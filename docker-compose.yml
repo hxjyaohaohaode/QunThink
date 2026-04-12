@@ -1,0 +1,58 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-chat-backend
+    restart: unless-stopped
+    ports:
+      - "3002:3002"
+    environment:
+      - PORT=3002
+      - NODE_ENV=production
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-your_deepseek_api_key}
+      - GLM_API_KEY=${GLM_API_KEY:-your_glm_api_key}
+      - MIMO_API_KEY=${MIMO_API_KEY:-your_mimo_api_key}
+      - QWEN_API_KEY=${QWEN_API_KEY:-your_qwen_api_key}
+    volumes:
+      - backend-data:/app/data
+      - backend-uploads:/app/uploads
+    networks:
+      - ai-chat-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3002/api/groups"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ai-chat-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - ai-chat-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  backend-data:
+    driver: local
+  backend-uploads:
+    driver: local
+
+networks:
+  ai-chat-network:
+    driver: bridge

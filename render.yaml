@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: ai-chat-group-backend
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3002
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: GLM_API_KEY
+        sync: false
+      - key: MIMO_API_KEY
+        sync: false
+      - key: QWEN_API_KEY
+        sync: false
