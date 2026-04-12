@@ -19,8 +19,12 @@ let ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 
 // 如果没有设置环境变量，使用内存中的密钥（仅用于开发）
 if (!ENCRYPTION_KEY) {
-  console.warn('⚠️  警告：未设置 ENCRYPTION_KEY 环境变量，使用开发密钥（不安全）');
+  console.warn('⚠️  安全警告：未设置 ENCRYPTION_KEY 环境变量，使用开发密钥。生产环境必须设置 ENCRYPTION_KEY，否则数据加密不安全！');
   ENCRYPTION_KEY = 'dev_encryption_key_do_not_use_in_production_123456';
+}
+
+if (process.env.NODE_ENV === 'production' && !process.env.ENCRYPTION_KEY) {
+  console.error('❌ 生产环境未设置 ENCRYPTION_KEY，数据加密将不安全！');
 }
 
 // 确保密钥长度符合要求

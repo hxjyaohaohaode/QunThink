@@ -799,7 +799,7 @@ ${debateSummary}
 
     const config = {
       name: 'Qwen3.5-Flash',
-      apiKey: process.env.QWEN_API_KEY || 'sk-4d623ee9fe964e4f972fea98da89006b',
+      apiKey: process.env.QWEN_API_KEY || '',
       endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
       model: 'qwen3.5-flash',
       params: { temperature: 0.5, top_p: 0.8, max_tokens: 2000 }

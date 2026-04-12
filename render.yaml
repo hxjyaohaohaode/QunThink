@@ -20,3 +20,7 @@ services:
         sync: false
       - key: QWEN_API_KEY
         sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false

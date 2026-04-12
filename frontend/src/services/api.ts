@@ -131,7 +131,7 @@ export const api = {
   },
 
   // 社交互动API
-  evaluateSmartLike: async (message: any, contextMessages: any[], senderInfo: any) => {
+  evaluateSmartLike: async (message: Record<string, unknown>, contextMessages: Record<string, unknown>[], senderInfo: Record<string, unknown>) => {
     const response = await axiosInstance.post('/social/evaluate-like', {
       message,
       contextMessages,
@@ -174,7 +174,7 @@ export const api = {
     return response.data;
   },
 
-  updateSmartLikeConfig: async (config: any) => {
+  updateSmartLikeConfig: async (config: Record<string, unknown>) => {
     const response = await axiosInstance.put('/social/smart-like-config', {
       config
     });
@@ -222,7 +222,7 @@ export const api = {
     return response.data.personas;
   },
 
-  updatePersona: async (aiId: string, config: any) => {
+  updatePersona: async (aiId: string, config: Record<string, unknown>) => {
     const response = await axiosInstance.put(`/personas/${aiId}`, config);
     return response.data.persona;
   },
@@ -237,7 +237,7 @@ export const api = {
     return response.data.profile;
   },
 
-  updateProfile: async (profile: any) => {
+  updateProfile: async (profile: Record<string, unknown>) => {
     const response = await axiosInstance.put('/profile', profile);
     return response.data.profile;
   }

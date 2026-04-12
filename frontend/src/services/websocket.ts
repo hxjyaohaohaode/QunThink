@@ -134,24 +134,48 @@ export function connectWebSocket(groupId?: string) {
   };
 }
 
-function handleWebSocketMessage(message: any) {
+interface WSMessage {
+  type: string;
+  group_id?: string;
+  sender_id?: string;
+  sender?: string;
+  sender_type?: 'user' | 'ai' | 'system';
+  content?: string;
+  content_type?: 'text' | 'code' | 'file' | 'system';
+  id?: string;
+  reply_to?: string;
+  created_at?: string;
+  timestamp?: string;
+  metadata?: Record<string, unknown>;
+  ai?: string;
+  message_id?: string;
+  liked_by?: string;
+  liked_by_type?: string;
+  comment?: {
+    content: string;
+    sender_type: 'user' | 'ai';
+    sender_id: string;
+  };
+}
+
+function handleWebSocketMessage(message: WSMessage) {
   const messagesStore = useMessagesStoreInternal.getState();
   const uiStore = useUIStore.getState();
 
   switch (message.type) {
     case 'new_message':
       if (message.group_id) {
-        const senderId = message.sender_id || message.sender;
+        const senderId = message.sender_id || message.sender || '';
         
         messagesStore.addMessage(message.group_id, {
           id: message.id || `${message.sender_type}_${Date.now()}`,
           group_id: message.group_id,
-          sender_type: message.sender_type,
+          sender_type: message.sender_type || 'system',
           sender_id: senderId,
-          content: message.content,
+          content: message.content || '',
           content_type: message.content_type || 'text',
           reply_to: message.reply_to,
-          created_at: message.created_at || message.timestamp,
+          created_at: message.created_at || message.timestamp || new Date().toISOString(),
           metadata: message.metadata
         });
 
@@ -190,9 +214,9 @@ function handleWebSocketMessage(message: any) {
           id: `system_${Date.now()}`,
           group_id: message.group_id,
           sender_type: 'system',
-          content: message.content,
+          content: message.content || '',
           content_type: 'system',
-          created_at: message.timestamp
+          created_at: message.timestamp || new Date().toISOString()
         });
       }
       break;

@@ -5,7 +5,7 @@ import { getDb } from '../../models/db.js';
 const AI_CONFIGS = {
   deepseek: {
     name: 'deepseek-chat',
-    apiKey: process.env.DEEPSEEK_API_KEY || 'sk-d3a1fe234c19415c9d2ad7ac679a3c72',
+    apiKey: process.env.DEEPSEEK_API_KEY || '',
     endpoint: 'https://api.deepseek.com/v1/chat/completions',
     model: 'deepseek-chat',
     enabled: true,
@@ -20,7 +20,7 @@ const AI_CONFIGS = {
   },
   deepseek_reasoner: {
     name: 'deepseek-reasoner',
-    apiKey: process.env.DEEPSEEK_API_KEY || 'sk-d3a1fe234c19415c9d2ad7ac679a3c72',
+    apiKey: process.env.DEEPSEEK_API_KEY || '',
     endpoint: 'https://api.deepseek.com/v1/chat/completions',
     model: 'deepseek-reasoner',
     enabled: true,
@@ -33,7 +33,7 @@ const AI_CONFIGS = {
   },
   glm: {
     name: 'GLM-4.5-Air',
-    apiKey: process.env.GLM_API_KEY || '4d1ab3a3f2614cd5aa65b61a86c9ffe8.KKqxIjcMfMZ9TxqW',
+    apiKey: process.env.GLM_API_KEY || '',
     endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
     model: 'GLM-4.5-Air',
     enabled: true,
@@ -46,7 +46,7 @@ const AI_CONFIGS = {
   },
   mimo: {
     name: 'mimo-v2-flash',
-    apiKey: process.env.MIMO_API_KEY || 'sk-c5db8fo9m0duxxc21n0yve8fxm66qqu2nk63f052whwnk4il',
+    apiKey: process.env.MIMO_API_KEY || '',
     endpoint: 'https://api.xiaomimimo.com/v1/chat/completions',
     model: 'mimo-v2-flash',
     enabled: true,
@@ -59,7 +59,7 @@ const AI_CONFIGS = {
   },
   qwen: {
     name: 'Qwen3.5-Flash',
-    apiKey: process.env.QWEN_API_KEY || 'sk-4d623ee9fe964e4f972fea98da89006b',
+    apiKey: process.env.QWEN_API_KEY || '',
     endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
     model: 'qwen3.5-flash',
     enabled: true,

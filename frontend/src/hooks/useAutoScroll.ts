@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-export function useAutoScroll(dependencies: any[]) {
+export function useAutoScroll(dependencies: unknown[]) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
