@@ -48,9 +48,9 @@ export function MessageBubble({ message, showActions: _showActions = true, onRep
   const name = customPersona?.name || AI_NAMES[senderId] || senderId;
   const avatarLetter = AI_AVATAR_LETTERS[senderId] || name.charAt(0).toUpperCase();
   
-  const hasLiked = message.liked_by?.includes('user');
+  const hasLiked = message.likes?.includes('user') || message.liked_by?.includes('user');
   const hasDisliked = message.disliked_by?.includes('user');
-  const likeCount = message.likes || 0;
+  const likeCount = message.likes_count || (Array.isArray(message.likes) ? message.likes.length : 0);
   const dislikeCount = message.dislikes || 0;
   const commentCount = message.comments?.length || 0;
 

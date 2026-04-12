@@ -30,7 +30,8 @@ export interface Message {
   reply_to?: string;
   metadata?: Record<string, any>;
   liked_by?: string[];
-  likes?: number;
+  likes?: string[];
+  likes_count?: number;
   disliked_by?: string[];
   dislikes?: number;
   comments?: Comment[];

@@ -28,8 +28,8 @@ export interface Message {
   reply_to_message?: Message;
   metadata?: Record<string, any>;
   created_at: string;
-  likes?: number;
-  liked_by?: string[];
+  likes?: string[];
+  likes_count?: number;
   dislikes?: number;
   disliked_by?: string[];
   comments?: Comment[];
@@ -128,7 +128,7 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
         messages: {
           ...state.messages,
           [groupId]: (state.messages[groupId] || []).map(m =>
-            m.id === messageId ? { ...m, likes: result.likes, likes_count: result.likes_count } : m
+            m.id === messageId ? { ...m, likes: result.likes || [], likes_count: result.likes_count || 0 } : m
           ),
         }
       }));
@@ -136,9 +136,13 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
       set(state => ({
         messages: {
           ...state.messages,
-          [groupId]: (state.messages[groupId] || []).map(m =>
-            m.id === messageId ? { ...m, likes: [...(m.likes || []), userId], likes_count: (m.likes_count || 0) + 1 } : m
-          ),
+          [groupId]: (state.messages[groupId] || []).map(m => {
+            if (m.id === messageId) {
+              const currentLikes: string[] = Array.isArray(m.likes) ? m.likes : [];
+              return { ...m, likes: [...currentLikes, userId], likes_count: (m.likes_count || 0) + 1 };
+            }
+            return m;
+          }),
         }
       }));
     }
@@ -151,7 +155,7 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
         messages: {
           ...state.messages,
           [groupId]: (state.messages[groupId] || []).map(m =>
-            m.id === messageId ? { ...m, likes: result.likes, likes_count: result.likes_count } : m
+            m.id === messageId ? { ...m, likes: result.likes || [], likes_count: result.likes_count || 0 } : m
           ),
         }
       }));
@@ -159,9 +163,13 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
       set(state => ({
         messages: {
           ...state.messages,
-          [groupId]: (state.messages[groupId] || []).map(m =>
-            m.id === messageId ? { ...m, likes: (m.likes || []).filter(id => id !== userId), likes_count: Math.max(0, (m.likes_count || 0) - 1) } : m
-          ),
+          [groupId]: (state.messages[groupId] || []).map(m => {
+            if (m.id === messageId) {
+              const currentLikes: string[] = Array.isArray(m.likes) ? m.likes : [];
+              return { ...m, likes: currentLikes.filter((id: string) => id !== userId), likes_count: Math.max(0, (m.likes_count || 0) - 1) };
+            }
+            return m;
+          }),
         }
       }));
     }
