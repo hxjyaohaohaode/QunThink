@@ -45,7 +45,7 @@ router.post('/auth/login-phone', validateBody(phoneLoginSchema), asyncHandler(as
   res.cookie('session_token', token, {
     httpOnly: true,
     path: '/',
-    sameSite: 'lax',
+    sameSite: isProduction ? 'none' : 'lax',
     maxAge: 86400,
     secure: isProduction
   });
@@ -139,7 +139,7 @@ router.post('/auth/register-sms', validateBody(smsRegisterSchema), asyncHandler(
   res.cookie('session_token', token, {
     httpOnly: true,
     path: '/',
-    sameSite: 'lax',
+    sameSite: isProduction ? 'none' : 'lax',
     maxAge: 86400,
     secure: isProduction
   });

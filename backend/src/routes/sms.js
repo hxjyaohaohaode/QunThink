@@ -106,7 +106,8 @@ router.post('/sms/verify', validateBody(smsVerifySchema), asyncHandler(async (re
     });
 
     const isProduction = process.env.NODE_ENV === 'production';
-    res.setHeader('Set-Cookie', `session_token=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=86400;${isProduction ? ' Secure;' : ''}`);
+    const sameSite = isProduction ? 'None' : 'Lax';
+    res.setHeader('Set-Cookie', `session_token=${token}; HttpOnly; Path=/; SameSite=${sameSite}; Max-Age=86400;${isProduction ? ' Secure;' : ''}`);
 
     res.json({
       success: true,
