@@ -589,28 +589,64 @@ function buildAPIMessages(systemPrompt, userMessage, recentMessages, persona, re
 
   for (let i = 0; i < effectiveMessages.length; i++) {
     const msg = effectiveMessages[i];
-    const content = msg.content || '';
+    let content = msg.content || '';
     const msgId = msg.id;
     
     if (msg.sender_type === 'user' && msgId === lastUserMsgId && content === userMessage) {
       continue;
     }
     
+    let replyHint = '';
+    if (!isPrivateChat && msg.reply_to) {
+      const replyMsg = effectiveMessages.find(m => m.id === msg.reply_to);
+      if (replyMsg) {
+        const replySender = replyMsg.sender_type === 'user' ? (userProfile?.nickname || '用户') : (AI_NAMES[replyMsg.sender_id] || replyMsg.sender_id || 'AI');
+        replyHint = ` [回复${replySender}]`;
+      }
+    }
+
+    let attachmentHint = '';
+    if (msg.attachments && msg.attachments.length > 0) {
+      const descParts = [];
+      for (const att of msg.attachments) {
+        if (att.media_description) {
+          descParts.push(att.media_description);
+        } else if (att.name || att.filename) {
+          const fname = att.name || att.filename;
+          const ext = fname.includes('.') ? fname.split('.').pop().toLowerCase() : '';
+          if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) {
+            descParts.push(`[图片: ${fname}]`);
+          } else if (['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext)) {
+            descParts.push(`[音频: ${fname}]`);
+          } else if (['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext)) {
+            descParts.push(`[视频: ${fname}]`);
+          } else {
+            descParts.push(`[文件: ${fname}]`);
+          }
+        }
+      }
+      if (descParts.length > 0) {
+        attachmentHint = `\n[附件内容] ${descParts.join(' | ')}`;
+      }
+    }
+    
+    const fullContent = content + attachmentHint;
+    
     if (msg.sender_type === 'user') {
       if (isPrivateChat) {
-        messages.push({ role: 'user', content });
+        messages.push({ role: 'user', content: fullContent + replyHint });
       } else {
         const userName = userProfile?.nickname || '用户';
-        messages.push({ role: 'user', content: `[${userName}]: ${content}` });
+        messages.push({ role: 'user', content: `[${userName}]${replyHint}: ${fullContent}` });
       }
     } else if (msg.sender_type === 'ai' && msg.sender_id === persona.id) {
-      messages.push({ role: 'assistant', content });
+      messages.push({ role: 'assistant', content: fullContent + replyHint });
     } else if (msg.sender_type === 'ai') {
       const aiName = AI_NAMES[msg.sender_id] || msg.sender_id || 'AI';
-      const truncated = content.substring(0, 300) + (content.length > 300 ? '...' : '');
-      messages.push({ role: 'user', content: `[${aiName}]: ${truncated}` });
+      const truncated = fullContent.substring(0, 300) + (fullContent.length > 300 ? '...' : '');
+      messages.push({ role: 'user', content: `[${aiName}]${replyHint}: ${truncated}` });
     } else {
-      messages.push({ role: 'user', content });
+      messages.push({ role: 'user', content: fullContent + replyHint });
     }
   }
 
@@ -623,9 +659,10 @@ function buildAPIMessages(systemPrompt, userMessage, recentMessages, persona, re
         senderName = AI_NAMES[msg.sender_id] || msg.sender_id || 'AI';
       }
       const content = msg.content.substring(0, 200);
-      return `${senderName}: ${content}${msg.content.length > 200 ? '...' : ''}`;
+      return `> ${senderName}: ${content}${msg.content.length > 200 ? '...' : ''}`;
     }).join('\n');
-    messages.push({ role: 'user', content: `[引用消息]\n${quotedContents}` });
+    const replyTarget = replyToMessages[0].sender_type === 'user' ? (userProfile?.nickname || '用户') : (AI_NAMES[replyToMessages[0].sender_id] || 'AI');
+    messages.push({ role: 'user', content: `[引用消息]\n${quotedContents}\n请回复@${replyTarget}` });
   }
 
   messages.push({ role: 'user', content: userMessage });
@@ -740,6 +777,11 @@ function buildSystemPrompt(persona, recentMessages = [], userProfile = null, rep
 
   if (!isPrivateChat) {
     parts.push('当前场景：这是一个群聊。');
+    parts.push('群聊规则：');
+    parts.push('1. 每条消息前都有发送者名称，格式为"发送者: 消息内容"，你必须仔细辨认是谁在说话。');
+    parts.push('2. 当你回复某人的消息时，请用"@"+对方名字的方式明确指出你在回复谁，例如"@小明 你说得对"。');
+    parts.push('3. 如果你在引用某人的消息，请用"> 对方名字: 对方说的话"的格式引用。');
+    parts.push('4. 不要把不同人说的话混淆，不要把用户的消息当成其他AI的，也不要把其他AI的消息当成用户的。');
   }
 
   if (!isPrivateChat && groupMembers && groupMembers.length > 0) {
@@ -803,9 +845,9 @@ function buildSystemPrompt(persona, recentMessages = [], userProfile = null, rep
         senderName = AI_NAMES[msg.sender_id] || msg.sender_id || 'AI';
       }
       const content = msg.content.substring(0, 200);
-      return `${senderName}: ${content}${msg.content.length > 200 ? '...' : ''}`;
+      return `> ${senderName}: ${content}${msg.content.length > 200 ? '...' : ''}`;
     }).join('\n');
-    parts.push(`\n【你正在回复的消息】\n${quotedContents}`);
+    parts.push(`\n【你正在回复的消息】\n${quotedContents}\n请明确回复这条消息的发送者，使用"@${replyToMessages[0].sender_type === 'user' ? (userProfile?.nickname || '用户') : (AI_NAMES[replyToMessages[0].sender_id] || 'AI')}"来指明你在回复谁。`);
   }
 
   if (feedbackInfo) {

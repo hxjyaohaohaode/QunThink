@@ -95,6 +95,10 @@ export function MessageInput() {
   const isAnyAITyping = currentGroup
     ? Object.values(typingIndicators[currentGroup.id] || {}).some(v => v === true)
     : false;
+  const hasStreamingMessages = currentGroup
+    ? (messages[currentGroup.id] || []).some(m => m.is_streaming)
+    : false;
+  const showStopButton = isAnyAITyping || justSentMessage || hasStreamingMessages;
   const hasPendingUploads = attachments.some(item => item.status !== 'ready');
   const readyAttachments = useMemo(
     () => attachments.flatMap(item => item.attachment ? [item.attachment] : []),
@@ -608,7 +612,7 @@ export function MessageInput() {
             multiple
             onChange={handleFileSelect}
             className="hidden"
-            accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.md,.py,.js,.ts,.jsx,.tsx,.html,.css,.json,.png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,.mp3,.wav,.ogg,.m4a,.aac,.flac,.mp4,.webm,.mov,.avi,.ppt,.pptx"
+            accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.md,.py,.js,.ts,.jsx,.tsx,.html,.css,.json,.png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,.mp3,.wav,.ogg,.m4a,.aac,.flac,.mp4,.webm,.mov,.avi,.ppt,.pptx,image/*"
           />
 
           <AnimatedButton
@@ -622,7 +626,7 @@ export function MessageInput() {
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" /></svg>
           </AnimatedButton>
 
-          {(isAnyAITyping || justSentMessage) && (
+          {showStopButton && (
             <AnimatedButton
               variant="primary"
               size="sm"
@@ -632,7 +636,7 @@ export function MessageInput() {
                   setJustSentMessage(false);
                 }
               }}
-              className="w-10 h-10 rounded-full !min-w-0 flex items-center justify-center !bg-red-500 hover:!bg-red-600"
+              className="w-10 h-10 rounded-full !min-w-0 flex items-center justify-center !bg-red-500 hover:!bg-red-600 shadow-lg shadow-red-500/30"
               title="停止生成"
             >
               <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>

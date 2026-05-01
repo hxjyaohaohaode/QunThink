@@ -175,59 +175,75 @@ async function callMiMoTTS(text, voice, toneConfig) {
     throw new Error('未配置 MIMO_API_KEY，无法调用 MiMo TTS');
   }
 
-  const chatResponse = await axios.post(
-    `${MIMO_API_BASE_URL}/chat/completions`,
-    {
-      model: 'mimo-v2-tts',
-      modalities: ['text', 'audio'],
-      audio: {
-        voice: voice,
-        format: 'wav'
-      },
-      messages: [
+  const maxRetries = 2;
+  let lastError = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const chatResponse = await axios.post(
+        `${MIMO_API_BASE_URL}/chat/completions`,
         {
-          role: 'user',
-          content: buildTonePrompt(toneConfig)
+          model: 'mimo-v2-tts',
+          modalities: ['text', 'audio'],
+          audio: {
+            voice: voice,
+            format: 'wav'
+          },
+          messages: [
+            {
+              role: 'user',
+              content: buildTonePrompt(toneConfig)
+            },
+            {
+              role: 'assistant',
+              content: text
+            }
+          ],
+          stream: false
         },
         {
-          role: 'assistant',
-          content: text
+          headers: {
+            Authorization: `Bearer ${process.env.MIMO_API_KEY}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json, audio/wav, audio/mpeg, audio/ogg, application/octet-stream'
+          },
+          timeout: 90000
         }
-      ],
-      stream: false
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.MIMO_API_KEY}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json, audio/wav, audio/mpeg, audio/ogg, application/octet-stream'
-      },
-      timeout: 60000
+      );
+
+      const directChoiceAudio = chatResponse.data?.choices?.[0]?.message?.audio;
+      if (directChoiceAudio?.data) {
+        const directAudio = buildAudioResult(
+          directChoiceAudio.data,
+          directChoiceAudio.format || directChoiceAudio.mime_type || 'wav'
+        );
+        if (directAudio) {
+          return directAudio;
+        }
+      }
+
+      const completionAudio = extractAudioPayload(chatResponse.data, chatResponse.headers);
+      if (completionAudio) {
+        return completionAudio;
+      }
+
+      const fallbackText = chatResponse.data?.choices?.[0]?.message?.content;
+      if (typeof fallbackText === 'string' && fallbackText.trim()) {
+        throw new Error(`API返回了文本而非音频: ${fallbackText.substring(0, 100)}`);
+      }
+
+      throw new Error('MiMo API 响应中未找到可播放的音频数据');
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxRetries && (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' || error.message?.includes('timeout'))) {
+        console.log(`[TTS] 重试 ${attempt + 1}/${maxRetries}...`);
+        await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+        continue;
+      }
+      throw error;
     }
-  );
-
-  const directChoiceAudio = chatResponse.data?.choices?.[0]?.message?.audio;
-  if (directChoiceAudio?.data) {
-    const directAudio = buildAudioResult(
-      directChoiceAudio.data,
-      directChoiceAudio.format || directChoiceAudio.mime_type || 'wav'
-    );
-    if (directAudio) {
-      return directAudio;
-    }
   }
-
-  const completionAudio = extractAudioPayload(chatResponse.data, chatResponse.headers);
-  if (completionAudio) {
-    return completionAudio;
-  }
-
-  const fallbackText = chatResponse.data?.choices?.[0]?.message?.content;
-  if (typeof fallbackText === 'string' && fallbackText.trim()) {
-    throw new Error(`API返回了文本而非音频: ${fallbackText.substring(0, 100)}`);
-  }
-
-  throw new Error('MiMo API 响应中未找到可播放的音频数据');
+  throw lastError;
 }
 
 function buildTonePrompt(toneConfig) {
@@ -428,7 +444,6 @@ router.get('/audio/:filename', async (req, res) => {
   }
 
   if (!fileExists) {
-    console.log(`[TTS音频] 文件不存在: ${audioPath}`);
     return res.status(404).json({ error: '音频文件不存在' });
   }
 
@@ -445,6 +460,7 @@ router.get('/audio/:filename', async (req, res) => {
 
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Type', contentType);
+  res.setHeader('Cache-Control', 'public, max-age=86400');
 
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-');

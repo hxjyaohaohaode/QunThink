@@ -71,12 +71,12 @@ let connectionError: string | null = null;
 let connectionTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-const MAX_RECONNECT_ATTEMPTS = 15;
-const BASE_RECONNECT_DELAY = 1000;
+const MAX_RECONNECT_ATTEMPTS = 30;
+const BASE_RECONNECT_DELAY = 500;
 const MAX_RECONNECT_DELAY = 30000;
-const HEARTBEAT_INTERVAL = 30000;
-const HEARTBEAT_TIMEOUT = 15000;
-const CONNECTION_TIMEOUT = 10000;
+const HEARTBEAT_INTERVAL = 25000;
+const HEARTBEAT_TIMEOUT = 35000;
+const CONNECTION_TIMEOUT = 20000;
 let isCleanDisconnect = false;
 
 function getReconnectDelay(attempt: number): number {
@@ -283,6 +283,7 @@ export function connectWebSocket(groupId?: string) {
     uiStore.setConnectionError(null);
 
     startHeartbeat(wsInstance);
+    startHealthCheck();
 
     const groupIdToJoin = pendingGroupId || currentGroupId || groupId;
     if (import.meta.env.DEV) console.log('[WS] onopen - groupIdToJoin:', groupIdToJoin);
@@ -330,7 +331,7 @@ export function connectWebSocket(groupId?: string) {
     
     const uiStore = useUIStore.getState();
     
-    if (import.meta.env.DEV) console.log('[WS] WebSocket disconnected, code:', event.code, 'reason:', event.reason || 'N/A');
+    if (import.meta.env.DEV) console.log('[WS] WebSocket disconnected, code:', event.code, 'reason:', event.reason || 'N/A', 'wasClean:', event.wasClean);
     
     uiStore.setConnectionStatus('disconnected');
 
@@ -358,7 +359,7 @@ export function connectWebSocket(groupId?: string) {
 
     if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       reconnectAttempts++;
-      const delay = event.code === 1006 ? 500 : getReconnectDelay(reconnectAttempts);
+      const delay = event.code === 1006 ? Math.min(500 * reconnectAttempts, 5000) : getReconnectDelay(reconnectAttempts);
       if (import.meta.env.DEV) console.log(`[WS] Reconnecting... attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}, delay ${delay}ms`);
       uiStore.setConnectionStatus('connecting');
       uiStore.setConnectionError(null);
@@ -374,13 +375,16 @@ export function connectWebSocket(groupId?: string) {
         connectWebSocket(currentGroupId || undefined);
       }, delay);
     } else {
-      if (import.meta.env.DEV) console.error('[WS] Max reconnection attempts reached');
+      if (import.meta.env.DEV) console.error('[WS] Max reconnection attempts reached, will retry in 60s');
       isReconnecting = false;
       connectionError = '连接已断开，重连失败，请刷新页面重试';
       uiStore.setConnectionError(connectionError);
       setTimeout(() => {
         reconnectAttempts = 0;
-      }, 120000);
+        if (currentGroupId) {
+          connectWebSocket(currentGroupId);
+        }
+      }, 60000);
     }
   };
 
@@ -858,6 +862,7 @@ export function disconnectWebSocket() {
   isCleanDisconnect = true;
   clearConnectionTimer();
   stopHeartbeat();
+  stopHealthCheck();
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -907,6 +912,30 @@ function cleanupStaleStreamMessages() {
 }
 
 let wasHidden = false;
+let healthCheckTimer: ReturnType<typeof setInterval> | null = null;
+
+function startHealthCheck() {
+  stopHealthCheck();
+  healthCheckTimer = setInterval(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      if (import.meta.env.DEV) console.log('[WS] Health check: connection lost, reconnecting...');
+      if (ws) {
+        try { ws.close(); } catch {}
+        ws = null;
+      }
+      isReconnecting = false;
+      reconnectAttempts = 0;
+      connectWebSocket(currentGroupId || undefined);
+    }
+  }, 60000);
+}
+
+function stopHealthCheck() {
+  if (healthCheckTimer) {
+    clearInterval(healthCheckTimer);
+    healthCheckTimer = null;
+  }
+}
 
 function handleVisibilityChange() {
   if (document.visibilityState === 'hidden') {
@@ -940,7 +969,14 @@ function handleVisibilityChange() {
       }
       try {
         ws.send(JSON.stringify({ type: 'ping' }));
-      } catch {}
+      } catch {
+        if (import.meta.env.DEV) console.log('[WS] Ping failed, reconnecting...');
+        try { ws.close(); } catch {}
+        ws = null;
+        isReconnecting = false;
+        reconnectAttempts = 0;
+        connectWebSocket(currentGroupId || undefined);
+      }
     }
   }
 }
@@ -989,6 +1025,7 @@ export function destroyWebSocket() {
   isCleanDisconnect = true;
   clearConnectionTimer();
   stopHeartbeat();
+  stopHealthCheck();
   if (ws) {
     ws.close();
     ws = null;

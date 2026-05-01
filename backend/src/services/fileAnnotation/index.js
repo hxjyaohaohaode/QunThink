@@ -143,6 +143,47 @@ async function compressImageForAnnotation(filePath, mimeType) {
   }
 }
 
+function getFastAnnotationConfig() {
+  const configs = [
+    { key: process.env.GLM_API_KEY, endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4-flash' },
+    { key: process.env.MIMO_API_KEY, endpoint: process.env.MIMO_BASE_URL ? `${process.env.MIMO_BASE_URL}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions', model: 'mimo-v2.5' },
+    { key: process.env.QWEN_API_KEY, endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen3.5-flash' }
+  ];
+  for (const config of configs) {
+    if (config.key) return config;
+  }
+  return null;
+}
+
+async function callFastAPI(messages, maxTokens = 120, timeout = 8000) {
+  const config = getFastAnnotationConfig();
+  if (!config) return null;
+
+  try {
+    const response = await axios.post(
+      config.endpoint,
+      {
+        model: config.model,
+        messages,
+        max_tokens: maxTokens,
+        temperature: 0.2,
+        stream: false
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${config.key}`,
+          'Content-Type': 'application/json'
+        },
+        timeout
+      }
+    );
+    return response.data?.choices?.[0]?.message?.content;
+  } catch (error) {
+    safeLog('warn', '快速标注API调用失败', { error: error.message });
+    return null;
+  }
+}
+
 async function annotateWithVision(filePath, mimeType, fileName) {
   const config = getAIConfig('mimo_omni');
   if (!config || !config.apiKey) {
@@ -173,7 +214,7 @@ async function annotateWithVision(filePath, mimeType, fileName) {
         'Authorization': `Bearer ${config.apiKey}`,
         'Content-Type': 'application/json'
       },
-      timeout: 30000
+      timeout: 15000
     });
 
     const content = response.data?.choices?.[0]?.message?.content;
@@ -188,87 +229,33 @@ async function annotateWithVision(filePath, mimeType, fileName) {
 }
 
 async function annotateWithMedia(fileName, fileSize, mediaType) {
-  const config = getAIConfig('mimo_flash') || getAIConfig('glm_flash');
-  if (!config || !config.apiKey) {
-    return null;
-  }
+  const prompt = MEDIA_ANNOTATION_PROMPT
+    .replace(/\{mediaType\}/g, mediaType)
+    .replace('{filename}', fileName)
+    .replace('{fileSize}', formatFileSize(fileSize));
 
-  try {
-    const prompt = MEDIA_ANNOTATION_PROMPT
-      .replace(/\{mediaType\}/g, mediaType)
-      .replace('{filename}', fileName)
-      .replace('{fileSize}', formatFileSize(fileSize));
+  const content = await callFastAPI([
+    { role: 'system', content: `你是一个文件搜索标注助手。根据文件名和大小推断${mediaType}内容，生成简洁准确的搜索标注。只输出标注结果，不要多余解释。` },
+    { role: 'user', content: prompt }
+  ]);
 
-    const requestBody = {
-      model: config.model,
-      messages: [
-        { role: 'system', content: `你是一个文件搜索标注助手。根据文件名和大小推断${mediaType}内容，生成简洁准确的搜索标注。只输出标注结果，不要多余解释。` },
-        { role: 'user', content: prompt }
-      ],
-      max_tokens: 120,
-      temperature: 0.2
-    };
-
-    const response = await axios.post(config.endpoint, requestBody, {
-      headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 15000
-    });
-
-    const result = response.data?.choices?.[0]?.message?.content;
-    if (result) {
-      return parseAnnotationResponse(result);
-    }
-    return null;
-  } catch (error) {
-    safeLog('warn', `${mediaType}标注失败`, { error: error.message, fileName });
-    return null;
-  }
+  return content ? parseAnnotationResponse(content) : null;
 }
 
 async function annotateWithText(fileName, contentSnippet, ext) {
-  const config = getAIConfig('mimo_flash') || getAIConfig('glm_flash');
-  if (!config || !config.apiKey) {
-    return null;
-  }
+  const snippet = contentSnippet.substring(0, 800);
+  const fileType = getFileTypeLabel(ext);
+  const prompt = TEXT_ANNOTATION_PROMPT
+    .replace('{filename}', fileName)
+    .replace('{filetype}', fileType)
+    .replace('{content}', snippet);
 
-  try {
-    const snippet = contentSnippet.substring(0, 800);
-    const fileType = getFileTypeLabel(ext);
-    const prompt = TEXT_ANNOTATION_PROMPT
-      .replace('{filename}', fileName)
-      .replace('{filetype}', fileType)
-      .replace('{content}', snippet);
+  const content = await callFastAPI([
+    { role: 'system', content: '你是一个文件搜索标注助手。你的任务是为文件生成简洁准确的搜索标注。只输出标注结果，不要多余解释。标签要具体、有区分度，便于用户搜索。' },
+    { role: 'user', content: prompt }
+  ]);
 
-    const requestBody = {
-      model: config.model,
-      messages: [
-        { role: 'system', content: '你是一个文件搜索标注助手。你的任务是为文件生成简洁准确的搜索标注。只输出标注结果，不要多余解释。标签要具体、有区分度，便于用户搜索。' },
-        { role: 'user', content: prompt }
-      ],
-      max_tokens: 120,
-      temperature: 0.15
-    };
-
-    const response = await axios.post(config.endpoint, requestBody, {
-      headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 15000
-    });
-
-    const result = response.data?.choices?.[0]?.message?.content;
-    if (result) {
-      return parseAnnotationResponse(result);
-    }
-    return null;
-  } catch (error) {
-    safeLog('warn', '文本标注失败', { error: error.message, fileName });
-    return null;
-  }
+  return content ? parseAnnotationResponse(content) : null;
 }
 
 export async function annotateWithoutFile(fileName, mimeType, fileSize, parsedContent) {
@@ -372,7 +359,7 @@ async function generateImageDescription(filePath, mimeType, fileName) {
         'Authorization': `Bearer ${config.apiKey}`,
         'Content-Type': 'application/json'
       },
-      timeout: 45000
+      timeout: 20000
     });
 
     const content = response.data?.choices?.[0]?.message?.content;
@@ -384,117 +371,45 @@ async function generateImageDescription(filePath, mimeType, fileName) {
 }
 
 async function generateAudioDescription(fileName, fileSize) {
-  const config = getAIConfig('mimo_flash') || getAIConfig('glm_flash');
-  if (!config || !config.apiKey) {
-    return null;
-  }
+  const prompt = AUDIO_DESCRIPTION_PROMPT
+    .replace('{filename}', fileName)
+    .replace('{fileSize}', formatFileSize(fileSize));
 
-  try {
-    const prompt = AUDIO_DESCRIPTION_PROMPT
-      .replace('{filename}', fileName)
-      .replace('{fileSize}', formatFileSize(fileSize));
+  const content = await callFastAPI([
+    { role: 'system', content: '你是一个音频内容分析助手。根据文件信息推断音频内容，生成详细描述。' },
+    { role: 'user', content: prompt }
+  ], 200, 8000);
 
-    const requestBody = {
-      model: config.model,
-      messages: [
-        { role: 'system', content: '你是一个音频内容分析助手。根据文件信息推断音频内容，生成详细描述。' },
-        { role: 'user', content: prompt }
-      ],
-      max_tokens: 200,
-      temperature: 0.3
-    };
-
-    const response = await axios.post(config.endpoint, requestBody, {
-      headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 15000
-    });
-
-    const content = response.data?.choices?.[0]?.message?.content;
-    return content && content.trim().length > 0 ? content.trim() : null;
-  } catch (error) {
-    safeLog('warn', '音频内容描述生成失败', { error: error.message, fileName });
-    return null;
-  }
+  return content && content.trim().length > 0 ? content.trim() : null;
 }
 
 async function generateVideoDescription(fileName, fileSize) {
-  const config = getAIConfig('mimo_flash') || getAIConfig('glm_flash');
-  if (!config || !config.apiKey) {
-    return null;
-  }
+  const prompt = VIDEO_DESCRIPTION_PROMPT
+    .replace('{filename}', fileName)
+    .replace('{fileSize}', formatFileSize(fileSize));
 
-  try {
-    const prompt = VIDEO_DESCRIPTION_PROMPT
-      .replace('{filename}', fileName)
-      .replace('{fileSize}', formatFileSize(fileSize));
+  const content = await callFastAPI([
+    { role: 'system', content: '你是一个视频内容分析助手。根据文件信息推断视频内容，生成详细描述。' },
+    { role: 'user', content: prompt }
+  ], 200, 8000);
 
-    const requestBody = {
-      model: config.model,
-      messages: [
-        { role: 'system', content: '你是一个视频内容分析助手。根据文件信息推断视频内容，生成详细描述。' },
-        { role: 'user', content: prompt }
-      ],
-      max_tokens: 200,
-      temperature: 0.3
-    };
-
-    const response = await axios.post(config.endpoint, requestBody, {
-      headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 15000
-    });
-
-    const content = response.data?.choices?.[0]?.message?.content;
-    return content && content.trim().length > 0 ? content.trim() : null;
-  } catch (error) {
-    safeLog('warn', '视频内容描述生成失败', { error: error.message, fileName });
-    return null;
-  }
+  return content && content.trim().length > 0 ? content.trim() : null;
 }
 
 async function generateTextDescription(fileName, contentSnippet, ext) {
-  const config = getAIConfig('mimo_flash') || getAIConfig('glm_flash');
-  if (!config || !config.apiKey) {
-    return null;
-  }
+  const snippet = contentSnippet.substring(0, 1500);
+  const fileType = getFileTypeLabel(ext);
+  const prompt = TEXT_DESCRIPTION_PROMPT
+    .replace('{filename}', fileName)
+    .replace('{filetype}', fileType)
+    .replace('{content}', snippet);
 
-  try {
-    const snippet = contentSnippet.substring(0, 1500);
-    const fileType = getFileTypeLabel(ext);
-    const prompt = TEXT_DESCRIPTION_PROMPT
-      .replace('{filename}', fileName)
-      .replace('{filetype}', fileType)
-      .replace('{content}', snippet);
+  const content = await callFastAPI([
+    { role: 'system', content: '你是一个文件内容分析助手。你的任务是为文件生成详细的内容描述，让AI能够理解文件内容。' },
+    { role: 'user', content: prompt }
+  ], 300, 10000);
 
-    const requestBody = {
-      model: config.model,
-      messages: [
-        { role: 'system', content: '你是一个文件内容分析助手。你的任务是为文件生成详细的内容描述，让AI能够理解文件内容。' },
-        { role: 'user', content: prompt }
-      ],
-      max_tokens: 300,
-      temperature: 0.2
-    };
-
-    const response = await axios.post(config.endpoint, requestBody, {
-      headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 15000
-    });
-
-    const content = response.data?.choices?.[0]?.message?.content;
-    return content && content.trim().length > 0 ? content.trim() : null;
-  } catch (error) {
-    safeLog('warn', '文本内容描述生成失败', { error: error.message, fileName });
-    return null;
-  }
+  return content && content.trim().length > 0 ? content.trim() : null;
 }
 
 export async function generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent) {
@@ -585,4 +500,12 @@ export async function annotateFile(filePath, mimeType, fileName, fileSize, parse
   annotation.tags = [...new Set(annotation.tags)].slice(0, 8);
 
   return annotation;
+}
+
+export async function annotateAndDescribe(filePath, mimeType, fileName, fileSize, parsedContent) {
+  const [annotation, description] = await Promise.all([
+    annotateFile(filePath, mimeType, fileName, fileSize, parsedContent),
+    generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent)
+  ]);
+  return { annotation, description };
 }

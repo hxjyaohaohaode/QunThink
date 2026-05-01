@@ -1,4 +1,4 @@
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ModelConfig,
   PersonaConfig,
@@ -187,6 +187,28 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
     setAvatarPreview(merged.avatar_url || null);
   }, [currentPersona, isOpen]);
 
+  const [dragStartY, setDragStartY] = useState<number | null>(null);
+  const [dragOffsetY, setDragOffsetY] = useState(0);
+
+  const handleDragStart = useCallback((clientY: number) => {
+    setDragStartY(clientY);
+    setDragOffsetY(0);
+  }, []);
+
+  const handleDragMove = useCallback((clientY: number) => {
+    if (dragStartY === null) return;
+    const offset = Math.max(0, clientY - dragStartY);
+    setDragOffsetY(offset);
+  }, [dragStartY]);
+
+  const handleDragEnd = useCallback(() => {
+    if (dragOffsetY > 120) {
+      onClose();
+    }
+    setDragStartY(null);
+    setDragOffsetY(0);
+  }, [dragOffsetY, onClose]);
+
   if (!isOpen) return null;
 
   const setField = <K extends keyof PersonaConfig>(key: K, value: PersonaConfig[K]) => {
@@ -289,7 +311,24 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
 
   return (
     <div className="fixed inset-0 z-[60] flex items-end md:items-center justify-center bg-black/50 md:p-4" onClick={onClose}>
-      <div className="flex max-h-[100dvh] md:max-h-[92vh] w-full md:max-w-3xl flex-col overflow-hidden rounded-t-2xl md:rounded-2xl border border-border-subtle bg-bg-surface shadow-2xl" onClick={(event) => event.stopPropagation()}>
+      <div
+        className="flex max-h-[100dvh] md:max-h-[92vh] w-full md:max-w-3xl flex-col overflow-hidden rounded-t-2xl md:rounded-2xl border border-border-subtle bg-bg-surface shadow-2xl"
+        style={{ transform: dragOffsetY > 0 ? `translateY(${dragOffsetY}px)` : undefined, transition: dragStartY === null ? 'transform 0.2s ease' : 'none' }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div
+          className="md:hidden flex justify-center pt-2 pb-1 cursor-grab active:cursor-grabbing"
+          onTouchStart={(e) => handleDragStart(e.touches[0].clientY)}
+          onTouchMove={(e) => handleDragMove(e.touches[0].clientY)}
+          onTouchEnd={handleDragEnd}
+          onMouseDown={(e) => handleDragStart(e.clientY)}
+          onMouseMove={(e) => { if (dragStartY !== null) handleDragMove(e.clientY); }}
+          onMouseUp={handleDragEnd}
+          onMouseLeave={() => { if (dragStartY !== null) handleDragEnd(); }}
+        >
+          <div className="w-10 h-1 rounded-full bg-border-subtle" />
+        </div>
+
         <div className="flex shrink-0 items-center justify-between border-b border-border-subtle px-4 md:px-6 py-3 md:py-4">
           <div>
             <h3 className="text-lg font-semibold text-text-primary">人设编辑器</h3>
@@ -548,7 +587,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
           )}
         </div>
 
-        <div className="flex shrink-0 items-center justify-between border-t border-border-subtle px-4 md:px-6 py-3 md:py-4" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom, 0px))' }}>
+        <div className="flex shrink-0 items-center justify-between border-t border-border-subtle px-4 md:px-6 py-3 md:py-4" style={{ paddingBottom: 'max(0.75rem, calc(env(safe-area-inset-bottom, 0px) + 60px))' }}>
           <button onClick={handleReset} disabled={saving} className="rounded-xl border border-border-subtle px-4 py-2 text-sm font-medium text-text-primary disabled:opacity-50">重置</button>
           <div className="flex gap-3">
             <button onClick={onClose} disabled={saving} className="rounded-xl border border-border-subtle px-4 py-2 text-sm font-medium text-text-primary disabled:opacity-50">取消</button>

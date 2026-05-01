@@ -7,7 +7,8 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { checkSmsVerifyCode, isSmsConfigured } from '../services/sms/index.js';
 
 const router = express.Router();
-const SESSION_MAX_AGE = parseInt(process.env.SESSION_MAX_AGE) || 24 * 60 * 60 * 1000;
+const SESSION_MAX_AGE = parseInt(process.env.SESSION_MAX_AGE) || 30 * 24 * 60 * 60 * 1000;
+const SESSION_MAX_AGE_SECONDS = Math.floor(SESSION_MAX_AGE / 1000);
 const isProduction = process.env.NODE_ENV === 'production';
 
 router.post('/auth/login-phone', validateBody(phoneLoginSchema), asyncHandler(async (req, res) => {
@@ -46,7 +47,7 @@ router.post('/auth/login-phone', validateBody(phoneLoginSchema), asyncHandler(as
     httpOnly: true,
     path: '/',
     sameSite: isProduction ? 'none' : 'lax',
-    maxAge: 86400,
+    maxAge: SESSION_MAX_AGE_SECONDS,
     secure: isProduction
   });
 
@@ -140,7 +141,7 @@ router.post('/auth/register-sms', validateBody(smsRegisterSchema), asyncHandler(
     httpOnly: true,
     path: '/',
     sameSite: isProduction ? 'none' : 'lax',
-    maxAge: 86400,
+    maxAge: SESSION_MAX_AGE_SECONDS,
     secure: isProduction
   });
 

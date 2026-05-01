@@ -67,9 +67,9 @@ export const AudioPlayer = memo(function AudioPlayer({ messageId, audioUrl, dura
     const audio = new Audio();
     const isCrossOrigin = src.startsWith('http') && !src.startsWith(window.location.origin);
     if (isCrossOrigin) {
-      audio.crossOrigin = 'use-credentials';
+      audio.crossOrigin = 'anonymous';
     }
-    audio.preload = 'auto';
+    audio.preload = 'metadata';
     audio.src = src;
     audioRef.current = audio;
     setAudioError(null);
@@ -175,11 +175,20 @@ export const AudioPlayer = memo(function AudioPlayer({ messageId, audioUrl, dura
       stopAll();
       setCurrentAudioId(messageId);
       setAudioError(null);
+      
+      if (audio.readyState < 2) {
+        audio.load();
+      }
+      
       audio.play().catch((error) => {
         setIsPlaying(false);
         setAudioPlaying(messageId, false);
         setCurrentAudioId(null);
-        setAudioError(error?.message || '音频播放失败');
+        if (error.name === 'NotAllowedError') {
+          setAudioError('请点击播放按钮开始播放');
+        } else {
+          setAudioError(error?.message || '音频播放失败');
+        }
       });
     }
   }, [messageId, setAudioPlaying, setCurrentAudioId, stopAll]);

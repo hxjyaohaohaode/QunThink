@@ -64,7 +64,8 @@ const wss = new WebSocketServer({
   server, 
   path: '/ws',
   maxPayload: 10 * 1024 * 1024,
-  perMessageDeflate: false
+  perMessageDeflate: false,
+  clientTracking: true
 });
 
 const isProduction = process.env.NODE_ENV === 'production';

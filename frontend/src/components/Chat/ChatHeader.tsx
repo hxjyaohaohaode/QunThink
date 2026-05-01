@@ -249,15 +249,15 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
                 <button
                   onClick={() => setShowDebatePanel(true)}
                   aria-label="辩论设置"
-                  className="hidden md:flex p-2 rounded-lg hover:bg-sidebar-hover transition-colors text-text-secondary hover:text-text-primary items-center gap-1"
+                  className="flex p-2 rounded-lg hover:bg-sidebar-hover transition-colors text-text-secondary hover:text-text-primary items-center gap-1"
                   title="辩论设置"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M3 3l7.07 7.07M21 21l-7.07-7.07M3 21l7.07-7.07M21 3l-7.07 7.07" /></svg>
-                  <span className="text-xs">辩论</span>
+                  <span className="text-xs hidden sm:inline">辩论</span>
                 </button>
 
-                <div className="hidden md:flex items-center gap-2 p-2 rounded-lg bg-bg-surface2">
-                  <span className="text-[11px] text-text-muted">辩论模式</span>
+                <div className="flex items-center gap-2 p-2 rounded-lg bg-bg-surface2">
+                  <span className="text-[11px] text-text-muted">辩论</span>
                   <button
                     onClick={handleToggleDebateMode}
                     aria-label={currentGroup.debate_mode ? '关闭辩论模式' : '开启辩论模式'}

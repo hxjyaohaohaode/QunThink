@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useProfileStore, UserProfile } from '../../stores/profileStore';
 
 interface UserProfileEditorProps {
@@ -115,6 +115,28 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
+  const [dragStartY, setDragStartY] = useState<number | null>(null);
+  const [dragOffsetY, setDragOffsetY] = useState(0);
+
+  const handleDragStart = useCallback((clientY: number) => {
+    setDragStartY(clientY);
+    setDragOffsetY(0);
+  }, []);
+
+  const handleDragMove = useCallback((clientY: number) => {
+    if (dragStartY === null) return;
+    const offset = Math.max(0, clientY - dragStartY);
+    setDragOffsetY(offset);
+  }, [dragStartY]);
+
+  const handleDragEnd = useCallback(() => {
+    if (dragOffsetY > 120) {
+      onClose();
+    }
+    setDragStartY(null);
+    setDragOffsetY(0);
+  }, [dragOffsetY, onClose]);
+
   if (!isOpen) return null;
 
   const handleSave = async () => {
@@ -163,11 +185,31 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-bg-surface dark:bg-gray-800 rounded-lg p-6 w-full max-w-[480px] shadow-xl animate-fade-in max-h-[85vh] overflow-y-auto">
-        <h3 className="text-lg font-semibold text-text-primary dark:text-white mb-4">编辑用户画像</h3>
+    <div className="fixed inset-0 bg-black/50 flex items-end md:items-center justify-center z-50" onClick={onClose}>
+      <div
+        className="bg-bg-surface dark:bg-gray-800 w-full md:max-w-[480px] md:rounded-lg rounded-t-2xl shadow-xl max-h-[100dvh] md:max-h-[85vh] flex flex-col overflow-hidden"
+        style={{ transform: dragOffsetY > 0 ? `translateY(${dragOffsetY}px)` : undefined, transition: dragStartY === null ? 'transform 0.2s ease' : 'none' }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div
+          className="md:hidden flex justify-center pt-2 pb-1 cursor-grab active:cursor-grabbing"
+          onTouchStart={(e) => handleDragStart(e.touches[0].clientY)}
+          onTouchMove={(e) => handleDragMove(e.touches[0].clientY)}
+          onTouchEnd={handleDragEnd}
+          onMouseDown={(e) => handleDragStart(e.clientY)}
+          onMouseMove={(e) => { if (dragStartY !== null) handleDragMove(e.clientY); }}
+          onMouseUp={handleDragEnd}
+          onMouseLeave={() => { if (dragStartY !== null) handleDragEnd(); }}
+        >
+          <div className="w-10 h-1 rounded-full bg-border-subtle" />
+        </div>
 
-        <div className="space-y-4">
+        <div className="flex shrink-0 items-center justify-between px-6 py-4 border-b border-border-subtle">
+          <h3 className="text-lg font-semibold text-text-primary dark:text-white">编辑用户画像</h3>
+          <button onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-text-secondary hover:bg-bg-surface2 hover:text-text-primary">关闭</button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-6 space-y-4" style={{ paddingBottom: 'max(1.5rem, calc(env(safe-area-inset-bottom, 0px) + 60px))' }}>
           <div>
             <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">昵称</label>
             <input
@@ -299,7 +341,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
           </div>
         </div>
 
-        <div className="flex gap-2 mt-6">
+        <div className="flex shrink-0 gap-2 px-6 py-4 border-t border-border-subtle" style={{ paddingBottom: 'max(1rem, calc(env(safe-area-inset-bottom, 0px) + 60px))' }}>
           {validationError && (
             <div className="w-full p-2 bg-red-50 dark:bg-red-900/20 rounded-lg text-xs text-red-600 dark:text-red-400 mb-2">
               {validationError}

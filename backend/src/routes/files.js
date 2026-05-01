@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { getUploadsDir, withWriteLock } from '../models/db.js';
 import { parseFile } from '../services/fileParser/index.js';
-import { annotateFile, annotateWithoutFile, generateMediaDescription } from '../services/fileAnnotation/index.js';
+import { annotateFile, annotateWithoutFile, generateMediaDescription, annotateAndDescribe } from '../services/fileAnnotation/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -305,22 +305,23 @@ router.post('/files/upload', (req, res, next) => {
 
     let searchDescription = '';
     let searchTags = [];
+    let mediaDescription = '';
+
     try {
       const textContent = typeof parsedContent === 'string' ? parsedContent : '';
-      const annotation = await annotateFile(filePath, mimeType, fileName, fileSize, textContent);
+      const { annotation, description } = await annotateAndDescribe(filePath, mimeType, fileName, fileSize, textContent);
       if (annotation) {
         searchDescription = annotation.description || '';
         searchTags = annotation.tags || [];
       }
+      if (description) {
+        mediaDescription = description;
+      }
     } catch (error) {
-      console.error('File annotation error:', error);
+      console.error('File annotation/description error:', error);
     }
 
-    let mediaDescription = '';
-    try {
-      mediaDescription = await generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent);
-    } catch (error) {
-      console.error('Media description generation error:', error);
+    if (!mediaDescription) {
       const ext = path.extname(fileName).toLowerCase();
       const isMedia = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg',
         '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma',

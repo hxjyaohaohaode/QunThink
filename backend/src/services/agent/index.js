@@ -1,9 +1,10 @@
 import { v4 as uuidv4 } from 'uuid';
+import axios from 'axios';
 import { getUploadsDir, getUserDb, withWriteLock } from '../../models/db.js';
 import { callAI, callAIStream, normalizeResponse } from '../ai/index.js';
-import { AI_PERSONAS } from '../../config/personas.js';
 import { parseFile } from '../fileParser/index.js';
-import { generateMediaDescription } from '../fileAnnotation/index.js';
+import { annotateAndDescribe, generateMediaDescription } from '../fileAnnotation/index.js';
+import { AI_PERSONAS } from '../../config/personas.js';
 import path from 'path';
 
 const AVAILABLE_MODELS = [
@@ -253,94 +254,41 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
       try {
         const filePath = attachment.file_path || path.resolve(getUploadsDir(), attachment.filename || attachment.name);
         const mimeType = attachment.mime_type || attachment.type || 'application/octet-stream';
+        const fileName = attachment.filename || attachment.name || '未知文件';
+        const fileSize = attachment.size || 0;
         
         const parsedContent = await parseFile(filePath, mimeType);
+        const textContent = typeof parsedContent === 'string' ? parsedContent : '';
         
-        if (typeof parsedContent === 'string') {
-          messageContent += `\n${parsedContent}\n`;
-          attachmentInfos.push({
-            filename: attachment.filename || attachment.name || '未知文件',
-            content_preview: parsedContent.substring(0, 100)
-          });
-        } else if (parsedContent && parsedContent.type === 'image') {
-          let imageDescription = '';
-          try {
-            imageDescription = await generateMediaDescription(
-              filePath,
-              parsedContent.mime_type || mimeType,
-              attachment.filename || attachment.name || '未知图片',
-              0,
-              parsedContent
-            );
-          } catch (e) {
-            console.error('[Agent对话] 图片描述生成失败:', e.message);
-          }
-          messageContent += `\n【用户上传的图片: ${attachment.filename || attachment.name || '未知文件'}】\n`;
-          if (imageDescription) {
-            messageContent += `图片内容描述: ${imageDescription}\n`;
-          } else {
-            messageContent += `请根据上下文理解这张图片。\n`;
-          }
-          attachmentInfos.push({
-            filename: attachment.filename || attachment.name || '未知文件',
-            type: 'image',
-            description: imageDescription,
-            base64: parsedContent.base64,
-            mime_type: parsedContent.mime_type
-          });
-        } else if (parsedContent && parsedContent.type === 'audio') {
-          let audioDescription = '';
-          try {
-            audioDescription = await generateMediaDescription(
-              filePath,
-              parsedContent.mime_type || mimeType,
-              attachment.filename || attachment.name || '未知音频',
-              0,
-              parsedContent
-            );
-          } catch (e) {
-            console.error('[Agent对话] 音频描述生成失败:', e.message);
-          }
-          messageContent += `\n【用户上传的音频: ${attachment.filename || attachment.name || '未知文件'}】\n`;
-          if (audioDescription) {
-            messageContent += `音频内容描述: ${audioDescription}\n`;
-          } else {
-            messageContent += `请根据上下文理解这段音频。\n`;
-          }
-          attachmentInfos.push({
-            filename: attachment.filename || attachment.name || '未知文件',
-            type: 'audio',
-            description: audioDescription,
-            base64: parsedContent.base64,
-            mime_type: parsedContent.mime_type
-          });
-        } else if (parsedContent && parsedContent.type === 'video') {
-          let videoDescription = '';
-          try {
-            videoDescription = await generateMediaDescription(
-              filePath,
-              parsedContent.mime_type || mimeType,
-              attachment.filename || attachment.name || '未知视频',
-              0,
-              parsedContent
-            );
-          } catch (e) {
-            console.error('[Agent对话] 视频描述生成失败:', e.message);
-          }
-          messageContent += `\n【用户上传的视频: ${attachment.filename || attachment.name || '未知文件'}】\n`;
-          if (videoDescription) {
-            messageContent += `视频内容描述: ${videoDescription}\n`;
-          } else {
-            messageContent += `请根据上下文理解这个视频。\n`;
-          }
-          attachmentInfos.push({
-            filename: attachment.filename || attachment.name || '未知文件',
-            type: 'video',
-            description: videoDescription,
-            base64: parsedContent.base64,
-            mime_type: parsedContent.mime_type
-          });
+        const { annotation, description } = await annotateAndDescribe(
+          filePath, mimeType, fileName, fileSize, textContent
+        );
+        
+        const ext = path.extname(fileName).toLowerCase();
+        const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'].includes(ext);
+        const isAudio = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac'].includes(ext);
+        const isVideo = ['.mp4', '.avi', '.mov', '.mkv', '.webm'].includes(ext);
+        const mediaType = isImage ? '图片' : isAudio ? '音频' : isVideo ? '视频' : '文件';
+        
+        messageContent += `\n【用户上传的${mediaType}: ${fileName}】\n`;
+        if (description) {
+          messageContent += `${mediaType}内容描述: ${description}\n`;
+        } else if (textContent) {
+          messageContent += `文件内容: ${textContent.substring(0, 800)}\n`;
+        } else {
+          messageContent += `请根据上下文理解这个${mediaType}。\n`;
         }
+        
+        if (annotation) {
+          messageContent += `标签: ${annotation.tags?.join(', ') || '无'}\n`;
+        }
+        
+        attachmentInfos.push({
+          filename: fileName,
+          type: isImage ? 'image' : isAudio ? 'audio' : isVideo ? 'video' : 'file',
+          description: description || '',
+          content_preview: (description || textContent).substring(0, 100)
+        });
       } catch (error) {
         console.error(`[Agent对话] 附件解析失败:`, error.message);
         messageContent += `\n[文件解析失败: ${attachment.filename || attachment.name || '未知文件'}]\n`;
@@ -430,8 +378,8 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
 
 export async function generateSuggestions(agent, agentResponse, userMessage, userId, chatHistory = [], userProfile = null) {
   const historyContext = chatHistory.length > 0
-    ? chatHistory.slice(-10).map(m =>
-        m.sender_type === 'user' ? `用户: ${m.content.substring(0, 200)}` : `智能体: ${m.content.substring(0, 200)}`
+    ? chatHistory.slice(-6).map(m =>
+        m.sender_type === 'user' ? `用户: ${m.content.substring(0, 150)}` : `智能体: ${m.content.substring(0, 150)}`
       ).join('\n')
     : '（暂无历史对话）';
 
@@ -457,85 +405,109 @@ export async function generateSuggestions(agent, agentResponse, userMessage, use
 
   const isInitial = !agentResponse || agentResponse === agent.opening_message;
 
+  const agentFuncDomain = agent.description ? agent.description.substring(0, 80) : '通用助手';
+
   const suggestionPrompt = isInitial
-    ? `你是一个对话建议生成器。根据智能体信息和用户画像，生成3条用户可能想对智能体说的话。
+    ? `根据智能体功能和用户画像，生成3条用户最可能说的话。
 
-## 智能体信息
-- 名称：${agent.name}
-- 功能：${agent.description}
-- 开场白：${agent.opening_message}
-${capabilitiesDesc.length > 0 ? `- 能力：${capabilitiesDesc.join('、')}` : ''}${userContext}
+智能体：${agent.name}
+功能：${agentFuncDomain}
+开场白：${agent.opening_message ? agent.opening_message.substring(0, 100) : '无'}
+${capabilitiesDesc.length > 0 ? `能力：${capabilitiesDesc.join('、')}` : ''}${userContext}
 
-## 要求
-1. 每条建议应该简短自然，像用户真实会说的话，每条不超过25字
-2. 建议必须与智能体的功能领域（${agent.description.substring(0, 50)}）紧密相关
-3. 建议要有差异：一条探索功能、一条具体问题、一条深入场景
-4. ${userContext ? '结合用户画像信息，让建议更贴合用户需求' : '让建议覆盖智能体的核心功能'}
-5. 不要加引号或序号，不要重复开场白内容
+要求：
+1. 每条15-25字，像用户真实会说的话
+2. 必须与"${agentFuncDomain}"直接相关
+3. 一条探索功能、一条具体问题、一条深入场景
+4. ${userContext ? '结合用户画像' : '覆盖核心功能'}
+5. 不加引号序号
 
-## 返回格式
-只返回JSON数组，不要其他内容：
-["建议1", "建议2", "建议3"]`
-    : `你是一个对话建议生成器。根据以下对话上下文，生成3条用户可能想继续说的话。
+只返回JSON数组：["建议1","建议2","建议3"]`
+    : `根据对话上下文，生成3条用户可能继续说的话。
 
-## 智能体信息
-- 名称：${agent.name}
-- 功能：${agent.description}
-${capabilitiesDesc.length > 0 ? `- 能力：${capabilitiesDesc.join('、')}` : ''}${userContext}
+智能体：${agent.name}
+功能：${agentFuncDomain}
+${capabilitiesDesc.length > 0 ? `能力：${capabilitiesDesc.join('、')}` : ''}${userContext}
 
-## 历史对话
+最近对话：
 ${historyContext}
 
-## 最近对话
-- 用户说：${userMessage.substring(0, 500)}
-- 智能体回复：${agentResponse.substring(0, 800)}
+用户说：${userMessage.substring(0, 300)}
+智能体回复：${agentResponse.substring(0, 500)}
 
-## 要求
-1. 每条建议应该简短自然，像用户真实会说的话，每条不超过25字
-2. 建议应该有差异：一条追问细节、一条换个角度、一条深入探讨
-3. 建议必须与智能体的功能领域（${agent.description.substring(0, 50)}）相关
-4. ${userContext ? '结合用户画像信息，让建议更贴合用户需求' : '让建议自然衔接对话'}
-5. 不要加引号或序号，不要重复已有对话内容
+要求：
+1. 每条15-25字，像用户真实会说的话
+2. 必须与"${agentFuncDomain}"直接相关
+3. 一条追问细节、一条换个角度、一条深入探讨
+4. ${userContext ? '结合用户画像' : '自然衔接对话'}
+5. 不加引号序号，不重复已有内容
 
-## 返回格式
-只返回JSON数组，不要其他内容：
-["建议1", "建议2", "建议3"]`;
+只返回JSON数组：["建议1","建议2","建议3"]`;
 
-  const persona = { id: 'glm_flash', name: 'glm-4-flash' };
-
-  let response;
   try {
-    response = await callAIStream(
-      'glm_flash',
-      persona,
-      suggestionPrompt,
-      [],
-      'free_chat',
-      null, [], null, null, false, [],
-      '你是一个JSON生成器，只返回JSON数组，不要任何额外文字。',
-      [], null, null, userId
-    );
-  } catch (error) {
-    console.error('[建议回复] glm_flash调用失败:', error.message);
-    return getDefaultSuggestions(agent, userProfile);
-  }
-
-  if (!response) {
-    return getDefaultSuggestions(agent, userProfile);
-  }
-
-  const parsed = extractJSON(response);
-  if (Array.isArray(parsed) && parsed.length > 0) {
-    const validSuggestions = parsed
-      .filter(s => typeof s === 'string' && s.trim().length > 0 && s.length <= 60)
-      .map(s => s.trim())
-      .slice(0, 3);
-    if (validSuggestions.length > 0) {
-      return validSuggestions;
+    const suggestions = await callSuggestionAPI(suggestionPrompt);
+    if (suggestions && suggestions.length > 0) {
+      return suggestions;
     }
+  } catch (error) {
+    console.error('[建议回复] API调用失败:', error.message);
   }
 
   return getDefaultSuggestions(agent, userProfile);
+}
+
+async function callSuggestionAPI(prompt) {
+  const configs = [
+    { key: process.env.GLM_API_KEY, endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4-flash' },
+    { key: process.env.MIMO_API_KEY, endpoint: process.env.MIMO_BASE_URL ? `${process.env.MIMO_BASE_URL}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions', model: 'mimo-v2.5' },
+    { key: process.env.QWEN_API_KEY, endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen3.5-flash' }
+  ];
+
+  for (const config of configs) {
+    if (!config.key) continue;
+    try {
+      const response = await axios.post(
+        config.endpoint,
+        {
+          model: config.model,
+          messages: [
+            { role: 'system', content: '你是JSON生成器，只返回JSON数组，不要任何额外文字。' },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.6,
+          max_tokens: 200,
+          stream: false
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${config.key}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 8000
+        }
+      );
+
+      const content = response.data?.choices?.[0]?.message?.content;
+      if (!content) continue;
+
+      const parsed = extractJSON(content);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const validSuggestions = parsed
+          .filter(s => typeof s === 'string' && s.trim().length > 0 && s.length <= 60)
+          .map(s => s.trim())
+          .slice(0, 3);
+        if (validSuggestions.length > 0) {
+          return validSuggestions;
+        }
+      }
+    } catch (error) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.error(`[建议回复] ${config.model}调用失败:`, error.message);
+      }
+      continue;
+    }
+  }
+  return null;
 }
 
 function getDefaultSuggestions(agent, userProfile = null) {

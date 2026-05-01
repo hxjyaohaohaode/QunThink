@@ -16,7 +16,7 @@ const connectionRateLimit = new Map();
 
 const SEND_BUFFER_DELAY = 5;
 const HEARTBEAT_INTERVAL = 30000;
-const MAX_MISSED_PINGS = 3;
+const MAX_MISSED_PINGS = 5;
 
 function cleanupClient(clientId) {
   const client = clients.get(clientId);
@@ -88,7 +88,7 @@ function startServerHeartbeat(wss) {
         missedPings.set(clientId, missed);
         if (missed >= MAX_MISSED_PINGS) {
           console.log(`Client ${clientId} 心跳超时(${missed}次未响应)，断开连接`);
-          client.ws.terminate();
+          try { client.ws.terminate(); } catch {}
           cleanupClient(clientId);
           return;
         }
@@ -100,7 +100,8 @@ function startServerHeartbeat(wss) {
         client.ws.send(JSON.stringify({ type: 'ping' }));
         pendingPings.set(clientId, true);
       } catch (error) {
-        // Client might have disconnected
+        try { client.ws.terminate(); } catch {}
+        cleanupClient(clientId);
       }
     });
   }, HEARTBEAT_INTERVAL);
@@ -109,6 +110,7 @@ function startServerHeartbeat(wss) {
     clients.forEach((client, clientId) => {
       if (client.ws.readyState !== 1 && client.ws.readyState !== 0) {
         console.log(`定时清理: 清理非活跃客户端 ${clientId}, readyState=${client.ws.readyState}`);
+        try { client.ws.terminate(); } catch {}
         cleanupClient(clientId);
       }
     });

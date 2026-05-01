@@ -3,7 +3,7 @@ import { getAuthDb } from '../models/authDb.js';
 import { safeLog } from '../utils/logger.js';
 
 const authMode = process.env.AUTH_MODE || 'session';
-const SESSION_MAX_AGE = parseInt(process.env.SESSION_MAX_AGE) || 24 * 60 * 60 * 1000;
+const SESSION_MAX_AGE = parseInt(process.env.SESSION_MAX_AGE) || 30 * 24 * 60 * 60 * 1000;
 const SESSION_REFRESH_THRESHOLD = SESSION_MAX_AGE * 0.5;
 
 const publicPaths = [
@@ -46,7 +46,7 @@ async function refreshSessionIfNeeded(session, req, res) {
       });
 
       const isProduction = process.env.NODE_ENV === 'production';
-      res.setHeader('Set-Cookie', `session_token=${session.token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=86400;${isProduction ? ' Secure;' : ''}`);
+      res.setHeader('Set-Cookie', `session_token=${session.token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(SESSION_MAX_AGE / 1000)};${isProduction ? ' Secure;' : ''}`);
       session.expires_at = newExpiresAt;
     } catch (err) {
       safeLog('warn', '会话刷新失败:', { error: err?.message });
