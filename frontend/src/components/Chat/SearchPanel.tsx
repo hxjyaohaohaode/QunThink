@@ -41,6 +41,7 @@ interface SearchResultFile {
   file_size?: number;
   search_description?: string;
   search_tags?: string[];
+  media_description?: string;
   content_preview?: string;
   match_field?: string;
   url?: string;
@@ -346,6 +347,9 @@ export function SearchPanel() {
                             <div className="min-w-0 flex-1">
                               <div className="text-sm font-medium text-text-primary">{highlightText(result.filename, query)}</div>
                               <div className="text-xs text-text-muted">{result.group_name} · {result.mime_type} · {formatFileSize(result.file_size)}</div>
+                              {result.media_description && (
+                                <p className="mt-1.5 text-xs text-accent/80 line-clamp-2">AI识别: {highlightText(truncate(result.media_description, 160), query)}</p>
+                              )}
                               {result.search_description && (
                                 <p className="mt-1.5 text-xs text-text-secondary line-clamp-2">{highlightText(truncate(result.search_description, 160), query)}</p>
                               )}

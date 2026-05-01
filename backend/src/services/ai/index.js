@@ -551,6 +551,41 @@ function generateSummary(messages) {
   return summaries.join('\n');
 }
 
+function buildAttachmentHint(attachments, hasTextContent) {
+  if (!attachments || attachments.length === 0) return '';
+  const attParts = [];
+  for (let i = 0; i < attachments.length; i++) {
+    const att = attachments[i];
+    const fname = att.name || att.filename || '未知文件';
+    const ext = fname.includes('.') ? fname.split('.').pop().toLowerCase() : '';
+    let typeLabel = '文件';
+    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext) || (att.type && att.type.startsWith('image/'))) {
+      typeLabel = '图片';
+    } else if (['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext) || (att.type && att.type.startsWith('audio/'))) {
+      typeLabel = '音频';
+    } else if (['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext) || (att.type && att.type.startsWith('video/'))) {
+      typeLabel = '视频';
+    } else if (['pdf'].includes(ext) || (att.type && att.type.includes('pdf'))) {
+      typeLabel = 'PDF文档';
+    } else if (['doc', 'docx'].includes(ext)) {
+      typeLabel = 'Word文档';
+    } else if (['xls', 'xlsx', 'csv'].includes(ext)) {
+      typeLabel = '表格';
+    }
+    const desc = att.media_description || '';
+    if (desc) {
+      attParts.push(`附件${i + 1}(${typeLabel}: ${fname}): ${desc}`);
+    } else {
+      attParts.push(`附件${i + 1}(${typeLabel}: ${fname})`);
+    }
+  }
+  if (attParts.length === 0) return '';
+  if (hasTextContent) {
+    return `\n【用户上传的附件内容】\n${attParts.join('\n')}\n【附件内容结束，以下是用户的文字消息】`;
+  }
+  return `\n【用户上传的附件内容】\n${attParts.join('\n')}\n【附件内容结束】`;
+}
+
 function buildAPIMessages(systemPrompt, userMessage, recentMessages, persona, replyToMessages = [], isPrivateChat = false, userProfile = null) {
   const messages = [
     { role: 'system', content: systemPrompt }
@@ -587,12 +622,14 @@ function buildAPIMessages(systemPrompt, userMessage, recentMessages, persona, re
     }
   }
 
+  let lastUserMsgAttachmentHint = '';
   for (let i = 0; i < effectiveMessages.length; i++) {
     const msg = effectiveMessages[i];
     let content = msg.content || '';
     const msgId = msg.id;
     
     if (msg.sender_type === 'user' && msgId === lastUserMsgId && content === userMessage) {
+      lastUserMsgAttachmentHint = buildAttachmentHint(msg.attachments, !!(userMessage && userMessage.trim().length > 0));
       continue;
     }
     
@@ -605,30 +642,7 @@ function buildAPIMessages(systemPrompt, userMessage, recentMessages, persona, re
       }
     }
 
-    let attachmentHint = '';
-    if (msg.attachments && msg.attachments.length > 0) {
-      const descParts = [];
-      for (const att of msg.attachments) {
-        if (att.media_description) {
-          descParts.push(att.media_description);
-        } else if (att.name || att.filename) {
-          const fname = att.name || att.filename;
-          const ext = fname.includes('.') ? fname.split('.').pop().toLowerCase() : '';
-          if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) {
-            descParts.push(`[图片: ${fname}]`);
-          } else if (['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext)) {
-            descParts.push(`[音频: ${fname}]`);
-          } else if (['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext)) {
-            descParts.push(`[视频: ${fname}]`);
-          } else {
-            descParts.push(`[文件: ${fname}]`);
-          }
-        }
-      }
-      if (descParts.length > 0) {
-        attachmentHint = `\n[附件内容] ${descParts.join(' | ')}`;
-      }
-    }
+    let attachmentHint = buildAttachmentHint(msg.attachments, !!(content && content.trim().length > 0));
     
     const fullContent = content + attachmentHint;
     
@@ -665,7 +679,7 @@ function buildAPIMessages(systemPrompt, userMessage, recentMessages, persona, re
     messages.push({ role: 'user', content: `[引用消息]\n${quotedContents}\n请回复@${replyTarget}` });
   }
 
-  messages.push({ role: 'user', content: userMessage });
+  messages.push({ role: 'user', content: lastUserMsgAttachmentHint + userMessage });
 
   return messages;
 }

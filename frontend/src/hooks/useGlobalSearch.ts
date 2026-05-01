@@ -44,6 +44,7 @@ export interface FileSearchResult {
   file_size: number;
   search_description: string;
   search_tags: string[];
+  media_description: string;
   content_preview: string;
   match_field: string;
   url: string;

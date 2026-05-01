@@ -864,6 +864,12 @@ router.get('/search', async (req, res) => {
           let attachmentMatchInfo = null;
           if (!contentMatch && !ttsMatch && message.attachments && message.attachments.length > 0) {
             for (const att of message.attachments) {
+              const attMediaDescMatch = att.media_description && att.media_description.toLowerCase().includes(searchQuery);
+              if (attMediaDescMatch) {
+                attachmentMatch = true;
+                attachmentMatchInfo = { filename: att.name || '附件', match_type: 'media_description' };
+                break;
+              }
               const fileId = att.id || att.url?.split('/').pop();
               const fileRecord = fileId ? filesIndex[fileId] : null;
               if (fileRecord) {
@@ -924,6 +930,7 @@ router.get('/search', async (req, res) => {
         const nameMatch = file.filename?.toLowerCase().includes(searchQuery);
         const descMatch = file.search_description?.toLowerCase().includes(searchQuery);
         const tagsMatch = (file.search_tags || []).some(t => t.toLowerCase().includes(searchQuery));
+        const mediaDescMatch = file.media_description && file.media_description.toLowerCase().includes(searchQuery);
 
         let contentMatch = false;
         let contentPreview = '';
@@ -943,9 +950,9 @@ router.get('/search', async (req, res) => {
           contentPreview = objStr.substring(0, 80);
         }
 
-        if (nameMatch || descMatch || tagsMatch || contentMatch) {
+        if (nameMatch || descMatch || tagsMatch || contentMatch || mediaDescMatch) {
           const groupObj = (db.data.groups || []).find(g => g.id === file.group_id);
-          let matchField = nameMatch ? 'filename' : descMatch ? 'description' : tagsMatch ? 'tags' : 'content';
+          let matchField = nameMatch ? 'filename' : descMatch ? 'description' : tagsMatch ? 'tags' : mediaDescMatch ? 'media_description' : 'content';
 
           const linkedMessage = (db.data.messages || []).find(m =>
             m.attachments && m.attachments.some(a => a.id === file.id || a.url?.endsWith(`/${file.id}/download`))
@@ -960,6 +967,7 @@ router.get('/search', async (req, res) => {
             file_size: file.file_size,
             search_description: file.search_description || '',
             search_tags: file.search_tags || [],
+            media_description: file.media_description || '',
             content_preview: contentPreview,
             match_field: matchField,
             url: `/api/files/${file.id}/download?group_id=${encodeURIComponent(file.group_id)}`,

@@ -474,47 +474,62 @@ const AttachmentItem: React.FC<{
         </div>
       ) : isVideo && attachment.url ? (
         <div
-          className={`flex items-center gap-2 px-3 py-3 rounded-[18px] text-xs ${isUser ? 'bg-white/20 text-white' : 'bg-bg-surface2/80 text-text-secondary'}`}
+          className={`flex flex-col gap-1 px-3 py-3 rounded-[18px] text-xs ${isUser ? 'bg-white/20 text-white' : 'bg-bg-surface2/80 text-text-secondary'}`}
           onClick={isSelectMode ? onToggleSelect : onPreview}
         >
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ backgroundColor: `${color}20` }}>
-            <svg className="w-4 h-4" fill="none" stroke={color} viewBox="0 0 24 24" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15.91 11.672a.375.375 0 010 .656l-5.603 3.113a.375.375 0 01-.557-.328V8.887c0-.286.307-.466.557-.327l5.603 3.112z" />
-            </svg>
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ backgroundColor: `${color}20` }}>
+              <svg className="w-4 h-4" fill="none" stroke={color} viewBox="0 0 24 24" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15.91 11.672a.375.375 0 010 .656l-5.603 3.113a.375.375 0 01-.557-.328V8.887c0-.286.307-.466.557-.327l5.603 3.112z" />
+              </svg>
+            </div>
+            <div className="flex flex-col min-w-0 flex-1">
+              <span className="truncate font-medium">{attachment.name}</span>
+              <span className="opacity-60 text-[10px]">{fileSize}</span>
+            </div>
           </div>
-          <div className="flex flex-col min-w-0 flex-1">
-            <span className="truncate font-medium">{attachment.name}</span>
-            <span className="opacity-60 text-[10px]">{fileSize}</span>
-          </div>
+          {attachment.media_description && !attachment.media_description.startsWith('[') && (
+            <p className="line-clamp-2 text-[10px] leading-4 opacity-80 pl-10">{attachment.media_description}</p>
+          )}
         </div>
       ) : isAudio && attachment.url ? (
         <div
-          className={`flex items-center gap-2 px-3 py-3 rounded-[18px] text-xs ${isUser ? 'bg-white/20 text-white' : 'bg-bg-surface2/80 text-text-secondary'}`}
+          className={`flex flex-col gap-1 px-3 py-3 rounded-[18px] text-xs ${isUser ? 'bg-white/20 text-white' : 'bg-bg-surface2/80 text-text-secondary'}`}
           onClick={isSelectMode ? onToggleSelect : onPreview}
         >
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ backgroundColor: `${color}20` }}>
-            <svg className="w-4 h-4" fill="none" stroke={color} viewBox="0 0 24 24" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
-            </svg>
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0" style={{ backgroundColor: `${color}20` }}>
+              <svg className="w-4 h-4" fill="none" stroke={color} viewBox="0 0 24 24" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
+              </svg>
+            </div>
+            <div className="flex flex-col min-w-0 flex-1">
+              <span className="truncate font-medium">{attachment.name}</span>
+              <span className="opacity-60 text-[10px]">{fileSize}</span>
+            </div>
           </div>
-          <div className="flex flex-col min-w-0 flex-1">
-            <span className="truncate font-medium">{attachment.name}</span>
-            <span className="opacity-60 text-[10px]">{fileSize}</span>
-          </div>
+          {attachment.media_description && !attachment.media_description.startsWith('[') && (
+            <p className="line-clamp-2 text-[10px] leading-4 opacity-80 pl-10">{attachment.media_description}</p>
+          )}
         </div>
       ) : (
         <div
-          className={`flex items-center gap-2 px-3 py-3 rounded-[18px] text-xs ${isUser ? 'bg-white/20 text-white' : 'bg-bg-surface2/80 text-text-secondary'}`}
+          className={`flex flex-col gap-1 px-3 py-3 rounded-[18px] text-xs ${isUser ? 'bg-white/20 text-white' : 'bg-bg-surface2/80 text-text-secondary'}`}
           onClick={isSelectMode ? onToggleSelect : onPreview}
         >
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 text-base" style={{ backgroundColor: `${color}20` }}>
-            {icon}
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 text-base" style={{ backgroundColor: `${color}20` }}>
+              {icon}
+            </div>
+            <div className="flex flex-col min-w-0 flex-1">
+              <span className="truncate font-medium">{attachment.name}</span>
+              <span className="opacity-60 text-[10px]">{fileSize}</span>
+            </div>
           </div>
-          <div className="flex flex-col min-w-0 flex-1">
-            <span className="truncate font-medium">{attachment.name}</span>
-            <span className="opacity-60 text-[10px]">{fileSize}</span>
-          </div>
+          {attachment.media_description && !attachment.media_description.startsWith('[') && (
+            <p className="line-clamp-2 text-[10px] leading-4 opacity-80 pl-10">{attachment.media_description}</p>
+          )}
         </div>
       )}
 
@@ -526,7 +541,10 @@ const AttachmentItem: React.FC<{
             <span className="truncate">{attachment.type.split('/')[0] || '文件'}</span>
           </div>
           {attachment.media_description && (
-            <p className="mt-1.5 line-clamp-2 text-[10px] leading-4 text-text-secondary">{attachment.media_description}</p>
+            <div className="mt-1.5 rounded-lg bg-bg-surface2/60 px-2 py-1.5">
+              <p className="text-[10px] font-medium text-text-muted mb-0.5">AI 识别内容</p>
+              <p className="text-[10px] leading-4 text-text-secondary whitespace-pre-wrap break-words">{attachment.media_description}</p>
+            </div>
           )}
         </div>
       )}
@@ -890,10 +908,13 @@ export const AttachmentStack: React.FC<AttachmentStackProps> = ({
                       {isImageType(attachment.type) && attachment.url ? (
                         <img src={sanitizeUrl(attachment.url)} alt={attachment.name || '附件图片'} className="pointer-events-none h-full w-full select-none object-cover" draggable={false} loading="lazy" />
                       ) : (
-                        <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-bg-surface2 via-white to-bg-surface3">
-                          <div className="flex h-16 w-16 items-center justify-center rounded-3xl text-4xl shadow-sm" style={{ backgroundColor: `${getFileTypeIcon(attachment.type).color}18` }}>
+                        <div className="flex h-full w-full flex-col items-center justify-center bg-gradient-to-br from-bg-surface2 via-white to-bg-surface3 p-3">
+                          <div className="flex h-12 w-12 items-center justify-center rounded-2xl text-3xl shadow-sm" style={{ backgroundColor: `${getFileTypeIcon(attachment.type).color}18` }}>
                             {getFileTypeIcon(attachment.type).icon}
                           </div>
+                          {attachment.media_description && !attachment.media_description.startsWith('[') && (
+                            <p className="mt-2 line-clamp-3 text-center text-[9px] leading-3 text-text-secondary">{attachment.media_description}</p>
+                          )}
                         </div>
                       )}
                     </div>
