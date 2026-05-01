@@ -7,7 +7,6 @@ import { UserProfileEditor } from './UserProfileEditor';
 import { FontSizeSelector } from './FontSizeToggle';
 import { useConfirm, useToast } from '../Common';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
-import { api } from '../../services/api';
 
 export function SettingsPage() {
   const APP_VERSION = import.meta.env.VITE_APP_VERSION || '2.8.9';
@@ -23,13 +22,6 @@ export function SettingsPage() {
   const [isThemeChanging, setIsThemeChanging] = useState(false);
   const [prevExpandedPersona, setPrevExpandedPersona] = useState<string | null>(null);
   const sectionRefs = useRef<(HTMLDivElement | null)[]>([]);
-
-  const [showChangePassword, setShowChangePassword] = useState(false);
-  const [currentPassword, setCurrentPassword] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [confirmNewPassword, setConfirmNewPassword] = useState('');
-  const [passwordLoading, setPasswordLoading] = useState(false);
-  const [passwordError, setPasswordError] = useState<string | null>(null);
 
   const [editingPersonaId, setEditingPersonaId] = useState<string | null>(null);
   const [showProfileEditor, setShowProfileEditor] = useState(false);
@@ -117,46 +109,6 @@ export function SettingsPage() {
       setTimeout(() => {
         setIsThemeChanging(false);
       }, 300);
-    }
-  };
-
-  const handleChangePassword = async () => {
-    setPasswordError(null);
-    if (!currentPassword) {
-      setPasswordError('请输入当前密码');
-      return;
-    }
-    if (newPassword.length < 8) {
-      setPasswordError('新密码至少需要8位');
-      return;
-    }
-    if (newPassword.length > 128) {
-      setPasswordError('新密码不能超过128位');
-      return;
-    }
-    if (!/[a-z]/.test(newPassword) || !/[A-Z]/.test(newPassword) || !/\d/.test(newPassword)) {
-      setPasswordError('新密码必须同时包含大写字母、小写字母和数字');
-      return;
-    }
-    if (newPassword !== confirmNewPassword) {
-      setPasswordError('两次输入的新密码不一致');
-      return;
-    }
-    setPasswordLoading(true);
-    try {
-      await api.changePassword(currentPassword, newPassword);
-      showToast({ message: '密码修改成功', type: 'success' });
-      setShowChangePassword(false);
-      setCurrentPassword('');
-      setNewPassword('');
-      setConfirmNewPassword('');
-      setPasswordError(null);
-    } catch (err: any) {
-      const errorMsg = err.response?.data?.error || '密码修改失败';
-      setPasswordError(errorMsg);
-      showToast({ message: errorMsg, type: 'error' });
-    } finally {
-      setPasswordLoading(false);
     }
   };
 
@@ -546,97 +498,9 @@ export function SettingsPage() {
               </div>
             </div>
 
-            <div
+            <div 
               ref={el => { sectionRefs.current[4] = el }}
               style={getSectionStyle(4)}
-              className="px-4"
-            >
-              <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3 settings-theme-transition">账号安全</h2>
-              <div className="bg-bg-surface border border-border-subtle rounded-xl overflow-hidden divide-y divide-border/30 settings-theme-transition settings-card">
-                <button
-                  onClick={() => {
-                    setShowChangePassword(!showChangePassword);
-                    setPasswordError(null);
-                  }}
-                  className="w-full flex items-center justify-between p-3 settings-theme-transition"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full flex items-center justify-center bg-bg-surface2 settings-theme-transition">
-                      <svg className="w-5 h-5 text-text-secondary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                      </svg>
-                    </div>
-                    <span className="text-sm text-text-primary settings-theme-transition">修改密码</span>
-                  </div>
-                  <svg
-                    className={`settings-expand-icon w-4 h-4 text-text-muted ${showChangePassword ? 'expanded' : ''}`}
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                  >
-                    <path d="m6 9 6 6 6-6" />
-                  </svg>
-                </button>
-                {showChangePassword && (
-                  <div className="px-3 pb-3 bg-bg-primary/30 settings-theme-transition">
-                    <div className="space-y-3 pt-2">
-                      <div>
-                        <label className="block text-xs font-medium text-text-muted mb-1 settings-theme-transition">当前密码</label>
-                        <input
-                          type="password"
-                          value={currentPassword}
-                          onChange={(e) => { setCurrentPassword(e.target.value); setPasswordError(null); }}
-                          className="w-full px-3 py-2 border border-border-subtle rounded-lg focus:outline-none focus:ring-1 focus:ring-accent/30 focus:border-accent bg-bg-surface2 text-text-primary text-sm settings-theme-transition"
-                          placeholder="请输入当前密码"
-                          autoComplete="current-password"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-text-muted mb-1 settings-theme-transition">新密码</label>
-                        <input
-                          type="password"
-                          value={newPassword}
-                          onChange={(e) => { setNewPassword(e.target.value); setPasswordError(null); }}
-                          minLength={8}
-                          maxLength={128}
-                          className="w-full px-3 py-2 border border-border-subtle rounded-lg focus:outline-none focus:ring-1 focus:ring-accent/30 focus:border-accent bg-bg-surface2 text-text-primary text-sm settings-theme-transition"
-                          placeholder="至少8位，需包含大写字母、小写字母和数字"
-                          autoComplete="new-password"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-text-muted mb-1 settings-theme-transition">确认新密码</label>
-                        <input
-                          type="password"
-                          value={confirmNewPassword}
-                          onChange={(e) => { setConfirmNewPassword(e.target.value); setPasswordError(null); }}
-                          className="w-full px-3 py-2 border border-border-subtle rounded-lg focus:outline-none focus:ring-1 focus:ring-accent/30 focus:border-accent bg-bg-surface2 text-text-primary text-sm settings-theme-transition"
-                          placeholder="再次输入新密码"
-                          autoComplete="new-password"
-                        />
-                      </div>
-                      {passwordError && (
-                        <div className="p-2 bg-red-50 dark:bg-red-900/20 rounded-lg text-xs text-red-600 dark:text-red-400 settings-theme-transition">
-                          {passwordError}
-                        </div>
-                      )}
-                      <button
-                        onClick={handleChangePassword}
-                        disabled={passwordLoading || !currentPassword || !newPassword || !confirmNewPassword}
-                        className="w-full py-2 text-sm font-medium text-white bg-accent rounded-lg disabled:opacity-50 disabled:cursor-not-allowed settings-theme-transition"
-                      >
-                        {passwordLoading ? '修改中...' : '确认修改'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div 
-              ref={el => { sectionRefs.current[5] = el }}
-              style={getSectionStyle(5)}
               className="px-4"
             >
               <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3 settings-theme-transition">关于</h2>

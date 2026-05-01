@@ -1,10 +1,5 @@
 import { z } from 'zod';
 
-/**
- * Shared contract source lives in `shared/contracts.ts`.
- * Backend keeps runtime validation in Zod and aligns request shapes with that shared model.
- */
-
 const validateBody = (schema) => (req, res, next) => {
   try {
     req.body = schema.parse(req.body);
@@ -82,22 +77,6 @@ const commentSchema = z.object({
   content: z.string().min(1).max(2000),
   parent_id: z.string().nullable().optional(),
   reply_to: z.string().nullable().optional()
-});
-
-const registerSchema = z.object({
-  username: z.string().min(3).max(50).regex(/^[a-zA-Z0-9_]+$/),
-  password: z.string().min(8).max(128).regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/, '密码必须包含大写字母、小写字母和数字'),
-  nickname: z.string().max(50).optional()
-});
-
-const loginSchema = z.object({
-  username: z.string(),
-  password: z.string()
-});
-
-const changePasswordSchema = z.object({
-  currentPassword: z.string(),
-  newPassword: z.string().min(8).max(128).regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/, '密码必须包含大写字母、小写字母和数字')
 });
 
 const smartLikeSchema = z.object({
@@ -194,18 +173,6 @@ const ttsSchema = z.object({
   groupId: z.string().optional()
 });
 
-const smsRegisterSchema = z.object({
-  phone: z.string().regex(/^1[3-9]\d{9}$/, '手机号格式不正确'),
-  password: z.string().min(8).max(128).regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/, '密码必须包含大写字母、小写字母和数字'),
-  code: z.string().regex(/^\d{4,8}$/, '验证码格式不正确'),
-  nickname: z.string().max(50).optional()
-});
-
-const phoneLoginSchema = z.object({
-  phone: z.string().regex(/^1[3-9]\d{9}$/, '手机号格式不正确'),
-  password: z.string()
-});
-
 const smsSendSchema = z.object({
   phone: z.string().regex(/^1[3-9]\d{9}$/, '手机号格式不正确')
 });
@@ -226,9 +193,6 @@ export {
   editMessageSchema,
   batchDeleteSchema,
   commentSchema,
-  registerSchema,
-  loginSchema,
-  changePasswordSchema,
   smartLikeSchema,
   autoLikeSchema,
   storeMemorySchema,
@@ -237,7 +201,5 @@ export {
   updateProfileSchema,
   ttsSchema,
   smsSendSchema,
-  smsVerifySchema,
-  smsRegisterSchema,
-  phoneLoginSchema
+  smsVerifySchema
 };

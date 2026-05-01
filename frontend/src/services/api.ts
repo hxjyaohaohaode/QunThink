@@ -814,26 +814,6 @@ export const api = {
     return response.data;
   },
 
-  login: async (username: string, password: string) => {
-    const response = await axiosInstance.post('/auth/login', { username, password });
-    return response.data;
-  },
-
-  loginPhone: async (phone: string, password: string) => {
-    const response = await axiosInstance.post('/auth/login-phone', { phone, password });
-    return response.data;
-  },
-
-  register: async (username: string, password: string, nickname?: string) => {
-    const response = await axiosInstance.post('/auth/register', { username, password, nickname });
-    return response.data;
-  },
-
-  registerSms: async (phone: string, password: string, code: string, nickname?: string) => {
-    const response = await axiosInstance.post('/auth/register-sms', { phone, password, code, nickname });
-    return response.data;
-  },
-
   logout: async () => {
     const response = await axiosInstance.post('/auth/logout');
     return response.data;
@@ -846,11 +826,6 @@ export const api = {
 
   getCurrentUser: async () => {
     const response = await axiosInstance.get('/auth/me');
-    return response.data;
-  },
-
-  changePassword: async (currentPassword: string, newPassword: string) => {
-    const response = await axiosInstance.post('/auth/change-password', { currentPassword, newPassword });
     return response.data;
   },
 
