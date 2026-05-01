@@ -43,8 +43,12 @@ const aiShortNames = {
 };
 
 const uploadDir = path.join(getUploadsDir(), 'backgrounds');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+try {
+  if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+  }
+} catch (err) {
+  console.warn('背景图目录创建失败（将在首次使用时重试）:', err.message);
 }
 
 const bgStorage = multer.diskStorage({

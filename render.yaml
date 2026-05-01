@@ -2,7 +2,7 @@ services:
   - type: web
     name: ai-chat-group-backend
     env: node
-    region: oregon
+    region: singapore
     plan: free
     buildCommand: cd backend && npm install
     startCommand: cd backend && npm start
@@ -10,12 +10,14 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: "20.18.0"
       - key: PORT
         value: 3002
       - key: AUTH_MODE
         value: session
       - key: DATA_DIR
-        value: /var/data
+        value: /opt/render/project/data
       - key: DEEPSEEK_API_KEY
         sync: false
       - key: GLM_API_KEY
@@ -28,13 +30,10 @@ services:
         sync: false
       - key: CORS_ORIGINS
         sync: false
-    disk:
-      name: data
-      mountPath: /var/data
-      sizeGB: 1
 
   - type: static
     name: ai-chat-group-frontend
+    region: singapore
     buildCommand: cd frontend && npm install && npm run build
     staticPublishPath: ./frontend/dist
     envVars:

@@ -124,7 +124,11 @@ function toFileResponse(fileRecord) {
 function getUploadDir(userId) {
   const userDir = path.join(uploadBaseDir, userId);
   if (!fs.existsSync(userDir)) {
-    fs.mkdirSync(userDir, { recursive: true });
+    try {
+      fs.mkdirSync(userDir, { recursive: true });
+    } catch (err) {
+      console.warn('上传目录创建失败:', err.message);
+    }
   }
   return userDir;
 }
