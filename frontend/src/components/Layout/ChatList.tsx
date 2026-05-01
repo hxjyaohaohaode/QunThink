@@ -585,7 +585,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
             {activeTab === 'all' && (
               <div className="flex items-center gap-1.5 px-4 py-1.5">
                 <svg className="w-3 h-3 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076a1.526 1.526 0 0 1 1.037-.443 48.282 48.282 0 0 0 5.68-.494c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" /></svg>
-                <span className="text-[10px] font-medium text-amber-500">评论</span>
+                <span className="text-[10px] font-medium text-amber-500">评论</span>
                 <span className="text-[10px] text-text-muted">{commentResults.length}</span>
               </div>
             )}
@@ -598,7 +598,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1 mb-0.5">
                       <span className="font-medium text-[11px] text-text-primary">{getSenderName(r.sender_type, r.sender_id)}</span>
-                      <span className="text-[9px] text-text-muted">评论浜?{r.group_name}</span>
+                      <span className="text-[9px] text-text-muted">评论人 {r.group_name}</span>
                       <span className="text-[9px] text-text-muted ml-auto">{dayjs(r.created_at).format('M/D HH:mm')}</span>
                     </div>
                     <p className="text-[11px] text-text-secondary line-clamp-2">{highlightText(r.content, searchRegex)}</p>
