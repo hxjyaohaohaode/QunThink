@@ -72,12 +72,25 @@ export const MessageContent = React.memo(function MessageContent({
 
   return (
     <div className="markdown-content select-text">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[[rehypeSanitize, sanitizeSchema]]}
-      >
-        {displayContent}
-      </ReactMarkdown>
+      {isStreaming && !content ? (
+        <div className="flex items-center gap-1.5 py-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-text-muted animate-bounce" style={{ animationDelay: '0ms' }} />
+          <span className="w-1.5 h-1.5 rounded-full bg-text-muted animate-bounce" style={{ animationDelay: '150ms' }} />
+          <span className="w-1.5 h-1.5 rounded-full bg-text-muted animate-bounce" style={{ animationDelay: '300ms' }} />
+        </div>
+      ) : (
+        <>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={[[rehypeSanitize, sanitizeSchema]]}
+          >
+            {displayContent}
+          </ReactMarkdown>
+          {isStreaming && content && (
+            <span className="inline-block w-0.5 h-[1.1em] bg-accent ml-0.5 animate-pulse align-text-bottom rounded-sm" />
+          )}
+        </>
+      )}
       {!isUser && processedContent.length > COLLAPSE_THRESHOLD && !isStreaming && (
         <button
           onClick={(e) => {

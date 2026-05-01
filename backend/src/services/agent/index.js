@@ -463,50 +463,65 @@ async function callSuggestionAPI(prompt) {
     { key: process.env.QWEN_API_KEY, endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen3.5-flash' }
   ];
 
-  for (const config of configs) {
-    if (!config.key) continue;
-    try {
-      const response = await axios.post(
-        config.endpoint,
-        {
-          model: config.model,
-          messages: [
-            { role: 'system', content: '你是JSON生成器，只返回JSON数组，不要任何额外文字。' },
-            { role: 'user', content: prompt }
-          ],
-          temperature: 0.6,
-          max_tokens: 200,
-          stream: false
+  const availableConfigs = configs.filter(c => c.key);
+  if (availableConfigs.length === 0) return null;
+
+  const callOne = async (config) => {
+    const response = await axios.post(
+      config.endpoint,
+      {
+        model: config.model,
+        messages: [
+          { role: 'system', content: '你是JSON生成器，只返回JSON数组，不要任何额外文字。' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.6,
+        max_tokens: 200,
+        stream: false
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${config.key}`,
+          'Content-Type': 'application/json'
         },
-        {
-          headers: {
-            Authorization: `Bearer ${config.key}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 8000
-        }
-      );
-
-      const content = response.data?.choices?.[0]?.message?.content;
-      if (!content) continue;
-
-      const parsed = extractJSON(content);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        const validSuggestions = parsed
-          .filter(s => typeof s === 'string' && s.trim().length > 0 && s.length <= 60)
-          .map(s => s.trim())
-          .slice(0, 3);
-        if (validSuggestions.length > 0) {
-          return validSuggestions;
-        }
+        timeout: 4000
       }
-    } catch (error) {
-      if (process.env.NODE_ENV !== 'production') {
-        console.error(`[建议回复] ${config.model}调用失败:`, error.message);
+    );
+
+    const content = response.data?.choices?.[0]?.message?.content;
+    if (!content) return null;
+
+    const parsed = extractJSON(content);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      const validSuggestions = parsed
+        .filter(s => typeof s === 'string' && s.trim().length > 0 && s.length <= 60)
+        .map(s => s.trim())
+        .slice(0, 3);
+      if (validSuggestions.length > 0) {
+        return validSuggestions;
       }
-      continue;
+    }
+    return null;
+  };
+
+  const promises = availableConfigs.map(config =>
+    callOne(config).catch(() => null)
+  );
+
+  try {
+    const raceResult = await Promise.any(promises);
+    if (raceResult && Array.isArray(raceResult) && raceResult.length > 0) {
+      return raceResult;
+    }
+  } catch {}
+
+  const results = await Promise.allSettled(promises);
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value && Array.isArray(r.value) && r.value.length > 0) {
+      return r.value;
     }
   }
+
   return null;
 }
 

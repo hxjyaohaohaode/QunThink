@@ -126,6 +126,7 @@ const updatePersonaSchema = z.object({
     responseFrequency: z.number().min(0).max(1).optional(),
     minDelay: z.number().int().min(0).max(60000).optional(),
     maxDelay: z.number().int().min(0).max(60000).optional(),
+    activeHours: z.object({ start: z.number(), end: z.number() }).optional(),
     maxResponsesPerConversation: z.number().int().min(1).max(100).optional(),
     cooldownBetweenResponses: z.number().int().min(0).max(60000).optional()
   }).optional(),
@@ -149,8 +150,14 @@ const updatePersonaSchema = z.object({
   }).optional(),
   debateConfig: z.object({
     debateStyle: z.enum(['formal', 'casual', 'aggressive', 'diplomatic']).optional(),
-    preferredRole: z.string().max(50).optional()
-  }).optional(),
+    preferredRole: z.string().max(50).optional(),
+    mode: z.string().max(50).optional(),
+    level: z.string().max(50).optional(),
+    topic: z.string().max(500).optional(),
+    rounds: z.number().int().min(1).max(20).optional(),
+    speakingTime: z.number().int().min(10).max(600).optional(),
+    roles: z.record(z.string(), z.string()).optional()
+  }).nullable().optional(),
   preferredRole: z.string().max(50).optional(),
   customRoleName: z.string().max(50).optional(),
   questionProbability: z.number().min(0).max(1).optional(),
@@ -158,7 +165,7 @@ const updatePersonaSchema = z.object({
   silenceProbability: z.number().min(0).max(1).optional(),
   speakingOrder: z.number().int().min(1).max(10).optional(),
   firstSpeakerTopics: z.array(z.string().max(100)).max(20).optional()
-}).strict();
+});
 
 const updateProfileSchema = z.object({
   displayName: z.string().min(1).max(50).optional(),

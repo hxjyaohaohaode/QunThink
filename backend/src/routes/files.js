@@ -474,8 +474,20 @@ router.get('/files/:id/download', async (req, res) => {
     return res.status(404).json({ error: 'File not found on disk' });
   }
 
+  const ext = path.extname(file.filename || '').toLowerCase();
+  const inlineTypes = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg',
+    '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac',
+    '.mp4', '.webm', '.mov', '.avi', '.mkv',
+    '.txt', '.md', '.csv', '.json', '.xml', '.pdf'];
+  const isInline = inlineTypes.includes(ext);
+
   res.setHeader('Content-Type', file.mime_type || 'application/octet-stream');
-  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.filename)}"`);
+  if (isInline) {
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.filename)}"`);
+  } else {
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.filename)}"`);
+  }
+  res.setHeader('Cache-Control', 'private, max-age=3600');
   res.sendFile(safeFilePath);
 });
 

@@ -260,10 +260,15 @@ const LightboxModal: React.FC<{
             </div>
           )}
           {!isImageType(current.type) && !isVideoType(current.type) && !isAudioType(current.type) && (
-            <div className="flex flex-col items-center gap-4 p-8 bg-white/10 rounded-2xl">
+            <div className="flex flex-col items-center gap-4 p-8 bg-white/10 rounded-2xl max-w-[90vw] max-h-[85vh] overflow-auto">
               <span className="text-5xl">{getFileTypeIcon(current.type).icon}</span>
               <p className="text-white text-sm font-medium max-w-[300px] truncate">{current.name}</p>
               <p className="text-white/60 text-xs">{formatFileSize(current.size)}</p>
+              {current.media_description && (
+                <div className="w-full max-w-[600px] mt-2 p-4 bg-black/30 rounded-xl text-left overflow-auto max-h-[40vh]">
+                  <p className="text-white/80 text-xs whitespace-pre-wrap break-words">{current.media_description}</p>
+                </div>
+              )}
               {current.url && (
                 <a
                   href={sanitizeUrl(current.url)}

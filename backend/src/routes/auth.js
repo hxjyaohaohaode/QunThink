@@ -38,7 +38,13 @@ router.post('/auth/login-phone', validateBody(phoneLoginSchema), asyncHandler(as
 
   await withWriteLock('auth', async () => {
     await db.read();
-    db.data.sessions = db.data.sessions.filter(s => s.userId !== user.id);
+    const existingSessions = db.data.sessions.filter(s => s.userId === user.id);
+    if (existingSessions.length >= 5) {
+      existingSessions.sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at));
+      const sessionsToKeep = existingSessions.slice(-4);
+      const sessionIdsToRemove = new Set(existingSessions.slice(0, -4).map(s => s.token));
+      db.data.sessions = db.data.sessions.filter(s => !sessionIdsToRemove.has(s.token));
+    }
     db.data.sessions.push(session);
     await db.write();
   });

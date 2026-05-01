@@ -63,6 +63,7 @@ let ws: WebSocket | null = null;
 let reconnectAttempts = 0;
 let currentGroupId: string | null = null;
 let pendingGroupId: string | null = null;
+let subscribedGroupIds: Set<string> = new Set();
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
 let lastMessageTimestamp: Record<string, string> = {};
@@ -289,9 +290,10 @@ export function connectWebSocket(groupId?: string) {
     if (import.meta.env.DEV) console.log('[WS] onopen - groupIdToJoin:', groupIdToJoin);
     if (groupIdToJoin) {
       currentGroupId = groupIdToJoin;
-      joinGroup(groupIdToJoin);
       pendingGroupId = null;
     }
+
+    subscribeAllGroups();
 
     if (currentGroupId && isReconnecting) {
       if (import.meta.env.DEV) console.log('[WS] 重连中，获取丢失的消息并同步全局数据');
@@ -408,16 +410,13 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
   switch (message.type) {
     case 'new_message':
       if (message.group_id) {
-        if (message.sender_type === 'user' && (message.sender_id === 'user' || message.sender_id === '')) {
-          break;
-        }
-        
         const senderId = message.sender_id || message.sender || '';
         const messageTimestamp = message.created_at || message.timestamp || new Date().toISOString();
         const msgId = message.id || `${message.sender_type}_${Date.now()}`;
         
         const currentMessages = messagesStore.messages[message.group_id] || [];
         const existingStreamMsg = currentMessages.find(m => m.id === msgId && m.is_streaming);
+        const existingMsgById = currentMessages.find(m => m.id === msgId);
         
         if (existingStreamMsg) {
           messagesStore.finalizeStreamMessage(
@@ -427,9 +426,28 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
             message.reply_to,
             message.reply_to_ids
           );
-        } else {
-          const existingMsg = currentMessages.find(m => m.id === msgId);
-          if (!existingMsg) {
+        } else if (!existingMsgById) {
+          const isLocalUserMessage = message.sender_type === 'user' && 
+            currentMessages.some(m => m.sender_type === 'user' && m.status === 'sending' && !m.is_streaming);
+          
+          if (isLocalUserMessage) {
+            const localMsg = currentMessages.find(m => m.sender_type === 'user' && m.status === 'sending');
+            if (localMsg) {
+              messagesStore.addMessage(message.group_id, {
+                id: msgId,
+                group_id: message.group_id,
+                sender_type: message.sender_type || 'system',
+                sender_id: senderId,
+                content: message.content || '',
+                content_type: message.content_type || 'text',
+                reply_to: message.reply_to,
+                created_at: messageTimestamp,
+                metadata: message.metadata,
+                tempId: localMsg.tempId,
+                status: 'sent'
+              });
+            }
+          } else {
             messagesStore.addMessage(message.group_id, {
               id: msgId,
               group_id: message.group_id,
@@ -550,6 +568,12 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
     case 'generation_stopped':
       if (message.group_id) {
         uiStore.clearAllTypingForGroup(message.group_id);
+        const groupMsgs = messagesStore.messages[message.group_id] || [];
+        groupMsgs.forEach(m => {
+          if (m.is_streaming) {
+            messagesStore.finalizeStreamMessage(message.group_id, m.id, m.content || '');
+          }
+        });
       }
       break;
 
@@ -790,25 +814,18 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
 export function joinGroup(groupId: string) {
   if (import.meta.env.DEV) console.log('[WS] joinGroup called:', groupId, 'ws state:', ws?.readyState, 'currentGroupId:', currentGroupId);
   
-  const previousGroupId = currentGroupId;
-  const isNewGroup = previousGroupId !== groupId;
-  
-  if (isNewGroup && previousGroupId && ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      type: 'leave_group',
-      group_id: previousGroupId
-    }));
-  }
-  
   currentGroupId = groupId;
   pendingGroupId = null;
   
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      type: 'join_group',
-      group_id: groupId
-    }));
-    if (import.meta.env.DEV) console.log('[WS] Sent join_group for:', groupId);
+    if (!subscribedGroupIds.has(groupId)) {
+      ws.send(JSON.stringify({
+        type: 'join_group',
+        group_id: groupId
+      }));
+      subscribedGroupIds.add(groupId);
+      if (import.meta.env.DEV) console.log('[WS] Sent join_group for:', groupId, 'total subscribed:', subscribedGroupIds.size);
+    }
   } else {
     if (import.meta.env.DEV) console.log('[WS] WebSocket not open, will join when connected');
     if (ws && ws.readyState === WebSocket.CONNECTING) {
@@ -820,6 +837,9 @@ export function joinGroup(groupId: string) {
 }
 
 export function leaveGroup(groupId: string) {
+  if (subscribedGroupIds.has(groupId)) {
+    subscribedGroupIds.delete(groupId);
+  }
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       type: 'leave_group',
@@ -858,6 +878,25 @@ export function stopGeneration(groupId: string) {
   }
 }
 
+export function subscribeAllGroups() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  
+  const groupsStore = useGroupsStore.getState();
+  const allGroups = groupsStore.groups || [];
+  
+  for (const group of allGroups) {
+    if (!subscribedGroupIds.has(group.id)) {
+      ws.send(JSON.stringify({
+        type: 'join_group',
+        group_id: group.id
+      }));
+      subscribedGroupIds.add(group.id);
+    }
+  }
+  
+  if (import.meta.env.DEV) console.log('[WS] subscribeAllGroups: subscribed to', subscribedGroupIds.size, 'groups');
+}
+
 export function disconnectWebSocket() {
   isCleanDisconnect = true;
   clearConnectionTimer();
@@ -873,6 +912,7 @@ export function disconnectWebSocket() {
     ws.close();
     ws = null;
     currentGroupId = null;
+    subscribedGroupIds.clear();
   }
   isReconnecting = false;
   reconnectAttempts = 0;
@@ -1033,6 +1073,7 @@ export function destroyWebSocket() {
   reconnectAttempts = 0;
   currentGroupId = null;
   pendingGroupId = null;
+  subscribedGroupIds.clear();
   isReconnecting = false;
 
   if (reconnectTimer) {

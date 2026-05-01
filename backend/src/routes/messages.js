@@ -168,7 +168,7 @@ router.post('/groups/:groupId/messages', validateBody(sendMessageSchema), async 
       filesIndex[f.id] = f;
     }
     enrichedAttachments = enrichedAttachments.map(att => {
-      const fileId = att.id || att.url?.split('/').pop() || att.url?.split('/files/').pop()?.replace('/download', '');
+      const fileId = att.id || att.url?.match(/\/files\/([^/]+)/)?.[1] || att.url?.split('/files/').pop()?.split('/')[0];
       const fileRecord = fileId ? filesIndex[fileId] : null;
       if (fileRecord && fileRecord.media_description) {
         return { ...att, media_description: fileRecord.media_description };

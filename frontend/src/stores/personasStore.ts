@@ -103,11 +103,14 @@ function deduplicatePersonas(personas: Record<string, PersonaConfig>): Record<st
 }
 
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
+let editLockCount = 0;
 
 function startAutoRefresh() {
   if (refreshTimer) return;
+  if (editLockCount > 0) return;
   
   refreshTimer = setInterval(() => {
+    if (editLockCount > 0) return;
     const state = usePersonasStore.getState();
     if (!state.loading) {
       state.fetchPersonas();
@@ -126,6 +129,27 @@ function stopAutoRefresh() {
     if (import.meta.env.DEV) {
       console.log('[Personas] 已停止自动刷新');
     }
+  }
+}
+
+export function pausePersonasAutoRefresh() {
+  editLockCount++;
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+  if (import.meta.env.DEV) {
+    console.log('[Personas] 自动刷新已暂停，编辑锁计数:', editLockCount);
+  }
+}
+
+export function resumePersonasAutoRefresh() {
+  editLockCount = Math.max(0, editLockCount - 1);
+  if (editLockCount === 0) {
+    startAutoRefresh();
+  }
+  if (import.meta.env.DEV) {
+    console.log('[Personas] 自动刷新已恢复，编辑锁计数:', editLockCount);
   }
 }
 

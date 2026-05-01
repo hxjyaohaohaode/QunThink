@@ -146,7 +146,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
 
   const getGroupAvatarInfo = useCallback((group: Group) => {
     if (group.avatar_url) {
-      return { color: 'transparent', letter: '', avatarUrl: group.avatar_url, name: null };
+      return { color: 'transparent', letter: '', avatarUrl: group.avatar_url, name: null, isGroup: false };
     }
     if (group.ai_members && group.ai_members.length > 0) {
       if (group.ai_members.length === 1) {
@@ -156,19 +156,24 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
           color: persona?.color || AI_COLORS[aiId] || '#888',
           letter: persona?.name?.charAt(0) || AI_AVATAR_LETTERS[aiId] || 'A',
           avatarUrl: persona?.avatar_url || null,
-          name: persona?.name || AI_NAMES[aiId] || aiId
+          name: persona?.name || AI_NAMES[aiId] || aiId,
+          isGroup: false
         };
       }
-      const firstMember = group.ai_members[0];
-      const firstPersona = personas[firstMember];
+      const memberColors = group.ai_members.slice(0, 4).map(id => {
+        const persona = personas[id];
+        return persona?.color || AI_COLORS[id] || '#888';
+      });
       return {
-        color: firstPersona?.color || AI_COLORS[firstMember] || '#888',
-        letter: firstPersona?.name?.charAt(0) || AI_AVATAR_LETTERS[firstMember] || 'G',
-        avatarUrl: firstPersona?.avatar_url || null,
-        name: null
+        color: memberColors[0],
+        letter: '',
+        avatarUrl: null,
+        name: null,
+        isGroup: true,
+        memberColors
       };
     }
-    return { color: '#888', letter: group.name.charAt(0).toUpperCase(), avatarUrl: null, name: null };
+    return { color: '#888', letter: group.name.charAt(0).toUpperCase(), avatarUrl: null, name: null, isGroup: false };
   }, [personas]);
 
   const formatTime = useCallback((dateStr: string) => {
@@ -276,18 +281,31 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
         `}
       >
         <div className="relative flex-shrink-0">
-          <div
-            className="w-9 h-9 rounded-lg flex items-center justify-center text-white text-sm font-semibold overflow-hidden transition-transform duration-150"
-            style={{
-              backgroundColor: avatarInfo.avatarUrl ? 'transparent' : avatarInfo.color,
-              backgroundImage: avatarInfo.avatarUrl ? `url(${avatarInfo.avatarUrl})` : 'none',
-              backgroundSize: 'cover',
-              backgroundPosition: 'center',
-              transform: isHovered ? 'scale(1.02)' : 'scale(1)',
-            }}
-          >
-            {!avatarInfo.avatarUrl && avatarInfo.letter}
-          </div>
+          {avatarInfo.isGroup && avatarInfo.memberColors ? (
+            <div className="w-9 h-9 rounded-lg flex items-center justify-center overflow-hidden transition-transform duration-150" style={{ transform: isHovered ? 'scale(1.02)' : 'scale(1)' }}>
+              <div className="w-full h-full grid grid-cols-2 grid-rows-2 gap-px p-0.5 bg-bg-surface">
+                {avatarInfo.memberColors.slice(0, 4).map((c: string, i: number) => (
+                  <div key={i} className="rounded-sm" style={{ backgroundColor: c }} />
+                ))}
+                {avatarInfo.memberColors.length < 4 && Array.from({ length: 4 - avatarInfo.memberColors.length }).map((_, i) => (
+                  <div key={`empty-${i}`} className="rounded-sm bg-bg-surface3" />
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div
+              className="w-9 h-9 rounded-lg flex items-center justify-center text-white text-sm font-semibold overflow-hidden transition-transform duration-150"
+              style={{
+                backgroundColor: avatarInfo.avatarUrl ? 'transparent' : avatarInfo.color,
+                backgroundImage: avatarInfo.avatarUrl ? `url(${avatarInfo.avatarUrl})` : 'none',
+                backgroundSize: 'cover',
+                backgroundPosition: 'center',
+                transform: isHovered ? 'scale(1.02)' : 'scale(1)',
+              }}
+            >
+              {!avatarInfo.avatarUrl && avatarInfo.letter}
+            </div>
+          )}
           {group.type === 'ai_private' && (
             <div className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 bg-purple-500 rounded-full border-2 border-bg-surface" />
           )}

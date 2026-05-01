@@ -80,7 +80,7 @@ export function MessageInput() {
   const sendingRef = useRef(false);
   const mentionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const { currentGroup } = useGroupsStore();
+  const { currentGroup, chatStatus } = useGroupsStore();
   const { sendMessage, messages, sending } = useMessagesStore();
   const { replyingTo, setReplyingTo, typingIndicators } = useUIStore();
   const connectionStatus = useUIStore(state => state.connectionStatus);
@@ -98,7 +98,10 @@ export function MessageInput() {
   const hasStreamingMessages = currentGroup
     ? (messages[currentGroup.id] || []).some(m => m.is_streaming)
     : false;
-  const showStopButton = isAnyAITyping || justSentMessage || hasStreamingMessages;
+  const isAutoChatRunning = currentGroup
+    ? chatStatus.get(currentGroup.id)?.isRunning === true
+    : false;
+  const showStopButton = isAnyAITyping || justSentMessage || hasStreamingMessages || isAutoChatRunning;
   const hasPendingUploads = attachments.some(item => item.status !== 'ready');
   const readyAttachments = useMemo(
     () => attachments.flatMap(item => item.attachment ? [item.attachment] : []),
@@ -283,10 +286,8 @@ export function MessageInput() {
     setAttachments(prev => [...prev, ...placeholders]);
     setUploading(true);
 
-    for (let index = 0; index < nextFiles.length; index += 1) {
-      const file = nextFiles[index];
+    const uploadPromises = nextFiles.map(async (file, index) => {
       const placeholder = placeholders[index];
-
       try {
         const uploadResult = await api.uploadFile(file, currentGroup.id);
         const uploadedFile = getUploadedFile(uploadResult);
@@ -295,21 +296,32 @@ export function MessageInput() {
         }
 
         const nextAttachment = toMessageAttachment(uploadedFile, file);
-        setAttachments(prev => prev.map(item => (
-          item.localId === placeholder.localId
-            ? {
-                ...item,
-                status: 'ready',
-                serverFile: uploadedFile,
-                attachment: nextAttachment
-              }
-            : item
-        )));
+        return { localId: placeholder.localId, status: 'ready' as const, serverFile: uploadedFile, attachment: nextAttachment };
       } catch (error: any) {
-        setAttachments(prev => prev.filter(item => item.localId !== placeholder.localId));
-        setSendError(error?.message || `附件 ${file.name} 上传失败，请重试`);
+        return { localId: placeholder.localId, error: error?.message || `附件 ${file.name} 上传失败，请重试` };
       }
-    }
+    });
+
+    const results = await Promise.all(uploadPromises);
+
+    setAttachments(prev => {
+      const failedLocalIds = new Set<string>();
+      let errorMsg: string | null = null;
+      const updated = prev.map(item => {
+        const result = results.find(r => r.localId === item.localId);
+        if (!result) return item;
+        if ('error' in result) {
+          failedLocalIds.add(result.localId);
+          errorMsg = result.error;
+          return item;
+        }
+        return { ...item, status: result.status, serverFile: result.serverFile, attachment: result.attachment };
+      }).filter(item => !failedLocalIds.has(item.localId));
+      if (errorMsg) {
+        setSendError(errorMsg);
+      }
+      return updated;
+    });
 
     setUploading(false);
   }, [attachments.length, currentGroup, hasPendingUploads, uploading]);
@@ -444,6 +456,26 @@ export function MessageInput() {
       ai.id.toLowerCase().includes(mentionFilter)
   );
 
+  const showMentionAll = !isUserPrivateChat && !isAIPrivateChat && currentGroupAIs.length > 1 && (
+    !mentionFilter || '所有人'.includes(mentionFilter) || 'all'.includes(mentionFilter)
+  );
+
+  const insertMentionAll = () => {
+    const cursorPos = textareaRef.current?.selectionStart || input.length;
+    const textBeforeCursor = input.slice(0, cursorPos);
+    const textAfterCursor = input.slice(cursorPos);
+    const atIndex = textBeforeCursor.lastIndexOf('@');
+    const textBeforeAt = textBeforeCursor.slice(0, atIndex);
+    const newInput = textBeforeAt + '@所有人 ' + textAfterCursor;
+    setInput(newInput);
+    closeMentions();
+    setTimeout(() => {
+      const newCursorPos = textBeforeAt.length + 5;
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(newCursorPos, newCursorPos);
+    }, 0);
+  };
+
   return (
     <div className="bg-bg-surface border-t border-border-subtle p-3 md:p-4 relative z-10 flex-shrink-0" style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))' }}>
       <div className="w-full">
@@ -572,7 +604,7 @@ export function MessageInput() {
               maxLength={MAX_CHARS}
             />
 
-            {showMentions && filteredAIs.length > 0 && (
+            {showMentions && (filteredAIs.length > 0 || showMentionAll) && (
               <div 
                 className={`absolute left-0 right-0 bg-bg-surface border border-border rounded-xl shadow-2xl z-50 overflow-hidden ${
                   isMobile 
@@ -584,13 +616,23 @@ export function MessageInput() {
                   选择要@的AI成员
                 </div>
                 <div className="overflow-y-auto max-h-[calc(100%-36px)]">
+                  {showMentionAll && (
+                    <button
+                      onClick={insertMentionAll}
+                      className="w-full px-3 py-2.5 text-left hover:bg-bg-surface2 transition-colors flex items-center gap-3 border-b border-border animate-mention-item"
+                    >
+                      <span className="w-3 h-3 rounded-full flex-shrink-0 bg-gradient-to-br from-blue-400 to-purple-500" />
+                      <span className="text-sm font-medium text-text-primary">所有人</span>
+                      <span className="text-xs text-text-muted ml-auto">@所有人</span>
+                    </button>
+                  )}
                   {filteredAIs.map((ai, index) => (
                     <button
                       key={ai.id}
                       onClick={() => insertMention(ai.id)}
                       className="w-full px-3 py-2.5 text-left hover:bg-bg-surface2 transition-colors flex items-center gap-3 border-b border-border last:border-b-0 animate-mention-item"
                       style={{
-                        animationDelay: `${index * 40}ms`
+                        animationDelay: `${(showMentionAll ? index + 1 : index) * 40}ms`
                       }}
                     >
                       <span

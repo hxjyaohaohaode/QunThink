@@ -6,6 +6,8 @@ import {
   ResponseConfig,
   SocialConfig,
   usePersonasStore,
+  pausePersonasAutoRefresh,
+  resumePersonasAutoRefresh,
 } from '../../stores/personasStore';
 import { AI_COLORS, AI_NAMES } from '../../types';
 import { useToast } from '../Common';
@@ -165,6 +167,8 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [activeTab, setActiveTab] = useState<'basic' | 'behavior' | 'social' | 'model'>('basic');
+  const [isDirty, setIsDirty] = useState(false);
+  const formRef = useRef<PersonaConfig>(defaultPersona);
 
   const currentPersona = personas[aiId];
   const title = useMemo(() => AI_NAMES[aiId] || currentPersona?.name || aiId, [aiId, currentPersona?.name]);
@@ -172,20 +176,31 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
 
   useEffect(() => {
     if (isOpen) {
+      pausePersonasAutoRefresh();
       fetchPersonas();
+    } else {
+      resumePersonasAutoRefresh();
+      setIsDirty(false);
     }
+    return () => {
+      if (isOpen) {
+        resumePersonasAutoRefresh();
+      }
+    };
   }, [fetchPersonas, isOpen]);
 
   useEffect(() => {
     if (!isOpen) return;
+    if (isDirty) return;
     const merged = mergePersona(currentPersona);
+    formRef.current = merged;
     setForm(merged);
     setPhrasesText((merged.typicalPhrases || []).join('\n'));
     setKeywordsText((merged.keywords || []).join(', '));
     setTopicsText((merged.firstSpeakerTopics || []).join(', '));
     setExpertiseText((merged.expertise || []).join(', '));
     setAvatarPreview(merged.avatar_url || null);
-  }, [currentPersona, isOpen]);
+  }, [currentPersona, isOpen, isDirty]);
 
   const [dragStartY, setDragStartY] = useState<number | null>(null);
   const [dragOffsetY, setDragOffsetY] = useState(0);
@@ -213,6 +228,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
 
   const setField = <K extends keyof PersonaConfig>(key: K, value: PersonaConfig[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
+    setIsDirty(true);
   };
 
   const setResponseConfig = <K extends keyof ResponseConfig>(key: K, value: ResponseConfig[K]) => {
@@ -224,6 +240,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
         [key]: value,
       },
     }));
+    setIsDirty(true);
   };
 
   const setSocialConfig = <K extends keyof SocialConfig>(key: K, value: SocialConfig[K]) => {
@@ -235,6 +252,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
         [key]: value,
       },
     }));
+    setIsDirty(true);
   };
 
   const setModelConfig = <K extends keyof ModelConfig>(key: K, value: ModelConfig[K]) => {
@@ -246,6 +264,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
         [key]: value,
       },
     }));
+    setIsDirty(true);
   };
 
   const handleFileSelect = (event: ChangeEvent<HTMLInputElement>) => {
@@ -260,7 +279,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
       return;
     }
     const reader = new FileReader();
-    reader.onload = () => setAvatarPreview((reader.result as string) || null);
+    reader.onload = () => { setAvatarPreview((reader.result as string) || null); setIsDirty(true); };
     reader.readAsDataURL(file);
   };
 
@@ -268,6 +287,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
     setSaving(true);
     try {
       await resetPersona(aiId);
+      setIsDirty(false);
       showToast({ message: '人设已重置。', type: 'success' });
       onClose();
     } catch (error) {
@@ -289,6 +309,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
         firstSpeakerTopics: topicsText.split(',').map((item) => item.trim()).filter(Boolean),
         expertise: expertiseText.split(',').map((item) => item.trim()).filter(Boolean),
       });
+      setIsDirty(false);
       showToast({ message: '人设已保存。', type: 'success' });
       onClose();
     } catch (error) {
@@ -389,11 +410,11 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-text-secondary">常用语句</label>
-                  <textarea value={phrasesText} onChange={(event) => setPhrasesText(event.target.value)} rows={5} placeholder="每行一条常用语句" className="w-full rounded-xl border border-border-subtle bg-bg-surface2 px-3 py-2 text-sm text-text-primary" />
+                  <textarea value={phrasesText} onChange={(event) => { setPhrasesText(event.target.value); setIsDirty(true); }} rows={5} placeholder="每行一条常用语句" className="w-full rounded-xl border border-border-subtle bg-bg-surface2 px-3 py-2 text-sm text-text-primary" />
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-text-secondary">擅长领域（逗号分隔）</label>
-                  <input value={expertiseText} onChange={(event) => setExpertiseText(event.target.value)} placeholder="如：逻辑推理, 数据分析, 编程技术" className="w-full rounded-xl border border-border-subtle bg-bg-surface2 px-3 py-2 text-sm text-text-primary" />
+                  <input value={expertiseText} onChange={(event) => { setExpertiseText(event.target.value); setIsDirty(true); }} placeholder="如：逻辑推理, 数据分析, 编程技术" className="w-full rounded-xl border border-border-subtle bg-bg-surface2 px-3 py-2 text-sm text-text-primary" />
                 </div>
               </div>
             </section>
@@ -403,15 +424,15 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
             <section className="grid gap-4 md:grid-cols-2">
               <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4">
                 <label className="mb-1 block text-xs font-medium text-text-secondary">关键词</label>
-                <input value={keywordsText} onChange={(event) => setKeywordsText(event.target.value)} placeholder="使用逗号分隔关键词" className="w-full rounded-xl border border-border-subtle bg-bg-surface px-3 py-2 text-sm text-text-primary" />
+                <input value={keywordsText} onChange={(event) => { setKeywordsText(event.target.value); setIsDirty(true); }} placeholder="使用逗号分隔关键词" className="w-full rounded-xl border border-border-subtle bg-bg-surface px-3 py-2 text-sm text-text-primary" />
               </div>
               <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4">
                 <label className="mb-1 block text-xs font-medium text-text-secondary">优先开场话题</label>
-                <input value={topicsText} onChange={(event) => setTopicsText(event.target.value)} placeholder="使用逗号分隔话题" className="w-full rounded-xl border border-border-subtle bg-bg-surface px-3 py-2 text-sm text-text-primary" />
+                <input value={topicsText} onChange={(event) => { setTopicsText(event.target.value); setIsDirty(true); }} placeholder="使用逗号分隔话题" className="w-full rounded-xl border border-border-subtle bg-bg-surface px-3 py-2 text-sm text-text-primary" />
               </div>
               <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4">
                 <label className="mb-2 block text-xs font-medium text-text-secondary">偏好角色</label>
-                <select value={form.preferredRole || 'expert'} onChange={(event) => setField('preferredRole', event.target.value as PreferredRole)} className="w-full rounded-xl border border-border-subtle bg-bg-surface px-3 py-2 text-sm text-text-primary">
+                <select value={form.preferredRole || 'expert'} onChange={(event) => { setField('preferredRole', event.target.value as PreferredRole); (event.target as HTMLSelectElement).blur(); }} className="w-full rounded-xl border border-border-subtle bg-bg-surface px-3 py-2 text-sm text-text-primary">
                   {roleOptions.map((role) => <option key={role} value={role}>{roleLabels[role]}</option>)}
                 </select>
                 {form.preferredRole && form.preferredRole !== 'custom' && roleDescriptions[form.preferredRole] && (
@@ -423,7 +444,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
               </div>
               <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4">
                 <label className="mb-2 block text-xs font-medium text-text-secondary">消息长度</label>
-                <select value={form.messageLength || 'medium'} onChange={(event) => setField('messageLength', event.target.value)} className="w-full rounded-xl border border-border-subtle bg-bg-surface px-3 py-2 text-sm text-text-primary">
+                <select value={form.messageLength || 'medium'} onChange={(event) => { setField('messageLength', event.target.value); (event.target as HTMLSelectElement).blur(); }} className="w-full rounded-xl border border-border-subtle bg-bg-surface px-3 py-2 text-sm text-text-primary">
                   <option value="short">简短</option>
                   <option value="medium">中等</option>
                   <option value="long">详细</option>
@@ -431,7 +452,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
               </div>
               <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4">
                 <label className="mb-2 block text-xs font-medium text-text-secondary">辩论倾向</label>
-                <select value={form.debateTendency || 'medium'} onChange={(event) => setField('debateTendency', event.target.value)} className="w-full rounded-xl border border-border-subtle bg-bg-surface px-3 py-2 text-sm text-text-primary">
+                <select value={form.debateTendency || 'medium'} onChange={(event) => { setField('debateTendency', event.target.value); (event.target as HTMLSelectElement).blur(); }} className="w-full rounded-xl border border-border-subtle bg-bg-surface px-3 py-2 text-sm text-text-primary">
                   <option value="low">温和（倾向赞同和附和）</option>
                   <option value="medium">平衡（理性表达不同意见）</option>
                   <option value="high">激进（喜欢反驳和质疑）</option>

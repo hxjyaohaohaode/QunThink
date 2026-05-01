@@ -219,8 +219,11 @@ export function DebateControlPanel({ groupId, isOpen, onClose }: DebateControlPa
   const participantPool = group?.ai_members || [];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 md:items-center" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 md:items-center" onClick={(e) => { if (e.target === e.currentTarget) { e.stopPropagation(); } }}>
       <div className="max-h-[90vh] w-full max-w-3xl overflow-hidden rounded-t-2xl border border-border-subtle bg-bg-surface shadow-2xl md:rounded-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="flex items-center justify-center pt-2 md:hidden">
+          <div className="w-10 h-1 rounded-full bg-border-subtle" />
+        </div>
         <div className="flex items-center justify-between border-b border-border-subtle px-6 py-4">
           <div>
             <h3 className="text-lg font-semibold text-text-primary">正式辩论</h3>

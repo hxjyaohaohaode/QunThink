@@ -816,14 +816,12 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
         return m;
       });
       
-      const shouldIncrementCounter = isDone || (state.streamUpdateCounter % 3 === 0);
-      
       return {
         messages: {
           ...state.messages,
           [groupId]: [...newMessages]
         },
-        ...(shouldIncrementCounter ? { streamUpdateCounter: state.streamUpdateCounter + 1 } : {})
+        streamUpdateCounter: state.streamUpdateCounter + 1
       };
     });
   },

@@ -147,10 +147,12 @@ export function useSwipeBack(
     enabled?: boolean;
   } = {}
 ) {
-  const { threshold = 80, enabled = true } = options;
+  const { threshold = 120, enabled = true } = options;
   const [isSwiping, setIsSwiping] = useState(false);
   const [swipeProgress, setSwipeProgress] = useState(0);
   const startXRef = useRef(0);
+  const startYRef = useRef(0);
+  const isHorizontalRef = useRef(false);
   const isSwipingRef = useRef(isSwiping);
   const swipeProgressRef = useRef(swipeProgress);
   isSwipingRef.current = isSwiping;
@@ -166,6 +168,8 @@ export function useSwipeBack(
       onTouchStart: (e: React.TouchEvent) => {
         const touch = e.touches[0];
         startXRef.current = touch.clientX;
+        startYRef.current = touch.clientY;
+        isHorizontalRef.current = false;
         setIsSwiping(true);
       },
       onTouchMove: (e: React.TouchEvent) => {
@@ -173,6 +177,24 @@ export function useSwipeBack(
         
         const touch = e.touches[0];
         const deltaX = touch.clientX - startXRef.current;
+        const deltaY = touch.clientY - startYRef.current;
+
+        if (!isHorizontalRef.current) {
+          if (Math.abs(deltaY) > Math.abs(deltaX) && Math.abs(deltaY) > 10) {
+            setIsSwiping(false);
+            setSwipeProgress(0);
+            return;
+          }
+          if (Math.abs(deltaX) > 15 && Math.abs(deltaX) > Math.abs(deltaY) * 1.5) {
+            if (startXRef.current > 40) {
+              setIsSwiping(false);
+              setSwipeProgress(0);
+              return;
+            }
+            isHorizontalRef.current = true;
+          }
+          return;
+        }
         
         if (deltaX > 0) {
           const progress = Math.min(deltaX / threshold, 1);
@@ -185,6 +207,7 @@ export function useSwipeBack(
         }
         setIsSwiping(false);
         setSwipeProgress(0);
+        isHorizontalRef.current = false;
       },
     };
   }, [enabled, reducedMotion, threshold, onBack]);

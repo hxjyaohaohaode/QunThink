@@ -950,6 +950,11 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
       isPrivateChat ? null : userAgents
     );
     
+    if (accumulatedContent.length > lastBroadcastLength) {
+      const incremental = accumulatedContent.substring(lastBroadcastLength);
+      broadcastStreamChunk(groupId, aiId, messageId, accumulatedContent, true, incremental);
+    }
+    
     let content = normalizeResponse(rawContent);
     
     if (!content || content.trim().length === 0) {
@@ -992,7 +997,7 @@ async function collectAttachmentDescriptions(groupId, userId) {
       if (msg.sender_type !== 'user' || !msg.attachments || msg.attachments.length === 0) continue;
 
       for (const att of msg.attachments) {
-        const fileId = att.id || att.url?.split('/').pop() || att.url?.split('/files/').pop()?.replace('/download', '');
+        const fileId = att.id || att.url?.match(/\/files\/([^/]+)/)?.[1] || att.url?.split('/files/').pop()?.split('/')[0];
         if (!fileId) continue;
 
         const fileRecord = db.data.files.find(f => f.id === fileId);
@@ -1085,30 +1090,42 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null) {
   const mentionedAIs = [];
   const mentionedByNames = {};
   if (userMessage) {
-    const mentionRegex = /@([a-zA-Z0-9_.\u4e00-\u9fff\s-]+)/g;
-    let match;
-    while ((match = mentionRegex.exec(userMessage)) !== null) {
-      const mentionText = match[1].trim();
-      
-      for (const [aiId, aliases] of Object.entries(AI_MENTION_ALIASES)) {
-        if (aliases.some(alias => alias.toLowerCase() === mentionText.toLowerCase())) {
-          if (group.ai_members.includes(aiId) && !mentionedAIs.includes(aiId)) {
-            mentionedAIs.push(aiId);
-            mentionedByNames[aiId] = userProfile?.nickname || '用户';
-          }
-          break;
+    const allMentionRegex = /@所有人/g;
+    const hasAllMention = allMentionRegex.test(userMessage);
+    
+    if (hasAllMention) {
+      for (const aiId of group.ai_members) {
+        if (!mentionedAIs.includes(aiId)) {
+          mentionedAIs.push(aiId);
+          mentionedByNames[aiId] = userProfile?.nickname || '用户';
         }
       }
-      
-      if (!mentionedAIs.length) {
-        for (const aiId of group.ai_members) {
-          const persona = getEffectivePersona(aiId, userId);
-          if (persona && persona.name && mentionText.toLowerCase() === persona.name.toLowerCase()) {
-            if (!mentionedAIs.includes(aiId)) {
+    } else {
+      const mentionRegex = /@([a-zA-Z0-9_.\u4e00-\u9fff\s-]+)/g;
+      let match;
+      while ((match = mentionRegex.exec(userMessage)) !== null) {
+        const mentionText = match[1].trim();
+        
+        for (const [aiId, aliases] of Object.entries(AI_MENTION_ALIASES)) {
+          if (aliases.some(alias => alias.toLowerCase() === mentionText.toLowerCase())) {
+            if (group.ai_members.includes(aiId) && !mentionedAIs.includes(aiId)) {
               mentionedAIs.push(aiId);
               mentionedByNames[aiId] = userProfile?.nickname || '用户';
             }
             break;
+          }
+        }
+        
+        if (!mentionedAIs.length) {
+          for (const aiId of group.ai_members) {
+            const persona = getEffectivePersona(aiId, userId);
+            if (persona && persona.name && mentionText.toLowerCase() === persona.name.toLowerCase()) {
+              if (!mentionedAIs.includes(aiId)) {
+                mentionedAIs.push(aiId);
+                mentionedByNames[aiId] = userProfile?.nickname || '用户';
+              }
+              break;
+            }
           }
         }
       }
@@ -1309,31 +1326,44 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
     let mentionedAIs = [];
     const mentionedByNames = {};
     if (lastAiMessage.content) {
-      const mentionRegex = /@([a-zA-Z0-9_.\u4e00-\u9fff\s-]+)/g;
-      let match;
-      while ((match = mentionRegex.exec(lastAiMessage.content)) !== null) {
-        const mentionText = match[1].trim();
-        for (const [aiId, aliases] of Object.entries(AI_MENTION_ALIASES)) {
-          if (aliases.some(alias => alias.toLowerCase() === mentionText.toLowerCase())) {
-            if (aiMembers.includes(aiId) && !mentionedAIs.includes(aiId)) {
-              mentionedAIs.push(aiId);
-              const senderPersona = getEffectivePersona(lastAiMessage.sender_id, userId);
-              mentionedByNames[aiId] = senderPersona?.name || lastAiMessage.sender_id;
-            }
-            break;
+      const allMentionRegex = /@所有人/g;
+      const hasAllMention = allMentionRegex.test(lastAiMessage.content);
+      
+      if (hasAllMention) {
+        for (const aiId of aiMembers) {
+          if (!mentionedAIs.includes(aiId)) {
+            mentionedAIs.push(aiId);
+            const senderPersona = getEffectivePersona(lastAiMessage.sender_id, userId);
+            mentionedByNames[aiId] = senderPersona?.name || lastAiMessage.sender_id;
           }
         }
-        
-        if (!mentionedAIs.length) {
-          for (const aiId of aiMembers) {
-            const persona = getEffectivePersona(aiId, userId);
-            if (persona && persona.name && mentionText.toLowerCase() === persona.name.toLowerCase()) {
-              if (!mentionedAIs.includes(aiId)) {
+      } else {
+        const mentionRegex = /@([a-zA-Z0-9_.\u4e00-\u9fff\s-]+)/g;
+        let match;
+        while ((match = mentionRegex.exec(lastAiMessage.content)) !== null) {
+          const mentionText = match[1].trim();
+          for (const [aiId, aliases] of Object.entries(AI_MENTION_ALIASES)) {
+            if (aliases.some(alias => alias.toLowerCase() === mentionText.toLowerCase())) {
+              if (aiMembers.includes(aiId) && !mentionedAIs.includes(aiId)) {
                 mentionedAIs.push(aiId);
                 const senderPersona = getEffectivePersona(lastAiMessage.sender_id, userId);
                 mentionedByNames[aiId] = senderPersona?.name || lastAiMessage.sender_id;
               }
               break;
+            }
+          }
+          
+          if (!mentionedAIs.length) {
+            for (const aiId of aiMembers) {
+              const persona = getEffectivePersona(aiId, userId);
+              if (persona && persona.name && mentionText.toLowerCase() === persona.name.toLowerCase()) {
+                if (!mentionedAIs.includes(aiId)) {
+                  mentionedAIs.push(aiId);
+                  const senderPersona = getEffectivePersona(lastAiMessage.sender_id, userId);
+                  mentionedByNames[aiId] = senderPersona?.name || lastAiMessage.sender_id;
+                }
+                break;
+              }
             }
           }
         }

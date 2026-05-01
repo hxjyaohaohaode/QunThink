@@ -39,6 +39,11 @@ interface SearchResultFile {
   filename: string;
   mime_type: string;
   file_size?: number;
+  search_description?: string;
+  search_tags?: string[];
+  content_preview?: string;
+  match_field?: string;
+  url?: string;
   linked_message_id?: string | null;
   created_at: string;
 }
@@ -338,11 +343,24 @@ export function SearchPanel() {
                       {searchData.files.map((result) => (
                         <button key={result.id} onClick={() => result.linked_message_id ? goToMessage(result.group_id, result.linked_message_id) : goToGroup(result.group_id)} className="block w-full rounded-xl border border-border-subtle bg-bg-surface2 p-4 text-left hover:border-accent">
                           <div className="flex items-center justify-between gap-3">
-                            <div>
-                              <div className="text-sm font-medium text-text-primary">{result.filename}</div>
+                            <div className="min-w-0 flex-1">
+                              <div className="text-sm font-medium text-text-primary">{highlightText(result.filename, query)}</div>
                               <div className="text-xs text-text-muted">{result.group_name} · {result.mime_type} · {formatFileSize(result.file_size)}</div>
+                              {result.search_description && (
+                                <p className="mt-1.5 text-xs text-text-secondary line-clamp-2">{highlightText(truncate(result.search_description, 160), query)}</p>
+                              )}
+                              {result.content_preview && !result.search_description && (
+                                <p className="mt-1.5 text-xs text-text-muted line-clamp-2">{highlightText(truncate(result.content_preview, 160), query)}</p>
+                              )}
+                              {result.search_tags && result.search_tags.length > 0 && (
+                                <div className="mt-1.5 flex flex-wrap gap-1">
+                                  {result.search_tags.slice(0, 5).map((tag) => (
+                                    <span key={tag} className="inline-block rounded-full bg-accent/10 px-2 py-0.5 text-[10px] text-accent">{tag}</span>
+                                  ))}
+                                </div>
+                              )}
                             </div>
-                            <span className="text-xs text-text-muted">{dayjs(result.created_at).format('YYYY-MM-DD HH:mm')}</span>
+                            <span className="text-xs text-text-muted flex-shrink-0">{dayjs(result.created_at).format('YYYY-MM-DD HH:mm')}</span>
                           </div>
                         </button>
                       ))}
