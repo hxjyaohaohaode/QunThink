@@ -6,7 +6,8 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const RATE_LIMIT_FILE = path.join(__dirname, '..', '..', 'data', '.rate_limits.json');
+const dataDir = process.env.DATA_DIR || path.join(__dirname, '..', '..', 'data');
+const RATE_LIMIT_FILE = path.join(dataDir, '.rate_limits.json');
 const MEMORY_STORE = new Map();
 const PERSIST_INTERVAL = 30 * 1000;
 const MAX_ENTRIES = 10000;

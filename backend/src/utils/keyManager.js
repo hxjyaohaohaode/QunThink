@@ -8,8 +8,9 @@ import { execSync } from 'child_process';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const KEY_FILE_PATH = path.join(__dirname, '..', '..', 'data', '.encryption_key');
-const KEY_HISTORY_DIR = path.join(__dirname, '..', '..', 'data', '.key_history');
+const dataDir = process.env.DATA_DIR || path.join(__dirname, '..', '..', 'data');
+const KEY_FILE_PATH = path.join(dataDir, '.encryption_key');
+const KEY_HISTORY_DIR = path.join(dataDir, '.key_history');
 const KEY_LENGTH = 32;
 const MAX_KEY_HISTORY = 5;
 
