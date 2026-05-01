@@ -4,8 +4,9 @@
  */
 
 import express from 'express';
-import { getDb } from '../models/db.js';
+import { withWriteLock } from '../models/db.js';
 import memoryService from '../services/memory/index.js';
+import { validateBody, storeMemorySchema, retrieveMemorySchema } from '../validators/index.js';
 
 const router = express.Router();
 
@@ -14,23 +15,27 @@ const router = express.Router();
  * POST /api/memory/store
  * 存储单个记忆
  */
-router.post('/memory/store', async (req, res) => {
+router.post('/memory/store', validateBody(storeMemorySchema), async (req, res) => {
   try {
-    const { content, sender_id, sender_type, category, metadata } = req.body;
+    const { content, category, metadata } = req.body;
     
     if (!content) {
       return res.status(400).json({ error: '记忆内容不能为空' });
     }
     
+    const sender_id = req.userId;
+    if (!sender_id) return res.status(401).json({ error: '未认证' });
+    const sender_type = 'user';
+    
     const memoryData = {
       content,
-      sender_id: sender_id || 'unknown',
-      sender_type: sender_type || 'unknown',
+      sender_id,
+      sender_type,
       category,
       metadata: metadata || {}
     };
     
-    const result = memoryService.storeMemory(memoryData);
+    const result = memoryService.storeMemory(memoryData, req.userId);
     
     res.json({
       success: true,
@@ -53,7 +58,7 @@ router.post('/memory/store', async (req, res) => {
  * 将多条消息存储为记忆
  */
 router.post('/memory/store-messages', async (req, res) => {
-  const db = getDb();
+  const db = await req.getUserDb();
   await db.read();
   
   try {
@@ -72,7 +77,7 @@ router.post('/memory/store-messages', async (req, res) => {
       return res.status(404).json({ error: '未找到指定的消息' });
     }
     
-    const result = memoryService.storeMessagesBatch(messages, { categories });
+    const result = memoryService.storeMessagesBatch(messages, { categories }, req.userId);
     
     res.json({
       success: true,
@@ -94,7 +99,7 @@ router.post('/memory/store-messages', async (req, res) => {
  * POST /api/memory/retrieve
  * 根据查询检索相关记忆
  */
-router.post('/memory/retrieve', async (req, res) => {
+router.post('/memory/retrieve', validateBody(retrieveMemorySchema), async (req, res) => {
   try {
     const { query, category, senderId, dateRange, limit } = req.body;
     
@@ -105,10 +110,15 @@ router.post('/memory/retrieve', async (req, res) => {
     const options = {};
     if (category) options.category = category;
     if (senderId) options.senderId = senderId;
-    if (dateRange) options.dateRange = dateRange;
+    if (dateRange) {
+      options.dateRange = {
+        startDate: dateRange.start,
+        endDate: dateRange.end
+      };
+    }
     if (limit) options.limit = parseInt(limit, 10);
     
-    const result = memoryService.retrieveMemories(query, options);
+    const result = memoryService.retrieveMemories(query, options, req.userId);
     
     res.json({
       success: true,
@@ -131,7 +141,7 @@ router.post('/memory/retrieve', async (req, res) => {
  * 根据对话历史检索相关记忆
  */
 router.post('/memory/retrieve-for-conversation', async (req, res) => {
-  const db = getDb();
+  const db = await req.getUserDb();
   await db.read();
   
   try {
@@ -148,7 +158,7 @@ router.post('/memory/retrieve-for-conversation', async (req, res) => {
       .slice(0, 50)
       .reverse();
     
-    const result = memoryService.retrieveForConversation(groupMessages, limit);
+    const result = memoryService.retrieveForConversation(groupMessages, limit, req.userId);
     
     res.json({
       success: true,
@@ -182,7 +192,7 @@ router.post('/memory/reference', async (req, res) => {
       return res.status(400).json({ error: '引用上下文不能为空' });
     }
     
-    const result = memoryService.referenceMemory(memoryId, context, referenceType);
+    const result = memoryService.referenceMemory(memoryId, context, referenceType, req.userId);
     
     res.json({
       success: true,
@@ -206,7 +216,7 @@ router.post('/memory/reference', async (req, res) => {
  */
 router.get('/memory/stats', async (req, res) => {
   try {
-    const result = memoryService.getStats();
+    const result = memoryService.getStats(req.userId);
     
     res.json({
       success: true,
@@ -230,7 +240,7 @@ router.get('/memory/stats', async (req, res) => {
  */
 router.get('/memory/performance', async (req, res) => {
   try {
-    const performanceCheck = memoryService.checkPerformance();
+    const performanceCheck = memoryService.checkPerformance(req.userId);
     
     res.json({
       success: true,
@@ -254,6 +264,10 @@ router.get('/memory/performance', async (req, res) => {
  */
 router.post('/memory/clear', async (req, res) => {
   try {
+    if (!req.userId || !req.userId.startsWith('admin')) {
+      return res.status(403).json({ error: '需要管理员权限' });
+    }
+
     const { confirm } = req.body;
     
     if (confirm !== 'CLEAR_ALL_MEMORIES') {
@@ -262,7 +276,7 @@ router.post('/memory/clear', async (req, res) => {
       });
     }
     
-    const result = memoryService.clearAll();
+    const result = memoryService.clearAll(req.userId);
     
     res.json({
       success: true,
@@ -286,7 +300,7 @@ router.post('/memory/clear', async (req, res) => {
  */
 router.get('/memory/config', async (req, res) => {
   try {
-    const config = memoryService.getConfig();
+    const config = memoryService.getConfig(req.userId);
     
     res.json({
       success: true,
@@ -355,7 +369,7 @@ router.put('/memory/config', async (req, res) => {
     }
     
     // 更新配置
-    const updateResult = memoryService.updateConfig(validConfig);
+    const updateResult = memoryService.updateConfig(validConfig, req.userId);
     
     res.json({
       success: true,
@@ -379,7 +393,7 @@ router.put('/memory/config', async (req, res) => {
  * 自动检测并存储重要的消息为记忆
  */
 router.post('/memory/auto-store-important', async (req, res) => {
-  const db = getDb();
+  const db = await req.getUserDb();
   await db.read();
   
   try {
@@ -429,7 +443,7 @@ router.post('/memory/auto-store-important', async (req, res) => {
     if (importantMessages.length > 0) {
       storeResult = memoryService.storeMessagesBatch(importantMessages, {
         categories: ['factual', 'emotional', 'relational']
-      });
+      }, req.userId);
     }
     
     res.json({

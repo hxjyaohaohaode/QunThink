@@ -3,20 +3,38 @@
  * 集成长期记忆存储、检索、引用等功能
  */
 
-import { longTermMemoryManager } from './longTermMemory.js';
+import { LongTermMemoryManager, longTermMemoryManager } from './longTermMemory.js';
+
+const memoryManagers = new Map([
+  ['default', longTermMemoryManager]
+]);
+
+function getScopedUserId(userId) {
+  return userId || 'default';
+}
 
 // 长期记忆服务包装器
 class LongTermMemoryService {
   constructor() {
-    this.manager = longTermMemoryManager;
+    this.managers = memoryManagers;
+  }
+
+  getManager(userId) {
+    const scopedUserId = getScopedUserId(userId);
+
+    if (!this.managers.has(scopedUserId)) {
+      this.managers.set(scopedUserId, new LongTermMemoryManager());
+    }
+
+    return this.managers.get(scopedUserId);
   }
 
   /**
    * 存储记忆
    */
-  storeMemory(memoryData) {
+  storeMemory(memoryData, userId) {
     try {
-      const result = this.manager.storeMemory(memoryData);
+      const result = this.getManager(userId).storeMemory(memoryData);
       return {
         success: true,
         ...result,
@@ -35,9 +53,9 @@ class LongTermMemoryService {
   /**
    * 检索记忆
    */
-  retrieveMemories(query, options = {}) {
+  retrieveMemories(query, options = {}, userId) {
     try {
-      const result = this.manager.retrieveMemories(query, options);
+      const result = this.getManager(userId).retrieveMemories(query, options);
       return result;
     } catch (error) {
       console.error('检索记忆失败:', error);
@@ -56,9 +74,9 @@ class LongTermMemoryService {
   /**
    * 引用记忆
    */
-  referenceMemory(memoryId, context, referenceType = 'direct') {
+  referenceMemory(memoryId, context, referenceType = 'direct', userId) {
     try {
-      const result = this.manager.referenceMemory(memoryId, context, referenceType);
+      const result = this.getManager(userId).referenceMemory(memoryId, context, referenceType);
       return result;
     } catch (error) {
       console.error('引用记忆失败:', error);
@@ -75,9 +93,9 @@ class LongTermMemoryService {
   /**
    * 获取记忆统计
    */
-  getMemoryStats() {
+  getMemoryStats(userId) {
     try {
-      const stats = this.manager.getMemoryStats();
+      const stats = this.getManager(userId).getMemoryStats();
       return {
         success: true,
         ...stats,
@@ -96,9 +114,9 @@ class LongTermMemoryService {
   /**
    * 清空所有记忆
    */
-  clearAllMemories() {
+  clearAllMemories(userId) {
     try {
-      const result = this.manager.clearAllMemories();
+      const result = this.getManager(userId).clearAllMemories();
       return {
         success: true,
         ...result,
@@ -117,8 +135,9 @@ class LongTermMemoryService {
   /**
    * 批量存储消息为记忆
    */
-  storeMessagesAsMemories(messages, options = {}) {
+  storeMessagesAsMemories(messages, options = {}, userId) {
     try {
+      const manager = this.getManager(userId);
       const results = [];
       const categories = options.categories || ['factual', 'emotional', 'relational'];
       
@@ -142,7 +161,7 @@ class LongTermMemoryService {
           }
         };
         
-        const result = this.manager.storeMemory(memoryData);
+        const result = manager.storeMemory(memoryData);
         results.push(result);
       });
       
@@ -170,7 +189,7 @@ class LongTermMemoryService {
   /**
    * 根据对话历史检索相关记忆
    */
-  retrieveRelevantMemoriesForConversation(conversationHistory, limit = 5) {
+  retrieveRelevantMemoriesForConversation(conversationHistory, limit = 5, userId) {
     try {
       // 提取最近消息的关键内容
       const recentMessages = conversationHistory.slice(-5);
@@ -191,7 +210,7 @@ class LongTermMemoryService {
       }
       
       // 检索相关记忆
-      const result = this.manager.retrieveMemories(queryText, { limit });
+      const result = this.getManager(userId).retrieveMemories(queryText, { limit });
       
       return {
         ...result,
@@ -224,20 +243,20 @@ export {
 
 export default {
   manager: longTermMemoryManager,
+  getManager: (userId) => longTermMemoryService.getManager(userId),
   service: longTermMemoryService,
   
-  // 便捷方法
-  storeMemory: (memoryData) => longTermMemoryService.storeMemory(memoryData),
-  retrieveMemories: (query, options) => longTermMemoryService.retrieveMemories(query, options),
-  referenceMemory: (memoryId, context, referenceType) => longTermMemoryService.referenceMemory(memoryId, context, referenceType),
-  getStats: () => longTermMemoryService.getMemoryStats(),
-  clearAll: () => longTermMemoryService.clearAllMemories(),
-  storeMessagesBatch: (messages, options) => longTermMemoryService.storeMessagesAsMemories(messages, options),
-  retrieveForConversation: (conversationHistory, limit) => longTermMemoryService.retrieveRelevantMemoriesForConversation(conversationHistory, limit),
+  storeMemory: (memoryData, userId) => longTermMemoryService.storeMemory(memoryData, userId),
+  retrieveMemories: (query, options, userId) => longTermMemoryService.retrieveMemories(query, options, userId),
+  referenceMemory: (memoryId, context, referenceType, userId) => longTermMemoryService.referenceMemory(memoryId, context, referenceType, userId),
+  getStats: (userId) => longTermMemoryService.getMemoryStats(userId),
+  clearAll: (userId) => longTermMemoryService.clearAllMemories(userId),
+  storeMessagesBatch: (messages, options, userId) => longTermMemoryService.storeMessagesAsMemories(messages, options, userId),
+  retrieveForConversation: (conversationHistory, limit, userId) => longTermMemoryService.retrieveRelevantMemoriesForConversation(conversationHistory, limit, userId),
   
-  // 性能检查
-  checkPerformance: () => {
-    const stats = longTermMemoryManager.getMemoryStats();
+  checkPerformance: (userId) => {
+    const manager = longTermMemoryService.getManager(userId);
+    const stats = manager.getMemoryStats();
     return {
       meetsRequirements: {
         retrievalTime: stats.performance.meetsTimeRequirement,
@@ -250,21 +269,22 @@ export default {
         referenceAccuracy: stats.performance.referenceAccuracy
       },
       requirements: {
-        maxRetrievalTime: longTermMemoryManager.config.maxRetrievalTime,
-        minAccuracy: longTermMemoryManager.config.minAccuracy,
-        minReferenceAccuracy: longTermMemoryManager.config.minReferenceAccuracy
+        maxRetrievalTime: manager.config.maxRetrievalTime,
+        minAccuracy: manager.config.minAccuracy,
+        minReferenceAccuracy: manager.config.minReferenceAccuracy
       }
     };
   },
   
   // 配置管理
-  getConfig: () => ({ ...longTermMemoryManager.config }),
-  updateConfig: (newConfig) => {
+  getConfig: (userId) => ({ ...longTermMemoryService.getManager(userId).config }),
+  updateConfig: (newConfig, userId) => {
+    const manager = longTermMemoryService.getManager(userId);
     Object.keys(newConfig).forEach(key => {
-      if (longTermMemoryManager.config.hasOwnProperty(key)) {
-        longTermMemoryManager.config[key] = newConfig[key];
+      if (Object.prototype.hasOwnProperty.call(manager.config, key)) {
+        manager.config[key] = newConfig[key];
       }
     });
-    return { success: true, config: longTermMemoryManager.config };
+    return { success: true, config: manager.config };
   }
 };

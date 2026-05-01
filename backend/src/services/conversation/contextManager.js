@@ -19,6 +19,26 @@ class ConversationContextManager {
     
     this.conversations = new Map(); // groupId -> ConversationContext
     this.topicModels = new Map();   // groupId -> TopicModel
+    this._cleanupTimer = null;
+    if (process.env.NODE_ENV !== 'test') {
+      this._cleanupTimer = setInterval(() => this.cleanupStaleEntries(), 30 * 60 * 1000);
+      if (typeof this._cleanupTimer.unref === 'function') {
+        this._cleanupTimer.unref();
+      }
+    }
+  }
+  
+  cleanupStaleEntries() {
+    const maxAge = 60 * 60 * 1000;
+    const now = Date.now();
+    
+    for (const [groupId, context] of this.conversations.entries()) {
+      const lastUpdate = new Date(context.metadata.lastUpdate).getTime();
+      if (now - lastUpdate > maxAge) {
+        this.conversations.delete(groupId);
+        this.topicModels.delete(groupId);
+      }
+    }
   }
   
   /**

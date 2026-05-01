@@ -4,8 +4,11 @@
  */
 
 import express from 'express';
-import { getDb } from '../models/db.js';
+import { withWriteLock } from '../models/db.js';
 import socialService from '../services/social/index.js';
+import { requireAuth } from '../middleware/auth.js';
+import { validateBody, smartLikeSchema, autoLikeSchema } from '../validators/index.js';
+import { sanitizeObject, COMMENT_SANITIZE_CONFIG } from '../utils/sanitize.js';
 
 const router = express.Router();
 
@@ -14,7 +17,7 @@ const router = express.Router();
  * POST /api/social/evaluate-like
  * 评估消息是否应该获得自动点赞
  */
-router.post('/social/evaluate-like', async (req, res) => {
+router.post('/social/evaluate-like', validateBody(smartLikeSchema), async (req, res) => {
   try {
     const { message, contextMessages = [], senderInfo = {} } = req.body;
     
@@ -44,8 +47,8 @@ router.post('/social/evaluate-like', async (req, res) => {
  * POST /api/social/auto-like
  * 根据智能评估自动点赞消息
  */
-router.post('/social/auto-like', async (req, res) => {
-  const db = getDb();
+router.post('/social/auto-like', validateBody(autoLikeSchema), async (req, res) => {
+  const db = await req.getUserDb();
   await db.read();
   
   try {
@@ -75,23 +78,28 @@ router.post('/social/auto-like', async (req, res) => {
     });
     
     let liked = false;
-    let likeCount = message.likes || 0;
+    if (!Array.isArray(message.likes)) {
+      message.likes = Array.isArray(message.liked_by) ? [...message.liked_by] : [];
+    }
+    if (!Array.isArray(message.liked_by)) {
+      message.liked_by = [...message.likes];
+    }
+    let likeCount = message.likes.length;
     
     // 如果评估建议点赞，则执行点赞
     if (evaluation.shouldLike) {
-      // 更新消息的点赞数
-      message.likes = (message.likes || 0) + 1;
-      message.liked_by = message.liked_by || [];
-      message.liked_by.push('system_auto_like');
-      
-      likeCount = message.likes;
-      liked = true;
-      
-      // 保存到数据库
-      await db.write();
-      
-      // 记录社交分析
-      socialService.analyzeMessage(message, { recentMessages: contextMessages });
+      if (!message.likes.includes('system_auto_like')) {
+        message.likes.push('system_auto_like');
+        message.liked_by = [...message.likes];
+        likeCount = message.likes.length;
+        liked = true;
+
+        await withWriteLock(req.userId, async () => {
+          await db.write();
+        });
+
+        socialService.analyzeMessage(message, { recentMessages: contextMessages });
+      }
     }
     
     res.json({
@@ -125,7 +133,7 @@ router.post('/social/batch-evaluate', async (req, res) => {
       return res.status(400).json({ error: '消息列表不能为空' });
     }
     
-    const db = getDb();
+    const db = await req.getUserDb();
     await db.read();
     
     // 获取群组的上下文消息
@@ -239,7 +247,7 @@ router.get('/social/top-messages', async (req, res) => {
     const topMessages = socialService.getTopMessages(limitNum, metric);
     
     // 获取完整的消息详情
-    const db = getDb();
+    const db = await req.getUserDb();
     await db.read();
     
     const messagesWithDetails = topMessages.map(item => {
@@ -391,6 +399,10 @@ router.put('/social/smart-like-config', async (req, res) => {
  */
 router.post('/social/reset', async (req, res) => {
   try {
+    if (!req.userId || !req.userId.startsWith('admin')) {
+      return res.status(403).json({ error: '需要管理员权限' });
+    }
+
     // 注意：在实际生产环境中需要权限验证
     const { confirm } = req.body;
     
@@ -427,7 +439,8 @@ router.post('/social/reset', async (req, res) => {
  */
 router.post('/social/comments/analyze', async (req, res) => {
   try {
-    const { comment, targetMessage, messageContext = [], commentThread = [] } = req.body;
+    const sanitizedBody = sanitizeObject(req.body, COMMENT_SANITIZE_CONFIG);
+    const { comment, targetMessage, messageContext = [], commentThread = [] } = sanitizedBody;
     
     if (!comment || !targetMessage) {
       return res.status(400).json({ error: '评论和目标消息不能为空' });
@@ -468,23 +481,19 @@ router.get('/social/comments/suggestions', async (req, res) => {
       return res.status(400).json({ error: '消息ID不能为空' });
     }
     
-    const db = getDb();
+    const db = await req.getUserDb();
     await db.read();
     
-    // 获取目标消息
     const targetMessage = db.data.messages.find(m => m.id === messageId);
     if (!targetMessage) {
       return res.status(404).json({ error: '消息未找到' });
     }
     
-    // 构建评论线程
     let commentThread = [];
     if (parentCommentId) {
-      // 获取父评论链
-      const allComments = db.data.comments || [];
-      const commentTree = socialService.buildCommentTree(allComments);
+      const messageComments = targetMessage.comments || [];
+      const commentTree = socialService.buildCommentTree(messageComments);
       
-      // 查找父评论及其祖先
       const findCommentPath = (comments, targetId, path = []) => {
         for (const comment of comments) {
           if (comment.id === targetId) {
@@ -541,17 +550,17 @@ router.get('/social/comments/tree', async (req, res) => {
       return res.status(400).json({ error: '消息ID不能为空' });
     }
     
-    const db = getDb();
+    const db = await req.getUserDb();
     await db.read();
     
-    // 获取该消息的所有评论
-    const allComments = db.data.comments || [];
-    const messageComments = allComments.filter(c => c.message_id === messageId);
+    const targetMessage = db.data.messages.find(m => m.id === messageId);
+    if (!targetMessage) {
+      return res.status(404).json({ error: '消息未找到' });
+    }
     
-    // 构建评论树
+    const messageComments = targetMessage.comments || [];
     const commentTree = socialService.buildCommentTree(messageComments);
     
-    // 验证深度
     const depthValidation = commentTree.map(comment => 
       socialService.validateCommentDepth(comment.id, commentTree)
     );
@@ -570,141 +579,6 @@ router.get('/social/comments/tree', async (req, res) => {
     res.status(500).json({ 
       success: false, 
       error: '获取评论树失败',
-      details: error.message 
-    });
-  }
-});
-
-/**
- * 创建评论
- * POST /api/comments
- * 创建新的评论（支持嵌套）
- */
-router.post('/comments', async (req, res) => {
-  const db = getDb();
-  await db.read();
-  
-  try {
-    const { 
-      message_id, 
-      content, 
-      sender_type = 'user', 
-      sender_id = 'user', 
-      parent_id = null,
-      reply_to = null 
-    } = req.body;
-    
-    if (!message_id || !content) {
-      return res.status(400).json({ error: '消息ID和评论内容不能为空' });
-    }
-    
-    // 验证消息是否存在
-    const targetMessage = db.data.messages.find(m => m.id === message_id);
-    if (!targetMessage) {
-      return res.status(404).json({ error: '目标消息未找到' });
-    }
-    
-    // 验证父评论是否存在（如果提供了parent_id）
-    if (parent_id) {
-      const parentComment = (db.data.comments || []).find(c => c.id === parent_id);
-      if (!parentComment) {
-        return res.status(404).json({ error: '父评论未找到' });
-      }
-      
-      // 验证评论深度
-      const allComments = db.data.comments || [];
-      const commentTree = socialService.buildCommentTree(allComments);
-      const depthValidation = socialService.validateCommentDepth(parent_id, commentTree);
-      
-      if (!depthValidation.valid) {
-        return res.status(400).json({ 
-          error: '评论深度超过限制',
-          details: depthValidation
-        });
-      }
-    }
-    
-    // 生成评论ID
-    const commentId = `comment_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    // 创建评论对象
-    const comment = {
-      id: commentId,
-      message_id,
-      parent_id: parent_id || null,
-      reply_to: reply_to || null,
-      sender_type,
-      sender_id,
-      content,
-      created_at: new Date().toISOString(),
-      likes: 0,
-      liked_by: []
-    };
-    
-    // 保存评论
-    if (!db.data.comments) {
-      db.data.comments = [];
-    }
-    db.data.comments.push(comment);
-    await db.write();
-    
-    // 分析评论相关性
-    let analysis = null;
-    try {
-      // 获取上下文
-      const messageContext = db.data.messages
-        .filter(m => m.group_id === targetMessage.group_id)
-        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-        .slice(0, 5)
-        .reverse();
-      
-      // 构建评论线程
-      let commentThread = [];
-      if (parent_id) {
-        const allComments = db.data.comments || [];
-        const commentTree = socialService.buildCommentTree(allComments);
-        const findCommentPath = (comments, targetId, path = []) => {
-          for (const c of comments) {
-            if (c.id === targetId) {
-              return [...path, c];
-            }
-            if (c.replies && c.replies.length > 0) {
-              const found = findCommentPath(c.replies, targetId, [...path, c]);
-              if (found) return found;
-            }
-          }
-          return null;
-        };
-        
-        const path = findCommentPath(commentTree, parent_id);
-        if (path) {
-          commentThread = path;
-        }
-      }
-      
-      analysis = socialService.analyzeComment(
-        comment,
-        targetMessage,
-        messageContext,
-        commentThread
-      );
-    } catch (analysisError) {
-      console.error('评论分析失败:', analysisError);
-      // 分析失败不影响评论创建
-    }
-    
-    res.status(201).json({
-      success: true,
-      comment,
-      analysis,
-      message: '评论创建成功',
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error('创建评论错误:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: '创建评论失败',
       details: error.message 
     });
   }

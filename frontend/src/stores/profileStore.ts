@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
+import { loadProfileCache, saveProfileCache, saveProfileCacheAsync } from '../utils/cacheUtils';
 
 export interface UserProfile {
   nickname: string;
@@ -18,6 +19,7 @@ export interface UserProfile {
 interface ProfileState {
   profile: UserProfile;
   loading: boolean;
+  initialized: boolean;
   fetchProfile: () => Promise<void>;
   updateProfile: (updates: Partial<UserProfile>) => Promise<void>;
 }
@@ -36,25 +38,60 @@ const defaultProfile: UserProfile = {
   bio: ''
 };
 
-export const useProfileStore = create<ProfileState>((set) => ({
+const PROFILE_STALE_TIME_MS = 30 * 1000;
+let profileFetchPromise: Promise<void> | null = null;
+let lastProfileFetchAt = 0;
+
+export const useProfileStore = create<ProfileState>((set, get) => ({
   profile: defaultProfile,
   loading: false,
+  initialized: false,
 
   fetchProfile: async () => {
-    set({ loading: true });
-    try {
-      const data = await api.getProfile();
-      set({ profile: data, loading: false });
-    } catch (error) {
-      console.error('Failed to fetch profile:', error);
-      set({ loading: false });
+    const state = get();
+    const isFresh = state.initialized && Date.now() - lastProfileFetchAt < PROFILE_STALE_TIME_MS;
+
+    if (isFresh) {
+      return;
     }
+
+    if (!state.initialized) {
+      const cachedProfile = loadProfileCache<UserProfile>();
+      if (cachedProfile) {
+        set({ profile: cachedProfile, initialized: true });
+      }
+    }
+
+    if (profileFetchPromise) {
+      return profileFetchPromise;
+    }
+
+    profileFetchPromise = (async () => {
+      set({ loading: true });
+      try {
+        const data = await api.getProfile();
+        lastProfileFetchAt = Date.now();
+        saveProfileCache(data);
+        saveProfileCacheAsync(data).catch(() => {});
+        set({ profile: data, loading: false, initialized: true });
+      } catch (error) {
+        console.error('Failed to fetch profile:', error);
+        set({ loading: false, initialized: true });
+      } finally {
+        profileFetchPromise = null;
+      }
+    })();
+
+    return profileFetchPromise;
   },
 
   updateProfile: async (updates: Partial<UserProfile>) => {
     try {
       const updated = await api.updateProfile(updates);
-      set({ profile: updated });
+      lastProfileFetchAt = Date.now();
+      saveProfileCache(updated);
+      saveProfileCacheAsync(updated).catch(() => {});
+      set({ profile: updated, initialized: true });
     } catch (error) {
       console.error('Failed to update profile:', error);
       throw error;

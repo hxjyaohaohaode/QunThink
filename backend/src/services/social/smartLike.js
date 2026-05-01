@@ -8,11 +8,45 @@
 function preprocessText(text) {
   if (!text || typeof text !== 'string') return '';
   
-  return text
+  const cleaned = text
     .toLowerCase()
-    .replace(/[^\w\s]/g, ' ') // 移除标点符号
-    .replace(/\s+/g, ' ')     // 合并多个空格
+    .replace(/[^\w\s\u4e00-\u9fff]/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
+  
+  const tokens = [];
+  const chineseRegex = /[\u4e00-\u9fff]+/g;
+  let lastIndex = 0;
+  let match;
+  
+  while ((match = chineseRegex.exec(cleaned)) !== null) {
+    if (match.index > lastIndex) {
+      const nonChinesePart = cleaned.slice(lastIndex, match.index).trim();
+      if (nonChinesePart) {
+        tokens.push(...nonChinesePart.split(/\s+/).filter(w => w.length > 0));
+      }
+    }
+    
+    const chineseText = match[0];
+    if (chineseText.length >= 2) {
+      for (let i = 0; i <= chineseText.length - 2; i++) {
+        tokens.push(chineseText.slice(i, i + 2));
+      }
+    } else {
+      tokens.push(chineseText);
+    }
+    
+    lastIndex = match.index + match[0].length;
+  }
+  
+  if (lastIndex < cleaned.length) {
+    const remaining = cleaned.slice(lastIndex).trim();
+    if (remaining) {
+      tokens.push(...remaining.split(/\s+/).filter(w => w.length > 0));
+    }
+  }
+  
+  return tokens.join(' ');
 }
 
 // 计算TF-IDF相似度（简化版）
@@ -107,24 +141,28 @@ function checkSocialBehavior(message, contextMessages = []) {
   
   const checks = {
     hasContent: message.content && message.content.trim().length > 0,
-    isRelevant: true, // 默认为true，后续根据上下文检查
-    isAppropriate: true, // 简单检查，可扩展
-    isMeaningful: message.content && message.content.trim().length > 5 // 至少5个字符
+    isRelevant: true,
+    isAppropriate: true,
+    isMeaningful: message.content && message.content.trim().length > 5
   };
   
-  // 检查话题偏离度（简化版）
   let topicDeviation = 0;
   if (contextMessages.length > 0) {
-    const lastMessage = contextMessages[contextMessages.length - 1];
-    const similarity = calculateSimilarity(message.content, lastMessage.content || '');
-    topicDeviation = 1 - similarity; // 相似度越低，偏离度越高
+    const recentContext = contextMessages.slice(-5);
+    let maxSimilarity = 0;
+    recentContext.forEach(ctxMsg => {
+      if (ctxMsg && ctxMsg.content) {
+        const similarity = calculateSimilarity(message.content, ctxMsg.content);
+        if (similarity > maxSimilarity) maxSimilarity = similarity;
+      }
+    });
+    topicDeviation = 1 - maxSimilarity;
   }
   
-  // 计算无意义互动率（简化版）
-  const isMeaningless = !checks.isMeaningful || topicDeviation > 0.7;
+  const isMeaningless = !checks.isMeaningful || topicDeviation > 0.85;
   
   return {
-    valid: checks.hasContent && checks.isMeaningful && topicDeviation <= 0.7,
+    valid: checks.hasContent && checks.isMeaningful && topicDeviation <= 0.85,
     checks,
     topicDeviation,
     isMeaningless,
@@ -141,11 +179,13 @@ class SmartLikeEngine {
   constructor() {
     this.history = [];
     this.config = {
-      relevanceWeight: 0.6,      // 相关性权重
-      sentimentWeight: 0.3,      // 情感权重
-      historyWeight: 0.1,        // 历史互动权重
-      threshold: 0.85,           // 点赞阈值
-      minContentLength: 10       // 最小内容长度
+      relevanceWeight: 0.4,
+      sentimentWeight: 0.3,
+      qualityWeight: 0.2,
+      historyWeight: 0.1,
+      threshold: 0.55,
+      minContentLength: 8,
+      maxContentLength: 5000
     };
   }
   
@@ -179,8 +219,7 @@ class SmartLikeEngine {
     // 1. 内容相关性分析
     let relevanceScore = 0;
     if (contextMessages.length > 0) {
-      // 计算与最近3条消息的平均相似度
-      const recentMessages = contextMessages.slice(-3);
+      const recentMessages = contextMessages.slice(-5);
       let totalSimilarity = 0;
       let count = 0;
       
@@ -192,25 +231,29 @@ class SmartLikeEngine {
         }
       });
       
-      relevanceScore = count > 0 ? totalSimilarity / count : 0.5; // 默认值
+      relevanceScore = count > 0 ? totalSimilarity / count : 0.6;
     } else {
-      relevanceScore = 0.5; // 没有上下文时的默认值
+      relevanceScore = 0.6;
     }
     
     // 2. 情感分析
     const sentimentResult = analyzeSentiment(message.content);
-    const sentimentScore = (sentimentResult.score + 1) / 2; // 归一化到0-1
+    const sentimentScore = (sentimentResult.score + 1) / 2;
     
-    // 3. 历史互动模式（简化版）
+    // 3. 内容质量评分
+    const qualityScore = this.calculateQualityScore(message);
+    
+    // 4. 历史互动模式
     const historyScore = this.calculateHistoryScore(message, senderInfo);
     
-    // 4. 社交行为规范检查
+    // 5. 社交行为规范检查
     const behaviorCheck = checkSocialBehavior(message, contextMessages);
     
-    // 5. 综合评分
+    // 6. 综合评分
     const totalScore = 
       relevanceScore * this.config.relevanceWeight +
       sentimentScore * this.config.sentimentWeight +
+      qualityScore * this.config.qualityWeight +
       historyScore * this.config.historyWeight;
     
     // 6. 决策
@@ -248,6 +291,45 @@ class SmartLikeEngine {
     };
   }
   
+  /**
+   * 计算内容质量分数
+   */
+  calculateQualityScore(message) {
+    const content = message.content || '';
+    let score = 0.5;
+    
+    // 内容长度评分
+    const length = content.length;
+    if (length >= 20 && length <= 500) {
+      score += 0.15;
+    } else if (length >= 10 && length <= 1000) {
+      score += 0.1;
+    }
+    
+    // 包含代码片段加分
+    if (content.includes('```') || content.includes('`')) {
+      score += 0.1;
+    }
+    
+    // 包含列表加分
+    if (content.includes('- ') || content.includes('* ') || /\d+\./.test(content)) {
+      score += 0.05;
+    }
+    
+    // 包含引用加分
+    if (content.includes('> ')) {
+      score += 0.05;
+    }
+    
+    // 包含表情符号减分（可能过于随意）
+    const emojiCount = (content.match(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}]/gu) || []).length;
+    if (emojiCount > 3) {
+      score -= 0.05;
+    }
+    
+    return Math.max(0, Math.min(1, score));
+  }
+
   /**
    * 计算历史互动分数
    */

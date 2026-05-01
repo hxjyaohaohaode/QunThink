@@ -3,7 +3,7 @@
     {
       "id": "group-presidential",
       "name": "智囊团会议室",
-      "description": "四个 AI 专家各抒己见，从不同角度分析问题",
+      "description": "多个 AI 专家各抒己见，从不同角度分析问题",
       "type": "preset",
       "debate_mode": false,
       "debate_level": 1,

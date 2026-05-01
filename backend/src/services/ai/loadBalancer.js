@@ -1,18 +1,18 @@
 /**
  * AI模型负载均衡与故障转移机制
- * 支持多个AI模型（deepseek、deepseek_reasoner、glm、mimo、qwen）的负载均衡，故障自动切换
+ * 支持多个AI模型（deepseek、deepseek_reasoner、glm_air、mimo_flash、qwen_flash）的负载均衡，故障自动切换
  * 目标：模型调用成功率≥99%，API响应时间≤1.5秒，模型输出内容相关性评分≥4.0/5
  */
 
 import axios from 'axios';
-import { aiHealthStatus } from './index.js';
+import { aiHealthStatus, getAIConfigs } from './index.js';
 
 // 模型配置（从环境变量读取）
 const MODEL_CONFIGS = {
   deepseek: {
     name: 'DeepSeek',
     apiKey: process.env.DEEPSEEK_API_KEY || '',
-    endpoint: 'https://api.deepseek.com/v1/chat/completions',
+    endpoint: 'https://api.deepseek.com/chat/completions',
     model: 'deepseek-chat',
     enabled: true,
     priority: 1
@@ -20,12 +20,12 @@ const MODEL_CONFIGS = {
   deepseek_reasoner: {
     name: 'DeepSeek Reasoner',
     apiKey: process.env.DEEPSEEK_API_KEY || '',
-    endpoint: 'https://api.deepseek.com/v1/chat/completions',
+    endpoint: 'https://api.deepseek.com/chat/completions',
     model: 'deepseek-reasoner',
     enabled: true,
     priority: 2
   },
-  glm: {
+  glm_air: {
     name: 'GLM',
     apiKey: process.env.GLM_API_KEY || '',
     endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
@@ -33,15 +33,15 @@ const MODEL_CONFIGS = {
     enabled: true,
     priority: 3
   },
-  mimo: {
+  mimo_flash: {
     name: 'MiMo',
     apiKey: process.env.MIMO_API_KEY || '',
-    endpoint: 'https://api.xiaomimimo.com/v1/chat/completions',
-    model: 'mimo-v2-flash',
+    endpoint: process.env.MIMO_BASE_URL ? `${process.env.MIMO_BASE_URL}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions',
+    model: 'mimo-v2.5',
     enabled: true,
     priority: 4
   },
-  qwen: {
+  qwen_flash: {
     name: 'Qwen',
     apiKey: process.env.QWEN_API_KEY || '',
     endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
@@ -64,18 +64,36 @@ class AILoadBalancer {
     this.metrics = new Map();
     this.healthStatus = new Map();
     this.circuitBreakers = new Map();
+    this._timers = [];
     
-    // 初始化模型
     this.initializeModels();
     
-    // 延迟初始健康检查（等待 aiHealthStatus 初始化完成）
-    setTimeout(() => this.performInitialHealthChecks(), 100);
-    
-    // 定期健康检查（每5分钟）
-    setInterval(() => this.performHealthChecks(), 5 * 60 * 1000);
-    
-    // 定期清理旧指标（每小时）
-    setInterval(() => this.cleanupOldMetrics(), 60 * 60 * 1000);
+    if (process.env.NODE_ENV !== 'test') {
+      const initialHealthCheckTimer = setTimeout(() => this.performInitialHealthChecks(), 5000);
+      if (typeof initialHealthCheckTimer.unref === 'function') {
+        initialHealthCheckTimer.unref();
+      }
+      
+      // 延长健康检查间隔到5分钟，减少API调用压力
+      const healthTimer = setInterval(() => this.performHealthChecks(), 5 * 60 * 1000);
+      const cleanupTimer = setInterval(() => this.cleanupOldMetrics(), 60 * 60 * 1000);
+      if (typeof healthTimer.unref === 'function') {
+        healthTimer.unref();
+      }
+      if (typeof cleanupTimer.unref === 'function') {
+        cleanupTimer.unref();
+      }
+      this._timers.push(healthTimer);
+      this._timers.push(cleanupTimer);
+    }
+  }
+  
+  cleanupTimers() {
+    for (const timer of this._timers) {
+      clearInterval(timer);
+    }
+    this._timers = [];
+    console.log('🧹 AI负载均衡器定时器已清理');
   }
   
   /**
@@ -116,9 +134,16 @@ class AILoadBalancer {
   async performInitialHealthChecks() {
     const promises = Array.from(this.models.keys()).map(async (modelId) => {
       try {
-        await this.healthCheck(modelId);
-        console.log(`✅ 模型 ${modelId} 初始健康检查通过`);
+        const healthy = await this.probeHealth(modelId);
+        if (healthy) {
+          this.healthStatus.set(modelId, 'healthy');
+          console.log(`✅ 模型 ${modelId} 初始健康检查通过`);
+        } else {
+          this.healthStatus.set(modelId, 'unhealthy');
+          console.warn(`⚠️  模型 ${modelId} 初始健康检查失败`);
+        }
       } catch (error) {
+        this.healthStatus.set(modelId, 'unhealthy');
         console.warn(`⚠️  模型 ${modelId} 初始健康检查失败:`, error.message);
       }
     });
@@ -130,19 +155,27 @@ class AILoadBalancer {
    * 定期健康检查
    */
   async performHealthChecks() {
-    console.log('🔄 执行AI模型定期健康检查（读取统一健康状态）...');
+    console.log('🔄 执行AI模型定期健康检查...');
     
-    for (const [modelId, model] of this.models.entries()) {
-      const status = aiHealthStatus.get(modelId);
-      if (status && status.status === 'healthy') {
-        this.healthStatus.set(modelId, 'healthy');
-        console.log(`✅ 模型 ${modelId} 健康检查通过 (响应时间: ${status.responseTime}ms)`);
-      } else {
+    const promises = Array.from(this.models.keys()).map(async (modelId) => {
+      try {
+        const healthy = await this.probeHealth(modelId);
+        if (healthy) {
+          this.healthStatus.set(modelId, 'healthy');
+          const status = aiHealthStatus.get(modelId);
+          console.log(`✅ 模型 ${modelId} 健康检查通过 (响应时间: ${status?.responseTime || 0}ms)`);
+        } else {
+          this.healthStatus.set(modelId, 'unhealthy');
+          const status = aiHealthStatus.get(modelId);
+          console.warn(`❌ 模型 ${modelId} 健康检查失败:`, status?.error || '未知错误');
+        }
+      } catch (error) {
         this.healthStatus.set(modelId, 'unhealthy');
-        const errorMsg = status?.error || '未知错误';
-        console.warn(`❌ 模型 ${modelId} 健康检查失败:`, errorMsg);
+        console.warn(`❌ 模型 ${modelId} 健康检查异常:`, error.message);
       }
-    }
+    });
+    
+    await Promise.allSettled(promises);
   }
   
   /**
@@ -157,6 +190,59 @@ class AILoadBalancer {
       return true;
     } else {
       throw new Error(status?.error || `模型 ${modelId} 不健康`);
+    }
+  }
+  
+  async probeHealth(modelId) {
+    const aiConfigs = getAIConfigs();
+    const config = aiConfigs[modelId];
+    
+    if (!config || !config.enabled || !config.apiKey) {
+      aiHealthStatus.set(modelId, { status: 'unhealthy', lastCheck: Date.now(), error: '模型未配置或未启用', responseTime: 0 });
+      return false;
+    }
+    
+    aiHealthStatus.set(modelId, { status: 'checking', lastCheck: Date.now(), error: null, responseTime: 0 });
+    
+    const startTime = Date.now();
+    
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      
+      const url = new URL(config.endpoint);
+      const healthCheckUrl = `${url.protocol}//${url.host}/`;
+      
+      try {
+        await axios.head(healthCheckUrl, {
+          signal: controller.signal,
+          timeout: 5000,
+          validateStatus: () => true
+        });
+      } catch {
+        await axios.get(healthCheckUrl, {
+          signal: controller.signal,
+          timeout: 5000,
+          validateStatus: () => true
+        });
+      }
+      
+      clearTimeout(timeoutId);
+      const responseTime = Date.now() - startTime;
+      aiHealthStatus.set(modelId, { status: 'healthy', lastCheck: Date.now(), error: null, responseTime });
+      
+      const breaker = this.circuitBreakers.get(modelId);
+      if (breaker) {
+        breaker.failureCount = 0;
+        breaker.state = 'CLOSED';
+        breaker.nextAttempt = null;
+      }
+      
+      return true;
+    } catch (error) {
+      const responseTime = Date.now() - startTime;
+      aiHealthStatus.set(modelId, { status: 'unhealthy', lastCheck: Date.now(), error: error.message, responseTime });
+      return false;
     }
   }
   
@@ -288,8 +374,8 @@ class AILoadBalancer {
           ...options
         };
         
-        // 设置超时
-        const timeout = options.timeout || 15000;
+        // 设置超时（增加到30秒，给大模型充足响应时间）
+        const timeout = options.timeout || 30000;
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), timeout);
         
@@ -341,13 +427,12 @@ class AILoadBalancer {
           this.recordFailure(selectedModelId, error);
         }
         
-        // 如果还有模型可尝试，继续
-        if (attempts < maxAttempts) {
-          console.warn(`模型 ${selectedModelId} 调用失败，尝试下一个模型:`, error.message);
-          // 短暂延迟后重试
-          await new Promise(resolve => setTimeout(resolve, 100));
-          continue;
-        }
+        // 如果还有模型可尝试，继续（减少延迟到500ms）
+      if (attempts < maxAttempts) {
+        console.warn(`模型 ${selectedModelId} 调用失败，等待500ms后尝试下一个模型:`, error.message);
+        await new Promise(resolve => setTimeout(resolve, 500));
+        continue;
+      }
       }
     }
     
@@ -407,12 +492,12 @@ class AILoadBalancer {
       breaker.failureCount++;
       breaker.lastFailureTime = Date.now();
       
-      // 如果连续失败超过阈值，打开断路器
+  // 如果连续失败超过阈值，打开断路器
       if (breaker.failureCount >= 5) {
         breaker.state = 'OPEN';
-        // 30秒后进入半开状态
-        breaker.nextAttempt = Date.now() + 30000;
-        console.warn(`🚨 模型 ${modelId} 断路器打开，30秒后重试`);
+        // 120秒后进入半开状态（给API更多恢复时间）
+        breaker.nextAttempt = Date.now() + 120000;
+        console.warn(`🚨 模型 ${modelId} 断路器打开，120秒后重试`);
       }
     }
   }
@@ -461,11 +546,25 @@ class AILoadBalancer {
    */
   cleanupOldMetrics() {
     const now = Date.now();
-    const oneDayAgo = now - 24 * 60 * 60 * 1000;
+    const oneHourAgo = now - 60 * 60 * 1000;
+    const MAX_METRICS_ENTRIES = 10000;
     
-    // 清理超过24小时的指标（示例）
-    // 在实际应用中，可能需要更复杂的指标保留策略
-    console.log('🧹 清理旧的AI模型指标数据...');
+    for (const [key, entry] of this.metrics.entries()) {
+      if (entry.timestamp && entry.timestamp < oneHourAgo) {
+        this.metrics.delete(key);
+      }
+    }
+    
+    if (this.metrics.size > MAX_METRICS_ENTRIES) {
+      const entries = Array.from(this.metrics.entries());
+      entries.sort((a, b) => (a[1].timestamp || 0) - (b[1].timestamp || 0));
+      const toDelete = this.metrics.size - MAX_METRICS_ENTRIES;
+      for (let i = 0; i < toDelete; i++) {
+        this.metrics.delete(entries[i][0]);
+      }
+    }
+    
+    console.log(`🧹 清理旧的AI模型指标数据，剩余条目: ${this.metrics.size}`);
   }
   
   /**

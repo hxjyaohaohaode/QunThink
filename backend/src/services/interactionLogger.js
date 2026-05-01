@@ -4,7 +4,7 @@
  * 提供互动频率、话题参与度、情感倾向等多维度分析
  */
 
-import { getDb } from '../models/db.js';
+import { getUserDb, listUserDatabases, withWriteLock } from '../models/db.js';
 import smartLikeEngine, { analyzeSentiment } from './social/smartLike.js';
 
 class InteractionLogger {
@@ -18,11 +18,32 @@ class InteractionLogger {
     };
   }
 
+  async findInteractionLogsInAllUsersDb(filter = {}) {
+    const userIds = await listUserDatabases();
+    const allLogs = [];
+    
+    for (const userId of userIds) {
+      const db = await getUserDb(userId);
+      await db.read();
+      const logs = db.data.interaction_logs || [];
+      allLogs.push(...logs);
+    }
+    
+    return allLogs;
+  }
+
   /**
    * 记录互动事件
    */
   async logInteraction(event) {
-    const db = getDb();
+    const userIds = await listUserDatabases();
+    
+    if (userIds.length === 0) {
+      throw new Error('没有找到用户数据库');
+    }
+    
+    const defaultUserId = userIds[0];
+    const db = await getUserDb(defaultUserId);
     await db.read();
     
     const interactionId = `interaction_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -68,7 +89,9 @@ class InteractionLogger {
 
     // 存储到数据库
     db.data.interaction_logs.push(logEntry);
-    await db.write();
+    await withWriteLock(defaultUserId, async () => {
+      await db.write();
+    });
     
     // 清除缓存
     this.analyticsCache = {
@@ -202,10 +225,7 @@ class InteractionLogger {
    * 获取互动日志
    */
   async getLogs(filter = {}) {
-    const db = getDb();
-    await db.read();
-    
-    let logs = db.data.interaction_logs;
+    let logs = await this.findInteractionLogsInAllUsersDb(filter);
     
     // 应用过滤器
     if (filter.type) {
@@ -253,8 +273,7 @@ class InteractionLogger {
    * 获取互动统计
    */
   async getInteractionStats(timeRange = '24h', groupId = null) {
-    const db = getDb();
-    await db.read();
+    let logs = await this.findInteractionLogsInAllUsersDb();
     
     const now = Date.now();
     let hours = 24;
@@ -267,7 +286,7 @@ class InteractionLogger {
     
     const cutoffTime = now - hours * 60 * 60 * 1000;
     
-    let logs = db.data.interaction_logs.filter(log => 
+    logs = logs.filter(log => 
       new Date(log.timestamp).getTime() > cutoffTime
     );
     
@@ -446,25 +465,34 @@ class InteractionLogger {
   async getInteractionQualityMetrics(timeRange = '24h') {
     const stats = await this.getInteractionStats(timeRange);
     
-    // 质量评估维度
+    const totalInteractions = stats.summary.totalInteractions;
+    const successfulInteractions = stats.breakdown.byType.message || 0;
+    const likes = stats.breakdown.byType.like || 0;
+    const dislikes = stats.breakdown.byType.dislike || 0;
+    
+    const responseRate = totalInteractions > 0 ? successfulInteractions / totalInteractions : 0;
+    const userSatisfaction = (likes + dislikes) > 0 ? likes / (likes + dislikes) : 0;
+    const avgMessagesPerSession = stats.summary.avgInteractionsPerParticipant || 0;
+    const engagementScore = Math.min(1, avgMessagesPerSession / 10);
+    
     const qualityMetrics = {
       relevance: {
-        score: 0.85, // 简化计算，实际应从日志中计算
+        score: responseRate,
         threshold: 0.7,
-        meetsRequirement: true,
-        description: '互动相关性评分'
+        meetsRequirement: responseRate >= 0.7,
+        description: '互动相关性评分（基于成功消息率）'
       },
       appropriateness: {
-        score: 0.90,
+        score: userSatisfaction,
         threshold: 0.8,
-        meetsRequirement: true,
-        description: '互动适当性评分'
+        meetsRequirement: userSatisfaction >= 0.8,
+        description: '互动适当性评分（基于点赞/踩比例）'
       },
       naturalness: {
-        score: 0.88,
+        score: engagementScore,
         threshold: 0.8,
-        meetsRequirement: true,
-        description: '互动自然度评分'
+        meetsRequirement: engagementScore >= 0.8,
+        description: '互动自然度评分（基于平均消息参与度）'
       }
     };
     
@@ -534,22 +562,30 @@ class InteractionLogger {
    * 清理旧日志（保留最近30天）
    */
   async cleanupOldLogs(daysToKeep = 30) {
-    const db = getDb();
-    await db.read();
+    const userIds = await listUserDatabases();
+    let totalRemoved = 0;
     
     const cutoffTime = Date.now() - daysToKeep * 24 * 60 * 60 * 1000;
-    const oldLogsCount = db.data.interaction_logs.length;
     
-    db.data.interaction_logs = db.data.interaction_logs.filter(log => 
-      new Date(log.timestamp).getTime() > cutoffTime
-    );
+    for (const userId of userIds) {
+      const db = await getUserDb(userId);
+      await db.read();
+      
+      const oldLogsCount = (db.data.interaction_logs || []).length;
+      db.data.interaction_logs = (db.data.interaction_logs || []).filter(log => 
+        new Date(log.timestamp).getTime() > cutoffTime
+      );
+      
+      const removedCount = oldLogsCount - (db.data.interaction_logs || []).length;
+      totalRemoved += removedCount;
+      
+      await withWriteLock(userId, async () => {
+        await db.write();
+      });
+    }
     
-    const newLogsCount = db.data.interaction_logs.length;
-    const removedCount = oldLogsCount - newLogsCount;
+    const remainingCount = await this.findInteractionLogsInAllUsersDb().then(logs => logs.length);
     
-    await db.write();
-    
-    // 清除缓存
     this.analyticsCache = {
       hourly: null,
       daily: null,
@@ -559,33 +595,29 @@ class InteractionLogger {
     
     return {
       success: true,
-      removedCount,
-      remainingCount: newLogsCount,
+      removedCount: totalRemoved,
+      remainingCount,
       daysKept: daysToKeep,
       timestamp: new Date().toISOString()
     };
   }
 
-  /**
-   * 获取系统状态
-   */
   async getSystemStatus() {
-    const db = getDb();
-    await db.read();
+    const allLogs = await this.findInteractionLogsInAllUsersDb();
     
-    const totalLogs = db.data.interaction_logs.length;
+    const totalLogs = allLogs.length;
     const now = Date.now();
-    const last24hLogs = db.data.interaction_logs.filter(log => 
+    const last24hLogs = allLogs.filter(log => 
       now - new Date(log.timestamp).getTime() <= 24 * 60 * 60 * 1000
     ).length;
     
-    const lastHourLogs = db.data.interaction_logs.filter(log => 
+    const lastHourLogs = allLogs.filter(log => 
       now - new Date(log.timestamp).getTime() <= 60 * 60 * 1000
     ).length;
     
     // 计算日志完整性（是否有缺失时间段）
     const logsByHour = {};
-    db.data.interaction_logs.forEach(log => {
+    allLogs.forEach(log => {
       const hour = new Date(log.timestamp).toISOString().slice(0, 13); // YYYY-MM-DDTHH
       logsByHour[hour] = (logsByHour[hour] || 0) + 1;
     });

@@ -1,9 +1,39 @@
 import express from 'express';
 import { systemMonitor } from '../services/monitoring/index.js';
+import { requireAuth } from '../middleware/auth.js';
+import { safeLog } from '../utils/logger.js';
 
 const router = express.Router();
 
-router.get('/metrics', (req, res) => {
+const clientErrorLog = [];
+const MAX_CLIENT_ERRORS = 100;
+
+router.post('/errors', (req, res) => {
+  try {
+    const errorData = req.body;
+    if (!errorData || !errorData.type) {
+      return res.status(400).json({ error: 'Invalid error report' });
+    }
+    const entry = {
+      ...errorData,
+      receivedAt: new Date().toISOString(),
+    };
+    clientErrorLog.push(entry);
+    if (clientErrorLog.length > MAX_CLIENT_ERRORS) {
+      clientErrorLog.shift();
+    }
+    safeLog('warn', `[ClientError] ${entry.type}: ${entry.message?.slice(0, 200)}`);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to log error' });
+  }
+});
+
+router.get('/client-errors', requireAuth, (req, res) => {
+  res.json({ success: true, errors: clientErrorLog, count: clientErrorLog.length });
+});
+
+router.get('/metrics', requireAuth, (req, res) => {
   try {
     const metrics = systemMonitor.getCurrentMetrics();
     res.json({
@@ -20,7 +50,7 @@ router.get('/metrics', (req, res) => {
   }
 });
 
-router.get('/status', (req, res) => {
+router.get('/status', requireAuth, (req, res) => {
   try {
     const status = systemMonitor.getSystemStatusReport();
     res.json({
@@ -62,8 +92,7 @@ router.get('/health', (req, res) => {
 
 router.get('/scaling/history', (req, res) => {
   try {
-    // 暂时返回模拟数据，实际应从数据库获取
-    const history = [];
+    const history = systemMonitor.getScalingHistory ? systemMonitor.getScalingHistory() : [];
     res.json({
       success: true,
       history,
@@ -78,7 +107,7 @@ router.get('/scaling/history', (req, res) => {
   }
 });
 
-router.post('/scaling/trigger', (req, res) => {
+router.post('/scaling/trigger', requireAuth, (req, res) => {
   try {
     const latestMetrics = systemMonitor.getCurrentMetrics();
     const scalingResult = systemMonitor.triggerAutoScaling(latestMetrics);
@@ -97,7 +126,7 @@ router.post('/scaling/trigger', (req, res) => {
   }
 });
 
-router.post('/scaling/manual', (req, res) => {
+router.post('/scaling/manual', requireAuth, (req, res) => {
   try {
     const { action, target, amount } = req.body;
     

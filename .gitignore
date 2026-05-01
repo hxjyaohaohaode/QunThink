@@ -38,9 +38,18 @@ yarn-error.log*
 # OS
 Thumbs.db
 
-# Backend data (user databases - keep structure but not content)
+# Backend data
 backend/data/users/*.json
 !backend/data/users/.gitkeep
+backend/data/auth.json
+backend/data/db.json
+backend/data/.rate_limits.json
+backend/data/tts/
+backend/data/uploads/
+
+# Encryption keys
+backend/data/.encryption_key
+backend/data/.encryption_key.meta
 
 # Uploads
 backend/uploads/*
@@ -49,5 +58,28 @@ backend/uploads/*
 # Test results
 backend/test_results/
 
-# Trae specs (optional - remove if you want to share specs)
-# .trae/
+# Server logs
+backend/server-*.log
+backend/server-*.err.log
+
+# Runtime logs
+.runtime-logs/
+
+# Trae specs
+.trae/
+
+# Batch scripts (deployment helpers, not needed in repo)
+build-for-netlify.bat
+check-config.bat
+create-backend-zip.bat
+deploy-docker.bat
+deploy-local.bat
+deploy-ngrok.bat
+diagnose.bat
+setup-api-keys.bat
+start-system.bat
+fix-logo.js
+
+# Sensitive files with API keys - NEVER commit
+API文件.txt
+短信服务.md

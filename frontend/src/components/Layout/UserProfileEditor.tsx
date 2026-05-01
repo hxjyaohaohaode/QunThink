@@ -45,7 +45,7 @@ function TagSelector({
             className={`px-3 py-1 rounded-full text-sm transition-all duration-200 ${
               selected.includes(option)
                 ? 'bg-user text-white'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                : 'bg-bg-surface2 dark:bg-gray-700 text-text-secondary dark:text-gray-300 hover:bg-bg-surface3 dark:hover:bg-gray-600'
             }`}
           >
             {option}
@@ -64,7 +64,7 @@ function TagSelector({
             }
           }}
           placeholder="自定义标签，按回车添加"
-          className="flex-1 px-3 py-1.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20"
+          className="flex-1 px-3 py-1.5 border border-border dark:border-gray-600 rounded-lg text-sm focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
         />
       </div>
       {selected.filter(t => !options.includes(t)).length > 0 && (
@@ -89,6 +89,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
   const { profile, fetchProfile, updateProfile } = useProfileStore();
   const [form, setForm] = useState<UserProfile>(profile);
   const [saving, setSaving] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
   const [hobbyCustomInput, setHobbyCustomInput] = useState('');
   const [personalityCustomInput, setPersonalityCustomInput] = useState('');
 
@@ -102,9 +103,38 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
     setForm(profile);
   }, [profile]);
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isOpen) {
+        onClose();
+      }
+    };
+    if (isOpen) {
+      window.addEventListener('keydown', handleKeyDown);
+    }
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
 
   const handleSave = async () => {
+    setValidationError(null);
+    if (!form.nickname?.trim()) {
+      setValidationError('昵称不能为空');
+      return;
+    }
+    if (form.age !== null && form.age !== undefined && (form.age < 1 || form.age > 150)) {
+      setValidationError('年龄需在1-150之间');
+      return;
+    }
+    if (form.height !== null && form.height !== undefined && (form.height < 30 || form.height > 300)) {
+      setValidationError('身高需在30-300cm之间');
+      return;
+    }
+    if (form.weight !== null && form.weight !== undefined && (form.weight < 10 || form.weight > 500)) {
+      setValidationError('体重需在10-500kg之间');
+      return;
+    }
     setSaving(true);
     try {
       await updateProfile(form);
@@ -134,27 +164,27 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg p-6 w-[480px] shadow-xl animate-fade-in max-h-[85vh] overflow-y-auto">
-        <h3 className="text-lg font-semibold text-text-primary mb-4">编辑用户画像</h3>
+      <div className="bg-bg-surface dark:bg-gray-800 rounded-lg p-6 w-full max-w-[480px] shadow-xl animate-fade-in max-h-[85vh] overflow-y-auto">
+        <h3 className="text-lg font-semibold text-text-primary dark:text-white mb-4">编辑用户画像</h3>
 
         <div className="space-y-4">
           <div>
-            <label className="block text-caption text-text-secondary mb-1">昵称</label>
+            <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">昵称</label>
             <input
               type="text"
               value={form.nickname}
               onChange={(e) => setForm({ ...form, nickname: e.target.value })}
               placeholder="输入昵称..."
-              className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20"
+              className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
             />
           </div>
 
           <div>
-            <label className="block text-caption text-text-secondary mb-1">性别</label>
+            <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">性别</label>
             <select
               value={form.gender}
               onChange={(e) => setForm({ ...form, gender: e.target.value })}
-              className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-white"
+              className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
             >
               <option value="">请选择</option>
               {GENDER_OPTIONS.map((opt) => (
@@ -165,54 +195,54 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
 
           <div className="grid grid-cols-3 gap-3">
             <div>
-              <label className="block text-caption text-text-secondary mb-1">年龄</label>
+              <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">年龄</label>
               <input
                 type="number"
                 value={form.age ?? ''}
                 onChange={(e) => setForm({ ...form, age: e.target.value ? Number(e.target.value) : null })}
                 placeholder="年龄"
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20"
+                className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
               />
             </div>
             <div>
-              <label className="block text-caption text-text-secondary mb-1">身高(cm)</label>
+              <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">身高(cm)</label>
               <input
                 type="number"
                 value={form.height ?? ''}
                 onChange={(e) => setForm({ ...form, height: e.target.value ? Number(e.target.value) : null })}
                 placeholder="身高"
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20"
+                className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
               />
             </div>
             <div>
-              <label className="block text-caption text-text-secondary mb-1">体重(kg)</label>
+              <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">体重(kg)</label>
               <input
                 type="number"
                 value={form.weight ?? ''}
                 onChange={(e) => setForm({ ...form, weight: e.target.value ? Number(e.target.value) : null })}
                 placeholder="体重"
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20"
+                className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
               />
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-caption text-text-secondary mb-1">职业</label>
+              <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">职业</label>
               <input
                 type="text"
                 value={form.occupation}
                 onChange={(e) => setForm({ ...form, occupation: e.target.value })}
                 placeholder="输入职业..."
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20"
+                className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
               />
             </div>
             <div>
-              <label className="block text-caption text-text-secondary mb-1">学历</label>
+              <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">学历</label>
               <select
                 value={form.education}
                 onChange={(e) => setForm({ ...form, education: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-white"
+                className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
               >
                 <option value="">请选择</option>
                 {EDUCATION_OPTIONS.map((opt) => (
@@ -223,7 +253,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
           </div>
 
           <div>
-            <label className="block text-caption text-text-secondary mb-1">爱好</label>
+            <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">爱好</label>
             <TagSelector
               options={HOBBY_OPTIONS}
               selected={form.hobbies}
@@ -235,7 +265,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
           </div>
 
           <div>
-            <label className="block text-caption text-text-secondary mb-1">性格</label>
+            <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">性格</label>
             <TagSelector
               options={PERSONALITY_OPTIONS}
               selected={form.personality}
@@ -247,32 +277,37 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
           </div>
 
           <div>
-            <label className="block text-caption text-text-secondary mb-1">目标</label>
+            <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">目标</label>
             <textarea
               value={form.goals}
               onChange={(e) => setForm({ ...form, goals: e.target.value })}
               placeholder="描述你的目标..."
               rows={2}
-              className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 resize-none"
+              className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 resize-none bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
             />
           </div>
 
           <div>
-            <label className="block text-caption text-text-secondary mb-1">自我介绍</label>
+            <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">自我介绍</label>
             <textarea
               value={form.bio}
               onChange={(e) => setForm({ ...form, bio: e.target.value })}
               placeholder="介绍一下自己..."
               rows={3}
-              className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 resize-none"
+              className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 resize-none bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
             />
           </div>
         </div>
 
         <div className="flex gap-2 mt-6">
+          {validationError && (
+            <div className="w-full p-2 bg-red-50 dark:bg-red-900/20 rounded-lg text-xs text-red-600 dark:text-red-400 mb-2">
+              {validationError}
+            </div>
+          )}
           <button
             onClick={onClose}
-            className="flex-1 px-4 py-2 border border-gray-200 rounded-lg text-text-secondary hover:bg-gray-50 transition-all duration-200"
+            className="flex-1 px-4 py-2 border border-border dark:border-gray-600 rounded-lg text-text-secondary dark:text-gray-400 hover:bg-bg-surface2 dark:hover:bg-gray-700 transition-all duration-200"
           >
             取消
           </button>

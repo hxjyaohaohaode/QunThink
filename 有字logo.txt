@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 320" width="400" height="320">
+  <defs>
+    <linearGradient id="main" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6C5CE7"/>
+      <stop offset="100%" stop-color="#A29BFE"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 底层 - 黑色，旋转-12度 -->
+  <rect x="140" y="40" width="90" height="90" rx="20" fill="#1A1A2E" opacity="0.9" transform="rotate(-12, 185, 85)"/>
+  <!-- 中层 - 紫色，旋转8度 -->
+  <rect x="160" y="35" width="90" height="90" rx="20" fill="#6C5CE7" opacity="0.6" transform="rotate(8, 205, 80)"/>
+  <!-- 顶层 - 渐变紫 -->
+  <rect x="178" y="45" width="90" height="90" rx="20" fill="url(#main)" opacity="1"/>
+
+  <!-- 品牌名 -->
+  <text x="200" y="195" text-anchor="middle" font-family="'PingFang SC','Noto Sans SC','Microsoft YaHei',sans-serif" font-size="56" font-weight="800" fill="#1A1A2E" letter-spacing="4">群想</text>
+
+  <!-- 英文名 -->
+  <text x="200" y="225" text-anchor="middle" font-family="'Inter','Helvetica Neue',sans-serif" font-size="18" font-weight="500" fill="#6C5CE7" letter-spacing="8">QUNTHINK</text>
+
+  <!-- 标语 -->
+  <text x="200" y="260" text-anchor="middle" font-family="'PingFang SC','Noto Sans SC','Microsoft YaHei',sans-serif" font-size="14" fill="#999" letter-spacing="4">想，就聊出来</text>
+</svg>

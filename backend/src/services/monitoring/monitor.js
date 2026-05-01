@@ -5,42 +5,57 @@
  */
 
 import os from 'os';
-import { getDb } from '../../models/db.js';
+import { getUserDb, listUserDatabases, withWriteLock } from '../../models/db.js';
 import { WebSocketPerformanceMonitor } from '../../websocket/performanceMonitor.js';
 import { default as aiLoadBalancer } from '../ai/loadBalancer.js';
+
+async function findFirstUserDb() {
+  const userIds = await listUserDatabases();
+  if (userIds.length === 0) return null;
+  return {
+    userId: userIds[0],
+    db: await getUserDb(userIds[0])
+  };
+}
 
 class SystemMonitor {
   constructor() {
     this.metricsHistory = [];
     this.maxHistorySize = 1000;
-    this.scalingThreshold = 80; // 扩容阈值 80%
-    this.scalingCooldown = 5 * 60 * 1000; // 5分钟冷却
+    this.scalingThreshold = 80;
+    this.scalingCooldown = 5 * 60 * 1000;
     this.lastScalingTime = null;
     this.performanceMonitor = new WebSocketPerformanceMonitor();
+    this._timers = [];
+    this._wss = null;
+    this._requestCounter = { total: 0, lastReset: Date.now() };
     
-    // 初始化监控
     this.initializeMonitoring();
     
-    // 定期收集指标（每30秒）
-    setInterval(() => this.collectMetrics(), 30 * 1000);
-    
-    // 定期检查扩容需求（每60秒）
-    setInterval(() => this.checkScalingNeeds(), 60 * 1000);
-    
-    // 定期清理历史数据（每10分钟）
-    setInterval(() => this.cleanupHistory(), 10 * 60 * 1000);
+    this._timers.push(setInterval(() => this.collectMetrics(), 30 * 1000));
+    this._timers.push(setInterval(() => this.checkScalingNeeds(), 60 * 1000));
+    this._timers.push(setInterval(() => this.cleanupHistory(), 10 * 60 * 1000));
     
     console.log('🔍 系统监控服务已启动');
   }
   
-  /**
-   * 初始化监控
-   */
+  cleanupTimers() {
+    for (const timer of this._timers) {
+      clearInterval(timer);
+    }
+    this._timers = [];
+    console.log('🔍 系统监控定时器已清理');
+  }
+  
+  setWss(wss) {
+    this._wss = wss;
+  }
+  
+  incrementRequestCount() {
+    this._requestCounter.total++;
+  }
+  
   async initializeMonitoring() {
-    // 性能监控器已在构造函数中启动
-    // this.performanceMonitor.startHealthMonitoring();
-    
-    // 记录初始状态
     await this.recordEvent('monitoring_started', {
       timestamp: new Date().toISOString(),
       thresholds: {
@@ -50,38 +65,17 @@ class SystemMonitor {
     });
   }
   
-  /**
-   * 收集系统指标
-   */
   async collectMetrics() {
     try {
       const timestamp = new Date().toISOString();
-      
-      // CPU使用率（模拟，实际应使用更精确的测量）
       const cpuUsage = this.getCpuUsage();
-      
-      // 内存使用率
       const memoryUsage = this.getMemoryUsage();
-      
-      // 网络活动（简化）
       const networkActivity = this.getNetworkActivity();
-      
-      // 数据库状态
       const databaseStatus = this.getDatabaseStatus();
-      
-      // WebSocket性能指标
       const websocketMetrics = this.performanceMonitor.getMetrics();
-      
-      // 系统负载
       const systemLoad = os.loadavg();
-      
-      // 活动连接数
       const activeConnections = this.getActiveConnections();
-      
-      // AI模型状态（从负载均衡器获取）
       const aiModelStatus = this.getAIModelStatus();
-      
-      // 文件处理状态
       const fileProcessingStatus = this.getFileProcessingStatus();
       
       const metrics = {
@@ -177,7 +171,6 @@ class SystemMonitor {
    */
   getNetworkActivity() {
     const networkInterfaces = os.networkInterfaces();
-    let totalBytes = 0;
     let activeInterfaces = 0;
     
     Object.values(networkInterfaces).forEach(iface => {
@@ -188,25 +181,26 @@ class SystemMonitor {
       });
     });
     
-    // 模拟网络流量（实际应使用更精确的测量）
-    const simulatedRx = Math.random() * 1000000;
-    const simulatedTx = Math.random() * 500000;
+    const elapsed = (Date.now() - this._requestCounter.lastReset) / 1000;
+    const requestsPerSecond = elapsed > 0 ? this._requestCounter.total / elapsed : 0;
     
     return {
       activeInterfaces,
-      rxBytes: simulatedRx,
-      txBytes: simulatedTx,
-      totalBytes: simulatedRx + simulatedTx
+      totalRequests: this._requestCounter.total,
+      requestsPerSecond: Math.round(requestsPerSecond * 100) / 100,
+      rxBytes: 0,
+      txBytes: 0,
+      totalBytes: 0
     };
   }
   
   /**
    * 获取数据库状态
    */
-  getDatabaseStatus() {
+  async getDatabaseStatus() {
     try {
-      const db = getDb();
-      if (!db || !db.data) {
+      const dbResult = await findFirstUserDb();
+      if (!dbResult?.db) {
         return {
           status: 'unavailable',
           size: 0,
@@ -220,6 +214,8 @@ class SystemMonitor {
           lastWrite: null
         };
       }
+      const { db } = dbResult;
+      await db.read();
       const size = JSON.stringify(db.data).length;
       const messages = db.data.messages?.length || 0;
       const files = db.data.files?.length || 0;
@@ -232,7 +228,7 @@ class SystemMonitor {
           messages,
           files,
           groups,
-          comments: db.data.comments?.length || 0,
+          comments: db.data.messages?.reduce((sum, m) => sum + (m.comments?.length || 0), 0) || 0,
           interaction_logs: db.data.interaction_logs?.length || 0
         },
         lastWrite: db.writeTimestamp || null
@@ -249,11 +245,11 @@ class SystemMonitor {
    * 获取活动连接数
    */
   getActiveConnections() {
-    // 简化实现，实际应从WebSocket服务器获取
+    const wsConnections = this._wss ? this._wss.clients.size : 0;
     return {
-      websocket: Math.floor(Math.random() * 50) + 10, // 模拟
-      http: Math.floor(Math.random() * 10) + 1,
-      aiModels: 4 // 固定4个AI模型
+      websocket: wsConnections,
+      http: 0,
+      aiModels: Object.keys(this.models || {}).length || 4
     };
   }
   
@@ -296,12 +292,9 @@ class SystemMonitor {
    * 获取文件处理状态
    */
   getFileProcessingStatus() {
-    // 简化实现
     return {
-      activeProcesses: Math.floor(Math.random() * 5),
-      queueLength: Math.floor(Math.random() * 10),
-      successRate: 0.95 + Math.random() * 0.04,
-      lastProcessed: new Date().toISOString()
+      status: 'not_available',
+      message: '文件处理状态数据不可用'
     };
   }
   
@@ -523,8 +516,10 @@ class SystemMonitor {
     console.log(`📝 监控事件: ${eventType}`, data);
 
     try {
-      const db = getDb();
-      if (!db || !db.data) return;
+      const dbResult = await findFirstUserDb();
+      if (!dbResult?.db) return;
+      const { db, userId } = dbResult;
+      await db.read();
       if (!db.data.monitoring_events) {
         db.data.monitoring_events = [];
       }
@@ -532,7 +527,9 @@ class SystemMonitor {
       if (db.data.monitoring_events.length > 1000) {
         db.data.monitoring_events = db.data.monitoring_events.slice(-1000);
       }
-      await db.write();
+      await withWriteLock(userId, async () => {
+        await db.write();
+      });
     } catch (error) {
       // 忽略数据库错误
     }

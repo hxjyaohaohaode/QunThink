@@ -47,6 +47,7 @@ class LongTermMemoryManager {
       category: memoryData.category || this.detectCategory(memoryData),
       vector: this.createMemoryVector(memoryData),
       metadata: {
+        ...(memoryData.metadata || {}),
         storedAt: timestamp,
         accessCount: 0,
         lastAccessed: null,
@@ -211,18 +212,22 @@ class LongTermMemoryManager {
     
     if (toRemove <= 0) return;
     
-    // 按最后访问时间排序
-    const memoriesArray = Array.from(this.memories.entries());
-    memoriesArray.sort((a, b) => {
-      const aLastAccessed = a[1].metadata.lastAccessed || a[1].metadata.storedAt;
-      const bLastAccessed = b[1].metadata.lastAccessed || b[1].metadata.storedAt;
-      return new Date(aLastAccessed) - new Date(bLastAccessed);
-    });
-    
-    // 移除最旧的记忆
     for (let i = 0; i < toRemove; i++) {
-      const [memoryId, memory] = memoriesArray[i];
-      this.removeMemory(memoryId);
+      let oldestId = null;
+      let oldestTime = Infinity;
+      
+      for (const [memoryId, memory] of this.memories.entries()) {
+        const accessTime = memory.metadata.lastAccessed || memory.metadata.storedAt;
+        const time = new Date(accessTime).getTime();
+        if (time < oldestTime) {
+          oldestTime = time;
+          oldestId = memoryId;
+        }
+      }
+      
+      if (oldestId) {
+        this.removeMemory(oldestId);
+      }
     }
     
     console.log(`移除了 ${toRemove} 个旧记忆`);
@@ -282,14 +287,18 @@ class LongTermMemoryManager {
       
       // 3. 基于时间的检索
       if (options.dateRange) {
-        const { startDate, endDate } = options.dateRange;
-        const dateIds = this.getMemoriesByDateRange(startDate, endDate);
-        
-        if (candidateIds.size === 0) {
-          candidateIds = dateIds;
-        } else {
-          // 取交集
-          candidateIds = new Set([...candidateIds].filter(id => dateIds.has(id)));
+        const startDate = options.dateRange.startDate || options.dateRange.start;
+        const endDate = options.dateRange.endDate || options.dateRange.end;
+
+        if (startDate && endDate) {
+          const dateIds = this.getMemoriesByDateRange(startDate, endDate);
+
+          if (candidateIds.size === 0) {
+            candidateIds = dateIds;
+          } else {
+            // 取交集
+            candidateIds = new Set([...candidateIds].filter(id => dateIds.has(id)));
+          }
         }
       }
       

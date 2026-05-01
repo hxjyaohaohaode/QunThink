@@ -33,9 +33,17 @@ class WebSocketPerformanceMonitor {
     };
     
     this.messageTracking = new Map(); // messageId -> { sentAt, confirmedAt, targetClientId }
+    this._healthCheckTimer = null;
     
-    // 启动健康检查
     this.startHealthMonitoring();
+  }
+  
+  cleanup() {
+    if (this._healthCheckTimer) {
+      clearInterval(this._healthCheckTimer);
+      this._healthCheckTimer = null;
+    }
+    console.log('[WebSocket性能监控] 定时器已清理');
   }
   
   /**
@@ -178,7 +186,7 @@ class WebSocketPerformanceMonitor {
     if (this.metrics.messageLatencies.length > 0) {
       const sum = this.metrics.messageLatencies.reduce((a, b) => a + b, 0);
       this.metrics.health.avgLatency = sum / this.metrics.messageLatencies.length;
-      this.metrics.health.maxLatency = Math.max(...this.metrics.messageLatencies);
+      this.metrics.health.maxLatency = this.metrics.messageLatencies.reduce((a, b) => Math.max(a, b), 0);
     }
     
     // 确定状态
@@ -197,10 +205,18 @@ class WebSocketPerformanceMonitor {
    * 开始健康监控
    */
   startHealthMonitoring() {
-    setInterval(() => {
+    if (process.env.NODE_ENV === 'test') {
+      return;
+    }
+
+    this._healthCheckTimer = setInterval(() => {
       this.updateHealthMetrics();
       this.logHealthStatus();
     }, this.config.healthCheckInterval);
+
+    if (typeof this._healthCheckTimer.unref === 'function') {
+      this._healthCheckTimer.unref();
+    }
   }
   
   /**

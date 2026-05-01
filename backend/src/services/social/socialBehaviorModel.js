@@ -30,6 +30,7 @@ class SocialBehaviorModel {
     };
     
     this.interactionHistory = [];
+    this.maxInteractionHistory = 500;
     this.behaviorMetrics = {
       totalInteractions: 0,
       meaninglessInteractions: 0,
@@ -280,7 +281,7 @@ class SocialBehaviorModel {
     
     const words = (allContent + ' ' + currentTopic)
       .toLowerCase()
-      .replace(/[^\w\s\u4e00-\u9fa5]/g, ' ')
+      .replace(/[^\w\s\u4e00-\u9fff]/g, ' ')
       .split(/\s+/)
       .filter(word => 
         word.length > 1 && 
@@ -309,7 +310,7 @@ class SocialBehaviorModel {
     
     return text
       .toLowerCase()
-      .replace(/[^\w\s\u4e00-\u9fa5]/g, ' ')
+      .replace(/[^\w\s\u4e00-\u9fff]/g, ' ')
       .split(/\s+/)
       .filter(word => word.length > 0);
   }
@@ -622,7 +623,10 @@ class SocialBehaviorModel {
       this.behaviorMetrics.recentTopicCoherence = this.behaviorMetrics.recentTopicCoherence.slice(-100);
     }
     
-    // 限制历史记录大小
+    if (this.interactionHistory.length > this.maxInteractionHistory) {
+      this.interactionHistory = this.interactionHistory.slice(-this.maxInteractionHistory);
+    }
+    
     if (this.interactionHistory.length > 1000) {
       this.interactionHistory = this.interactionHistory.slice(-1000);
     }

@@ -5,8 +5,11 @@
 
 import express from 'express';
 import aiLoadBalancer from '../services/ai/loadBalancer.js';
+import { requireAdmin } from '../middleware/auth.js';
 
 const router = express.Router();
+
+router.use('/ai', requireAdmin);
 
 /**
  * 获取所有AI模型状态
@@ -127,7 +130,7 @@ router.put('/ai/models/:modelId/enabled', async (req, res) => {
 router.put('/ai/models/:modelId/config', async (req, res) => {
   try {
     const { modelId } = req.params;
-    const { config } = req.body;
+    const { config, apiKey, ..._rest } = req.body;
     
     if (!config || typeof config !== 'object') {
       return res.status(400).json({ 
@@ -135,8 +138,10 @@ router.put('/ai/models/:modelId/config', async (req, res) => {
         error: '配置参数不能为空' 
       });
     }
+
+    const { apiKey: _configApiKey, ...safeConfig } = config;
     
-    const result = aiLoadBalancer.updateModelConfig(modelId, config);
+    const result = aiLoadBalancer.updateModelConfig(modelId, safeConfig);
     
     res.json({
       success: true,

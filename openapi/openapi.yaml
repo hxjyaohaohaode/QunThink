@@ -1,0 +1,675 @@
+openapi: 3.1.0
+info:
+  title: AI聊天群 API
+  version: 1.0.0
+  description: 最小但真实对齐的接口契约，覆盖认证、群组、消息与文件主链路。
+servers:
+  - url: http://localhost:3002
+    description: Local backend
+tags:
+  - name: Auth
+  - name: Groups
+  - name: Messages
+  - name: Files
+paths:
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: 注册用户
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterInput'
+      responses:
+        '201':
+          description: 注册成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          description: 参数不合法
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '409':
+          description: 用户名冲突
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: 登录
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginInput'
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          description: 用户名或密码错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: 获取当前登录用户
+      responses:
+        '200':
+          description: 当前用户
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user:
+                    $ref: '#/components/schemas/AuthUser'
+        '401':
+          description: 未登录
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/groups:
+    get:
+      tags: [Groups]
+      summary: 获取群组列表
+      responses:
+        '200':
+          description: 群组数组
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Group'
+    post:
+      tags: [Groups]
+      summary: 创建群组
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GroupCreateInput'
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Group'
+        '400':
+          description: 参数不合法
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/groups/{id}:
+    get:
+      tags: [Groups]
+      summary: 获取群组详情
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+      responses:
+        '200':
+          description: 群组详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Group'
+        '404':
+          description: 群组不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/groups/{groupId}/messages:
+    get:
+      tags: [Messages]
+      summary: 获取群消息
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsGroupId'
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+        - in: query
+          name: before
+          schema:
+            type: string
+        - in: query
+          name: after
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 消息分页结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedMessagesResponse'
+    post:
+      tags: [Messages]
+      summary: 发送消息
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsGroupId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageCreateInput'
+      responses:
+        '201':
+          description: 发送成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '400':
+          description: 参数错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '404':
+          description: 群组不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/messages/{id}/like:
+    post:
+      tags: [Messages]
+      summary: 点赞消息
+      parameters:
+        - $ref: '#/components/parameters/MessageId'
+      responses:
+        '200':
+          description: 点赞结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReactionResponse'
+    delete:
+      tags: [Messages]
+      summary: 取消点赞
+      parameters:
+        - $ref: '#/components/parameters/MessageId'
+      responses:
+        '200':
+          description: 取消点赞结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReactionResponse'
+  /api/messages/{id}/dislike:
+    post:
+      tags: [Messages]
+      summary: 点踩消息
+      parameters:
+        - $ref: '#/components/parameters/MessageId'
+      responses:
+        '200':
+          description: 点踩结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DislikeResponse'
+    delete:
+      tags: [Messages]
+      summary: 取消点踩
+      parameters:
+        - $ref: '#/components/parameters/MessageId'
+      responses:
+        '200':
+          description: 取消点踩结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DislikeResponse'
+  /api/comments:
+    post:
+      tags: [Messages]
+      summary: 创建评论
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommentCreateInput'
+      responses:
+        '201':
+          description: 评论创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comment'
+        '400':
+          description: 评论目标不合法
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/files/upload:
+    post:
+      tags: [Files]
+      summary: 上传文件
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [group_id, files]
+              properties:
+                group_id:
+                  type: string
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+      responses:
+        '201':
+          description: 上传成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileUploadResponse'
+        '400':
+          description: 上传失败
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '401':
+          description: 未认证
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/files/{id}/download:
+    get:
+      tags: [Files]
+      summary: 下载文件
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 文件流
+        '404':
+          description: 文件不存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+components:
+  parameters:
+    GroupId:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+    GroupIdAsGroupId:
+      in: path
+      name: groupId
+      required: true
+      schema:
+        type: string
+    MessageId:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+  schemas:
+    ApiError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    AuthUser:
+      type: object
+      required: [id, username]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        nickname:
+          type: string
+    AuthResponse:
+      type: object
+      required: [success, user]
+      properties:
+        success:
+          type: boolean
+          const: true
+        user:
+          $ref: '#/components/schemas/AuthUser'
+    LoginInput:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+    RegisterInput:
+      allOf:
+        - $ref: '#/components/schemas/LoginInput'
+        - type: object
+          properties:
+            nickname:
+              type: string
+    Group:
+      type: object
+      required:
+        - id
+        - name
+        - description
+        - type
+        - debate_mode
+        - debate_level
+        - ai_members
+        - created_at
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        type:
+          type: string
+          enum: [preset, custom, private, ai_private]
+        is_private:
+          type: boolean
+        avatar_url:
+          type: string
+          nullable: true
+        avatar_color:
+          type: string
+          nullable: true
+        background_url:
+          type: string
+          nullable: true
+        announcement:
+          type: string
+        pinned:
+          type: boolean
+        debate_mode:
+          type: boolean
+        debate_level:
+          type: integer
+        ai_members:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        last_message_at:
+          type: string
+          format: date-time
+        last_message_preview:
+          type: string
+          nullable: true
+    GroupCreateInput:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        ai_members:
+          type: array
+          items:
+            type: string
+        is_private:
+          type: boolean
+        ai_member:
+          type: string
+        avatar_url:
+          type: string
+        avatar_color:
+          type: string
+          nullable: true
+    MessageAttachment:
+      type: object
+      required: [id, name, type, size]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        type:
+          type: string
+        size:
+          type: number
+        url:
+          type: string
+        media_description:
+          type: string
+    Message:
+      type: object
+      required:
+        - id
+        - group_id
+        - sender_type
+        - content
+        - content_type
+        - created_at
+      properties:
+        id:
+          type: string
+        group_id:
+          type: string
+        sender_type:
+          type: string
+          enum: [user, ai, system]
+        sender_id:
+          type: string
+        content:
+          type: string
+        content_type:
+          type: string
+          enum: [text, code, file, system]
+        reply_to:
+          type: string
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessageAttachment'
+        metadata:
+          type: object
+          additionalProperties: true
+        liked_by:
+          type: array
+          items:
+            type: string
+        likes:
+          type: array
+          items:
+            type: string
+        likes_count:
+          type: integer
+        disliked_by:
+          type: array
+          items:
+            type: string
+        dislikes:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+    MessageCreateInput:
+      type: object
+      required: [content]
+      additionalProperties: false
+      properties:
+        content:
+          type: string
+        content_type:
+          type: string
+          enum: [text, code, file, system]
+        reply_to:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/MessageAttachment'
+    PaginatedMessagesResponse:
+      type: object
+      required: [messages, hasMore]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        hasMore:
+          type: boolean
+    CommentCreateInput:
+      type: object
+      required: [message_id, content]
+      additionalProperties: false
+      properties:
+        message_id:
+          type: string
+        content:
+          type: string
+        parent_id:
+          type: string
+          nullable: true
+        reply_to:
+          type: string
+          nullable: true
+    Comment:
+      type: object
+      required: [id, message_id, sender_type, content, created_at]
+      properties:
+        id:
+          type: string
+        message_id:
+          type: string
+        parent_id:
+          type: string
+        reply_to:
+          type: string
+        sender_type:
+          type: string
+          enum: [user, ai, system]
+        sender_id:
+          type: string
+        content:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        depth:
+          type: integer
+    UploadedFile:
+      type: object
+      required:
+        - id
+        - group_id
+        - uploader_id
+        - owner_user_id
+        - filename
+        - original_path
+        - mime_type
+        - file_size
+        - created_at
+      properties:
+        id:
+          type: string
+        group_id:
+          type: string
+        uploader_id:
+          type: string
+        owner_user_id:
+          type: string
+        filename:
+          type: string
+        stored_filename:
+          type: string
+        original_path:
+          type: string
+        parsed_content:
+          type: string
+          nullable: true
+        media_description:
+          type: string
+        mime_type:
+          type: string
+        file_size:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        url:
+          type: string
+        original_name:
+          type: string
+    FileUploadResponse:
+      type: object
+      required: [success, file]
+      properties:
+        success:
+          type: boolean
+          const: true
+        file:
+          $ref: '#/components/schemas/UploadedFile'
+    ReactionResponse:
+      type: object
+      required: [likes, liked_by, likes_count]
+      properties:
+        likes:
+          type: array
+          items:
+            type: string
+        liked_by:
+          type: array
+          items:
+            type: string
+        likes_count:
+          type: integer
+    DislikeResponse:
+      type: object
+      required: [disliked_by, dislikes]
+      properties:
+        disliked_by:
+          type: array
+          items:
+            type: string
+        dislikes:
+          type: integer

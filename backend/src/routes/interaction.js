@@ -5,6 +5,7 @@
 
 import express from 'express';
 import interactionLogger from '../services/interactionLogger.js';
+import { requireAuth } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -208,8 +209,12 @@ router.get('/interaction/status', async (req, res) => {
  * 清理旧日志（需要管理员权限）
  * POST /api/interaction/cleanup
  */
-router.post('/interaction/cleanup', async (req, res) => {
+router.post('/interaction/cleanup', requireAuth, async (req, res) => {
   try {
+    if (!req.userId || !req.userId.startsWith('admin')) {
+      return res.status(403).json({ error: '需要管理员权限' });
+    }
+
     const { daysToKeep = 30, confirm } = req.body;
     
     if (confirm !== 'CONFIRM_CLEANUP') {

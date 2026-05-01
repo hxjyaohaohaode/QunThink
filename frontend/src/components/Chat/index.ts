@@ -4,3 +4,7 @@ export { MessageBubble } from './MessageBubble';
 export { TypingIndicator } from './TypingIndicator';
 export { MessageInput } from './MessageInput';
 export { NewMessageBadge } from './NewMessageBadge';
+export { DebateControlPanel } from './DebateControlPanel';
+export { SearchPanel } from './SearchPanel';
+export { CommentSection } from './CommentSection';
+export { AttachmentStack } from './AttachmentStack';

@@ -9,11 +9,11 @@ import { calculateSimilarity, analyzeSentiment } from './smartLike.js';
 class ContextAwareCommentAnalyzer {
   constructor() {
     this.config = {
-      minRelevanceScore: 0.7,      // 最小相关性评分
-      maxDepth: 5,                 // 最大嵌套深度
-      contextWindowSize: 3,        // 上下文窗口大小（条消息）
-      sentimentWeight: 0.3,
-      relevanceWeight: 0.4,
+      minRelevanceScore: 0.5,
+      maxDepth: 5,
+      contextWindowSize: 5,
+      sentimentWeight: 0.2,
+      relevanceWeight: 0.5,
       contextCoherenceWeight: 0.15,
       threadCoherenceWeight: 0.15
     };
@@ -193,7 +193,7 @@ class ContextAwareCommentAnalyzer {
     
     const words = text
       .toLowerCase()
-      .replace(/[^\w\s\u4e00-\u9fa5]/g, ' ')
+      .replace(/[^\w\s\u4e00-\u9fff]/g, ' ')
       .split(/\s+/)
       .filter(word => 
         word.length > 1 && 
@@ -222,7 +222,7 @@ class ContextAwareCommentAnalyzer {
     
     const commentWords = commentText
       .toLowerCase()
-      .replace(/[^\w\s\u4e00-\u9fa5]/g, ' ')
+      .replace(/[^\w\s\u4e00-\u9fff]/g, ' ')
       .split(/\s+/);
     
     let matchedTopics = 0;
