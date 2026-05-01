@@ -85,12 +85,9 @@ function AnimatedTitle({ text }: { text: string }) {
 }
 
 type AuthView = 'login' | 'register';
-type LoginMode = 'username' | 'phone';
 
 export function LoginPage({ onLoginSuccess }: LoginPageProps) {
   const [authView, setAuthView] = useState<AuthView>('login');
-  const [loginMode, setLoginMode] = useState<LoginMode>('username');
-  const [username, setUsername] = useState('');
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -102,7 +99,6 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
   const [countdown, setCountdown] = useState(0);
   const [sendingCode, setSendingCode] = useState(false);
   const [useSmsLogin, setUseSmsLogin] = useState(false);
-  const [registerMode, setRegisterMode] = useState<'username' | 'phone'>('username');
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const { showToast, Toast } = useToast();
 
@@ -186,40 +182,10 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
     e.preventDefault();
     setError(null);
 
-    if (loginMode === 'username') {
-      if (!username) {
-        setError('请输入用户名');
-        showToast({ message: '请输入用户名', type: 'error' });
-        return;
-      }
-      if (!password) {
-        setError('请输入密码');
-        showToast({ message: '请输入密码', type: 'error' });
-        return;
-      }
-      setLoading(true);
-      try {
-        await api.login(username, password);
-        await completeAuthFlow('登录成功！');
-      } catch (err: any) {
-        const errorMsg = err?.response?.data?.error || err?.message || '登录失败';
-        setError(errorMsg);
-        showToast({ message: errorMsg, type: 'error' });
-        setLoading(false);
-      }
-      return;
-    }
-
     const phoneError = validatePhone(phone);
     if (phoneError) {
       setError(phoneError);
       showToast({ message: phoneError, type: 'error' });
-      return;
-    }
-
-    if (!password) {
-      setError('请输入密码');
-      showToast({ message: '请输入密码', type: 'error' });
       return;
     }
 
@@ -239,6 +205,12 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
           await completeAuthFlow('登录成功！');
         }
       } else {
+        if (!password) {
+          setError('请输入密码');
+          showToast({ message: '请输入密码', type: 'error' });
+          setLoading(false);
+          return;
+        }
         await api.loginPhone(phone, password);
         await completeAuthFlow('登录成功！');
       }
@@ -253,36 +225,6 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
   const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-
-    if (registerMode === 'username') {
-      if (!username || username.length < 3) {
-        setError('用户名至少需要3个字符');
-        showToast({ message: '用户名至少需要3个字符', type: 'error' });
-        return;
-      }
-      const passwordError = validatePassword(password);
-      if (passwordError) {
-        setError(passwordError);
-        showToast({ message: passwordError, type: 'error' });
-        return;
-      }
-      if (password !== confirmPassword) {
-        setError('两次输入的密码不一致');
-        showToast({ message: '两次输入的密码不一致', type: 'error' });
-        return;
-      }
-      setLoading(true);
-      try {
-        await api.register(username, password, nickname || undefined);
-        await completeAuthFlow('注册成功！');
-      } catch (err: any) {
-        const errorMsg = err?.response?.data?.error || err?.message || '注册失败';
-        setError(errorMsg);
-        showToast({ message: errorMsg, type: 'error' });
-        setLoading(false);
-      }
-      return;
-    }
 
     const phoneError = validatePhone(phone);
     if (phoneError) {
@@ -325,11 +267,9 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
   const isSubmitDisabled = () => {
     if (loading || success) return true;
     if (authView === 'login') {
-      if (loginMode === 'username') return !username || !password;
       if (useSmsLogin) return !phone || !smsCode;
       return !phone || !password;
     }
-    if (registerMode === 'username') return !username || !password || !confirmPassword;
     return !phone || !password || !confirmPassword || !smsCode;
   };
 
@@ -337,8 +277,6 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
     setAuthView(view);
     setError(null);
     setUseSmsLogin(false);
-    if (view === 'login') setLoginMode('username');
-    if (view === 'register') setRegisterMode('username');
   };
 
   return (
@@ -443,83 +381,50 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
                   className="space-y-5"
                   onSubmit={handleLoginSubmit}
                 >
-                  {loginMode === 'username' ? (
-                    <>
-                      <motion.div custom={1} variants={formElementVariants} initial="hidden" animate="visible">
-                        <label className="block text-sm font-medium text-text-secondary mb-2">用户名</label>
-                        <input
-                          type="text"
-                          value={username}
-                          onChange={(e) => setUsername(e.target.value)}
-                          required
-                          className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
-                          placeholder="请输入用户名"
-                          autoComplete="username"
-                        />
-                      </motion.div>
+                  <motion.div custom={1} variants={formElementVariants} initial="hidden" animate="visible">
+                    <label className="block text-sm font-medium text-text-secondary mb-2">手机号</label>
+                    <input
+                      type="tel"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
+                      required
+                      className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
+                      placeholder="请输入手机号"
+                      autoComplete="tel"
+                      maxLength={11}
+                    />
+                  </motion.div>
 
-                      <motion.div custom={2} variants={formElementVariants} initial="hidden" animate="visible">
-                        <label className="block text-sm font-medium text-text-secondary mb-2">密码</label>
-                        <input
-                          type="password"
-                          value={password}
-                          onChange={(e) => setPassword(e.target.value)}
-                          required
-                          className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
-                          placeholder="请输入密码"
-                          autoComplete="current-password"
-                        />
-                      </motion.div>
-                    </>
-                  ) : (
-                    <>
-                      <motion.div custom={1} variants={formElementVariants} initial="hidden" animate="visible">
-                        <label className="block text-sm font-medium text-text-secondary mb-2">手机号</label>
-                        <input
-                          type="tel"
-                          value={phone}
-                          onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
-                          required
-                          className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
-                          placeholder="请输入手机号"
-                          autoComplete="tel"
-                          maxLength={11}
-                        />
-                      </motion.div>
-
-                      <AnimatePresence mode="wait">
-                        {useSmsLogin ? (
+                  <AnimatePresence mode="wait">
+                    {useSmsLogin ? (
                       <motion.div
                         key="sms-login-code"
                         initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: 'auto' }}
                         exit={{ opacity: 0, height: 0 }}
                         transition={{ duration: 0.2 }}
-                        className="space-y-5"
                       >
-                        <div>
-                          <label className="block text-sm font-medium text-text-secondary mb-2">验证码</label>
-                          <div className="flex gap-2">
-                            <input
-                              type="text"
-                              value={smsCode}
-                              onChange={(e) => setSmsCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                              required
-                              className="flex-1 px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary tracking-[0.5em] text-center text-lg font-mono"
-                              placeholder="6位验证码"
-                              maxLength={6}
-                              autoComplete="one-time-code"
-                              inputMode="numeric"
-                            />
-                            <button
-                              type="button"
-                              onClick={handleSendSmsCode}
-                              disabled={countdown > 0 || sendingCode || !/^1[3-9]\d{9}$/.test(phone)}
-                              className="px-4 py-3 bg-accent hover:bg-accent-hover disabled:bg-bg-surface4 text-white rounded-xl text-sm font-medium whitespace-nowrap disabled:cursor-not-allowed transition-colors min-w-[110px]"
-                            >
-                              {sendingCode ? '发送中...' : countdown > 0 ? `${countdown}s` : '获取验证码'}
-                            </button>
-                          </div>
+                        <label className="block text-sm font-medium text-text-secondary mb-2">验证码</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={smsCode}
+                            onChange={(e) => setSmsCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                            required
+                            className="flex-1 px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary tracking-[0.5em] text-center text-lg font-mono"
+                            placeholder="6位验证码"
+                            maxLength={6}
+                            autoComplete="one-time-code"
+                            inputMode="numeric"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleSendSmsCode}
+                            disabled={countdown > 0 || sendingCode || !/^1[3-9]\d{9}$/.test(phone)}
+                            className="px-4 py-3 bg-accent hover:bg-accent-hover disabled:bg-bg-surface4 text-white rounded-xl text-sm font-medium whitespace-nowrap disabled:cursor-not-allowed transition-colors min-w-[110px]"
+                          >
+                            {sendingCode ? '发送中...' : countdown > 0 ? `${countdown}s` : '获取验证码'}
+                          </button>
                         </div>
                       </motion.div>
                     ) : (
@@ -543,8 +448,6 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
                       </motion.div>
                     )}
                   </AnimatePresence>
-                    </>
-                  )}
 
                   <AnimatePresence>
                     {error && (
@@ -622,42 +525,16 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
                     </button>
                   </motion.div>
 
-                  <motion.div custom={4} variants={formElementVariants} initial="hidden" animate="visible" className="text-center space-y-2">
-                    {loginMode === 'phone' && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setUseSmsLogin(prev => !prev);
-                          setError(null);
-                        }}
-                        className="text-sm text-accent hover:underline block w-full"
-                      >
-                        {useSmsLogin ? '使用密码登录' : '使用短信验证码登录'}
-                      </button>
-                    )}
+                  <motion.div custom={4} variants={formElementVariants} initial="hidden" animate="visible" className="text-center">
                     <button
                       type="button"
                       onClick={() => {
-                        setLoginMode(prev => prev === 'username' ? 'phone' : 'username');
-                        setError(null);
-                        setUseSmsLogin(false);
-                      }}
-                      className="text-sm text-accent hover:underline block w-full"
-                    >
-                      {loginMode === 'username' ? '使用手机号登录' : '使用用户名登录'}
-                    </button>
-                  </motion.div>
-
-                  <motion.div custom={7} variants={formElementVariants} initial="hidden" animate="visible" className="text-center">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setRegisterMode(prev => prev === 'username' ? 'phone' : 'username');
+                        setUseSmsLogin(prev => !prev);
                         setError(null);
                       }}
                       className="text-sm text-accent hover:underline"
                     >
-                      {registerMode === 'username' ? '使用手机号注册' : '使用用户名注册'}
+                      {useSmsLogin ? '使用密码登录' : '使用短信验证码登录'}
                     </button>
                   </motion.div>
                 </motion.form>
@@ -671,143 +548,84 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
                   className="space-y-5"
                   onSubmit={handleRegisterSubmit}
                 >
-                  {registerMode === 'username' ? (
-                    <>
-                      <motion.div custom={1} variants={formElementVariants} initial="hidden" animate="visible">
-                        <label className="block text-sm font-medium text-text-secondary mb-2">用户名</label>
-                        <input
-                          type="text"
-                          value={username}
-                          onChange={(e) => setUsername(e.target.value)}
-                          required
-                          className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
-                          placeholder="至少3个字符"
-                          autoComplete="username"
-                        />
-                      </motion.div>
+                  <motion.div custom={1} variants={formElementVariants} initial="hidden" animate="visible">
+                    <label className="block text-sm font-medium text-text-secondary mb-2">手机号</label>
+                    <input
+                      type="tel"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
+                      required
+                      className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
+                      placeholder="请输入手机号"
+                      autoComplete="tel"
+                      maxLength={11}
+                    />
+                  </motion.div>
 
-                      <motion.div custom={2} variants={formElementVariants} initial="hidden" animate="visible">
-                        <label className="block text-sm font-medium text-text-secondary mb-2">密码</label>
-                        <input
-                          type="password"
-                          value={password}
-                          onChange={(e) => setPassword(e.target.value)}
-                          required
-                          minLength={8}
-                          className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
-                          placeholder="至少8位，需包含大小写字母和数字"
-                          autoComplete="new-password"
-                        />
-                      </motion.div>
+                  <motion.div custom={2} variants={formElementVariants} initial="hidden" animate="visible">
+                    <label className="block text-sm font-medium text-text-secondary mb-2">密码</label>
+                    <input
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      required
+                      minLength={8}
+                      className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
+                      placeholder="至少8位，需包含大小写字母和数字"
+                      autoComplete="new-password"
+                    />
+                  </motion.div>
 
-                      <motion.div custom={3} variants={formElementVariants} initial="hidden" animate="visible">
-                        <label className="block text-sm font-medium text-text-secondary mb-2">确认密码</label>
-                        <input
-                          type="password"
-                          value={confirmPassword}
-                          onChange={(e) => setConfirmPassword(e.target.value)}
-                          required
-                          minLength={8}
-                          className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
-                          placeholder="请再次输入密码"
-                          autoComplete="new-password"
-                        />
-                      </motion.div>
+                  <motion.div custom={3} variants={formElementVariants} initial="hidden" animate="visible">
+                    <label className="block text-sm font-medium text-text-secondary mb-2">确认密码</label>
+                    <input
+                      type="password"
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      required
+                      minLength={8}
+                      className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
+                      placeholder="请再次输入密码"
+                      autoComplete="new-password"
+                    />
+                  </motion.div>
 
-                      <motion.div custom={4} variants={formElementVariants} initial="hidden" animate="visible">
-                        <label className="block text-sm font-medium text-text-secondary mb-2">昵称（可选）</label>
-                        <input
-                          type="text"
-                          value={nickname}
-                          onChange={(e) => setNickname(e.target.value)}
-                          className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
-                          placeholder="请输入昵称"
-                          autoComplete="nickname"
-                        />
-                      </motion.div>
-                    </>
-                  ) : (
-                    <>
-                      <motion.div custom={1} variants={formElementVariants} initial="hidden" animate="visible">
-                        <label className="block text-sm font-medium text-text-secondary mb-2">手机号</label>
-                        <input
-                          type="tel"
-                          value={phone}
-                          onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
-                          required
-                          className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
-                          placeholder="请输入手机号"
-                          autoComplete="tel"
-                          maxLength={11}
-                        />
-                      </motion.div>
+                  <motion.div custom={4} variants={formElementVariants} initial="hidden" animate="visible">
+                    <label className="block text-sm font-medium text-text-secondary mb-2">昵称（可选）</label>
+                    <input
+                      type="text"
+                      value={nickname}
+                      onChange={(e) => setNickname(e.target.value)}
+                      className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
+                      placeholder="请输入昵称"
+                      autoComplete="nickname"
+                    />
+                  </motion.div>
 
-                      <motion.div custom={2} variants={formElementVariants} initial="hidden" animate="visible">
-                        <label className="block text-sm font-medium text-text-secondary mb-2">密码</label>
-                        <input
-                          type="password"
-                          value={password}
-                          onChange={(e) => setPassword(e.target.value)}
-                          required
-                          minLength={8}
-                          className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
-                          placeholder="至少8位，需包含大小写字母和数字"
-                          autoComplete="new-password"
-                        />
-                      </motion.div>
-
-                      <motion.div custom={3} variants={formElementVariants} initial="hidden" animate="visible">
-                        <label className="block text-sm font-medium text-text-secondary mb-2">确认密码</label>
-                        <input
-                          type="password"
-                          value={confirmPassword}
-                          onChange={(e) => setConfirmPassword(e.target.value)}
-                          required
-                          minLength={8}
-                          className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
-                          placeholder="请再次输入密码"
-                          autoComplete="new-password"
-                        />
-                      </motion.div>
-
-                      <motion.div custom={4} variants={formElementVariants} initial="hidden" animate="visible">
-                        <label className="block text-sm font-medium text-text-secondary mb-2">昵称（可选）</label>
-                        <input
-                          type="text"
-                          value={nickname}
-                          onChange={(e) => setNickname(e.target.value)}
-                          className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
-                          placeholder="请输入昵称"
-                          autoComplete="nickname"
-                        />
-                      </motion.div>
-
-                      <motion.div custom={5} variants={formElementVariants} initial="hidden" animate="visible">
-                        <label className="block text-sm font-medium text-text-secondary mb-2">短信验证码</label>
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
-                            value={smsCode}
-                            onChange={(e) => setSmsCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                            required
-                            className="flex-1 px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary tracking-[0.5em] text-center text-lg font-mono"
-                            placeholder="6位验证码"
-                            maxLength={6}
-                            autoComplete="one-time-code"
-                            inputMode="numeric"
-                          />
-                          <button
-                            type="button"
-                            onClick={handleSendSmsCode}
-                            disabled={countdown > 0 || sendingCode || !/^1[3-9]\d{9}$/.test(phone)}
-                            className="px-4 py-3 bg-accent hover:bg-accent-hover disabled:bg-bg-surface4 text-white rounded-xl text-sm font-medium whitespace-nowrap disabled:cursor-not-allowed transition-colors min-w-[110px]"
-                          >
-                            {sendingCode ? '发送中...' : countdown > 0 ? `${countdown}s` : '获取验证码'}
-                          </button>
-                        </div>
-                      </motion.div>
-                    </>
-                  )}
+                  <motion.div custom={5} variants={formElementVariants} initial="hidden" animate="visible">
+                    <label className="block text-sm font-medium text-text-secondary mb-2">短信验证码</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={smsCode}
+                        onChange={(e) => setSmsCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                        required
+                        className="flex-1 px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary tracking-[0.5em] text-center text-lg font-mono"
+                        placeholder="6位验证码"
+                        maxLength={6}
+                        autoComplete="one-time-code"
+                        inputMode="numeric"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleSendSmsCode}
+                        disabled={countdown > 0 || sendingCode || !/^1[3-9]\d{9}$/.test(phone)}
+                        className="px-4 py-3 bg-accent hover:bg-accent-hover disabled:bg-bg-surface4 text-white rounded-xl text-sm font-medium whitespace-nowrap disabled:cursor-not-allowed transition-colors min-w-[110px]"
+                      >
+                        {sendingCode ? '发送中...' : countdown > 0 ? `${countdown}s` : '获取验证码'}
+                      </button>
+                    </div>
+                  </motion.div>
 
                   <AnimatePresence>
                     {error && (
