@@ -84,8 +84,14 @@ function AnimatedTitle({ text }: { text: string }) {
   );
 }
 
+type AuthView = 'login' | 'register';
+
 export function LoginPage({ onLoginSuccess }: LoginPageProps) {
+  const [authView, setAuthView] = useState<AuthView>('login');
   const [phone, setPhone] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [nickname, setNickname] = useState('');
   const [smsCode, setSmsCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -121,6 +127,14 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
   const validatePhone = (value: string) => {
     if (!value) return '请输入手机号';
     if (!/^1[3-9]\d{9}$/.test(value)) return '手机号格式不正确';
+    return null;
+  };
+
+  const validatePassword = (value: string) => {
+    if (value.length < 8) return '密码至少需要8位';
+    if (!/[A-Z]/.test(value) || !/[a-z]/.test(value) || !/\d/.test(value)) {
+      return '密码必须包含大写字母、小写字母和数字';
+    }
     return null;
   };
 
@@ -163,7 +177,7 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
@@ -171,6 +185,48 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
     if (phoneError) {
       setError(phoneError);
       showToast({ message: phoneError, type: 'error' });
+      return;
+    }
+
+    if (!password) {
+      setError('请输入密码');
+      showToast({ message: '请输入密码', type: 'error' });
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await api.loginPhone(phone, password);
+      await completeAuthFlow('登录成功！');
+    } catch (err: any) {
+      const errorMsg = err?.response?.data?.error || err?.message || '登录失败';
+      setError(errorMsg);
+      showToast({ message: errorMsg, type: 'error' });
+      setLoading(false);
+    }
+  };
+
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    const phoneError = validatePhone(phone);
+    if (phoneError) {
+      setError(phoneError);
+      showToast({ message: phoneError, type: 'error' });
+      return;
+    }
+
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      setError(passwordError);
+      showToast({ message: passwordError, type: 'error' });
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setError('两次输入的密码不一致');
+      showToast({ message: '两次输入的密码不一致', type: 'error' });
       return;
     }
 
@@ -182,14 +238,10 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
 
     setLoading(true);
     try {
-      const result = await api.verifySmsCode(phone, smsCode);
-      if (result.isNewUser) {
-        await completeAuthFlow('注册成功！');
-      } else {
-        await completeAuthFlow('登录成功！');
-      }
+      await api.registerSms(phone, password, smsCode, nickname || undefined);
+      await completeAuthFlow('注册成功！');
     } catch (err: any) {
-      const errorMsg = err?.response?.data?.error || err?.message || '验证失败';
+      const errorMsg = err?.response?.data?.error || err?.message || '注册失败';
       setError(errorMsg);
       showToast({ message: errorMsg, type: 'error' });
       setLoading(false);
@@ -198,7 +250,20 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
 
   const isSubmitDisabled = () => {
     if (loading || success) return true;
-    return !phone || !smsCode;
+    if (authView === 'login') {
+      return !phone || !password;
+    }
+    return !phone || !password || !confirmPassword || !smsCode;
+  };
+
+  const switchView = (view: AuthView) => {
+    setAuthView(view);
+    setError(null);
+    setPhone('');
+    setPassword('');
+    setConfirmPassword('');
+    setNickname('');
+    setSmsCode('');
   };
 
   return (
@@ -263,138 +328,316 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
             initial="hidden"
             animate="visible"
           >
-            <motion.form
-              initial={{ opacity: 0, x: -20 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ duration: 0.2 }}
-              className="space-y-5"
-              onSubmit={handleSubmit}
+            <motion.div
+              className="flex mb-6 bg-bg-surface2 rounded-xl p-1"
+              custom={0}
+              variants={formElementVariants}
+              initial="hidden"
+              animate="visible"
             >
-              <motion.div custom={1} variants={formElementVariants} initial="hidden" animate="visible">
-                <label className="block text-sm font-medium text-text-secondary mb-2">手机号</label>
-                <input
-                  type="tel"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
-                  required
-                  className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
-                  placeholder="请输入手机号"
-                  autoComplete="tel"
-                  maxLength={11}
-                />
-              </motion.div>
+              <button
+                onClick={() => switchView('login')}
+                className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                  authView === 'login'
+                    ? 'bg-bg-surface text-accent shadow-sm'
+                    : 'text-text-muted'
+                }`}
+              >
+                登录
+              </button>
+              <button
+                onClick={() => switchView('register')}
+                className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                  authView === 'register'
+                    ? 'bg-bg-surface text-accent shadow-sm'
+                    : 'text-text-muted'
+                }`}
+              >
+                注册
+              </button>
+            </motion.div>
 
-              <motion.div custom={2} variants={formElementVariants} initial="hidden" animate="visible">
-                <label className="block text-sm font-medium text-text-secondary mb-2">验证码</label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={smsCode}
-                    onChange={(e) => setSmsCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                    required
-                    className="flex-1 px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary tracking-[0.5em] text-center text-lg font-mono"
-                    placeholder="6位验证码"
-                    maxLength={6}
-                    autoComplete="one-time-code"
-                    inputMode="numeric"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleSendSmsCode}
-                    disabled={countdown > 0 || sendingCode || !/^1[3-9]\d{9}$/.test(phone)}
-                    className="px-4 py-3 bg-accent hover:bg-accent-hover disabled:bg-bg-surface4 text-white rounded-xl text-sm font-medium whitespace-nowrap disabled:cursor-not-allowed transition-colors min-w-[110px]"
-                  >
-                    {sendingCode ? '发送中...' : countdown > 0 ? `${countdown}s` : '获取验证码'}
-                  </button>
-                </div>
-              </motion.div>
-
-              <AnimatePresence>
-                {error && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -10 }}
-                    className="p-3 bg-red-50 dark:bg-red-900/20 rounded-xl text-sm text-red-600 dark:text-red-400"
-                  >
-                    {error}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
-              <motion.div custom={3} variants={formElementVariants} initial="hidden" animate="visible">
-                <button
-                  type="submit"
-                  disabled={isSubmitDisabled()}
-                  className="w-full py-3 bg-accent hover:bg-accent-hover text-white rounded-xl font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-all relative overflow-hidden"
+            <AnimatePresence mode="wait">
+              {authView === 'login' ? (
+                <motion.form
+                  key="login"
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: 20 }}
+                  transition={{ duration: 0.2 }}
+                  className="space-y-5"
+                  onSubmit={handleLoginSubmit}
                 >
-                  <AnimatePresence mode="wait">
-                    {success ? (
+                  <motion.div custom={1} variants={formElementVariants} initial="hidden" animate="visible">
+                    <label className="block text-sm font-medium text-text-secondary mb-2">手机号</label>
+                    <input
+                      type="tel"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
+                      required
+                      className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
+                      placeholder="请输入手机号"
+                      autoComplete="tel"
+                      maxLength={11}
+                    />
+                  </motion.div>
+
+                  <motion.div custom={2} variants={formElementVariants} initial="hidden" animate="visible">
+                    <label className="block text-sm font-medium text-text-secondary mb-2">密码</label>
+                    <input
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      required
+                      className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
+                      placeholder="请输入密码"
+                      autoComplete="current-password"
+                    />
+                  </motion.div>
+
+                  <AnimatePresence>
+                    {error && (
                       <motion.div
-                        key="success"
-                        className="flex items-center justify-center gap-2"
-                        variants={successIconVariants}
-                        initial="hidden"
-                        animate="visible"
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -10 }}
+                        className="p-3 bg-red-50 dark:bg-red-900/20 rounded-xl text-sm text-red-600 dark:text-red-400"
                       >
-                        <svg className="w-5 h-5 text-green-500" viewBox="0 0 24 24" fill="none">
-                          <motion.circle
-                            cx="12" cy="12" r="10"
-                            stroke="currentColor" strokeWidth="2"
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            transition={{ duration: 0.2 }}
-                          />
-                          <motion.path
-                            d="M8 12l3 3 5-6"
-                            stroke="currentColor" strokeWidth="2"
-                            strokeLinecap="round" strokeLinejoin="round"
-                            variants={checkmarkVariants}
-                            initial="hidden"
-                            animate="visible"
-                          />
-                        </svg>
-                        <span>成功！</span>
+                        {error}
                       </motion.div>
-                    ) : loading ? (
-                      <motion.div
-                        key="loading"
-                        className="flex items-center justify-center gap-2"
-                        variants={spinnerVariants}
-                        initial="initial"
-                        animate="loading"
-                      >
-                        <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                        </svg>
-                        <span>验证中...</span>
-                      </motion.div>
-                    ) : (
-                      <motion.span
-                        key="idle"
-                        variants={buttonContentVariants}
-                        initial="initial"
-                        animate="initial"
-                        exit="loading"
-                      >
-                        登录 / 注册
-                      </motion.span>
                     )}
                   </AnimatePresence>
-                </button>
-              </motion.div>
 
-              <motion.p
-                custom={4}
-                variants={formElementVariants}
-                initial="hidden"
-                animate="visible"
-                className="text-center text-xs text-text-muted"
-              >
-                新用户将自动注册，无需单独操作
-              </motion.p>
-            </motion.form>
+                  <motion.div custom={3} variants={formElementVariants} initial="hidden" animate="visible">
+                    <button
+                      type="submit"
+                      disabled={isSubmitDisabled()}
+                      className="w-full py-3 bg-accent hover:bg-accent-hover text-white rounded-xl font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-all relative overflow-hidden"
+                    >
+                      <AnimatePresence mode="wait">
+                        {success ? (
+                          <motion.div
+                            key="success"
+                            className="flex items-center justify-center gap-2"
+                            variants={successIconVariants}
+                            initial="hidden"
+                            animate="visible"
+                          >
+                            <svg className="w-5 h-5 text-green-500" viewBox="0 0 24 24" fill="none">
+                              <motion.circle
+                                cx="12" cy="12" r="10"
+                                stroke="currentColor" strokeWidth="2"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                transition={{ duration: 0.2 }}
+                              />
+                              <motion.path
+                                d="M8 12l3 3 5-6"
+                                stroke="currentColor" strokeWidth="2"
+                                strokeLinecap="round" strokeLinejoin="round"
+                                variants={checkmarkVariants}
+                                initial="hidden"
+                                animate="visible"
+                              />
+                            </svg>
+                            <span>成功！</span>
+                          </motion.div>
+                        ) : loading ? (
+                          <motion.div
+                            key="loading"
+                            className="flex items-center justify-center gap-2"
+                            variants={spinnerVariants}
+                            initial="initial"
+                            animate="loading"
+                          >
+                            <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                            </svg>
+                            <span>登录中...</span>
+                          </motion.div>
+                        ) : (
+                          <motion.span
+                            key="idle"
+                            variants={buttonContentVariants}
+                            initial="initial"
+                            animate="initial"
+                            exit="loading"
+                          >
+                            登录
+                          </motion.span>
+                        )}
+                      </AnimatePresence>
+                    </button>
+                  </motion.div>
+                </motion.form>
+              ) : (
+                <motion.form
+                  key="register"
+                  initial={{ opacity: 0, x: 20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -20 }}
+                  transition={{ duration: 0.2 }}
+                  className="space-y-5"
+                  onSubmit={handleRegisterSubmit}
+                >
+                  <motion.div custom={1} variants={formElementVariants} initial="hidden" animate="visible">
+                    <label className="block text-sm font-medium text-text-secondary mb-2">手机号</label>
+                    <input
+                      type="tel"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 11))}
+                      required
+                      className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
+                      placeholder="请输入手机号"
+                      autoComplete="tel"
+                      maxLength={11}
+                    />
+                  </motion.div>
+
+                  <motion.div custom={2} variants={formElementVariants} initial="hidden" animate="visible">
+                    <label className="block text-sm font-medium text-text-secondary mb-2">密码</label>
+                    <input
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      required
+                      minLength={8}
+                      className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
+                      placeholder="至少8位，需包含大小写字母和数字"
+                      autoComplete="new-password"
+                    />
+                  </motion.div>
+
+                  <motion.div custom={3} variants={formElementVariants} initial="hidden" animate="visible">
+                    <label className="block text-sm font-medium text-text-secondary mb-2">确认密码</label>
+                    <input
+                      type="password"
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      required
+                      minLength={8}
+                      className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
+                      placeholder="请再次输入密码"
+                      autoComplete="new-password"
+                    />
+                  </motion.div>
+
+                  <motion.div custom={4} variants={formElementVariants} initial="hidden" animate="visible">
+                    <label className="block text-sm font-medium text-text-secondary mb-2">昵称（可选）</label>
+                    <input
+                      type="text"
+                      value={nickname}
+                      onChange={(e) => setNickname(e.target.value)}
+                      className="w-full px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary"
+                      placeholder="请输入昵称"
+                      autoComplete="nickname"
+                    />
+                  </motion.div>
+
+                  <motion.div custom={5} variants={formElementVariants} initial="hidden" animate="visible">
+                    <label className="block text-sm font-medium text-text-secondary mb-2">短信验证码</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={smsCode}
+                        onChange={(e) => setSmsCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                        required
+                        className="flex-1 px-4 py-3 border border-border-subtle rounded-xl focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent bg-bg-surface2 text-text-primary tracking-[0.5em] text-center text-lg font-mono"
+                        placeholder="6位验证码"
+                        maxLength={6}
+                        autoComplete="one-time-code"
+                        inputMode="numeric"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleSendSmsCode}
+                        disabled={countdown > 0 || sendingCode || !/^1[3-9]\d{9}$/.test(phone)}
+                        className="px-4 py-3 bg-accent hover:bg-accent-hover disabled:bg-bg-surface4 text-white rounded-xl text-sm font-medium whitespace-nowrap disabled:cursor-not-allowed transition-colors min-w-[110px]"
+                      >
+                        {sendingCode ? '发送中...' : countdown > 0 ? `${countdown}s` : '获取验证码'}
+                      </button>
+                    </div>
+                  </motion.div>
+
+                  <AnimatePresence>
+                    {error && (
+                      <motion.div
+                        initial={{ opacity: 0, y: -10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -10 }}
+                        className="p-3 bg-red-50 dark:bg-red-900/20 rounded-xl text-sm text-red-600 dark:text-red-400"
+                      >
+                        {error}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  <motion.div custom={6} variants={formElementVariants} initial="hidden" animate="visible">
+                    <button
+                      type="submit"
+                      disabled={isSubmitDisabled()}
+                      className="w-full py-3 bg-accent hover:bg-accent-hover text-white rounded-xl font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-all relative overflow-hidden"
+                    >
+                      <AnimatePresence mode="wait">
+                        {success ? (
+                          <motion.div
+                            key="success"
+                            className="flex items-center justify-center gap-2"
+                            variants={successIconVariants}
+                            initial="hidden"
+                            animate="visible"
+                          >
+                            <svg className="w-5 h-5 text-green-500" viewBox="0 0 24 24" fill="none">
+                              <motion.circle
+                                cx="12" cy="12" r="10"
+                                stroke="currentColor" strokeWidth="2"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                transition={{ duration: 0.2 }}
+                              />
+                              <motion.path
+                                d="M8 12l3 3 5-6"
+                                stroke="currentColor" strokeWidth="2"
+                                strokeLinecap="round" strokeLinejoin="round"
+                                variants={checkmarkVariants}
+                                initial="hidden"
+                                animate="visible"
+                              />
+                            </svg>
+                            <span>成功！</span>
+                          </motion.div>
+                        ) : loading ? (
+                          <motion.div
+                            key="loading"
+                            className="flex items-center justify-center gap-2"
+                            variants={spinnerVariants}
+                            initial="initial"
+                            animate="loading"
+                          >
+                            <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                            </svg>
+                            <span>注册中...</span>
+                          </motion.div>
+                        ) : (
+                          <motion.span
+                            key="idle"
+                            variants={buttonContentVariants}
+                            initial="initial"
+                            animate="initial"
+                            exit="loading"
+                          >
+                            注册
+                          </motion.span>
+                        )}
+                      </AnimatePresence>
+                    </button>
+                  </motion.div>
+                </motion.form>
+              )}
+            </AnimatePresence>
           </motion.div>
         </motion.div>
       </div>

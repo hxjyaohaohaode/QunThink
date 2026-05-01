@@ -182,6 +182,18 @@ const smsVerifySchema = z.object({
   code: z.string().regex(/^\d{4,8}$/, '验证码格式不正确')
 });
 
+const smsRegisterSchema = z.object({
+  phone: z.string().regex(/^1[3-9]\d{9}$/, '手机号格式不正确'),
+  password: z.string().min(8).max(128).regex(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/, '密码必须包含大写字母、小写字母和数字'),
+  code: z.string().regex(/^\d{4,8}$/, '验证码格式不正确'),
+  nickname: z.string().max(50).optional()
+});
+
+const phoneLoginSchema = z.object({
+  phone: z.string().regex(/^1[3-9]\d{9}$/, '手机号格式不正确'),
+  password: z.string()
+});
+
 export {
   validateBody,
   validateQuery,
@@ -201,5 +213,7 @@ export {
   updateProfileSchema,
   ttsSchema,
   smsSendSchema,
-  smsVerifySchema
+  smsVerifySchema,
+  smsRegisterSchema,
+  phoneLoginSchema
 };

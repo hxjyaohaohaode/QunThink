@@ -814,6 +814,16 @@ export const api = {
     return response.data;
   },
 
+  loginPhone: async (phone: string, password: string) => {
+    const response = await axiosInstance.post('/auth/login-phone', { phone, password });
+    return response.data;
+  },
+
+  registerSms: async (phone: string, password: string, code: string, nickname?: string) => {
+    const response = await axiosInstance.post('/auth/register-sms', { phone, password, code, nickname });
+    return response.data;
+  },
+
   logout: async () => {
     const response = await axiosInstance.post('/auth/logout');
     return response.data;
