@@ -14,6 +14,10 @@ jobs:
         env:
           RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
+          if [ -z "$RENDER_API_KEY" ]; then
+            echo "RENDER_API_KEY not set, skipping deploy"
+            exit 0
+          fi
           echo "Triggering Render deployment..."
           curl -X POST \
             -H "Authorization: Bearer $RENDER_API_KEY" \
