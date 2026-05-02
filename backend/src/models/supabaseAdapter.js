@@ -23,12 +23,16 @@ export async function getPool() {
 
   initializing = (async () => {
     try {
+      const sslConfig = connectionString.includes('pooler.supabase.com')
+        ? { ssl: { rejectUnauthorized: false } }
+        : { ssl: { rejectUnauthorized: false } };
+
       pool = new Pool({
         connectionString,
         max: 5,
         idleTimeoutMillis: 60000,
-        connectionTimeoutMillis: 10000,
-        ssl: { rejectUnauthorized: false }
+        connectionTimeoutMillis: 15000,
+        ...sslConfig
       });
 
       pool.on('error', (err) => {
@@ -52,7 +56,7 @@ export async function getPool() {
     } catch (err) {
       console.error('❌ Supabase/PostgreSQL 连接失败:', err.message);
       if (pool) {
-        await pool.end().catch(() => {});
+        try { await pool.end(); } catch (e) {}
       }
       pool = null;
       initializing = null;

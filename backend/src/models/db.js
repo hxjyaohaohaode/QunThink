@@ -580,11 +580,19 @@ export async function migrateExistingData() {
 export async function initDatabase() {
   if (isSupabaseEnabled()) {
     console.log('🐘 使用 Supabase/PostgreSQL 作为数据存储后端');
-    await getPool();
-    await initUserDatabase('default');
-    defaultDb = userDbs.get('default');
-    console.log('✅ Supabase/PostgreSQL 数据库系统初始化完成');
-    return;
+    let pool = null;
+    try {
+      pool = await getPool();
+    } catch (err) {
+      console.error('❌ Supabase 连接失败，将回退到本地存储:', err.message);
+    }
+    if (pool) {
+      await initUserDatabase('default');
+      defaultDb = userDbs.get('default');
+      console.log('✅ Supabase/PostgreSQL 数据库系统初始化完成');
+      return;
+    }
+    console.warn('⚠️ Supabase 不可用，回退到本地文件存储');
   }
 
   if (isMongoEnabled()) {
