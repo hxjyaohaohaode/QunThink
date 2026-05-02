@@ -286,10 +286,20 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
         const mediaType = isImage ? '图片' : isAudio ? '音频' : isVideo ? '视频' : '文件';
         
         messageContent += `\n【用户上传的${mediaType}: ${fileName}】\n`;
-        if (description) {
-          messageContent += `${mediaType}内容描述: ${description}\n`;
-        } else if (textContent) {
-          messageContent += `文件内容: ${textContent.substring(0, 800)}\n`;
+        const hasRealContent = textContent && textContent.length > 30
+          && !textContent.startsWith('[') && !textContent.startsWith('【');
+
+        if (hasRealContent) {
+          if (description) {
+            messageContent += `AI分析: ${description}\n`;
+          }
+          const contentLimit = 4000;
+          messageContent += `\n文件原文:\n${textContent.substring(0, contentLimit)}\n`;
+          if (textContent.length > contentLimit) {
+            messageContent += `...(内容已截断，原文共${textContent.length}字)\n`;
+          }
+        } else if (description) {
+          messageContent += `内容描述: ${description}\n`;
         } else {
           messageContent += `请根据上下文理解这个${mediaType}。\n`;
         }

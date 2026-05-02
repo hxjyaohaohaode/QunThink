@@ -38,6 +38,18 @@ const ALLOWED_FILE_TYPES = {
   ]
 };
 
+const ALLOWED_EXTENSIONS = new Set([
+  'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg',
+  'pdf',
+  'txt', 'csv', 'md', 'xml', 'json', 'yaml', 'yml', 'toml',
+  'mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'quicktime',
+  'mp3', 'wav', 'm4a', 'aac', 'flac', 'wma',
+  'doc', 'docx',
+  'xls', 'xlsx',
+  'ppt', 'pptx',
+  'py', 'js', 'ts', 'jsx', 'tsx', 'html', 'css', 'java', 'c', 'cpp', 'go', 'rs'
+]);
+
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const MAX_FILES = 10;
 
@@ -186,10 +198,14 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (attachedFiles.length + files.length > MAX_FILES) return;
+    const allAllowedTypes = [...ALLOWED_FILE_TYPES.images, ...ALLOWED_FILE_TYPES.audio, ...ALLOWED_FILE_TYPES.video, ...ALLOWED_FILE_TYPES.documents];
     const validFiles = files.filter(file => {
       if (file.size > MAX_FILE_SIZE) return false;
-      const allAllowedTypes = [...ALLOWED_FILE_TYPES.images, ...ALLOWED_FILE_TYPES.audio, ...ALLOWED_FILE_TYPES.video, ...ALLOWED_FILE_TYPES.documents];
-      return allAllowedTypes.includes(file.type);
+      if (file.type && allAllowedTypes.includes(file.type)) return true;
+      const ext = file.name.split('.').pop()?.toLowerCase() || '';
+      if (ALLOWED_EXTENSIONS.has(ext)) return true;
+      if (!file.type || file.type === 'application/octet-stream') return true;
+      return false;
     });
     setAttachedFiles(prev => [...prev, ...validFiles]);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -200,13 +216,17 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   }, []);
 
   const getFileIcon = (file: File) => {
-    if (file.type.startsWith('image/')) return '🖼️';
-    if (file.type.startsWith('audio/')) return '🎵';
-    if (file.type.startsWith('video/')) return '🎬';
-    if (file.type.includes('pdf')) return '📄';
-    if (file.type.includes('word') || file.type.includes('document')) return '📝';
-    if (file.type.includes('excel') || file.type.includes('sheet')) return '📊';
-    if (file.type.includes('powerpoint') || file.type.includes('presentation')) return '📑';
+    const ext = file.name.split('.').pop()?.toLowerCase() || '';
+    const mimeType = file.type || '';
+    if (mimeType.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) return '🖼️';
+    if (mimeType.startsWith('audio/') || ['mp3', 'wav', 'm4a', 'aac', 'flac', 'wma', 'ogg'].includes(ext)) return '🎵';
+    if (mimeType.startsWith('video/') || ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv'].includes(ext)) return '🎬';
+    if (ext === 'pdf') return '📄';
+    if (['doc', 'docx'].includes(ext)) return '📝';
+    if (['xls', 'xlsx', 'csv'].includes(ext)) return '📊';
+    if (['ppt', 'pptx'].includes(ext)) return '�';
+    if (['txt', 'md', 'json', 'xml', 'yaml', 'yml', 'toml'].includes(ext)) return '📃';
+    if (['py', 'js', 'ts', 'jsx', 'tsx', 'html', 'css', 'java', 'c', 'cpp', 'go', 'rs'].includes(ext)) return '�';
     return '📁';
   };
 
@@ -472,7 +492,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
           ref={fileInputRef}
           type="file"
           multiple
-          accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv"
+          accept="image/*,audio/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.json,.xml,.yaml,.yml,.py,.js,.ts,.jsx,.tsx,.html,.css,.java,.c,.cpp,.go,.rs"
           onChange={handleFileSelect}
           className="hidden"
         />

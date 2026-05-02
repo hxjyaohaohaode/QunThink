@@ -15,9 +15,10 @@ const __dirname = path.dirname(__filename);
 const ALLOWED_MIME_TYPES = [
   'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp',
   'application/pdf',
-  'text/plain', 'text/csv', 'text/markdown', 'text/xml', 'text/json',
-  'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime',
-  'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp4', 'audio/aac', 'audio/flac',
+  'text/plain', 'text/csv', 'text/markdown', 'text/xml', 'application/json',
+  'text/yaml', 'text/x-yaml', 'application/x-toml',
+  'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-msvideo', 'video/x-ms-wmv', 'video/x-flv',
+  'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp4', 'audio/aac', 'audio/flac', 'audio/x-ms-wma',
   'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
@@ -55,10 +56,19 @@ const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();
+    const allowedExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg',
+      '.pdf', '.txt', '.csv', '.md', '.xml', '.json', '.yaml', '.yml', '.toml',
+      '.mp4', '.webm', '.ogg', '.mov', '.avi', '.mkv', '.flv', '.wmv',
+      '.mp3', '.wav', '.m4a', '.aac', '.flac', '.wma',
+      '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+      '.py', '.rs', '.go', '.java', '.c', '.cpp', '.ts', '.tsx', '.html', '.css'];
     if (DANGEROUS_EXTENSIONS.includes(ext)) {
       return cb(new Error('不允许上传可执行文件'));
     }
-    if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+    const mimeOk = ALLOWED_MIME_TYPES.includes(file.mimetype)
+      || !file.mimetype
+      || file.mimetype === 'application/octet-stream';
+    if (!mimeOk && !allowedExts.includes(ext)) {
       return cb(new Error('不支持的文件类型'));
     }
     cb(null, true);
