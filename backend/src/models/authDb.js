@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import crypto from 'crypto';
+import { isMongoEnabled, getMongoDb, MongoLow } from './mongoAdapter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,6 +19,29 @@ const defaultAuthData = {
 };
 
 export async function initAuthDb() {
+  if (isMongoEnabled()) {
+    const mongoDb = await getMongoDb();
+    const collection = mongoDb.collection('auth_data');
+    authDb = new MongoLow(collection, { id: 'main' }, defaultAuthData);
+
+    try {
+      await authDb.read();
+    } catch (err) {
+      console.warn(`⚠️ MongoDB 认证数据库读取失败: ${err.message}`);
+      authDb.data = JSON.parse(JSON.stringify(defaultAuthData));
+    }
+
+    for (const [key, value] of Object.entries(defaultAuthData)) {
+      if (authDb.data[key] === undefined) {
+        authDb.data[key] = JSON.parse(JSON.stringify(value));
+      }
+    }
+
+    await cleanupExpiredSessions();
+    console.log('✅ MongoDB 认证数据库初始化完成');
+    return authDb;
+  }
+
   const adapter = new JSONFile(authDbFile);
   authDb = new CustomLow(adapter, defaultAuthData);
   

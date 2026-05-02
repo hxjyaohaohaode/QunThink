@@ -28,6 +28,7 @@ import { rateLimiter, messageRateLimiter, fileRateLimiter, aiRateLimiter, queryR
 import { errorHandler } from './middleware/errorHandler.js';
 import { getUploadsDir, initDatabase } from './models/db.js';
 import { getAuthDb, initAuthDb } from './models/authDb.js';
+import { closeMongoConnection } from './models/mongoAdapter.js';
 import fs from 'fs/promises';
 import crypto from 'crypto';
 import { setupWebSocket } from './websocket/index.js';
@@ -495,7 +496,11 @@ process.on('SIGTERM', () => {
     console.log('HTTP server closed');
     wss.close(() => {
       console.log('WebSocket server closed');
-      process.exit(0);
+      closeMongoConnection().then(() => {
+        process.exit(0);
+      }).catch(() => {
+        process.exit(0);
+      });
     });
   });
   setTimeout(() => {
@@ -508,7 +513,11 @@ process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down...');
   server.close(() => {
     wss.close(() => {
-      process.exit(0);
+      closeMongoConnection().then(() => {
+        process.exit(0);
+      }).catch(() => {
+        process.exit(0);
+      });
     });
   });
 });

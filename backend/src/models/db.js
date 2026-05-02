@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import { Mutex } from 'async-mutex';
+import { isMongoEnabled, getMongoDb, MongoLow } from './mongoAdapter.js';
 
 const _writeTimestamps = new WeakMap();
 const _lastReadTimestamps = new WeakMap();
@@ -285,6 +286,22 @@ function createDefaultGroups() {
 }
 
 export async function initUserDatabase(userId) {
+  if (isMongoEnabled()) {
+    const mongoDb = await getMongoDb();
+    const collection = mongoDb.collection('users_data');
+    const existing = await collection.findOne({ userId });
+    if (!existing) {
+      const initialData = JSON.parse(JSON.stringify(defaultUserData));
+      initialData.groups = createDefaultGroups();
+      const mongoLow = new MongoLow(collection, { userId }, defaultUserData);
+      mongoLow.data = initialData;
+      await mongoLow.write();
+      userDbs.set(userId, mongoLow);
+      console.log(`✅ MongoDB: 用户 ${userId} 数据库初始化完成`);
+    }
+    return getUserDb(userId);
+  }
+
   const dbPath = getUserDbPath(userId);
   
   try {
@@ -297,7 +314,6 @@ export async function initUserDatabase(userId) {
     
     db.data.groups = createDefaultGroups();
     
-    // Use direct file write to avoid steno rename issues on Windows
     try {
       await fs.writeFile(dbPath, JSON.stringify(db.data, null, 2), 'utf-8');
       console.log(`✅ 用户数据库初始化完成: ${userId}`);
@@ -343,6 +359,55 @@ export async function getUserDb(userId) {
   if (userDbs.has(userId)) {
     const db = userDbs.get(userId);
     db._lastAccess = Date.now();
+    return db;
+  }
+
+  if (isMongoEnabled()) {
+    const mongoDb = await getMongoDb();
+    const collection = mongoDb.collection('users_data');
+    const db = new MongoLow(collection, { userId }, defaultUserData);
+
+    try {
+      await db.read();
+    } catch (err) {
+      console.warn(`⚠️ MongoDB 用户 ${userId} 数据读取失败: ${err.message}`);
+      db.data = JSON.parse(JSON.stringify(defaultUserData));
+    }
+
+    let needsWrite = false;
+    for (const [key, value] of Object.entries(defaultUserData)) {
+      if (db.data[key] === undefined) {
+        db.data[key] = JSON.parse(JSON.stringify(value));
+        needsWrite = true;
+      }
+    }
+
+    if (db.data.groups.length === 0) {
+      db.data.groups = createDefaultGroups();
+      needsWrite = true;
+    }
+
+    if (!db.data._indexes) {
+      db.data._indexes = { messagesByGroup: {} };
+      needsWrite = true;
+    }
+
+    for (const group of db.data.groups) {
+      if (group.last_message_at === undefined || group.last_message_preview === undefined) {
+        resetGroupActivity(db, group.id);
+        needsWrite = true;
+      }
+    }
+
+    if (needsWrite) {
+      await db.write();
+    }
+
+    userDbs.set(userId, db);
+    db._lastAccess = Date.now();
+    evictLeastRecentlyUsed();
+
+    console.log(`📖 [MongoDB] 用户 ${userId} 数据加载完成 - 消息: ${db.data.messages.length}, 群组: ${db.data.groups.length}`);
     return db;
   }
   
@@ -445,6 +510,15 @@ export async function migrateExistingData() {
 }
 
 export async function initDatabase() {
+  if (isMongoEnabled()) {
+    console.log('🍃 使用 MongoDB 作为数据存储后端');
+    await getMongoClient();
+    await initUserDatabase('default');
+    defaultDb = userDbs.get('default');
+    console.log('✅ MongoDB 数据库系统初始化完成');
+    return;
+  }
+
   try {
     await fs.access(dataDir);
     console.log('✅ 数据库目录已存在:', dataDir);
@@ -466,7 +540,7 @@ export async function initDatabase() {
   await initUserDatabase('default');
   defaultDb = userDbs.get('default');
 
-  console.log('✅ 数据库系统初始化完成');
+  console.log('✅ 数据库系统初始化完成 (lowdb)');
 }
 
 export function getDb() {
@@ -499,6 +573,17 @@ export function clearUserDbCache(userId) {
 }
 
 export async function listUserDatabases() {
+  if (isMongoEnabled()) {
+    try {
+      const mongoDb = await getMongoDb();
+      const docs = await mongoDb.collection('users_data').find({}, { projection: { userId: 1 } }).toArray();
+      return docs.map(d => d.userId);
+    } catch (error) {
+      console.warn('MongoDB listUserDatabases failed:', error.message);
+      return [];
+    }
+  }
+
   try {
     const files = await fs.readdir(usersDataDir);
     return files

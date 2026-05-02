@@ -7,7 +7,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import crypto from 'crypto';
 
 const router = express.Router();
-const SESSION_MAX_AGE = parseInt(process.env.SESSION_MAX_AGE) || 24 * 60 * 60 * 1000;
+const SESSION_MAX_AGE = parseInt(process.env.SESSION_MAX_AGE) || 30 * 24 * 60 * 60 * 1000;
 
 router.post('/sms/send', validateBody(smsSendSchema), asyncHandler(async (req, res) => {
   if (!isSmsConfigured()) {
@@ -107,7 +107,8 @@ router.post('/sms/verify', validateBody(smsVerifySchema), asyncHandler(async (re
 
     const isProduction = process.env.NODE_ENV === 'production';
     const sameSite = isProduction ? 'None' : 'Lax';
-    res.setHeader('Set-Cookie', `session_token=${token}; HttpOnly; Path=/; SameSite=${sameSite}; Max-Age=86400;${isProduction ? ' Secure;' : ''}`);
+    const maxAgeSeconds = Math.floor(SESSION_MAX_AGE / 1000);
+    res.setHeader('Set-Cookie', `session_token=${token}; HttpOnly; Path=/; SameSite=${sameSite}; Max-Age=${maxAgeSeconds};${isProduction ? ' Secure;' : ''}`);
 
     res.json({
       success: true,
