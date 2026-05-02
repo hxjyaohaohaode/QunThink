@@ -4,10 +4,11 @@ const { Pool } = pg;
 
 let pool = null;
 let initialized = false;
+let _connectionFailed = false;
 let initializing = null;
 
 export function isSupabaseEnabled() {
-  return !!process.env.SUPABASE_DB_URL;
+  return !!process.env.SUPABASE_DB_URL && !_connectionFailed;
 }
 
 export function isCloudDbEnabled() {
@@ -55,6 +56,7 @@ export async function getPool() {
       return pool;
     } catch (err) {
       console.error('❌ Supabase/PostgreSQL 连接失败:', err.message);
+      _connectionFailed = true;
       if (pool) {
         try { await pool.end(); } catch (e) {}
       }

@@ -36,9 +36,15 @@ export async function initAuthDb() {
       }
     }
 
-    await cleanupExpiredSessions();
-    console.log('✅ Supabase 认证数据库初始化完成');
-    return authDb;
+    try {
+      await cleanupExpiredSessions();
+      console.log('✅ Supabase 认证数据库初始化完成');
+      return authDb;
+    } catch (err) {
+      console.error(`❌ Supabase 认证数据库清理失败: ${err.message}`);
+      console.warn('⚠️ Supabase 不可用，回退到本地文件存储');
+      authDb = null;
+    }
   }
 
   if (isMongoEnabled()) {
@@ -59,9 +65,15 @@ export async function initAuthDb() {
       }
     }
 
-    await cleanupExpiredSessions();
-    console.log('✅ MongoDB 认证数据库初始化完成');
-    return authDb;
+    try {
+      await cleanupExpiredSessions();
+      console.log('✅ MongoDB 认证数据库初始化完成');
+      return authDb;
+    } catch (err) {
+      console.error(`❌ MongoDB 认证数据库初始化失败: ${err.message}`);
+      console.warn('⚠️ MongoDB 不可用，回退到本地文件存储');
+      authDb = null;
+    }
   }
 
   const adapter = new JSONFile(authDbFile);
@@ -137,12 +149,21 @@ export function generateSessionToken() {
 
 export async function cleanupExpiredSessions() {
   const db = getAuthDb();
-  await db.read();
+  try {
+    await db.read();
+  } catch (err) {
+    console.warn('[Auth] 读取会话数据失败:', err.message);
+    return;
+  }
   const now = new Date();
   const before = db.data.sessions.length;
   db.data.sessions = db.data.sessions.filter(s => new Date(s.expires_at) > now);
   if (db.data.sessions.length < before) {
-    await db.write();
-    console.log(`[Auth] Cleaned ${before - db.data.sessions.length} expired sessions`);
+    try {
+      await db.write();
+      console.log(`[Auth] Cleaned ${before - db.data.sessions.length} expired sessions`);
+    } catch (err) {
+      console.warn('[Auth] 写入会话数据失败:', err.message);
+    }
   }
 }
