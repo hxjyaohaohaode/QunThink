@@ -299,8 +299,13 @@ export async function initUserDatabase(userId) {
 
     if (pgLow.data.groups.length === 0) {
       pgLow.data.groups = createDefaultGroups();
-      await pgLow.write();
-      console.log(`✅ Supabase: 用户 ${userId} 数据库初始化完成`);
+      try {
+        await pgLow.write();
+        console.log(`✅ Supabase: 用户 ${userId} 数据库初始化完成`);
+      } catch (writeErr) {
+        console.error(`❌ Supabase 用户 ${userId} 数据写入失败: ${writeErr.message}`);
+        throw writeErr;
+      }
     }
 
     return getUserDb(userId);
@@ -580,17 +585,21 @@ export async function migrateExistingData() {
 export async function initDatabase() {
   if (isSupabaseEnabled()) {
     console.log('🐘 使用 Supabase/PostgreSQL 作为数据存储后端');
-    let pool = null;
+    let supabasePool = null;
     try {
-      pool = await getPool();
+      supabasePool = await getPool();
     } catch (err) {
       console.error('❌ Supabase 连接失败，将回退到本地存储:', err.message);
     }
-    if (pool) {
-      await initUserDatabase('default');
-      defaultDb = userDbs.get('default');
-      console.log('✅ Supabase/PostgreSQL 数据库系统初始化完成');
-      return;
+    if (supabasePool) {
+      try {
+        await initUserDatabase('default');
+        defaultDb = userDbs.get('default');
+        console.log('✅ Supabase/PostgreSQL 数据库系统初始化完成');
+        return;
+      } catch (err) {
+        console.error('❌ Supabase 初始化失败，将回退到本地存储:', err.message);
+      }
     }
     console.warn('⚠️ Supabase 不可用，回退到本地文件存储');
   }
