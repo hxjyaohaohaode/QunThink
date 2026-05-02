@@ -1,6 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
@@ -121,7 +122,7 @@ function toFileResponse(fileRecord) {
   return {
     ...fileRecord,
     original_name: fileRecord.filename,
-    url: `/api/files/${fileRecord.id}/download?group_id=${encodeURIComponent(fileRecord.group_id)}`,
+    url: `/api/files/${fileRecord.id}/download?token=${encodeURIComponent(fileRecord.download_token || '')}&group_id=${encodeURIComponent(fileRecord.group_id)}`,
     media_description: fileRecord.media_description || ''
   };
 }
@@ -361,6 +362,7 @@ router.post('/files/upload', (req, res, next) => {
       media_description: mediaDescription || '',
       search_description: searchDescription,
       search_tags: searchTags,
+      download_token: crypto.randomBytes(16).toString('hex'),
       parse_status: parseError ? 'error' : 'success',
       parse_error: parseError || null,
       annotate_error: annotateError || null,
@@ -473,7 +475,36 @@ router.post('/files/:id/analyze', async (req, res) => {
 
 router.get('/files/:id/download', async (req, res) => {
   const { id } = req.params;
+  const token = typeof req.query.token === 'string' ? req.query.token : undefined;
   const groupId = typeof req.query.group_id === 'string' ? req.query.group_id : undefined;
+
+  if (token) {
+    try {
+      const db = await req.getUserDb();
+      await db.read();
+      const file = db.data.files.find(f => f.id === id && f.download_token === token);
+      if (file) {
+        const safeFilePath = resolveStoredFilePath(file, req.userId || file.uploader_id || file.owner_user_id);
+        if (safeFilePath && fs.existsSync(safeFilePath)) {
+          const ext = path.extname(file.filename || '').toLowerCase();
+          const inlineTypes = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg',
+            '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac',
+            '.mp4', '.webm', '.mov', '.avi', '.mkv',
+            '.txt', '.md', '.csv', '.json', '.xml', '.pdf'];
+          const isInline = inlineTypes.includes(ext);
+          res.setHeader('Content-Type', file.mime_type || 'application/octet-stream');
+          res.setHeader('Content-Disposition', isInline ? 'inline' : 'attachment');
+          res.setHeader('Cache-Control', 'private, max-age=3600');
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          return res.sendFile(safeFilePath);
+        }
+      }
+      return res.status(404).json({ error: 'File not found' });
+    } catch (error) {
+      return res.status(500).json({ error: error.message });
+    }
+  }
+
   const { file, error, status } = await getAccessibleFileRecord(req, id, groupId);
   if (!file) {
     return res.status(status).json({ error });

@@ -4,13 +4,14 @@ import { safeLog } from '../../utils/logger.js';
 import path from 'path';
 import fs from 'fs/promises';
 
-const VISION_ANNOTATION_PROMPT = `请为这张图片生成搜索标注，用于在聊天系统中搜索。
+const VISION_ANNOTATION_PROMPT = `请仔细观察这张图片并生成搜索标注，用于聊天系统中检索。
 要求：
-1. 描述图片的主要内容、场景、物体、文字等关键信息（不超过40字）
-2. 提供3-8个搜索关键词标签，包括：物体、场景、颜色、情感、文字内容等
-格式严格如下（不要加其他内容）：
+1. 描述图片的主要内容、场景、物体、人物、动作、文字等关键信息（40字以内）
+2. 提供5-8个搜索关键词标签，要有区分度，包括：核心物体、场景类型、颜色、动作、氛围、图片类型等
+3. 如果图片中有文字，务必提取文字内容作为标签
+格式严格如下（不要加markdown、换行或额外说明）：
 描述:xxx
-标签:xxx,xxx,xxx`;
+标签:关键字1,关键字2,关键字3`;
 
 const MEDIA_ANNOTATION_PROMPT = `请为以下{mediaType}文件生成搜索标注，用于在聊天系统中搜索。
 根据文件名和文件大小推断可能的{mediaType}内容。
@@ -227,7 +228,16 @@ async function annotateWithVision(filePath, mimeType, fileName) {
       safeLog('warn', `视觉标注失败(${modelId})`, { error: error.message, fileName });
     }
   }
-  return null;
+
+  const ext = path.extname(fileName).toLowerCase();
+  const baseName = path.basename(fileName, ext);
+  const fallbackPrompt = `请根据文件名推断图片内容并生成搜索标注。文件名: ${baseName}，格式: ${ext}。结合文件名中的关键词推断图片主题。格式严格如下：描述:xxx 标签:xxx,xxx,xxx`;
+  const fallbackContent = await callFastAPI([
+    { role: 'system', content: '你是一个文件搜索标注助手。根据文件名推断图片内容，生成搜索标注。标签要具体、有区分度。' },
+    { role: 'user', content: fallbackPrompt }
+  ], 120, 5000);
+
+  return fallbackContent ? parseAnnotationResponse(fallbackContent) : null;
 }
 
 async function annotateWithMedia(fileName, fileSize, mediaType) {
@@ -407,7 +417,17 @@ async function generateImageDescription(filePath, mimeType, fileName) {
       safeLog('warn', `图片内容描述生成失败(${modelId})`, { error: error.message, fileName });
     }
   }
-  return null;
+
+  const ext = path.extname(fileName).toLowerCase();
+  const baseName = path.basename(fileName, ext);
+  const sizeLabel = formatFileSize((await fs.stat(filePath)).size);
+  const fallbackPrompt = `请根据文件名推断这张图片的可能内容和用途。文件名: ${baseName}，格式: ${ext}，大小: ${sizeLabel}。请用自然语言简洁描述，50字以内。`;
+  const fallbackContent = await callFastAPI([
+    { role: 'system', content: '你是一个图片内容分析助手。根据文件名推断图片内容，生成简洁描述。' },
+    { role: 'user', content: fallbackPrompt }
+  ], 120, 5000);
+
+  return fallbackContent && fallbackContent.trim().length > 0 ? fallbackContent.trim() : null;
 }
 
 async function generateAudioDescription(fileName, fileSize) {
@@ -549,17 +569,47 @@ export async function generateMediaDescription(filePath, mimeType, fileName, fil
     const sizeStr = formatFileSize(fileSize);
     const baseName = path.basename(fileName, ext);
     if (isImage) {
-      description = `[图片文件: ${baseName}, 格式: ${ext}, 大小: ${sizeStr}]`;
+      description = `一张名为"${baseName}"的${ext}格式图片，文件大小约${sizeStr}`;
     } else if (isAudio) {
-      description = `[音频文件: ${baseName}, 格式: ${ext}, 大小: ${sizeStr}]`;
+      description = `一个名为"${baseName}"的${ext}格式音频文件，文件大小约${sizeStr}`;
     } else if (isVideo) {
-      description = `[视频文件: ${baseName}, 格式: ${ext}, 大小: ${sizeStr}]`;
+      description = `一个名为"${baseName}"的${ext}格式视频文件，文件大小约${sizeStr}`;
     } else {
-      description = `[文件: ${baseName}, 大小: ${sizeStr}]`;
+      description = `一个名为"${baseName}"的文件，文件大小约${sizeStr}`;
     }
   }
 
   return description;
+}
+
+async function refineImageAnnotation(annotation, fileName, fileSize) {
+  const sizeStr = fileSize > 1024 * 1024
+    ? `${(fileSize / (1024 * 1024)).toFixed(1)}MB` : `${(fileSize / 1024).toFixed(0)}KB`;
+  const ext = path.extname(fileName).toLowerCase();
+  const baseName = path.basename(fileName, ext);
+
+  const refinePrompt = `视觉模型给出了以下分析结果：
+描述: ${annotation.description}
+标签: ${annotation.tags.join(', ')}
+
+附加信息：
+文件名: ${baseName}
+文件格式: ${ext}
+文件大小: ${sizeStr}
+
+请结合文件名和视觉结果，修正或优化搜索标注：
+1. 如果文件名提供了额外线索（如"截图"、"产品图"、"会议"等），请融入描述中
+2. 优化标签，确保包含文件名中的核心关键词
+格式严格如下：
+描述:xxx
+标签:xxx,xxx,xxx`;
+
+  const content = await callFastAPI([
+    { role: 'system', content: '你是搜索标注精炼助手。结合视觉分析和文件名，产出更准确的标注。' },
+    { role: 'user', content: refinePrompt }
+  ], 150, 5000);
+
+  return content ? parseAnnotationResponse(content) : null;
 }
 
 export async function annotateFile(filePath, mimeType, fileName, fileSize, parsedContent) {
@@ -575,6 +625,10 @@ export async function annotateFile(filePath, mimeType, fileName, fileSize, parse
 
   if (isImage) {
     annotation = await annotateWithVision(filePath, mimeType, fileName);
+    if (annotation && annotation.description) {
+      const refined = await refineImageAnnotation(annotation, fileName, fileSize);
+      if (refined) annotation = refined;
+    }
   } else if (isAudio) {
     annotation = await annotateWithMedia(fileName, fileSize, '音频');
     if (!annotation && hasTextContent) {

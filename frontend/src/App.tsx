@@ -380,6 +380,7 @@ function App() {
   const navigateToView = useCallback((view: MobileView) => {
     prevViewRef.current = mobileViewRef.current;
     setMobileView(view);
+    window.history.pushState({ mobileView: view }, '', '');
   }, []);
 
   const handleMobileSelectGroup = useCallback((groupId: string) => {
@@ -400,6 +401,7 @@ function App() {
     } else {
       const { selectGroup } = useGroupsStore.getState();
       selectGroup('');
+      setMobileTab('chats');
       navigateToView('main');
     }
   }, [mobileView, navigateToView]);
@@ -557,6 +559,15 @@ function AppContent({
       }
     }
   }, []);
+
+  useEffect(() => {
+    window.history.replaceState({ mobileView: 'main' }, '', '');
+    const handlePopState = () => {
+      handleMobileBack();
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [handleMobileBack]);
 
   return (
     <div className="h-dvh bg-bg-primary text-text-primary overflow-hidden">

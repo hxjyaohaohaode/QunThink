@@ -33,7 +33,7 @@ export function SettingsPage() {
   const totalAIModels = AI_LIST.length;
   const nonChatModels = ['mimo_tts', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'];
   const chatAIMembers = aiMembers.filter(id => !nonChatModels.includes(id as string));
-  const notInGroups = AI_LIST.filter(id => !aiMembers.includes(id as string));
+  const notInGroups = AI_LIST.filter(id => !aiMembers.includes(id as string) && !nonChatModels.includes(id as string));
   const personaEntries = Object.entries(personas);
 
   useEffect(() => {

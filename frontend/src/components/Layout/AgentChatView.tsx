@@ -154,6 +154,31 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
     return () => { isCancelled = true; };
   }, [agentId]);
 
+  const getLocalSuggestions = useCallback((isInitial: boolean): string[] => {
+    if (!agent) return [];
+    const desc = agent.description || '';
+    const name = agent.name || '';
+    if (isInitial) {
+      if (desc.includes('编程') || desc.includes('代码') || desc.includes('开发')) {
+        return ['帮我写一个实用的代码示例', '这个技术栈有哪些最佳实践？', '帮我分析一下常见的架构模式'];
+      }
+      if (desc.includes('写作') || desc.includes('文案') || desc.includes('创作')) {
+        return ['帮我写一篇关于这个主题的文章', '能换个风格再写一版吗？', '给我一些创意灵感和方向'];
+      }
+      if (desc.includes('翻译') || desc.includes('语言')) {
+        return ['帮我翻译这段内容', '解释一下这个词的用法和语境', '帮我纠正这段话的语法错误'];
+      }
+      if (desc.includes('健身') || desc.includes('运动') || desc.includes('健康')) {
+        return ['帮我制定一个适合我的训练计划', '有哪些适合初学者的动作？', '如何科学地避免运动损伤？'];
+      }
+      if (desc.includes('学习') || desc.includes('教育') || desc.includes('考试')) {
+        return ['帮我梳理一下这个领域的知识框架', '有哪些重点和难点需要掌握？', '给我出几道练习题检验一下'];
+      }
+      return [`你能帮我做什么？介绍一下你的功能`, `${name}有什么独特的优势？`, '给我一个具体的使用场景'];
+    }
+    return ['能详细解释一下吗？', '有其他方案吗？', '能举个例子吗？'];
+  }, [agent]);
+
   useEffect(() => {
     if (!agent || !agent.enable_suggestions || !messagesLoaded) return;
 
@@ -163,10 +188,16 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
       setLoadingSuggestions(true);
       fetchAgentSuggestions(agentId).then(suggestions => {
         if (isCancelled || !mountedRef.current) return;
+        if (suggestions.length === 0) {
+          suggestions = getLocalSuggestions(true);
+        }
         setInitialSuggestions(suggestions);
         setLoadingSuggestions(false);
       }).catch(() => {
-        if (!isCancelled && mountedRef.current) setLoadingSuggestions(false);
+        if (isCancelled && mountedRef.current) {
+          setInitialSuggestions(getLocalSuggestions(true));
+          setLoadingSuggestions(false);
+        }
       });
       return () => { isCancelled = true; };
     }
@@ -179,12 +210,21 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
         setLoadingSuggestions(true);
         fetchAgentSuggestions(agentId).then(suggestions => {
           if (isCancelled || !mountedRef.current) return;
+          if (suggestions.length === 0) {
+            suggestions = getLocalSuggestions(false);
+          }
           if (suggestions.length > 0) {
             setActiveSuggestions({ msgId: lastFinishedAgentMsgId, items: suggestions });
           }
           setLoadingSuggestions(false);
         }).catch(() => {
-          if (!isCancelled && mountedRef.current) setLoadingSuggestions(false);
+          if (isCancelled && mountedRef.current) {
+            const fallback = getLocalSuggestions(false);
+            if (fallback.length > 0) {
+              setActiveSuggestions({ msgId: lastFinishedAgentMsgId, items: fallback });
+            }
+            setLoadingSuggestions(false);
+          }
         });
         return () => { isCancelled = true; };
       }
