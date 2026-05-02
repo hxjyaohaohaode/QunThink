@@ -19,6 +19,7 @@ import { ConnectionStatus } from './components/Layout/ConnectionStatus';
 import { SplashScreen } from './components/Layout/SplashScreen';
 import { LoginPage } from './components/Layout/LoginPage';
 import { ChatHeader, MessageList, MessageInput } from './components/Chat';
+import { ObserverControlPanel } from './components/Chat/ObserverControlPanel';
 import { GroupInfoPage } from './components/Chat/GroupInfoPage';
 import { ErrorBoundary } from './components/Common/ErrorBoundary';
 import { PWAInstallPrompt } from './components/Common/PWAInstallPrompt';
@@ -586,7 +587,11 @@ function AppContent({
               <div className="w-full flex flex-col h-full">
                 <ChatHeader showGroupInfoButton={true} />
                 <MessageList />
-                <MessageInput />
+                {currentGroup.is_ai_private ? (
+                  <ObserverControlPanel groupId={currentGroup.id} topic={currentGroup.topic || currentGroup.description} />
+                ) : (
+                  <MessageInput />
+                )}
               </div>
             </div>
           ) : (
@@ -688,7 +693,11 @@ function AppContent({
             <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
               <MessageList />
             </div>
-            <MessageInput />
+            {currentGroup.is_ai_private ? (
+              <ObserverControlPanel groupId={currentGroup.id} topic={currentGroup.topic || currentGroup.description} />
+            ) : (
+              <MessageInput />
+            )}
           </div>
         )}
 

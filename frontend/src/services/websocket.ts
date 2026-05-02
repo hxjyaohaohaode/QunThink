@@ -185,7 +185,7 @@ async function fetchMissedMessages(groupId: string) {
       let addedCount = 0;
       let finalizedCount = 0;
       
-      messages.forEach((msg: { id: string; group_id: string; sender_type: string; sender_id?: string; content: string; content_type: string; created_at: string; reply_to?: string; reply_to_ids?: string[]; metadata?: Record<string, unknown>; is_streaming?: boolean }) => {
+      messages.forEach((msg: { id: string; group_id: string; sender_type: string; sender_id?: string; content: string; content_type: string; created_at: string; reply_to?: string | string[]; reply_to_ids?: string[]; metadata?: Record<string, unknown>; is_streaming?: boolean }) => {
         if (streamingIds.has(msg.id)) {
           messagesStore.finalizeStreamMessage(
             groupId,

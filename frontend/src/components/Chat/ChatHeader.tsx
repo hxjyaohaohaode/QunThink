@@ -33,6 +33,7 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
   const [showDebatePanel, setShowDebatePanel] = useState(false);
   const [showGroupInfo, setShowGroupInfo] = useState(false);
   const [autonomousRunning, setAutonomousRunning] = useState(false);
+  const [autonomousPaused, setAutonomousPaused] = useState(false);
   const [debateLevelAnim, setDebateLevelAnim] = useState<number | null>(null);
 
   const isPrivateChat = currentGroup?.is_private === true;
@@ -116,6 +117,7 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
       const result = await stopAutonomousChat(currentGroup.id);
       if (import.meta.env.DEV) console.log('停止自主对话结果:', result);
       setAutonomousRunning(false);
+      setAutonomousPaused(false);
       setTypingAI(currentGroup.id, null);
     } catch (error) {
       console.error('停止自主对话失败:', error);
@@ -147,8 +149,12 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
   };
 
   const handleToggleAutonomous = () => {
-    if (autonomousRunning) {
-      handleStopAutonomousChat();
+    if (autonomousRunning && !autonomousPaused) {
+      setAutonomousPaused(true);
+      updateChatStatus(currentGroup!.id, { isRunning: true, currentSpeaker: null, status: 'paused' });
+    } else if (autonomousPaused) {
+      setAutonomousPaused(false);
+      updateChatStatus(currentGroup!.id, { isRunning: true, currentSpeaker: null, status: 'running' });
     } else {
       setShowTopicModal(true);
     }
@@ -230,21 +236,41 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
                 <button
                   onClick={handleToggleAutonomous}
                   disabled={actionLoading}
-                  aria-label={autonomousRunning ? '停止AI自主对话' : '开始AI自主对话'}
+                  aria-label={autonomousRunning ? (autonomousPaused ? '恢复AI自主对话' : '暂停AI自主对话') : '开始AI自主对话'}
                   className="p-2 rounded-lg hover:bg-sidebar-hover transition-colors text-text-secondary hover:text-text-primary flex items-center gap-1"
-                  title={autonomousRunning ? '停止AI自主对话' : '开始AI自主对话'}
+                  title={autonomousRunning ? (autonomousPaused ? '恢复AI自主对话' : '暂停AI自主对话') : '开始AI自主对话'}
                 >
-                  {autonomousRunning ? (
-                    <div className="w-4 h-4 flex items-center justify-center">
-                      <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
-                    </div>
+                  {autonomousRunning && !autonomousPaused ? (
+                    <svg className="w-4 h-4 text-amber-500" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+                    </svg>
+                  ) : autonomousPaused ? (
+                    <svg className="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+                    </svg>
                   ) : (
                     <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                       <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
                     </svg>
                   )}
-                  <span className="text-xs hidden sm:inline">{autonomousRunning ? '停止' : 'AI对话'}</span>
+                  <span className="text-xs hidden sm:inline">
+                    {autonomousRunning ? (autonomousPaused ? '继续' : '暂停') : 'AI对话'}
+                  </span>
                 </button>
+                {autonomousRunning && (
+                  <button
+                    onClick={handleStopAutonomousChat}
+                    disabled={actionLoading}
+                    aria-label="停止AI自主对话"
+                    className="p-2 rounded-lg hover:bg-sidebar-hover transition-colors text-text-secondary hover:text-red-500 flex items-center gap-1"
+                    title="停止AI自主对话"
+                  >
+                    <div className="w-4 h-4 flex items-center justify-center">
+                      <div className="w-2.5 h-2.5 rounded-sm bg-red-500"></div>
+                    </div>
+                    <span className="text-xs hidden sm:inline">停止</span>
+                  </button>
+                )}
 
                 <button
                   onClick={() => setShowDebatePanel(true)}

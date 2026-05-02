@@ -77,12 +77,13 @@ export function MessageInput() {
   const isNearLimit = charCount > MAX_CHARS * 0.9;
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const mentionMenuRef = useRef<HTMLDivElement>(null);
   const sendingRef = useRef(false);
   const mentionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { currentGroup, chatStatus } = useGroupsStore();
   const { sendMessage, messages, sending } = useMessagesStore();
-  const { replyingTo, setReplyingTo, typingIndicators } = useUIStore();
+  const { replyingTo, clearReplyingTo, removeReplyingTo, typingIndicators } = useUIStore();
   const connectionStatus = useUIStore(state => state.connectionStatus);
 
   const currentGroupAIs = useMemo(() => {
@@ -128,9 +129,9 @@ export function MessageInput() {
   const isAIPrivateChat = currentGroup?.is_ai_private === true || currentGroup?.type === 'ai_private';
   const isUserPrivateChat = currentGroup?.is_private === true && !isAIPrivateChat && currentGroup?.ai_members?.length === 1;
 
-  const replyToMessage = replyingTo && currentGroup
-    ? messages[currentGroup.id]?.find(m => m.id === replyingTo)
-    : null;
+  const replyToMessages = replyingTo.length > 0 && currentGroup
+    ? replyingTo.map(id => messages[currentGroup.id]?.find(m => m.id === id)).filter(Boolean)
+    : [];
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -211,12 +212,6 @@ export function MessageInput() {
     };
   }, []);
 
-  useEffect(() => {
-    if (replyingTo && textareaRef.current) {
-      textareaRef.current.focus();
-    }
-  }, [replyingTo]);
-
   const closeMentions = useCallback(() => {
     setIsClosing(true);
     if (mentionTimeoutRef.current) {
@@ -227,6 +222,27 @@ export function MessageInput() {
       setIsClosing(false);
     }, 150);
   }, []);
+
+  useEffect(() => {
+    if (!showMentions) return;
+    const handleClickOutside = (e: Event) => {
+      if (mentionMenuRef.current && !mentionMenuRef.current.contains(e.target as Node)) {
+        closeMentions();
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('touchstart', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('touchstart', handleClickOutside);
+    };
+  }, [showMentions, closeMentions]);
+
+  useEffect(() => {
+    if (replyingTo.length > 0 && textareaRef.current) {
+      textareaRef.current.focus();
+    }
+  }, [replyingTo]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
@@ -411,14 +427,14 @@ export function MessageInput() {
       const result = await sendMessage(
         currentGroup.id,
         contentToSend,
-        replyingTo || undefined,
+        replyingTo.length > 0 ? replyingTo : undefined,
         readyAttachments.length > 0 ? readyAttachments : undefined
       );
       if (result.success) {
         setInput('');
         setAttachments([]);
         setLastFailedContent(null);
-        setReplyingTo(null);
+        clearReplyingTo();
         setShowSendSuccess(true);
         setTimeout(() => setShowSendSuccess(false), 1500);
       } else {
@@ -433,7 +449,7 @@ export function MessageInput() {
     } finally {
       sendingRef.current = false;
     }
-  }, [currentGroup, hasPendingUploads, input, readyAttachments, replyingTo, sendMessage, sending, setReplyingTo, uploading]);
+  }, [currentGroup, hasPendingUploads, input, readyAttachments, replyingTo, sendMessage, sending, clearReplyingTo, uploading]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
@@ -446,9 +462,7 @@ export function MessageInput() {
     }
   }, [handleSend, closeMentions]);
 
-  const handleCancelReply = () => {
-    setReplyingTo(null);
-  };
+
 
   const filteredAIs = currentGroupAIs.filter(
     (ai) => !mentionFilter || 
@@ -492,26 +506,38 @@ export function MessageInput() {
         </div>
       )}
       <>
-        {replyToMessage && (
-          <div className="flex items-center gap-2 mb-3 px-3 py-2 bg-bg-surface2 rounded-xl border-l-2 border-l-accent">
-            <div 
-              className="w-1 h-8 rounded-full"
-              style={{ backgroundColor: AI_COLORS[replyToMessage.sender_id || 'system'] || '#999' }}
-            />
-            <div className="flex-1 min-w-0">
-              <div className="text-caption text-text-muted">
-                回复 {AI_NAMES[replyToMessage.sender_id || 'system'] || replyToMessage.sender_id || '未知'}
+        {replyToMessages.length > 0 && (
+          <div className="flex flex-col gap-1 mb-3">
+            {replyToMessages.map((msg, idx) => (
+              <div key={msg!.id} className="flex items-center gap-2 px-3 py-2 bg-bg-surface2 rounded-xl border-l-2 border-l-accent">
+                <div
+                  className="w-1 h-8 rounded-full"
+                  style={{ backgroundColor: AI_COLORS[msg!.sender_id || 'system'] || '#999' }}
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="text-caption text-text-muted">
+                    引用 {idx + 1} · {AI_NAMES[msg!.sender_id || 'system'] || msg!.sender_id || '未知'}
+                  </div>
+                  <div className="text-caption text-text-secondary truncate">
+                    {(msg!.content || '').substring(0, 40)}{(msg!.content || '').length > 40 ? '...' : ''}
+                  </div>
+                </div>
+                <button
+                  onClick={() => removeReplyingTo(msg!.id)}
+                  className="p-1 hover:bg-bg-surface3 rounded text-text-muted hover:text-text-primary transition-colors flex-shrink-0"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
               </div>
-              <div className="text-caption text-text-secondary truncate">
-                {(replyToMessage.content || '').substring(0, 50)}{(replyToMessage.content || '').length > 50 ? '...' : ''}
-              </div>
-            </div>
-            <button
-              onClick={handleCancelReply}
-              className="p-1 hover:bg-bg-surface3 rounded text-text-muted hover:text-text-primary transition-colors"
-            >
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-            </button>
+            ))}
+            {replyToMessages.length > 1 && (
+              <button
+                onClick={clearReplyingTo}
+                className="self-end text-[10px] text-text-muted hover:text-red-500 transition-colors px-1"
+              >
+                清除全部引用
+              </button>
+            )}
           </div>
         )}
 
@@ -606,6 +632,7 @@ export function MessageInput() {
 
             {showMentions && (filteredAIs.length > 0 || showMentionAll) && (
               <div 
+                ref={mentionMenuRef}
                 className={`absolute left-0 right-0 bg-bg-surface border border-border rounded-xl shadow-2xl z-50 overflow-hidden ${
                   isMobile 
                     ? 'bottom-full mb-2 max-h-[40vh]' 

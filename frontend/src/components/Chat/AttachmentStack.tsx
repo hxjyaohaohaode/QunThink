@@ -34,18 +34,71 @@ export function formatFileSize(bytes: number): string {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(1)}GB`;
 }
 
-export function getFileTypeIcon(type: string): { icon: string; color: string } {
-  if (type.startsWith('image/')) return { icon: '🖼️', color: '#10b981' };
-  if (type.startsWith('video/')) return { icon: '🎬', color: '#f59e0b' };
-  if (type.startsWith('audio/')) return { icon: '🎵', color: '#8b5cf6' };
-  if (type.includes('pdf')) return { icon: '📄', color: '#ef4444' };
-  if (type.includes('word') || type.includes('document') || type.includes('doc')) return { icon: '📝', color: '#3b82f6' };
-  if (type.includes('excel') || type.includes('spreadsheet') || type.includes('xls')) return { icon: '📊', color: '#22c55e' };
-  if (type.includes('powerpoint') || type.includes('presentation') || type.includes('ppt')) return { icon: '📽️', color: '#f97316' };
-  if (type.includes('zip') || type.includes('rar') || type.includes('7z') || type.includes('tar') || type.includes('gz')) return { icon: '🗜️', color: '#6b7280' };
-  if (type.includes('text') || type.includes('json') || type.includes('xml') || type.includes('csv')) return { icon: '📃', color: '#06b6d4' };
-  if (type.includes('javascript') || type.includes('typescript') || type.includes('python') || type.includes('java') || type.includes('html') || type.includes('css')) return { icon: '💻', color: '#a855f7' };
-  return { icon: '📎', color: '#6b7280' };
+export function getFileTypeIcon(type: string): { icon: string; color: string; svg: (size?: number) => JSX.Element } {
+  const size = 24;
+  const svgs: Record<string, () => JSX.Element> = {
+    image: () => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><circle cx="8.5" cy="8.5" r="1.5" /><polyline points="21,15 16,10 5,21" />
+      </svg>
+    ),
+    video: () => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+        <polygon points="23,7 16,12 23,17 23,7" /><rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+      </svg>
+    ),
+    audio: () => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9 18V5l12-2v13" /><circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
+      </svg>
+    ),
+    pdf: () => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14,2 14,8 20,8" /><line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="16" y2="17" /><line x1="8" y1="9" x2="10" y2="9" />
+      </svg>
+    ),
+    doc: () => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14,2 14,8 20,8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><polyline points="10,9 9,9 8,9" />
+      </svg>
+    ),
+    xls: () => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14,2 14,8 20,8" /><line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="16" y2="17" /><path d="M12 9L8 13" />
+      </svg>
+    ),
+    ppt: () => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#f97316" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14,2 14,8 20,8" /><rect x="8" y="12" width="8" height="5" rx="1" /><line x1="10" y1="15" x2="14" y2="15" />
+      </svg>
+    ),
+    archive: () => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="21,8 21,21 3,21 3,8" /><rect x="1" y="3" width="22" height="5" /><line x1="10" y1="12" x2="14" y2="12" />
+      </svg>
+    ),
+    code: () => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#a855f7" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="16,18 22,12 16,6" /><polyline points="8,6 2,12 8,18" />
+      </svg>
+    ),
+    file: () => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="#6b7280" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14,2 14,8 20,8" />
+      </svg>
+    ),
+  };
+
+  if (type.startsWith('image/')) return { icon: 'image', color: '#10b981', svg: svgs.image };
+  if (type.startsWith('video/')) return { icon: 'video', color: '#f59e0b', svg: svgs.video };
+  if (type.startsWith('audio/')) return { icon: 'audio', color: '#8b5cf6', svg: svgs.audio };
+  if (type.includes('pdf')) return { icon: 'pdf', color: '#ef4444', svg: svgs.pdf };
+  if (type.includes('word') || type.includes('document') || type.includes('doc')) return { icon: 'doc', color: '#3b82f6', svg: svgs.doc };
+  if (type.includes('excel') || type.includes('spreadsheet') || type.includes('xls')) return { icon: 'xls', color: '#22c55e', svg: svgs.xls };
+  if (type.includes('powerpoint') || type.includes('presentation') || type.includes('ppt')) return { icon: 'ppt', color: '#f97316', svg: svgs.ppt };
+  if (type.includes('zip') || type.includes('rar') || type.includes('7z') || type.includes('tar') || type.includes('gz')) return { icon: 'archive', color: '#6b7280', svg: svgs.archive };
+  if (type.includes('javascript') || type.includes('typescript') || type.includes('python') || type.includes('java') || type.includes('html') || type.includes('css')) return { icon: 'code', color: '#a855f7', svg: svgs.code };
+  return { icon: 'file', color: '#6b7280', svg: svgs.file };
 }
 
 function isImageType(type: string) { return type?.startsWith('image/'); }
@@ -261,7 +314,7 @@ const LightboxModal: React.FC<{
           )}
           {!isImageType(current.type) && !isVideoType(current.type) && !isAudioType(current.type) && (
             <div className="flex flex-col items-center gap-4 p-8 bg-white/10 rounded-2xl max-w-[90vw] max-h-[85vh] overflow-auto">
-              <span className="text-5xl">{getFileTypeIcon(current.type).icon}</span>
+              {getFileTypeIcon(current.type).svg()}
               <p className="text-white text-sm font-medium max-w-[300px] truncate">{current.name}</p>
               <p className="text-white/60 text-xs">{formatFileSize(current.size)}</p>
               {current.media_description && (
@@ -349,7 +402,7 @@ const LightboxModal: React.FC<{
                         <img src={sanitizeUrl(att.url)} alt="" className="w-full h-full object-cover" draggable={false} />
                       ) : (
                         <div className="w-full h-full bg-white/10 flex items-center justify-center text-lg">
-                          {getFileTypeIcon(att.type).icon}
+                        {getFileTypeIcon(att.type).svg()}
                         </div>
                       )}
                     </button>
@@ -909,8 +962,8 @@ export const AttachmentStack: React.FC<AttachmentStackProps> = ({
                         <img src={sanitizeUrl(attachment.url)} alt={attachment.name || '附件图片'} className="pointer-events-none h-full w-full select-none object-cover" draggable={false} loading="lazy" />
                       ) : (
                         <div className="flex h-full w-full flex-col items-center justify-center bg-gradient-to-br from-bg-surface2 via-white to-bg-surface3 p-3">
-                          <div className="flex h-12 w-12 items-center justify-center rounded-2xl text-3xl shadow-sm" style={{ backgroundColor: `${getFileTypeIcon(attachment.type).color}18` }}>
-                            {getFileTypeIcon(attachment.type).icon}
+                          <div className="flex h-12 w-12 items-center justify-center rounded-2xl" style={{ backgroundColor: `${getFileTypeIcon(attachment.type).color}18` }}>
+                            {getFileTypeIcon(attachment.type).svg()}
                           </div>
                           {attachment.media_description && !attachment.media_description.startsWith('[') && (
                             <p className="mt-2 line-clamp-3 text-center text-[9px] leading-3 text-text-secondary">{attachment.media_description}</p>

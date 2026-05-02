@@ -627,4 +627,32 @@ input[type="range"]::-moz-range-track {
     padding: 0.4rem 0.6rem;
     border-radius: 8px;
   }
+
+  .chat-item {
+    padding-left: 12px;
+    padding-right: 12px;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .chat-item:active {
+    background-color: rgba(108, 92, 231, 0.08);
+  }
+
+  .message-bubble {
+    -webkit-touch-callout: default;
+    -webkit-user-select: text;
+    user-select: text;
+  }
+}
+
+@media (display-mode: standalone) {
+  body {
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
 }

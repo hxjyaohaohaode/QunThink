@@ -70,10 +70,11 @@ export const AI_PERSONAS = {
     firstSpeakerTopics: ['推理', '思考', '不确定性', '复杂问题'],
     replyStyle: '使用思维链方法，逐步分析和推演问题。',
     typicalPhrases: [
-      '让我仔细思考一下。',
-      '从多角度来确定…',
-      '这背后可能有更深的。',
-      '综合考虑。'
+      '让我从不同角度看看',
+      '等一下我想想',
+      '嗯，这个说法值得推敲',
+      '其实也不一定是这样',
+      '有没有另外一种可能'
     ],
     expertise: ['深度推理', '复杂问题分析', '思维链推理', '不确定性处理'],
     speakingTraits: '喜欢深入思考后再发言，善于多角度分析，表达较为谨慎',
@@ -129,10 +130,11 @@ export const AI_PERSONAS = {
     firstSpeakerTopics: ['产品', '用户', '实践', '落地', '执行', '效率', '体验'],
     replyStyle: '说话直接，关注实际问题和可执行方案，注重结果。',
     typicalPhrases: [
-      '从实际角度看…',
-      '我觉得纠结这个没意义，关键是。',
-      '简单说，该怎么干。',
-      '等一下，这个方案不太行。'
+      '说实话',
+      '我觉得重点不是这个',
+      '直接说重点吧',
+      '这个方案不行，因为',
+      '有个更简单的办法'
     ],
     expertise: ['产品实践', '用户体验', '执行落地', '效率优化'],
     speakingTraits: '说话直接了当，不喜欢绕弯子，善于指出问题核心',
@@ -583,7 +585,169 @@ export const AI_PERSONAS = {
       frequencyPenalty: 0.1,
       presencePenalty: 0.1
     }
+  },
+  glm_4v_flash: {
+    id: 'glm_4v_flash',
+    name: 'GLM-4V-Flash',
+    color: '#22c55e',
+    avatar: null,
+    styleTag: '视觉识别',
+    keywords: ['视觉', '图片', '识别', '图像', '理解'],
+    style: '视觉识别',
+    personality: '专注于图像理解和视觉内容分析',
+    firstSpeakerTopics: [],
+    replyStyle: '对图片进行视觉分析和内容标注，不参与文本对话',
+    typicalPhrases: [],
+    expertise: ['图像识别', '视觉理解', '内容标注', '场景分析'],
+    speakingTraits: '仅用于图片内容识别标注，不参与群聊对话',
+    messageLength: 'short',
+    debateTendency: 'low',
+    questionProbability: 0,
+    silenceProbability: 1,
+    refusalProbability: 0,
+    speakingOrder: 0,
+    preferredRole: 'none',
+    customRoleName: '',
+    responseConfig: {
+      enabled: false,
+      responseFrequency: 0,
+      minDelay: 0,
+      maxDelay: 0,
+      activeHours: { start: 0, end: 0 },
+      maxResponsesPerConversation: 0,
+      cooldownBetweenResponses: 0
+    },
+    socialConfig: {
+      maxMessageLength: 500,
+      enableQuoting: false,
+      enableSocialFeedback: false,
+      quoteProbability: 0,
+      maxQuotesPerMessage: 0,
+      likeProbability: 0,
+      commentProbability: 0,
+      dislikeProbability: 0,
+      interactionProbability: 0
+    },
+    debateConfig: {
+      debateStyle: 'none',
+      preferredRole: 'none'
+    },
+    modelConfig: {
+      maxTokens: 500,
+      temperature: 0.20,
+      topP: 0.9,
+      frequencyPenalty: 0,
+      presencePenalty: 0
+    }
+  },
+  qwen_vl_plus: {
+    id: 'qwen_vl_plus',
+    name: 'Qwen-VL-Plus',
+    color: '#7c3aed',
+    avatar: null,
+    styleTag: '视觉语言',
+    keywords: ['视觉', '语言', '图像', '理解', '分析'],
+    style: '视觉语言',
+    personality: '结合视觉和语言能力进行综合分析',
+    firstSpeakerTopics: [],
+    replyStyle: '对图片进行视觉语言分析，不参与文本对话',
+    typicalPhrases: [],
+    expertise: ['图像理解', '视觉问答', '图文分析', 'OCR识别'],
+    speakingTraits: '仅用于图片内容分析和识别，不参与群聊对话',
+    messageLength: 'short',
+    debateTendency: 'low',
+    questionProbability: 0,
+    silenceProbability: 1,
+    refusalProbability: 0,
+    speakingOrder: 0,
+    preferredRole: 'none',
+    customRoleName: '',
+    responseConfig: {
+      enabled: false,
+      responseFrequency: 0,
+      minDelay: 0,
+      maxDelay: 0,
+      activeHours: { start: 0, end: 0 },
+      maxResponsesPerConversation: 0,
+      cooldownBetweenResponses: 0
+    },
+    socialConfig: {
+      maxMessageLength: 500,
+      enableQuoting: false,
+      enableSocialFeedback: false,
+      quoteProbability: 0,
+      maxQuotesPerMessage: 0,
+      likeProbability: 0,
+      commentProbability: 0,
+      dislikeProbability: 0,
+      interactionProbability: 0
+    },
+    debateConfig: {
+      debateStyle: 'none',
+      preferredRole: 'none'
+    },
+    modelConfig: {
+      maxTokens: 500,
+      temperature: 0.20,
+      topP: 0.9,
+      frequencyPenalty: 0,
+      presencePenalty: 0
+    }
+  },
+  qwen_omni: {
+    id: 'qwen_omni',
+    name: 'Qwen2.5-Omni-7B',
+    color: '#06b6d4',
+    avatar: null,
+    styleTag: '全模态分析师',
+    keywords: ['全模态', '视觉', '音频', '视频', '综合分析'],
+    style: '全模态分析师',
+    personality: '全局感知、跨模态融合、多维度分析',
+    firstSpeakerTopics: [],
+    replyStyle: '对图片、音频、视频进行全模态分析和标注，不参与文本对话',
+    typicalPhrases: [],
+    expertise: ['多模态分析', '视觉识别', '音频理解', '视频分析'],
+    speakingTraits: '仅用于内容识别标注，不参与群聊对话',
+    messageLength: 'short',
+    debateTendency: 'low',
+    questionProbability: 0,
+    silenceProbability: 1,
+    refusalProbability: 0,
+    speakingOrder: 0,
+    preferredRole: 'none',
+    customRoleName: '',
+    responseConfig: {
+      enabled: false,
+      responseFrequency: 0,
+      minDelay: 0,
+      maxDelay: 0,
+      activeHours: { start: 0, end: 0 },
+      maxResponsesPerConversation: 0,
+      cooldownBetweenResponses: 0
+    },
+    socialConfig: {
+      maxMessageLength: 500,
+      enableQuoting: false,
+      enableSocialFeedback: false,
+      quoteProbability: 0,
+      maxQuotesPerMessage: 0,
+      likeProbability: 0,
+      commentProbability: 0,
+      dislikeProbability: 0,
+      interactionProbability: 0
+    },
+    debateConfig: {
+      debateStyle: 'none',
+      preferredRole: 'none'
+    },
+    modelConfig: {
+      maxTokens: 500,
+      temperature: 0.20,
+      topP: 0.9,
+      frequencyPenalty: 0,
+      presencePenalty: 0
+    }
   }
 };
 
-export const AI_LIST = ['deepseek', 'deepseek_reasoner', 'mimo_flash', 'mimo_omni', 'mimo_tts', 'glm_air', 'glm_flash', 'glm_flashx', 'qwen_flash', 'qwen_turbo'];
+export const AI_LIST = ['deepseek', 'deepseek_reasoner', 'mimo_flash', 'mimo_omni', 'mimo_tts', 'glm_air', 'glm_flash', 'glm_flashx', 'qwen_flash', 'qwen_turbo', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'];

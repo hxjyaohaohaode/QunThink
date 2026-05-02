@@ -6,14 +6,14 @@ import { Group } from '../types';
 
 export type { Group };
 
-const GROUPS_STALE_TIME_MS = 15 * 1000;
+const GROUPS_STALE_TIME_MS = 5 * 1000;
 let groupsFetchPromise: Promise<void> | null = null;
 let lastGroupsFetchAt = 0;
 
 export interface ChatStatus {
   isRunning: boolean;
   currentSpeaker: string | null;
-  status: 'running' | 'stopped';
+  status: 'running' | 'stopped' | 'paused';
 }
 
 export interface DebateRole {

@@ -23,7 +23,7 @@ interface MessagesState {
   error: string | null;
   fetchMessages: (groupId: string) => Promise<void>;
   loadMoreMessages: (groupId: string) => Promise<void>;
-  sendMessage: (groupId: string, content: string, replyTo?: string, attachments?: MessageAttachment[]) => Promise<{ success: boolean; tempId: string; error?: string }>;
+  sendMessage: (groupId: string, content: string, replyTo?: string | string[], attachments?: MessageAttachment[]) => Promise<{ success: boolean; tempId: string; error?: string }>;
   retryMessage: (groupId: string, tempId: string) => Promise<{ success: boolean; error?: string }>;
   removeFailedMessage: (groupId: string, tempId: string) => void;
   deleteMessage: (messageId: string, groupId: string) => Promise<void>;
@@ -46,7 +46,7 @@ interface MessagesState {
   clearMessages: (groupId: string) => void;
   addStreamMessage: (groupId: string, messageId: string, senderId: string) => void;
   updateStreamMessage: (groupId: string, messageId: string, content: string, isDone: boolean) => void;
-  finalizeStreamMessage: (groupId: string, messageId: string, content: string, replyTo?: string, replyToIds?: string[]) => void;
+  finalizeStreamMessage: (groupId: string, messageId: string, content: string, replyTo?: string | string[], replyToIds?: string[]) => void;
 }
 
 const persistTimers: Record<string, ReturnType<typeof setTimeout>> = {};
@@ -283,7 +283,7 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
     }
   },
 
-  sendMessage: async (groupId: string, content: string, replyTo?: string, attachments?: MessageAttachment[]) => {
+  sendMessage: async (groupId: string, content: string, replyTo?: string | string[], attachments?: MessageAttachment[]) => {
     if (sendingGroups.get(groupId)) {
       return { success: false, tempId: '', error: '消息正在发送中' };
     }
@@ -826,7 +826,7 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
     });
   },
 
-  finalizeStreamMessage: (groupId: string, messageId: string, content: string, replyTo?: string, replyToIds?: string[]) => {
+  finalizeStreamMessage: (groupId: string, messageId: string, content: string, replyTo?: string | string[], replyToIds?: string[]) => {
     set(state => {
       const groupMessages = state.messages[groupId] || [];
       const existingIndex = groupMessages.findIndex(m => m.id === messageId);

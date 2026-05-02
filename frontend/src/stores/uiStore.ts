@@ -16,13 +16,16 @@ export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected';
 interface UIState {
   sidebarWidth: number;
   typingIndicators: TypingState;
-  replyingTo: string | null;
+  replyingTo: string[];
   connectionStatus: ConnectionStatus;
   connectionError: string | null;
   effectiveTheme: 'light' | 'dark';
   setSidebarWidth: (width: number) => void;
   setTyping: (groupId: string, aiId: string, isTyping: boolean) => void;
-  setReplyingTo: (messageId: string | null) => void;
+  setReplyingTo: (messageIds: string[]) => void;
+  addReplyingTo: (messageId: string) => void;
+  removeReplyingTo: (messageId: string) => void;
+  clearReplyingTo: () => void;
   clearAllTypingForGroup: (groupId: string) => void;
   clearAllTypingTimeouts: () => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
@@ -62,7 +65,7 @@ export const useUIStore = create<UIState>()(
     (set, get) => ({
       sidebarWidth: 256,
       typingIndicators: {},
-      replyingTo: null,
+      replyingTo: [],
       connectionStatus: 'disconnected',
       connectionError: null,
       effectiveTheme: computeEffectiveTheme(useThemeStore.getState().theme),
@@ -129,8 +132,26 @@ export const useUIStore = create<UIState>()(
         }
       },
 
-      setReplyingTo: (messageId: string | null) => {
-        set({ replyingTo: messageId });
+      setReplyingTo: (messageIds: string[]) => {
+        set({ replyingTo: messageIds });
+      },
+
+      addReplyingTo: (messageId: string) => {
+        set(state => ({
+          replyingTo: state.replyingTo.includes(messageId)
+            ? state.replyingTo
+            : [...state.replyingTo, messageId]
+        }));
+      },
+
+      removeReplyingTo: (messageId: string) => {
+        set(state => ({
+          replyingTo: state.replyingTo.filter(id => id !== messageId)
+        }));
+      },
+
+      clearReplyingTo: () => {
+        set({ replyingTo: [] });
       },
 
       clearAllTypingForGroup: (groupId: string) => {

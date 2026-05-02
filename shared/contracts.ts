@@ -82,7 +82,7 @@ export interface Comment {
   id: string;
   message_id: string;
   parent_id?: string;
-  reply_to?: string;
+  reply_to?: string | string[];
   sender_type: SenderType;
   sender_id?: string;
   content: string;
@@ -121,7 +121,7 @@ export interface Message {
   sender_id?: string;
   content: string;
   content_type: MessageContentType;
-  reply_to?: string;
+  reply_to?: string | string[];
   reply_to_ids?: string[];
   reply_to_message?: Message;
   reply_to_messages?: Message[];
@@ -171,7 +171,7 @@ export interface GroupSettingsInput {
 export interface MessageCreateInput {
   content: string;
   content_type?: MessageContentType;
-  reply_to?: string;
+  reply_to?: string | string[];
   metadata?: Record<string, unknown>;
   attachments?: MessageAttachment[];
 }

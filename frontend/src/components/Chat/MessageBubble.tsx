@@ -85,7 +85,7 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
   const { deleteMessage, editMessage, retryMessage, removeFailedMessage, updateMessage } = useMessagesStore();
   const { currentGroup } = useGroupsStore();
   const { personas } = usePersonasStore();
-  const { setReplyingTo } = useUIStore();
+  const { addReplyingTo } = useUIStore();
   const { contextMenu, handleContextMenu, handleLongPress, closeContextMenu } = useMessageContextMenu();
   const { confirm, ConfirmModal } = useConfirm();
   const { showToast, Toast } = useToast();
@@ -140,10 +140,11 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
   const nextMsg = currentMsgIndex >= 0 ? allMessages[currentMsgIndex + 1] : undefined;
   const isLastInGroup = !nextMsg || nextMsg.sender_type !== message.sender_type || nextMsg.sender_id !== message.sender_id;
 
-  const replyToMessage = useMemo(() =>
-    message.reply_to ? allMessages.find(m => m.id === message.reply_to) : null,
-    [message.reply_to, allMessages]
-  );
+  const replyToMessages = useMemo(() => {
+    if (!message.reply_to) return [];
+    const replyIds = Array.isArray(message.reply_to) ? message.reply_to : [message.reply_to];
+    return replyIds.map((id: string) => allMessages.find(m => m.id === id)).filter(Boolean);
+  }, [message.reply_to, allMessages]);
 
   const handleDelete = async () => {
     const confirmed = await confirm({ title: '删除消息', description: '确定要删除这条消息吗？', danger: true });
@@ -324,12 +325,13 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
             </div>
           )}
 
-          {replyToMessage && (
+          {replyToMessages.length > 0 && replyToMessages.map((replyTarget, idx) => (
             <div
+              key={replyTarget!.id}
               className={`mb-1.5 px-3 py-2 rounded-lg text-xs max-w-[300px] cursor-pointer hover:bg-opacity-80 transition-all quote-card ${isUser ? 'mr-2 bg-green-50/80 dark:bg-green-900/30 border-l-[3px] border-green-400' : 'ml-1 bg-bg-surface2 border-l-[3px] border-border'}`}
               onClick={(e) => {
                 e.stopPropagation();
-                const element = document.querySelector(`[data-message-id="${replyToMessage.id}"]`);
+                const element = document.querySelector(`[data-message-id="${replyTarget!.id}"]`);
                 if (element) {
                   element.scrollIntoView({ behavior: 'smooth', block: 'center' });
                   element.classList.add('highlight-message');
@@ -337,27 +339,30 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
               }}
             >
               <div className="flex items-center gap-1.5 mb-1">
+                {replyToMessages.length > 1 && (
+                  <span className="text-text-muted text-[9px] bg-bg-surface3 px-1 py-0.5 rounded">{idx + 1}/{replyToMessages.length}</span>
+                )}
                 <span className="text-text-muted text-[10px]"><svg className="w-2.5 h-2.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" /></svg></span>
                 <div
                   className="w-4 h-4 rounded-full flex items-center justify-center text-white text-[8px] shadow-sm overflow-hidden flex-shrink-0"
                   style={{
-                    backgroundColor: personas[replyToMessage.sender_id || '']?.avatar_url ? 'transparent' : (personas[replyToMessage.sender_id || '']?.color || AI_COLORS[replyToMessage.sender_id || 'system']),
-                    backgroundImage: personas[replyToMessage.sender_id || '']?.avatar_url ? `url(${sanitizeUrl(personas[replyToMessage.sender_id || '']?.avatar_url)})` : 'none',
+                    backgroundColor: personas[replyTarget!.sender_id || '']?.avatar_url ? 'transparent' : (personas[replyTarget!.sender_id || '']?.color || AI_COLORS[replyTarget!.sender_id || 'system']),
+                    backgroundImage: personas[replyTarget!.sender_id || '']?.avatar_url ? `url(${sanitizeUrl(personas[replyTarget!.sender_id || '']?.avatar_url)})` : 'none',
                     backgroundSize: 'cover',
                     backgroundPosition: 'center'
                   }}
                 >
-                  {!personas[replyToMessage.sender_id || '']?.avatar_url && (AI_AVATAR_LETTERS[replyToMessage.sender_id || 'system'])}
+                  {!personas[replyTarget!.sender_id || '']?.avatar_url && (AI_AVATAR_LETTERS[replyTarget!.sender_id || 'system'])}
                 </div>
-                <span style={{ color: personas[replyToMessage.sender_id || '']?.color || AI_COLORS[replyToMessage.sender_id || 'system'] }} className="font-semibold">
-                  {personas[replyToMessage.sender_id || '']?.name || AI_NAMES[replyToMessage.sender_id || ''] || replyToMessage.sender_id}
+                <span style={{ color: personas[replyTarget!.sender_id || '']?.color || AI_COLORS[replyTarget!.sender_id || 'system'] }} className="font-semibold">
+                  {personas[replyTarget!.sender_id || '']?.name || AI_NAMES[replyTarget!.sender_id || ''] || replyTarget!.sender_id}
                 </span>
               </div>
               <div className="text-text-secondary line-clamp-2 leading-relaxed pl-4 border-l-2 border-border">
-                {(replyToMessage.content || '').substring(0, 80)}{(replyToMessage.content || '').length > 80 ? '...' : ''}
+                {(replyTarget!.content || '').substring(0, 80)}{(replyTarget!.content || '').length > 80 ? '...' : ''}
               </div>
             </div>
-          )}
+          ))}
 
           <div className={`message-bubble ${isUser ? 'user-message rounded-2xl rounded-tr-sm' : 'ai-message rounded-2xl rounded-tl-sm'} ${showSendGlow ? 'message-send-glow' : ''}`}>
             {message.attachments && message.attachments.length > 0 && (
@@ -567,7 +572,7 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
           y={contextMenu.y}
           actions={[
             { label: '复制', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>, onClick: () => { try { if (navigator.clipboard) { navigator.clipboard.writeText(message.content); } else { const ta = document.createElement('textarea'); ta.value = message.content; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); } } catch {} } },
-            { label: '回复', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" /></svg>, onClick: () => { if (onReply) onReply(message.id); setReplyingTo(message.id); } },
+            { label: '回复', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" /></svg>, onClick: () => { if (onReply) onReply(message.id); addReplyingTo(message.id); } },
             ...(isUser ? [{ label: '编辑', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" /></svg>, onClick: handleEdit }] : []),
             ...(isUser ? [{ label: '删除', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.108 0 00-7.5 0" /></svg>, onClick: handleDelete, danger: true }] : []),
           ]}

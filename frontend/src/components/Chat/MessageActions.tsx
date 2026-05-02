@@ -41,7 +41,7 @@ export const MessageActions = React.memo(function MessageActions({
   const [isLikeAnimating, setIsLikeAnimating] = useState(false);
   const { likeMessage, unlikeMessage, dislikeMessage, undislikeMessage } = useMessagesStore();
   const { currentGroup } = useGroupsStore();
-  const { setReplyingTo } = useUIStore();
+  const { addReplyingTo, replyingTo, removeReplyingTo } = useUIStore();
   const { showToast } = useToast();
 
   const hasLiked = likedBy.includes('user') || likes.includes('user');
@@ -75,10 +75,16 @@ export const MessageActions = React.memo(function MessageActions({
     }
   }, [hasDisliked, currentGroup, messageId, dislikeMessage, undislikeMessage]);
 
+  const isReplying = replyingTo.includes(messageId);
+
   const handleReply = useCallback(() => {
     if (onReply) onReply();
-    setReplyingTo(messageId);
-  }, [onReply, setReplyingTo, messageId]);
+    if (isReplying) {
+      removeReplyingTo(messageId);
+    } else {
+      addReplyingTo(messageId);
+    }
+  }, [onReply, addReplyingTo, removeReplyingTo, messageId, isReplying]);
 
   const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(content);
@@ -125,7 +131,7 @@ export const MessageActions = React.memo(function MessageActions({
         </svg>
       </ActionButton>
 
-      <ActionButton onClick={handleReply} title="回复引用">
+      <ActionButton onClick={handleReply} title={isReplying ? '取消引用' : '回复引用'} active={isReplying} activeColor="text-accent">
         <svg className="w-4 h-4 md:w-3.5 md:h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
         </svg>

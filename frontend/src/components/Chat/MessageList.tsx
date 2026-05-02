@@ -86,7 +86,7 @@ const MessageItemWrapper = React.memo(({
 export function MessageList() {
   const { currentGroup } = useGroupsStore();
   const { messages, pagination, loading, batchDeleteMessages, clearAllMessages, loadMoreMessages, streamUpdateCounter } = useMessagesStore();
-  const { typingIndicators, setReplyingTo } = useUIStore();
+  const { typingIndicators, addReplyingTo } = useUIStore();
   const { scrollToMessageId, setScrollToMessageId } = useNavigationStore();
   const { confirm, ConfirmModal } = useConfirm();
   const { showToast, Toast } = useToast();
@@ -505,7 +505,7 @@ export function MessageList() {
             <MessageBubble 
               message={message}
               showTimeDivider={item.showTimeDivider}
-              onReply={() => !isMultiSelectMode && setReplyingTo(message.id)}
+              onReply={() => !isMultiSelectMode && addReplyingTo(message.id)}
               isMultiSelectMode={isMultiSelectMode}
               isDebateMode={isDebateMode}
             />
@@ -513,7 +513,7 @@ export function MessageList() {
         </div>
       </MessageItemWrapper>
     );
-  }, [selectedMessageIdsKey, isMultiSelectMode, toggleMessageSelection, setReplyingTo, isDebateMode, reducedMotion, listItems.length]);
+  }, [selectedMessageIdsKey, isMultiSelectMode, toggleMessageSelection, addReplyingTo, isDebateMode, reducedMotion, listItems.length]);
 
   if (!currentGroup) {
     return (

@@ -396,7 +396,7 @@ export const api = {
     groupId: string,
     content: string,
     contentType: 'text' | 'code' | 'file' | 'system' = 'text',
-    replyTo?: string,
+    replyTo?: string | string[],
     metadata?: Record<string, any>,
     attachments?: { id: string; name: string; type: string; size: number; url?: string }[]
   ): Promise<Message> => {

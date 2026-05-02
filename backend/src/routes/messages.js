@@ -150,6 +150,7 @@ router.post('/groups/:groupId/messages', validateBody(sendMessageSchema), async 
   const content = sanitizedBody.content;
   const content_type = sanitizedBody.content_type || 'text';
   const reply_to = sanitizedBody.reply_to;
+  const replyToArray = Array.isArray(reply_to) ? reply_to : (reply_to ? [reply_to] : []);
   const metadata = sanitizedBody.metadata;
   const attachments = sanitizedBody.attachments;
   const sender_type = 'user';

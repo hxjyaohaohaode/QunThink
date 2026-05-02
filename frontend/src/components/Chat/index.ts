@@ -8,3 +8,4 @@ export { DebateControlPanel } from './DebateControlPanel';
 export { SearchPanel } from './SearchPanel';
 export { CommentSection } from './CommentSection';
 export { AttachmentStack } from './AttachmentStack';
+export { ObserverControlPanel } from './ObserverControlPanel';

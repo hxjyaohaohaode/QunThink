@@ -7,6 +7,7 @@ import { UserProfileEditor } from './UserProfileEditor';
 import { FontSizeSelector } from './FontSizeToggle';
 import { useConfirm, useToast } from '../Common';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
+import { AI_LIST, AI_NAMES } from '../../types';
 
 export function SettingsPage() {
   const APP_VERSION = import.meta.env.VITE_APP_VERSION || '2.8.9';
@@ -29,6 +30,10 @@ export function SettingsPage() {
   const [showIOSGuide, setShowIOSGuide] = useState(false);
 
   const aiMembers = Array.from(new Set(groups.flatMap(g => g.ai_members || [])));
+  const totalAIModels = AI_LIST.length;
+  const nonChatModels = ['mimo_tts', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'];
+  const chatAIMembers = aiMembers.filter(id => !nonChatModels.includes(id as string));
+  const notInGroups = AI_LIST.filter(id => !aiMembers.includes(id as string));
   const personaEntries = Object.entries(personas);
 
   useEffect(() => {
@@ -531,7 +536,17 @@ export function SettingsPage() {
                 </div>
                 <div className="flex items-center justify-between p-3 settings-theme-transition">
                   <span className="text-sm text-text-primary settings-theme-transition">AI模型</span>
-                  <span className="text-sm text-text-secondary settings-theme-transition">{aiMembers.length} 个已配置</span>
+                  <span className="text-sm text-text-secondary settings-theme-transition">{totalAIModels} 个已配置</span>
+                </div>
+                <div className="mt-2 space-y-1">
+                  <p className="text-xs text-text-muted">
+                    聊天AI：{chatAIMembers.length} 个已加入群聊 · 专用AI：4 个（TTS语音、视觉识别、全模态分析）
+                  </p>
+                  {notInGroups.length > 0 && (
+                    <p className="text-xs text-amber-500">
+                      未入群：{notInGroups.map(id => AI_NAMES[id as keyof typeof AI_NAMES] || id).join('、')}（可在创建群聊时添加）
+                    </p>
+                  )}
                 </div>
                 <button
                   onClick={async () => {

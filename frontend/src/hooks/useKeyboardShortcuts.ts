@@ -15,7 +15,7 @@ interface ShortcutConfig {
 }
 
 export function useKeyboardShortcuts() {
-  const { setReplyingTo } = useUIStore();
+  const { clearReplyingTo } = useUIStore();
   const { messages } = useMessagesStore();
   const { currentGroup } = useGroupsStore();
 
@@ -54,7 +54,7 @@ export function useKeyboardShortcuts() {
         key: 'Escape',
         description: '关闭弹窗/取消回复',
         action: () => {
-          setReplyingTo(null);
+          clearReplyingTo();
           // 关闭所有弹窗
           const modals = document.querySelectorAll('[data-modal]');
           modals.forEach(modal => {
@@ -121,7 +121,7 @@ export function useKeyboardShortcuts() {
         condition: () => !!currentGroup,
       },
     ];
-  }, [currentGroup, messages, setReplyingTo]);
+  }, [currentGroup, messages, clearReplyingTo]);
 
   useEffect(() => {
     const shortcuts = getShortcuts();

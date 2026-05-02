@@ -91,7 +91,7 @@ function getFileIcon(mimeType: string): ReactNode {
 }
 
 export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
-  const { groups, currentGroup, selectGroup, loading, deleteGroup } = useGroupsStore();
+  const { groups, currentGroup, selectGroup, loading, deleteGroup, fetchGroups } = useGroupsStore();
   const { messages } = useMessagesStore();
   const { personas } = usePersonasStore();
   const { selectAgent } = useAgentsStore();
@@ -123,9 +123,20 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
   useEffect(() => {
     const interval = setInterval(() => {
       setTimeUpdateKey(prev => prev + 1);
-    }, 300000);
+    }, 30000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    fetchGroups(true).catch(() => {});
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        fetchGroups(true).catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [fetchGroups]);
 
   const getGroupLastMessage = useCallback((group: Group) => {
     const groupMessages = messages[group.id] || [];
@@ -216,7 +227,11 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
     await deleteGroup(groupId);
   };
 
-  const toggleGroup = (groupKey: string) => {
+  const toggleGroup = (groupKey: string, e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     setExpandedGroups(prev => {
       const newSet = new Set(prev);
       if (newSet.has(groupKey)) {
@@ -369,8 +384,8 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
     return (
       <div key={groupKey} className="animate-chat-group-in">
         <button
-          onClick={() => toggleGroup(groupKey)}
-          className="w-full flex items-center gap-2 px-4 py-1.5 text-[10px] font-medium text-text-muted uppercase tracking-wider hover:bg-sidebar-hover transition-colors duration-150"
+          onClick={(e) => toggleGroup(groupKey, e)}
+          className="w-full flex items-center gap-2 px-4 py-2 text-[10px] font-medium text-text-muted uppercase tracking-wider hover:bg-sidebar-hover transition-colors duration-150 select-none"
         >
           <svg
             className={`w-3 h-3 transition-transform duration-200 ${isExpanded ? '' : '-rotate-90'}`}

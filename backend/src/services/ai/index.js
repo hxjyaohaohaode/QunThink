@@ -120,10 +120,9 @@ const DEFAULT_AI_CONFIGS = {
     enabled: true,
     priority: 9,
     params: {
-      temperature: 0.50,
-      top_p: 0.9,
       max_tokens: 2000
-    }
+    },
+    note: 'DeepSeek推理模型 - 不支持temperature/top_p/frequency_penalty/presence_penalty参数'
   },
   mimo_tts: {
     name: 'mimo-v2-tts',
@@ -511,6 +510,13 @@ async function callStandardAPI(config, persona, userMessage, recentMessages, res
     top_p: effectiveTopP
   };
 
+  if (config.note && config.note.includes('不支持temperature')) {
+    delete requestBody.temperature;
+    delete requestBody.top_p;
+    delete requestBody.frequency_penalty;
+    delete requestBody.presence_penalty;
+  }
+
   if (effectiveFreqPenalty !== undefined) {
     requestBody.frequency_penalty = effectiveFreqPenalty;
   }
@@ -765,7 +771,7 @@ function buildSystemPrompt(persona, recentMessages = [], userProfile = null, rep
   }
 
   if (persona.typicalPhrases && persona.typicalPhrases.length > 0) {
-    parts.push(`你的口头禅：${persona.typicalPhrases.join('、')}。在合适的语境中可以自然地使用这些口头禅。`);
+    parts.push(`语言风格参考（仅供参考，无需刻意模仿）：${persona.typicalPhrases.join('、')}。这只是你日常可能常用的表达方式示例，不是固定模板，你可以自由自然地表达。`);
   }
 
   if (persona.keywords && persona.keywords.length > 0) {
@@ -1016,6 +1022,12 @@ export async function callAIStream(aiId, persona, userMessage, recentMessages, r
       max_tokens: effectiveMaxTokens,
       top_p: effectiveTopP
     };
+    if (config.note && config.note.includes('不支持temperature')) {
+      delete requestBody.temperature;
+      delete requestBody.top_p;
+      delete requestBody.frequency_penalty;
+      delete requestBody.presence_penalty;
+    }
     if (effectiveFreqPenalty !== undefined) requestBody.frequency_penalty = effectiveFreqPenalty;
     if (effectivePresPenalty !== undefined) requestBody.presence_penalty = effectivePresPenalty;
 
@@ -1267,6 +1279,11 @@ export async function callAIDebate(aiId, persona, userMessage, recentMessages, d
         temperature: effectiveTemperature,
         top_p: effectiveTopP
       };
+
+      if (config.note && config.note.includes('不支持temperature')) {
+        delete requestBody.temperature;
+        delete requestBody.top_p;
+      }
 
       const response = await axios.post(config.endpoint, requestBody, {
         headers: {

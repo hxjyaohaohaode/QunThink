@@ -471,7 +471,7 @@ async function callSuggestionAPI(prompt) {
           Authorization: `Bearer ${config.key}`,
           'Content-Type': 'application/json'
         },
-        timeout: 4000
+        timeout: 2000
       }
     );
 
