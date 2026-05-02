@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import { Mutex } from 'async-mutex';
 import { isMongoEnabled, getMongoDb, MongoLow } from './mongoAdapter.js';
+import { isSupabaseEnabled, PgLow, listAllKeys } from './supabaseAdapter.js';
 
 const _writeTimestamps = new WeakMap();
 const _lastReadTimestamps = new WeakMap();
@@ -286,6 +287,25 @@ function createDefaultGroups() {
 }
 
 export async function initUserDatabase(userId) {
+  if (isSupabaseEnabled()) {
+    const key = `user:${userId}`;
+    const pgLow = new PgLow(key, defaultUserData);
+    try {
+      await pgLow.read();
+    } catch (err) {
+      console.warn(`⚠️ Supabase 用户 ${userId} 数据读取失败: ${err.message}`);
+      pgLow.data = JSON.parse(JSON.stringify(defaultUserData));
+    }
+
+    if (pgLow.data.groups.length === 0) {
+      pgLow.data.groups = createDefaultGroups();
+      await pgLow.write();
+      console.log(`✅ Supabase: 用户 ${userId} 数据库初始化完成`);
+    }
+
+    return getUserDb(userId);
+  }
+
   if (isMongoEnabled()) {
     const mongoDb = await getMongoDb();
     const collection = mongoDb.collection('users_data');
@@ -359,6 +379,54 @@ export async function getUserDb(userId) {
   if (userDbs.has(userId)) {
     const db = userDbs.get(userId);
     db._lastAccess = Date.now();
+    return db;
+  }
+
+  if (isSupabaseEnabled()) {
+    const key = `user:${userId}`;
+    const db = new PgLow(key, defaultUserData);
+
+    try {
+      await db.read();
+    } catch (err) {
+      console.warn(`⚠️ Supabase 用户 ${userId} 数据读取失败: ${err.message}`);
+      db.data = JSON.parse(JSON.stringify(defaultUserData));
+    }
+
+    let needsWrite = false;
+    for (const [k, value] of Object.entries(defaultUserData)) {
+      if (db.data[k] === undefined) {
+        db.data[k] = JSON.parse(JSON.stringify(value));
+        needsWrite = true;
+      }
+    }
+
+    if (db.data.groups.length === 0) {
+      db.data.groups = createDefaultGroups();
+      needsWrite = true;
+    }
+
+    if (!db.data._indexes) {
+      db.data._indexes = { messagesByGroup: {} };
+      needsWrite = true;
+    }
+
+    for (const group of db.data.groups) {
+      if (group.last_message_at === undefined || group.last_message_preview === undefined) {
+        resetGroupActivity(db, group.id);
+        needsWrite = true;
+      }
+    }
+
+    if (needsWrite) {
+      await db.write();
+    }
+
+    userDbs.set(userId, db);
+    db._lastAccess = Date.now();
+    evictLeastRecentlyUsed();
+
+    console.log(`📖 [Supabase] 用户 ${userId} 数据加载完成 - 消息: ${db.data.messages.length}, 群组: ${db.data.groups.length}`);
     return db;
   }
 
@@ -510,6 +578,15 @@ export async function migrateExistingData() {
 }
 
 export async function initDatabase() {
+  if (isSupabaseEnabled()) {
+    console.log('🐘 使用 Supabase/PostgreSQL 作为数据存储后端');
+    await getPool();
+    await initUserDatabase('default');
+    defaultDb = userDbs.get('default');
+    console.log('✅ Supabase/PostgreSQL 数据库系统初始化完成');
+    return;
+  }
+
   if (isMongoEnabled()) {
     console.log('🍃 使用 MongoDB 作为数据存储后端');
     await getMongoClient();
@@ -573,6 +650,15 @@ export function clearUserDbCache(userId) {
 }
 
 export async function listUserDatabases() {
+  if (isSupabaseEnabled()) {
+    try {
+      return await listAllKeys('user:');
+    } catch (error) {
+      console.warn('Supabase listUserDatabases failed:', error.message);
+      return [];
+    }
+  }
+
   if (isMongoEnabled()) {
     try {
       const mongoDb = await getMongoDb();

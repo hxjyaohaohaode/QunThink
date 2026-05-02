@@ -29,6 +29,7 @@ import { errorHandler } from './middleware/errorHandler.js';
 import { getUploadsDir, initDatabase } from './models/db.js';
 import { getAuthDb, initAuthDb } from './models/authDb.js';
 import { closeMongoConnection } from './models/mongoAdapter.js';
+import { closeSupabaseConnection } from './models/supabaseAdapter.js';
 import fs from 'fs/promises';
 import crypto from 'crypto';
 import { setupWebSocket } from './websocket/index.js';
@@ -490,13 +491,20 @@ initDatabase().then(async () => {
   });
 });
 
+async function closeAllConnections() {
+  await Promise.all([
+    closeMongoConnection().catch(() => {}),
+    closeSupabaseConnection().catch(() => {})
+  ]);
+}
+
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully...');
   server.close(() => {
     console.log('HTTP server closed');
     wss.close(() => {
       console.log('WebSocket server closed');
-      closeMongoConnection().then(() => {
+      closeAllConnections().then(() => {
         process.exit(0);
       }).catch(() => {
         process.exit(0);
@@ -513,7 +521,7 @@ process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down...');
   server.close(() => {
     wss.close(() => {
-      closeMongoConnection().then(() => {
+      closeAllConnections().then(() => {
         process.exit(0);
       }).catch(() => {
         process.exit(0);

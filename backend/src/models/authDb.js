@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import crypto from 'crypto';
 import { isMongoEnabled, getMongoDb, MongoLow } from './mongoAdapter.js';
+import { isSupabaseEnabled, PgLow } from './supabaseAdapter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,6 +20,27 @@ const defaultAuthData = {
 };
 
 export async function initAuthDb() {
+  if (isSupabaseEnabled()) {
+    authDb = new PgLow('auth:main', defaultAuthData);
+
+    try {
+      await authDb.read();
+    } catch (err) {
+      console.warn(`⚠️ Supabase 认证数据库读取失败: ${err.message}`);
+      authDb.data = JSON.parse(JSON.stringify(defaultAuthData));
+    }
+
+    for (const [key, value] of Object.entries(defaultAuthData)) {
+      if (authDb.data[key] === undefined) {
+        authDb.data[key] = JSON.parse(JSON.stringify(value));
+      }
+    }
+
+    await cleanupExpiredSessions();
+    console.log('✅ Supabase 认证数据库初始化完成');
+    return authDb;
+  }
+
   if (isMongoEnabled()) {
     const mongoDb = await getMongoDb();
     const collection = mongoDb.collection('auth_data');
