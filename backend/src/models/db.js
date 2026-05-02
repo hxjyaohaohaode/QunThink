@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import { Mutex } from 'async-mutex';
 import { isMongoEnabled, getMongoDb, MongoLow } from './mongoAdapter.js';
-import { isSupabaseEnabled, PgLow, listAllKeys } from './supabaseAdapter.js';
+import { isSupabaseEnabled, PgLow, listAllKeys, getPool } from './supabaseAdapter.js';
 
 const _writeTimestamps = new WeakMap();
 const _lastReadTimestamps = new WeakMap();
