@@ -44,10 +44,12 @@ const MAX_FILES = 10;
 const SuggestionButtons = React.memo(function SuggestionButtons({
   suggestions,
   onClick,
+  onRefresh,
   disabled
 }: {
   suggestions: string[];
   onClick: (suggestion: string) => void;
+  onRefresh?: () => void;
   disabled: boolean;
 }) {
   return (
@@ -56,7 +58,7 @@ const SuggestionButtons = React.memo(function SuggestionButtons({
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -4, transition: { duration: 0.15 } }}
       transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-      className="flex flex-wrap gap-2 mt-2.5 ml-1"
+      className="flex flex-wrap gap-2 mt-2.5 ml-1 items-center"
     >
       {suggestions.map((suggestion, idx) => (
         <motion.button
@@ -75,6 +77,22 @@ const SuggestionButtons = React.memo(function SuggestionButtons({
           <span className="max-w-[220px] truncate">{suggestion}</span>
         </motion.button>
       ))}
+      {onRefresh && (
+        <motion.button
+          initial={{ opacity: 0, scale: 0.92 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ duration: 0.2, delay: suggestions.length * 0.06 }}
+          onClick={onRefresh}
+          disabled={disabled}
+          className="flex items-center gap-1 px-2.5 py-2 text-xs text-text-muted hover:text-accent transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+          title="换一批"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182" />
+          </svg>
+          <span>换一批</span>
+        </motion.button>
+      )}
     </motion.div>
   );
 });
@@ -92,7 +110,6 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   const mountedRef = useRef(true);
   const initialFetchedRef = useRef(false);
   const historyFetchKeyRef = useRef('');
-  const lastSSEMsgIdRef = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -100,6 +117,10 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   const agent = currentAgent || agents.find((a) => a.id === agentId);
   const messages = agentMessages.get(agentId) || [];
   const isAgentStreaming = messages.some((m) => m.is_streaming);
+
+  const lastFinishedAgentMsgId = messages.length > 0
+    ? [...messages].reverse().find(m => m.sender_type === 'agent' && !m.is_streaming)?.id
+    : null;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -114,7 +135,6 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
     setLoadingSuggestions(false);
     initialFetchedRef.current = false;
     historyFetchKeyRef.current = '';
-    lastSSEMsgIdRef.current = null;
     selectAgent(agentId);
     fetchAgentMessages(agentId).then(() => {
       if (!isCancelled && mountedRef.current) setMessagesLoaded(true);
@@ -139,46 +159,25 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
       return () => { isCancelled = true; };
     }
 
-    if (messages.length > 0) {
-      const lastMsg = messages[messages.length - 1];
-      if (
-        lastMsg.sender_type === 'agent' &&
-        !lastMsg.is_streaming &&
-        !activeSuggestions &&
-        !loadingSuggestions
-      ) {
-        const fetchKey = `${agentId}:${lastMsg.id}`;
-        if (historyFetchKeyRef.current !== fetchKey) {
-          historyFetchKeyRef.current = fetchKey;
-          let isCancelled = false;
-          setLoadingSuggestions(true);
-          fetchAgentSuggestions(agentId).then(suggestions => {
-            if (isCancelled || !mountedRef.current) return;
-            if (suggestions.length > 0) {
-              setActiveSuggestions({ msgId: lastMsg.id, items: suggestions });
-            }
-            setLoadingSuggestions(false);
-          }).catch(() => {
-            if (!isCancelled && mountedRef.current) setLoadingSuggestions(false);
-          });
-          return () => { isCancelled = true; };
-        }
+    if (lastFinishedAgentMsgId && !activeSuggestions && !loadingSuggestions) {
+      const fetchKey = `${agentId}:${lastFinishedAgentMsgId}`;
+      if (historyFetchKeyRef.current !== fetchKey) {
+        historyFetchKeyRef.current = fetchKey;
+        let isCancelled = false;
+        setLoadingSuggestions(true);
+        fetchAgentSuggestions(agentId).then(suggestions => {
+          if (isCancelled || !mountedRef.current) return;
+          if (suggestions.length > 0) {
+            setActiveSuggestions({ msgId: lastFinishedAgentMsgId, items: suggestions });
+          }
+          setLoadingSuggestions(false);
+        }).catch(() => {
+          if (!isCancelled && mountedRef.current) setLoadingSuggestions(false);
+        });
+        return () => { isCancelled = true; };
       }
     }
-  }, [agent?.id, agent?.enable_suggestions, messagesLoaded, messages.length, activeSuggestions, loadingSuggestions]);
-
-  useEffect(() => {
-    if (messages.length === 0) return;
-    const lastMsg = messages[messages.length - 1];
-    if (
-      lastMsg.sender_type === 'agent' &&
-      !lastMsg.is_streaming &&
-      lastMsg.id !== lastSSEMsgIdRef.current
-    ) {
-      lastSSEMsgIdRef.current = lastMsg.id;
-      historyFetchKeyRef.current = `${agentId}:${lastMsg.id}`;
-    }
-  }, [messages]);
+  }, [agent?.id, agent?.enable_suggestions, messagesLoaded, lastFinishedAgentMsgId, activeSuggestions, loadingSuggestions]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -215,6 +214,13 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
     setInitialSuggestions([]);
     setActiveSuggestions(null);
   }, []);
+
+  const refreshSuggestions = useCallback(() => {
+    if (!agent?.enable_suggestions || loadingSuggestions) return;
+    historyFetchKeyRef.current = '';
+    setActiveSuggestions(null);
+    setInitialSuggestions([]);
+  }, [agent?.enable_suggestions, loadingSuggestions]);
 
   const handleSend = useCallback(async (overrideMessage?: string) => {
     const content = (overrideMessage || inputValue).trim();
@@ -362,6 +368,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
                     <SuggestionButtons
                       suggestions={activeSuggestions.items}
                       onClick={handleSuggestionClick}
+                      onRefresh={refreshSuggestions}
                       disabled={isSuggestionDisabled}
                     />
                   )}
@@ -385,6 +392,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
                 <SuggestionButtons
                   suggestions={initialSuggestions}
                   onClick={handleSuggestionClick}
+                  onRefresh={refreshSuggestions}
                   disabled={isSuggestionDisabled}
                 />
               </div>

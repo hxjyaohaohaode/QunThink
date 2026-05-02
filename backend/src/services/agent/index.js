@@ -88,13 +88,15 @@ ${modelList}
   "model_roles": [
     {"modelId": "模型ID", "role": "角色名", "description": "该模型在智能体中的具体职责说明"}
   ],
-  "system_prompt": "这个智能体的完整系统提示词，必须包括：角色定位、专业领域、行为准则、能力边界、回复风格、核心功能"
+  "system_prompt": "这个智能体的完整系统提示词，必须包括：角色定位、专业领域、行为准则、回复风格、核心功能、主动引导策略"
 }
 
 ## 注意事项
 - model_roles至少分配2个模型，最多4个模型
-- system_prompt必须非常详细，至少200字，完全基于用户需求定制
-- **关键约束**：system_prompt 中必须明确定义智能体的功能边界，要求智能体**只做用户设定的功能范围内的事情**，如果用户请求超出功能范围，应该礼貌说明自己专注于设定的功能
+- system_prompt必须非常详细，至少300字，完全基于用户需求定制
+- system_prompt 中应明确定义智能体的专业领域和核心功能
+- **重要**：system_prompt 中要求智能体在专业领域内主动提供深入帮助，而不是简单地拒绝用户。如果用户请求略微偏离核心功能但与专业领域相关，应该灵活应对并提供有价值的信息。只有完全无关的请求才礼貌引导
+- system_prompt 中必须包含"主动引导策略"：智能体应该在回复末尾主动提供1-2个相关延伸话题或建议，引导用户深入探索
 - 确保模型分工明确、各尽其职、功能强大`;
 
   const persona = { id: 'deepseek_reasoner', name: 'deepseek-reasoner' };
@@ -133,7 +135,20 @@ ${modelList}
       { modelId: 'deepseek_reasoner', role: '意图理解', description: '深度分析用户意图，理解复杂需求' },
       { modelId: 'deepseek', role: '主回复', description: '生成高质量专业回复' }
     ];
-    agentSystemPrompt = `你是${name}，一个专业的AI助手。${description}。请用专业、友好、高效的方式与用户交流。你的回复应该准确、详细且有针对性。`;
+    agentSystemPrompt = `你是${name}，一个专业的AI助手。${description}。
+
+## 核心能力
+你擅长${description}，在这个领域内你能提供深入、专业、有价值的帮助。
+
+## 行为准则
+1. 在专业领域内主动提供深入分析和建议
+2. 回复准确、详细、有针对性，避免泛泛而谈
+3. 如果用户请求与你的专业领域相关但略微偏离核心功能，灵活应对并提供有价值的信息
+4. 只有完全无关的请求才礼貌引导回你的专业领域
+5. 在回复末尾主动提供1-2个相关延伸话题，引导用户深入探索
+
+## 回复风格
+专业、友好、高效，用自然的方式与用户交流，让每次对话都有收获。`;
   }
 
   const agent = {
@@ -316,30 +331,58 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
     .filter(m => m.agent_id === agentId)
     .slice(-30);
 
-  const primaryModel = agent.model_roles[0];
-  const modelId = primaryModel?.modelId || 'deepseek';
-  const persona = AI_PERSONAS[modelId] || { id: modelId, name: modelId };
+  const modelRoles = agent.model_roles || [];
+  const intentModel = modelRoles.find(r => r.role === '意图理解') || modelRoles[0];
+  const replyModel = modelRoles.find(r => r.role === '主回复') || modelRoles[0];
+
+  const replyModelId = replyModel?.modelId || 'deepseek';
+  const replyPersona = AI_PERSONAS[replyModelId] || { id: replyModelId, name: replyModelId };
 
   const formattedMessages = recentAgentMessages.map(m => ({
     id: m.id,
     sender_type: m.sender_type === 'agent' ? 'ai' : 'user',
-    sender_id: m.sender_type === 'agent' ? modelId : 'user',
+    sender_id: m.sender_type === 'agent' ? replyModelId : 'user',
     content: m.content
   }));
 
-  const functionBoundary = `【重要功能约束】你是"${agent.name}"智能体，你的功能定位是：${agent.description}。你必须严格遵守以下规则：
-1. **只做你功能范围内的事情**：你的能力严格限定在用户设定的功能描述中
-2. **拒绝超出功能范围的请求**：如果用户请求超出你的功能，礼貌说明"抱歉，我专注于[功能描述]，这个需求超出了我的能力范围。你可以尝试[相关功能]。"
-3. **不要冒充其他功能**：不要声称自己会做用户没有设定给你的功能
-4. **始终记住自己的身份**：你是用户创建的专业智能体，不是通用的聊天助手
-5. **回复时体现专业性**：在你的专业领域内提供深入、准确的帮助`;
+  const enhancedSystemPrompt = buildAgentSystemPrompt(agent);
 
-  const enhancedSystemPrompt = `${functionBoundary}\n\n${agent.system_prompt}`;
+  let intentContext = '';
+  if (modelRoles.length >= 2 && intentModel.modelId !== replyModelId) {
+    try {
+      const intentModelId = intentModel.modelId;
+      const intentPersona = AI_PERSONAS[intentModelId] || { id: intentModelId, name: intentModelId };
+      const intentSystemPrompt = `你是一个意图分析专家。你的任务是：分析用户在对话中的真实意图，提取关键信息点，判断用户需求的优先级和情感倾向。请简洁地输出分析结果，不超过100字。`;
+
+      const recentContext = recentAgentMessages.slice(-6).map(m =>
+        m.sender_type === 'user' ? `用户: ${m.content.substring(0, 200)}` : `助手: ${m.content.substring(0, 200)}`
+      ).join('\n');
+
+      const intentResult = await callAIStream(
+        intentModelId,
+        intentPersona,
+        `分析以下对话中用户的最新意图：\n\n${recentContext}\n\n用户最新消息：${messageContent.substring(0, 500)}`,
+        [],
+        'free_chat',
+        null, [], null, null, false, [],
+        intentSystemPrompt,
+        [], null, null, userId
+      );
+
+      if (intentResult && intentResult.trim()) {
+        intentContext = `\n\n【意图分析】${intentResult.trim()}`;
+      }
+    } catch (error) {
+      console.warn('[Agent对话] 意图分析失败，跳过:', error.message);
+    }
+  }
+
+  const finalMessage = intentContext ? `${messageContent}${intentContext}` : messageContent;
 
   const response = await callAIStream(
-    modelId,
-    persona,
-    messageContent,
+    replyModelId,
+    replyPersona,
+    finalMessage,
     formattedMessages,
     'free_chat',
     null, [], null, null, false, [],
@@ -363,10 +406,23 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
   return { content: response };
 }
 
+function buildAgentSystemPrompt(agent) {
+  const functionBoundary = `你是"${agent.name}"智能体，功能定位：${agent.description}。
+
+## 行为准则
+1. 在你的专业领域内提供深入、准确、有价值的帮助
+2. 如果用户请求与你的功能定位完全无关，礼貌引导回你的专业领域，但不要过于生硬
+3. 始终记住自己的身份和专业性，回复时体现专业深度
+4. 主动提供有价值的延伸信息和建议，让对话更有深度
+5. 用自然、专业、友好的方式与用户交流`;
+
+  return `${functionBoundary}\n\n${agent.system_prompt}`;
+}
+
 export async function generateSuggestions(agent, agentResponse, userMessage, userId, chatHistory = [], userProfile = null) {
   const historyContext = chatHistory.length > 0
     ? chatHistory.slice(-6).map(m =>
-        m.sender_type === 'user' ? `用户: ${m.content.substring(0, 150)}` : `智能体: ${m.content.substring(0, 150)}`
+        m.sender_type === 'user' ? `用户: ${m.content.substring(0, 200)}` : `智能体: ${m.content.substring(0, 200)}`
       ).join('\n')
     : '（暂无历史对话）';
 
@@ -379,7 +435,7 @@ export async function generateSuggestions(agent, agentResponse, userMessage, use
     if (userProfile.goals) parts.push(`目标: ${userProfile.goals}`);
     if (userProfile.personality && userProfile.personality.length > 0) parts.push(`性格: ${userProfile.personality.join('、')}`);
     if (userProfile.education) parts.push(`学历: ${userProfile.education}`);
-    if (userProfile.bio) parts.push(`简介: ${userProfile.bio.substring(0, 100)}`);
+    if (userProfile.bio) parts.push(`简介: ${userProfile.bio.substring(0, 150)}`);
     if (parts.length > 0) userContext = `\n## 用户画像\n${parts.join('\n')}`;
   }
 
@@ -391,48 +447,66 @@ export async function generateSuggestions(agent, agentResponse, userMessage, use
   }
 
   const isInitial = !agentResponse || agentResponse === agent.opening_message;
+  const agentFuncDomain = agent.description ? agent.description.substring(0, 120) : '通用助手';
+  const capabilitiesStr = capabilitiesDesc.length > 0 ? `\n## 智能体能力\n${capabilitiesDesc.join('、')}` : '';
 
-  const agentFuncDomain = agent.description ? agent.description.substring(0, 80) : '通用助手';
+  const systemPrompt = `你是一名资深对话设计师，擅长根据上下文预测用户最可能的下一步提问。你需要生成3个能推动对话向纵深发展的追问建议。
 
-  const suggestionPrompt = isInitial
-    ? `根据智能体功能和用户画像，生成3条用户最可能说的话。
+## 核心原则
+1. 建议必须是用户真实会说的话，口语化、自然、具体
+2. 每个建议应开启新的信息探索路径，避免重复
+3. 严格基于智能体功能范围和对话上下文生成
+4. 返回纯JSON数组格式，不要任何额外文字`;
 
-智能体：${agent.name}
-功能：${agentFuncDomain}
-开场白：${agent.opening_message ? agent.opening_message.substring(0, 100) : '无'}
-${capabilitiesDesc.length > 0 ? `能力：${capabilitiesDesc.join('、')}` : ''}${userContext}
+  const userPrompt = isInitial
+    ? `## 智能体信息
+名称：${agent.name}
+功能定位：${agentFuncDomain}
+开场白：${agent.opening_message ? agent.opening_message.substring(0, 150) : '无'}${capabilitiesStr}${userContext}
 
-要求：
-1. 每条15-25字，像用户真实会说的话
-2. 必须与"${agentFuncDomain}"直接相关
-3. 一条探索功能、一条具体问题、一条深入场景
-4. ${userContext ? '结合用户画像' : '覆盖核心功能'}
-5. 不加引号序号
+## 任务
+用户刚进入与"${agent.name}"的对话，看到了开场白。请生成3条用户最可能说的话。
 
+## 生成要求
+1. 每条15-30字，像用户真实会说的话，口语化表达
+2. 三条建议覆盖不同维度：
+   - 第一条：探索智能体的核心功能（用户最想先试什么）
+   - 第二条：提出一个具体的专业问题（基于功能定位）
+   - 第三条：深入一个实际使用场景（结合用户画像${userContext ? '' : '或功能特色'})
+3. ${userContext ? '必须结合用户画像中的职业、爱好等信息个性化建议' : '建议要体现智能体的独特价值'}
+4. 不加引号、序号等修饰
+
+## 输出格式
 只返回JSON数组：["建议1","建议2","建议3"]`
-    : `根据对话上下文，生成3条用户可能继续说的话。
+    : `## 智能体信息
+名称：${agent.name}
+功能定位：${agentFuncDomain}${capabilitiesStr}${userContext}
 
-智能体：${agent.name}
-功能：${agentFuncDomain}
-${capabilitiesDesc.length > 0 ? `能力：${capabilitiesDesc.join('、')}` : ''}${userContext}
-
-最近对话：
+## 对话上下文
 ${historyContext}
 
-用户说：${userMessage.substring(0, 300)}
-智能体回复：${agentResponse.substring(0, 500)}
+## 当前轮对话
+用户说：${userMessage.substring(0, 400)}
+智能体回复：${agentResponse.substring(0, 600)}
 
-要求：
-1. 每条15-25字，像用户真实会说的话
-2. 必须与"${agentFuncDomain}"直接相关
-3. 一条追问细节、一条换个角度、一条深入探讨
-4. ${userContext ? '结合用户画像' : '自然衔接对话'}
-5. 不加引号序号，不重复已有内容
+## 任务
+根据以上对话上下文，生成3条用户可能继续说的话。
 
+## 生成要求
+1. 每条15-30字，像用户真实会说的话，口语化表达
+2. 三条建议覆盖不同维度：
+   - 第一条：追问智能体回复中的细节或关键信息
+   - 第二条：换个角度或方向提出相关问题
+   - 第三条：深入探讨或请求具体行动（如示例、方案、步骤等）
+3. ${userContext ? '结合用户画像让建议更个性化' : '自然衔接当前对话话题'}
+4. 不加引号、序号等修饰，不重复已有对话内容
+5. 禁止复述智能体已明确回答的内容
+
+## 输出格式
 只返回JSON数组：["建议1","建议2","建议3"]`;
 
   try {
-    const suggestions = await callSuggestionAPI(suggestionPrompt);
+    const suggestions = await callSuggestionAPI(systemPrompt, userPrompt);
     if (suggestions && suggestions.length > 0) {
       return suggestions;
     }
@@ -440,10 +514,10 @@ ${historyContext}
     console.error('[建议回复] API调用失败:', error.message);
   }
 
-  return getDefaultSuggestions(agent, userProfile);
+  return getDefaultSuggestions(agent, isInitial, userProfile);
 }
 
-async function callSuggestionAPI(prompt) {
+async function callSuggestionAPI(systemPrompt, userPrompt) {
   const configs = [
     { key: process.env.GLM_API_KEY, endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4-flash' },
     { key: process.env.MIMO_API_KEY, endpoint: process.env.MIMO_BASE_URL ? `${process.env.MIMO_BASE_URL}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions', model: 'mimo-v2.5' },
@@ -459,11 +533,11 @@ async function callSuggestionAPI(prompt) {
       {
         model: config.model,
         messages: [
-          { role: 'system', content: '你是JSON生成器，只返回JSON数组，不要任何额外文字。' },
-          { role: 'user', content: prompt }
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
         ],
-        temperature: 0.6,
-        max_tokens: 200,
+        temperature: 0.7,
+        max_tokens: 300,
         stream: false
       },
       {
@@ -471,7 +545,7 @@ async function callSuggestionAPI(prompt) {
           Authorization: `Bearer ${config.key}`,
           'Content-Type': 'application/json'
         },
-        timeout: 2000
+        timeout: 6000
       }
     );
 
@@ -481,8 +555,8 @@ async function callSuggestionAPI(prompt) {
     const parsed = extractJSON(content);
     if (Array.isArray(parsed) && parsed.length > 0) {
       const validSuggestions = parsed
-        .filter(s => typeof s === 'string' && s.trim().length > 0 && s.length <= 60)
-        .map(s => s.trim())
+        .filter(s => typeof s === 'string' && s.trim().length > 0 && s.length <= 80)
+        .map(s => s.trim().replace(/^["'\d.\s)]+/, '').replace(/["']+$/, ''))
         .slice(0, 3);
       if (validSuggestions.length > 0) {
         return validSuggestions;
@@ -512,7 +586,7 @@ async function callSuggestionAPI(prompt) {
   return null;
 }
 
-function getDefaultSuggestions(agent, userProfile = null) {
+function getDefaultSuggestions(agent, isInitial = true, userProfile = null) {
   const desc = agent.description || '';
   const name = agent.name || '';
 
@@ -522,18 +596,68 @@ function getDefaultSuggestions(agent, userProfile = null) {
     if (userProfile.hobbies && userProfile.hobbies.length > 0) userHints.push(...userProfile.hobbies.slice(0, 3));
   }
 
+  if (isInitial) {
+    if (desc.includes('编程') || desc.includes('代码') || desc.includes('开发')) {
+      return [
+        '帮我写一个实用的代码示例',
+        '这个技术栈有哪些最佳实践？',
+        '帮我分析一下常见的架构模式'
+      ];
+    }
+    if (desc.includes('写作') || desc.includes('文案') || desc.includes('创作')) {
+      return [
+        '帮我写一篇关于这个主题的文章',
+        '能换个风格再写一版吗？',
+        '给我一些创意灵感和方向'
+      ];
+    }
+    if (desc.includes('翻译') || desc.includes('语言')) {
+      return [
+        '帮我翻译这段内容',
+        '解释一下这个词的用法和语境',
+        '帮我纠正这段话的语法错误'
+      ];
+    }
+    if (desc.includes('健身') || desc.includes('运动') || desc.includes('健康')) {
+      return [
+        '帮我制定一个适合我的训练计划',
+        '有哪些适合初学者的动作？',
+        '如何科学地避免运动损伤？'
+      ];
+    }
+    if (desc.includes('学习') || desc.includes('教育') || desc.includes('考试')) {
+      return [
+        '帮我梳理一下这个领域的知识框架',
+        '有哪些重点和难点需要掌握？',
+        '给我出几道练习题检验一下'
+      ];
+    }
+    if (userHints.length > 0) {
+      return [
+        `作为${userHints[0]}，你能帮我做什么？`,
+        `${name}最擅长解决什么问题？`,
+        '给我一个具体的使用场景示例'
+      ];
+    }
+    return [
+      `你能帮我做什么？介绍一下你的功能`,
+      `${name}有什么独特的优势？`,
+      '给我一个具体的使用场景'
+    ];
+  }
+
   if (desc.includes('编程') || desc.includes('代码') || desc.includes('开发')) {
     return [
-      '帮我写一个实用的代码示例',
-      '有哪些最佳实践和规范？',
-      '帮我优化这段代码的性能'
+      '能详细解释一下这个实现原理吗？',
+      '有没有更优的解决方案？',
+      '帮我写一个完整的代码示例'
     ];
   }
   if (desc.includes('写作') || desc.includes('文案') || desc.includes('创作')) {
     return [
       '能换个风格再写一版吗？',
       '帮我润色一下这段文字',
-      '给我更多创意方向'
+      '给我更多创意方向和灵感'
     ];
   }
   if (desc.includes('翻译') || desc.includes('语言')) {
