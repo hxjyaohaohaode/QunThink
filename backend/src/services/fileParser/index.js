@@ -54,19 +54,18 @@ async function parseImage(filePath, ext, mimeType) {
     const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
     const fileSize = stats.size > 1024 * 1024 ? `${fileSizeMB}MB` : `${fileSizeKB}KB`;
     
-    const base64Data = buffer.toString('base64');
-    
-    return {
-      type: 'image',
-      file_path: filePath,
-      file_name: path.basename(filePath),
-      mime_type: mimeType || `image/${ext.slice(1)}`,
-      file_size: fileSize,
-      base64: `data:${mimeType || 'image/' + ext.slice(1)};base64,${base64Data}`,
-      description: `[图片文件: ${path.basename(filePath)}, 格式: ${ext}, 大小: ${fileSize}]`
-    };
+    let dimensions = '';
+    try {
+      const sharp = (await import('sharp')).default;
+      const metadata = await sharp(buffer).metadata();
+      if (metadata.width && metadata.height) {
+        dimensions = ` · ${metadata.width}x${metadata.height}px`;
+        if (metadata.format) ext = metadata.format;
+      }
+    } catch {}
+
+    return `[图片文件] 名称=${path.basename(filePath)} · 格式=${ext.toUpperCase()} · 大小=${fileSize}${dimensions}`;
   } catch (error) {
-    console.error('Image parse error:', error);
     return `[图片解析失败: ${error.message}]`;
   }
 }
@@ -77,21 +76,9 @@ async function parseAudio(filePath, ext, mimeType) {
     const fileSizeKB = (stats.size / 1024).toFixed(1);
     const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
     const fileSize = stats.size > 1024 * 1024 ? `${fileSizeMB}MB` : `${fileSizeKB}KB`;
-    
-    const buffer = await fs.readFile(filePath);
-    const base64Data = buffer.toString('base64');
-    
-    return {
-      type: 'audio',
-      file_path: filePath,
-      file_name: path.basename(filePath),
-      mime_type: mimeType || `audio/${ext.slice(1)}`,
-      file_size: fileSize,
-      base64: `data:${mimeType || 'audio/' + ext.slice(1)};base64,${base64Data}`,
-      description: `[音频文件: ${path.basename(filePath)}, 格式: ${ext}, 大小: ${fileSize}]`
-    };
+
+    return `[音频文件] 名称=${path.basename(filePath)} · 格式=${ext.toUpperCase()} · 大小=${fileSize}`;
   } catch (error) {
-    console.error('Audio parse error:', error);
     return `[音频解析失败: ${error.message}]`;
   }
 }
@@ -102,21 +89,9 @@ async function parseVideo(filePath, ext, mimeType) {
     const fileSizeKB = (stats.size / 1024).toFixed(1);
     const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
     const fileSize = stats.size > 1024 * 1024 ? `${fileSizeMB}MB` : `${fileSizeKB}KB`;
-    
-    const buffer = await fs.readFile(filePath);
-    const base64Data = buffer.toString('base64');
-    
-    return {
-      type: 'video',
-      file_path: filePath,
-      file_name: path.basename(filePath),
-      mime_type: mimeType || `video/${ext.slice(1)}`,
-      file_size: fileSize,
-      base64: `data:${mimeType || 'video/' + ext.slice(1)};base64,${base64Data}`,
-      description: `[视频文件: ${path.basename(filePath)}, 格式: ${ext}, 大小: ${fileSize}]`
-    };
+
+    return `[视频文件] 名称=${path.basename(filePath)} · 格式=${ext.toUpperCase()} · 大小=${fileSize}`;
   } catch (error) {
-    console.error('Video parse error:', error);
     return `[视频解析失败: ${error.message}]`;
   }
 }

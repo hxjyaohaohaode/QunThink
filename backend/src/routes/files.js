@@ -302,15 +302,19 @@ router.post('/files/upload', (req, res, next) => {
     const mimeType = file.mimetype;
 
     let parsedContent = null;
+    let parseError = null;
     try {
       parsedContent = await parseFile(filePath, mimeType);
     } catch (error) {
       console.error('File parse error:', error);
+      parseError = error.message;
+      parsedContent = `[解析失败: ${error.message}]`;
     }
 
     let searchDescription = '';
     let searchTags = [];
     let mediaDescription = '';
+    let annotateError = null;
 
     try {
       const textContent = typeof parsedContent === 'string' ? parsedContent : '';
@@ -324,19 +328,21 @@ router.post('/files/upload', (req, res, next) => {
       }
     } catch (error) {
       console.error('File annotation/description error:', error);
+      annotateError = error.message;
     }
 
     if (!mediaDescription) {
       const ext = path.extname(fileName).toLowerCase();
-      const isMedia = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg',
+      const mediaExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg',
         '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma',
-        '.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'].includes(ext);
+        '.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'];
+      const isMedia = mediaExts.includes(ext);
       if (isMedia) {
         const sizeStr = fileSize > 1024 * 1024
           ? `${(fileSize / (1024 * 1024)).toFixed(1)}MB`
           : `${(fileSize / 1024).toFixed(0)}KB`;
-        mediaDescription = `[${isMedia ? '媒体' : '文件'}: ${fileName}, 大小: ${sizeStr}]`;
-      } else if (typeof parsedContent === 'string' && parsedContent.length > 0) {
+        mediaDescription = `[媒体文件: ${fileName}, 大小: ${sizeStr}]`;
+      } else if (typeof parsedContent === 'string' && parsedContent.length > 0 && !parsedContent.startsWith('[解析失败')) {
         mediaDescription = parsedContent.substring(0, 500);
       }
     }
@@ -355,6 +361,9 @@ router.post('/files/upload', (req, res, next) => {
       media_description: mediaDescription || '',
       search_description: searchDescription,
       search_tags: searchTags,
+      parse_status: parseError ? 'error' : 'success',
+      parse_error: parseError || null,
+      annotate_error: annotateError || null,
       created_at: new Date().toISOString()
     };
 
