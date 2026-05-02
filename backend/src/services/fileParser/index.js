@@ -98,21 +98,41 @@ async function parseVideo(filePath, ext, mimeType) {
 
 async function parsePresentation(filePath, ext) {
   try {
-    const workbook = xlsx.readFile(filePath);
+    const isNewFormat = ext === '.pptx';
     
-    let result = '';
-    
-    for (const sheetName of workbook.SheetNames) {
-      const sheet = workbook.Sheets[sheetName];
-      const csv = xlsx.utils.sheet_to_csv(sheet);
-      result += `--- 幻灯片内容: ${sheetName} ---\n${csv}\n\n`;
+    if (isNewFormat) {
+      try {
+        const AdmZip = (await import('adm-zip')).default;
+        const zip = new AdmZip(filePath);
+        const slideEntries = zip.getEntries()
+          .filter(e => e.entryName.match(/^ppt\/slides\/slide\d+\.xml$/i))
+          .sort((a, b) => {
+            const na = parseInt(a.entryName.match(/slide(\d+)/i)?.[1] || '0');
+            const nb = parseInt(b.entryName.match(/slide(\d+)/i)?.[1] || '0');
+            return na - nb;
+          });
+        
+        if (slideEntries.length > 0) {
+          let result = '';
+          for (const entry of slideEntries) {
+            const xmlContent = entry.getData().toString('utf-8');
+            const texts = [];
+            const textRegex = /<a:t[^>]*>([^<]*)<\/a:t>/g;
+            let match;
+            while ((match = textRegex.exec(xmlContent)) !== null) {
+              if (match[1].trim()) texts.push(match[1].trim());
+            }
+            const slideNum = entry.entryName.match(/slide(\d+)/i)?.[1] || '?';
+            if (texts.length > 0) {
+              result += `--- 幻灯片 ${slideNum} ---\n${texts.join('\n')}\n\n`;
+            }
+          }
+          if (result.trim()) return result.trim();
+        }
+      } catch {}
     }
     
-    if (result) {
-      return result;
-    }
-    
-    return `[PPT文件: ${path.basename(filePath)}, 已提取文本内容]`;
+    return `[PPT文件: ${path.basename(filePath)}, 格式: ${ext.toUpperCase()}]`;
   } catch (error) {
     console.error('Presentation parse error:', error);
     return `[PPT解析失败: ${error.message}]`;

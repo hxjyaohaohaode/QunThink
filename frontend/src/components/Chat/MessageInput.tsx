@@ -45,7 +45,7 @@ function getUploadedFile(result: { file?: UploadedFile; files?: UploadedFile[] }
 
 function toMessageAttachment(uploadedFile: UploadedFile, fallbackFile: File): MessageAttachment {
   const mediaDescription = uploadedFile.media_description
-    || (typeof uploadedFile.parsed_content === 'string' ? uploadedFile.parsed_content.substring(0, 120) : '')
+    || (typeof uploadedFile.parsed_content === 'string' ? uploadedFile.parsed_content.substring(0, 500) : '')
     || '附件识别完成';
 
   return {

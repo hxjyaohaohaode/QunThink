@@ -171,8 +171,12 @@ router.post('/groups/:groupId/messages', validateBody(sendMessageSchema), async 
     enrichedAttachments = enrichedAttachments.map(att => {
       const fileId = att.id || att.url?.match(/\/files\/([^/]+)/)?.[1] || att.url?.split('/files/').pop()?.split('/')[0];
       const fileRecord = fileId ? filesIndex[fileId] : null;
-      if (fileRecord && fileRecord.media_description) {
-        return { ...att, media_description: fileRecord.media_description };
+      if (fileRecord) {
+        return {
+          ...att,
+          media_description: fileRecord.media_description || att.media_description || '',
+          parsed_content: fileRecord.parsed_content || ''
+        };
       }
       return att;
     });

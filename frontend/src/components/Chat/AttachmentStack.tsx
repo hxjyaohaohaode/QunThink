@@ -475,7 +475,7 @@ const AttachmentItem: React.FC<{
   const isVideo = isVideoType(attachment.type);
   const isAudio = isAudioType(attachment.type);
   const fileSize = formatFileSize(attachment.size);
-  const { icon, color } = getFileTypeIcon(attachment.type);
+  const { color } = getFileTypeIcon(attachment.type);
 
   const isDragging = dragIndex === index;
   const isDropTarget = dropIndex === index;
@@ -573,7 +573,7 @@ const AttachmentItem: React.FC<{
         >
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 text-base" style={{ backgroundColor: `${color}20` }}>
-              {icon}
+              {getFileTypeIcon(attachment.type).svg(16)}
             </div>
             <div className="flex flex-col min-w-0 flex-1">
               <span className="truncate font-medium">{attachment.name}</span>
