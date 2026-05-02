@@ -14,6 +14,7 @@ const publicPaths = [
   '/api/auth/login',
   '/api/auth/login-phone',
   '/api/auth/register-sms',
+  '/api/auth/me',
   '/api/sms/send',
   '/api/sms/verify',
   '/api/tts/audio'
@@ -46,7 +47,14 @@ async function refreshSessionIfNeeded(session, req, res) {
       });
 
       const isProduction = process.env.NODE_ENV === 'production';
-      res.setHeader('Set-Cookie', `session_token=${session.token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(SESSION_MAX_AGE / 1000)};${isProduction ? ' Secure;' : ''}`);
+      res.cookie('session_token', session.token, {
+        httpOnly: true,
+        domain: isProduction ? undefined : 'localhost',
+        path: '/',
+        sameSite: isProduction ? 'none' : 'lax',
+        maxAge: Math.floor(SESSION_MAX_AGE / 1000),
+        secure: isProduction
+      });
       session.expires_at = newExpiresAt;
     } catch (err) {
       safeLog('warn', '会话刷新失败:', { error: err?.message });

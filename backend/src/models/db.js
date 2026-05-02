@@ -6,6 +6,7 @@ import fs from 'fs/promises';
 import { Mutex } from 'async-mutex';
 
 const _writeTimestamps = new WeakMap();
+const _lastReadTimestamps = new WeakMap();
 
 class CustomLow extends Low {
   async write() {
@@ -21,11 +22,13 @@ class CustomLow extends Low {
           const tmpPath = err.path;
           const match = tmpPath.match(/^(.+)[/\\]\.([^/\\]+)\.tmp$/);
           if (match) {
-            filePath = match[1] + '/' + match[2];
+            filePath = match[1] + path.sep + match[2];
           }
         }
         if (filePath) {
           try {
+            const dir = path.dirname(filePath);
+            await fs.mkdir(dir, { recursive: true });
             await fs.writeFile(filePath, JSON.stringify(this.data, null, 2), 'utf-8');
             _writeTimestamps.set(this, Date.now());
             return;
@@ -41,7 +44,8 @@ class CustomLow extends Low {
 
   async read() {
     const lastWrite = _writeTimestamps.get(this);
-    if (lastWrite && this.data) {
+    const lastRead = _lastReadTimestamps.get(this);
+    if (lastWrite && lastRead && lastRead >= lastWrite && this.data) {
       return;
     }
 
@@ -49,6 +53,7 @@ class CustomLow extends Low {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         await super.read();
+        _lastReadTimestamps.set(this, Date.now());
         return;
       } catch (err) {
         if (err instanceof SyntaxError && err.message.includes('JSON') && attempt < maxRetries - 1) {
@@ -362,8 +367,12 @@ export async function getUserDb(userId) {
       }
     } catch (recoverErr) {
       console.warn(`⚠️ 用户 ${userId} 数据库恢复失败，使用默认数据`);
+      try {
+        const backupPath = dbPath + '.corrupted.' + Date.now();
+        await fs.copyFile(dbPath, backupPath);
+        console.log(`📦 损坏的用户数据库已备份到: ${backupPath}`);
+      } catch {}
       db.data = JSON.parse(JSON.stringify(defaultUserData));
-      await db.write();
     }
   }
   

@@ -65,6 +65,7 @@ function mergePersona(defaultPersona, customPersona = {}) {
     debateTendency: customPersona.debateTendency !== undefined ? customPersona.debateTendency : (defaultPersona.debateTendency || 'medium'),
     questionProbability: customPersona.questionProbability !== undefined ? customPersona.questionProbability : (defaultPersona.questionProbability ?? 0.3),
     silenceProbability: customPersona.silenceProbability !== undefined ? customPersona.silenceProbability : (defaultPersona.silenceProbability ?? 0.1),
+    refusalProbability: customPersona.refusalProbability !== undefined ? customPersona.refusalProbability : (defaultPersona.refusalProbability ?? 0),
     speakingOrder: customPersona.speakingOrder !== undefined ? customPersona.speakingOrder : (defaultPersona.speakingOrder ?? 3),
     preferredRole: customPersona.preferredRole !== undefined ? customPersona.preferredRole : (defaultPersona.preferredRole || 'analyst'),
     customRoleName: customPersona.customRoleName !== undefined ? customPersona.customRoleName : (defaultPersona.customRoleName || ''),
@@ -114,7 +115,7 @@ router.put('/personas/:aiId', validateBody(updatePersonaSchema), async (req, res
       'typicalPhrases', 'expertise', 'speakingTraits', 'keywords', 'messageLength',
       'responseConfig', 'socialConfig', 'modelConfig', 'debateConfig',
       'preferredRole', 'customRoleName', 'questionProbability', 'debateTendency',
-      'silenceProbability', 'speakingOrder', 'firstSpeakerTopics'
+      'silenceProbability', 'refusalProbability', 'speakingOrder', 'firstSpeakerTopics'
     ];
     if (!db.data.customPersonas[aiId]) {
       db.data.customPersonas[aiId] = {};

@@ -41,6 +41,38 @@ type BootstrapPayload = {
 };
 
 const AUTH_MODE = import.meta.env.VITE_AUTH_MODE || 'session';
+const SESSION_PERSIST_KEY = 'app_session_persist';
+
+function persistSessionInfo(userId: string) {
+  try {
+    localStorage.setItem(SESSION_PERSIST_KEY, JSON.stringify({
+      userId,
+      timestamp: Date.now()
+    }));
+  } catch {}
+}
+
+function clearPersistedSessionInfo() {
+  try {
+    localStorage.removeItem(SESSION_PERSIST_KEY);
+  } catch {}
+}
+
+function getPersistedSessionInfo(): { userId: string; timestamp: number } | null {
+  try {
+    const raw = localStorage.getItem(SESSION_PERSIST_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    const maxAge = 30 * 24 * 60 * 60 * 1000;
+    if (Date.now() - data.timestamp > maxAge) {
+      localStorage.removeItem(SESSION_PERSIST_KEY);
+      return null;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
 
 function isAuthFailure(error: unknown) {
   const status = (error as any)?.response?.status;
@@ -147,6 +179,8 @@ async function handleLogout() {
     await api.logout();
   } catch {}
 
+  clearPersistedSessionInfo();
+
   if (cachedUserId) {
     clearAllCachesForUser(cachedUserId);
     await clearAllIndexedDBForUser(cachedUserId);
@@ -157,9 +191,6 @@ async function handleLogout() {
       localStorage.removeItem(`ws_last_msg_ts_${cachedUserId}`);
     }
   } catch {}
-
-  setCacheUserId(null);
-  setIndexedDBUserId(null);
 
   useGroupsStore.setState({
     groups: [],
@@ -213,6 +244,9 @@ async function handleLogout() {
     creatingAgent: false
   });
 
+  setCacheUserId(null);
+  setIndexedDBUserId(null);
+
   if (import.meta.env.DEV) {
     console.log('[App] User logged out, caches cleared');
   }
@@ -258,16 +292,25 @@ function App() {
         }
 
         if (authStatus?.valid !== true) {
-          throw new Error(authStatus?.message || '需要登录');
+          if (!cancelled) {
+            dataInitializedRef.current = false;
+            setIsAuthenticated(false);
+          }
+          return;
         }
 
         const currentUser = await api.getCurrentUser();
-        const userId = currentUser?.user?.id || getCacheUserId();
+        const userId = currentUser?.user?.id || getCacheUserId() || getPersistedSessionInfo()?.userId;
         if (!userId) {
-          throw new Error('无法确定当前用户');
+          if (!cancelled) {
+            dataInitializedRef.current = false;
+            setIsAuthenticated(false);
+          }
+          return;
         }
 
         await initializeUserData(userId);
+        persistSessionInfo(userId);
         if (!cancelled) {
           dataInitializedRef.current = true;
           setIsAuthenticated(true);
@@ -276,8 +319,6 @@ function App() {
         console.warn('[App] Session bootstrap failed:', error);
         if (!cancelled) {
           dataInitializedRef.current = false;
-          setCacheUserId(null);
-          setIndexedDBUserId(null);
           setIsAuthenticated(false);
         }
       }
@@ -400,6 +441,7 @@ function App() {
       }
       dataInitializedRef.current = true;
       hydrateBootstrapData(userId, response);
+      persistSessionInfo(userId);
       splashCompletedRef.current = true;
       setIsAuthenticated(true);
       setAppPhase('app');

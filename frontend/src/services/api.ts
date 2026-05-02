@@ -835,8 +835,15 @@ export const api = {
   },
 
   getCurrentUser: async () => {
-    const response = await axiosInstance.get('/auth/me');
-    return response.data;
+    try {
+      const response = await axiosInstance.get('/auth/me');
+      return response.data;
+    } catch (error: any) {
+      if (error?.response?.status === 401) {
+        return { user: null };
+      }
+      throw error;
+    }
   },
 
   sendSmsCode: async (phone: string) => {
@@ -850,8 +857,15 @@ export const api = {
   },
 
   getAuthStatus: async () => {
-    const response = await axiosInstance.get('/auth/token');
-    return response.data;
+    try {
+      const response = await axiosInstance.get('/auth/token');
+      return response.data;
+    } catch (error: any) {
+      if (error?.response?.status === 401 && error?.response?.data) {
+        return error.response.data;
+      }
+      throw error;
+    }
   },
 
   getAgents: async (): Promise<any[]> => {

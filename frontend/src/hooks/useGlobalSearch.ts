@@ -31,7 +31,8 @@ export interface MessageSearchResult {
   has_attachments: boolean;
   attachments: SearchAttachment[];
   attachment_match?: { filename: string; match_type: string } | null;
-  match_type: 'content' | 'attachment';
+  attachment_match_preview?: string | null;
+  match_type: 'content' | 'attachment' | 'tts_transcript';
   created_at: string;
 }
 

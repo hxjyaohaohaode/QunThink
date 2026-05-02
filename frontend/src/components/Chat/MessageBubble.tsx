@@ -218,10 +218,15 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
     const systemAvatarUrl = systemPersona?.avatar_url;
     const systemName = systemPersona?.name || AI_NAMES[systemSenderId || 'system'] || systemSenderId || '系统';
     const systemAvatarLetter = AI_AVATAR_LETTERS[systemSenderId || 'system'] || (systemName || '系').charAt(0).toUpperCase();
+    const isRefusal = message.metadata?.refusal === true;
 
     return (
       <div className="flex justify-center my-3 animate-fade-in">
-        <div className="flex items-center gap-2 bg-bg-surface2/80 dark:bg-bg-surface/80 backdrop-blur-sm px-3 py-1.5 rounded-full max-w-[85%] shadow-sm border border-border/30">
+        <div className={`flex items-center gap-2 backdrop-blur-sm px-3 py-1.5 rounded-full max-w-[85%] shadow-sm border ${
+          isRefusal
+            ? 'bg-amber-50/90 dark:bg-amber-900/30 border-amber-200/50 dark:border-amber-700/50'
+            : 'bg-bg-surface2/80 dark:bg-bg-surface/80 border-border/30'
+        }`}>
           {systemSenderId && (
             <div
               className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[8px] font-semibold flex-shrink-0 shadow-sm overflow-hidden"
@@ -235,7 +240,12 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
               {!systemAvatarUrl && systemAvatarLetter}
             </div>
           )}
-          <div className="text-xs text-text-muted text-center">
+          {isRefusal && (
+            <svg className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
+            </svg>
+          )}
+          <div className={`text-xs text-center ${isRefusal ? 'text-amber-700 dark:text-amber-300' : 'text-text-muted'}`}>
             {message.content}
           </div>
         </div>

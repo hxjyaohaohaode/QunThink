@@ -7,6 +7,7 @@ import { useGroupsStore } from '../../stores/groupsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { usePersonasStore } from '../../stores/personasStore';
 import { useAgentsStore } from '../../stores/agentsStore';
+import { joinGroup } from '../../services/websocket';
 import { AI_AVATAR_LETTERS, AI_COLORS, AI_NAMES } from '../../types';
 import { useDebounce } from '../../hooks/useDebounce';
 
@@ -29,6 +30,8 @@ interface SearchResultMessage {
   sender_type: 'user' | 'ai' | 'system';
   sender_id?: string;
   content: string;
+  attachment_match_preview?: string;
+  match_type?: string;
   created_at: string;
 }
 
@@ -196,11 +199,13 @@ export function SearchPanel() {
 
   const goToGroup = (groupId: string) => {
     selectGroup(groupId);
+    joinGroup(groupId);
     close();
   };
 
   const goToMessage = (groupId: string, messageId: string) => {
     selectGroup(groupId);
+    joinGroup(groupId);
     setScrollToMessageId(messageId);
     close();
   };
@@ -329,6 +334,9 @@ export function SearchPanel() {
                               </div>
                               <div className="text-xs text-text-muted">{result.group_name}</div>
                               <p className="mt-2 text-sm text-text-secondary">{highlightText(truncate(result.content, 160), query)}</p>
+                              {result.attachment_match_preview && (
+                                <p className="mt-1.5 text-xs text-accent/80 line-clamp-2 whitespace-pre-line">{highlightText(truncate(result.attachment_match_preview, 200), query)}</p>
+                              )}
                             </div>
                           </div>
                         </button>

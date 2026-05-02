@@ -105,38 +105,33 @@ export function populateGroupCache(userId, db) {
   }
 }
 
-const REFUSAL_REASONS = [
-  '太无聊了',
-  '缺乏深度',
-  '没有营养',
-  '太过肤浅',
-  '不够有趣',
-  '逻辑不通',
-  '毫无根据',
-  '过于主观',
-  '不太认同',
-  '无法苟同',
-  '缺乏逻辑支撑',
-  '非常搞笑',
-  '傻得有点可爱',
-  '太无聊了',
-  '太没有创意了',
-  '太过平淡无奇',
-  '没有讨论价值',
-  '偏离了主题',
-  '没什么新意',
-  '不太合适',
-  '这种说法不够严谨',
-  '有点怪怪的',
-  '与你人格不符',
-  '过于武断了',
-];
-
-function generateRefusalMessage(aiId, userId = null) {
+async function generateRefusalMessage(aiId, userId = null, recentMessages = []) {
   const persona = getEffectivePersona(aiId, userId);
   const name = persona?.name || aiId;
-  const reason = REFUSAL_REASONS[Math.floor(Math.random() * REFUSAL_REASONS.length)];
-  return `${name}觉得你的发言${reason}所以拒绝回答`;
+
+  try {
+    const { callAI: callAIForRefusal, normalizeResponse: normalizeRefusal } = await import('../ai/index.js');
+    const lastMessage = recentMessages && recentMessages.length > 0
+      ? recentMessages[recentMessages.length - 1]
+      : null;
+    const lastContent = lastMessage ? lastMessage.content?.substring(0, 200) || '' : '';
+
+    const refusalPrompt = `你是${name}，你决定拒绝回答当前的消息。
+请用一句话简短地表达你为什么不想回答，语气要符合你的人设${persona?.personality ? '（' + persona.personality + '）' : ''}。
+只输出你的理由，不要加引号或其他格式，20字以内。
+${lastContent ? '对方说的是：' + lastContent : ''}`;
+
+    const rawRefusal = await callAIForRefusal(aiId, persona, refusalPrompt, [], 'refusal', null, [], null, [], false, [], userId);
+    const refusalReason = normalizeRefusal(rawRefusal)?.trim();
+
+    if (refusalReason && refusalReason.length > 0 && refusalReason.length <= 50) {
+      return `${name}觉得${refusalReason}，所以拒绝回答`;
+    }
+  } catch (e) {
+    console.warn('[AI拒绝] 生成拒绝理由失败:', e.message);
+  }
+
+  return `${name}不想回答这个问题`;
 }
 
 function sleep(ms) {
@@ -770,17 +765,18 @@ function buildWeChatStylePrompt(persona, userMessage, recentMessages, groupMembe
 
   if (attachmentDescriptions && attachmentDescriptions.length > 0) {
     const attachmentParts = attachmentDescriptions.map(att => {
+      const sender = att.sender || '用户';
       if (att.type === 'image') {
-        return `【用户上传的图片: ${att.name}】\n图片内容描述: ${att.description}`;
+        return `【${sender}上传的图片: ${att.name}】\n图片内容描述: ${att.description}`;
       } else if (att.type === 'audio') {
-        return `【用户上传的音频: ${att.name}】\n音频内容描述: ${att.description}`;
+        return `【${sender}上传的音频: ${att.name}】\n音频内容描述: ${att.description}`;
       } else if (att.type === 'video') {
-        return `【用户上传的视频: ${att.name}】\n视频内容描述: ${att.description}`;
+        return `【${sender}上传的视频: ${att.name}】\n视频内容描述: ${att.description}`;
       } else {
-        return `【用户上传的文件: ${att.name}】\n文件内容: ${att.description}`;
+        return `【${sender}上传的文件: ${att.name}】\n文件内容: ${att.description}`;
       }
     }).join('\n\n');
-    parts.push(`\n【用户上传的附件内容】\n${attachmentParts}`);
+    parts.push(`\n【聊天中的附件内容】\n${attachmentParts}`);
   }
 
   if (userMessage) {
@@ -854,6 +850,43 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
 
   const silenceProbability = persona.silenceProbability ?? 0;
   if (!isMentioned && !isPrivateChat && Math.random() < silenceProbability) {
+    return null;
+  }
+
+  const refusalProbability = persona.refusalProbability ?? 0;
+  if (refusalProbability > 0 && Math.random() < refusalProbability) {
+    const refusalMsg = await generateRefusalMessage(aiId, userId, recentMessages);
+    if (refusalMsg) {
+      const refusalMessageId = uuidv4();
+      const refusalMessage = {
+        id: refusalMessageId,
+        group_id: groupId,
+        sender_type: 'system',
+        sender_id: aiId,
+        content: refusalMsg,
+        content_type: 'system',
+        metadata: { refusal: true },
+        created_at: new Date().toISOString()
+      };
+      
+      const dbResult = await findGroupAndMessagesInAnyUserDb(groupId);
+      if (dbResult) {
+        await withWriteLock(dbResult.userId, async () => {
+          await dbResult.db.read();
+          dbResult.db.data.messages.push(refusalMessage);
+          await dbResult.db.write();
+        });
+      }
+      
+      broadcastToGroup(groupId, {
+        type: 'system_message',
+        group_id: groupId,
+        content: refusalMsg,
+        sender_id: aiId,
+        metadata: { refusal: true },
+        timestamp: new Date().toISOString()
+      });
+    }
     return null;
   }
   
@@ -991,10 +1024,10 @@ async function collectAttachmentDescriptions(groupId, userId) {
     await db.read();
     const recentMessages = db.data.messages
       .filter(m => m.group_id === groupId)
-      .slice(-5);
+      .slice(-20);
 
     for (const msg of recentMessages) {
-      if (msg.sender_type !== 'user' || !msg.attachments || msg.attachments.length === 0) continue;
+      if (!msg.attachments || msg.attachments.length === 0) continue;
 
       for (const att of msg.attachments) {
         const fileId = att.id || att.url?.match(/\/files\/([^/]+)/)?.[1] || att.url?.split('/files/').pop()?.split('/')[0];
@@ -1018,11 +1051,13 @@ async function collectAttachmentDescriptions(groupId, userId) {
         }
 
         if (description) {
+          const senderLabel = msg.sender_type === 'user' ? '用户' : (msg.sender_id || '某人');
           descriptions.push({
             id: fileRecord.id,
             name: fileRecord.filename,
             type: isImage ? 'image' : isAudio ? 'audio' : isVideo ? 'video' : 'file',
-            description
+            description,
+            sender: senderLabel
           });
         }
       }
@@ -1177,33 +1212,6 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null) {
     if (context.cancel) return null;
     
     if (!result) {
-      const refusalMsg = generateRefusalMessage(aiId, userId);
-      const refusalMessageId = uuidv4();
-      const refusalMessage = {
-        id: refusalMessageId,
-        group_id: groupId,
-        sender_type: 'system',
-        sender_id: aiId,
-        content: refusalMsg,
-        content_type: 'system',
-        created_at: new Date().toISOString()
-      };
-      
-      await withWriteLock(userId, async () => {
-        await userDb.read();
-        userDb.data.messages.push(refusalMessage);
-        updateGroupActivityById(userDb, groupId, refusalMessage);
-        await userDb.write();
-      });
-      
-      broadcastToGroup(groupId, {
-        type: 'system_message',
-        group_id: groupId,
-        content: refusalMsg,
-        sender_id: aiId,
-        timestamp: new Date().toISOString()
-      });
-      
       return null;
     }
     
@@ -1400,32 +1408,40 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
       
       if (Math.random() > interactionProb) {
         console.log(`[AI对话] ${aiId} 决定不回应`);
-        const refusalMsg = generateRefusalMessage(aiId, userId);
-        const refusalMessageId = uuidv4();
-        const refusalMessage = {
-          id: refusalMessageId,
-          group_id: groupId,
-          sender_type: 'system',
-          sender_id: aiId,
-          content: refusalMsg,
-          content_type: 'system',
-          created_at: new Date().toISOString()
-        };
         
-        await withWriteLock(dbResult.userId, async () => {
-          await dbResult.db.read();
-          dbResult.db.data.messages.push(refusalMessage);
-          updateGroupActivityById(dbResult.db, groupId, refusalMessage);
-          await dbResult.db.write();
-        });
-        
-        broadcastToGroup(groupId, {
-          type: 'system_message',
-          group_id: groupId,
-          content: refusalMsg,
-          sender_id: aiId,
-          timestamp: new Date().toISOString()
-        });
+        const refusalProb = persona.refusalProbability ?? 0;
+        if (refusalProb > 0 && Math.random() < refusalProb) {
+          const refusalMsg = await generateRefusalMessage(aiId, userId, recentMessages);
+          if (refusalMsg) {
+            const refusalMessageId = uuidv4();
+            const refusalMessage = {
+              id: refusalMessageId,
+              group_id: groupId,
+              sender_type: 'system',
+              sender_id: aiId,
+              content: refusalMsg,
+              content_type: 'system',
+              metadata: { refusal: true },
+              created_at: new Date().toISOString()
+            };
+            
+            await withWriteLock(dbResult.userId, async () => {
+              await dbResult.db.read();
+              dbResult.db.data.messages.push(refusalMessage);
+              updateGroupActivityById(dbResult.db, groupId, refusalMessage);
+              await dbResult.db.write();
+            });
+            
+            broadcastToGroup(groupId, {
+              type: 'system_message',
+              group_id: groupId,
+              content: refusalMsg,
+              sender_id: aiId,
+              metadata: { refusal: true },
+              timestamp: new Date().toISOString()
+            });
+          }
+        }
         
         continue;
       }

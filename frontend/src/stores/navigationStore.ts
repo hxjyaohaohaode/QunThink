@@ -15,7 +15,7 @@ interface NavigationState {
 
 export const useNavigationStore = create<NavigationState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       sidebarOpen: true,
       searchPanelOpen: false,
       scrollToMessageId: null,
@@ -26,7 +26,12 @@ export const useNavigationStore = create<NavigationState>()(
       setScrollToMessageId: (id: string | null) => {
         set({ scrollToMessageId: id });
         if (id) {
-          setTimeout(() => set({ scrollToMessageId: null }), 3000);
+          setTimeout(() => {
+            const current = get().scrollToMessageId;
+            if (current === id) {
+              set({ scrollToMessageId: null });
+            }
+          }, 15000);
         }
       },
       setTimeFormat: (format) => set({ timeFormat: format }),

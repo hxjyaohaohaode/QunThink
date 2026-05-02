@@ -143,92 +143,131 @@ async function compressImageForAnnotation(filePath, mimeType) {
   }
 }
 
-function getFastAnnotationConfig() {
+function getFastAnnotationConfigs() {
   const configs = [
     { key: process.env.GLM_API_KEY, endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4-flash' },
     { key: process.env.MIMO_API_KEY, endpoint: process.env.MIMO_BASE_URL ? `${process.env.MIMO_BASE_URL}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions', model: 'mimo-v2.5' },
-    { key: process.env.QWEN_API_KEY, endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen3.5-flash' }
+    { key: process.env.QWEN_API_KEY, endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen3.5-flash' },
+    { key: process.env.DEEPSEEK_API_KEY, endpoint: 'https://api.deepseek.com/chat/completions', model: 'deepseek-chat' }
   ];
+  return configs.filter(c => c.key);
+}
+
+async function callFastAPI(messages, maxTokens = 120, timeout = 8000) {
+  const configs = getFastAnnotationConfigs();
+  if (configs.length === 0) return null;
+
   for (const config of configs) {
-    if (config.key) return config;
+    try {
+      const response = await axios.post(
+        config.endpoint,
+        {
+          model: config.model,
+          messages,
+          max_tokens: maxTokens,
+          temperature: 0.2,
+          stream: false
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${config.key}`,
+            'Content-Type': 'application/json'
+          },
+          timeout
+        }
+      );
+      const content = response.data?.choices?.[0]?.message?.content;
+      if (content && content.trim().length > 0) return content;
+    } catch (error) {
+      safeLog('warn', `快速标注API调用失败(${config.model})`, { error: error.message });
+    }
   }
   return null;
 }
 
-async function callFastAPI(messages, maxTokens = 120, timeout = 8000) {
-  const config = getFastAnnotationConfig();
-  if (!config) return null;
+async function annotateWithVision(filePath, mimeType, fileName) {
+  const dataUrl = await compressImageForAnnotation(filePath, mimeType);
+  if (!dataUrl) return null;
 
-  try {
-    const response = await axios.post(
-      config.endpoint,
-      {
+  const visionModels = ['glm_4v_flash', 'qwen_vl_plus', 'mimo_omni', 'qwen_omni'];
+  for (const modelId of visionModels) {
+    const config = getAIConfig(modelId);
+    if (!config || !config.apiKey) continue;
+
+    try {
+      const requestBody = {
         model: config.model,
-        messages,
-        max_tokens: maxTokens,
-        temperature: 0.2,
-        stream: false
-      },
-      {
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: VISION_ANNOTATION_PROMPT },
+              { type: 'image_url', image_url: { url: dataUrl } }
+            ]
+          }
+        ],
+        max_tokens: 150,
+        temperature: 0.2
+      };
+
+      const response = await axios.post(config.endpoint, requestBody, {
         headers: {
-          Authorization: `Bearer ${config.key}`,
+          'Authorization': `Bearer ${config.apiKey}`,
           'Content-Type': 'application/json'
         },
-        timeout
+        timeout: 15000
+      });
+
+      const content = response.data?.choices?.[0]?.message?.content;
+      if (content) {
+        const parsed = parseAnnotationResponse(content);
+        if (parsed) return parsed;
       }
-    );
-    return response.data?.choices?.[0]?.message?.content;
-  } catch (error) {
-    safeLog('warn', '快速标注API调用失败', { error: error.message });
-    return null;
-  }
-}
-
-async function annotateWithVision(filePath, mimeType, fileName) {
-  const config = getAIConfig('mimo_omni');
-  if (!config || !config.apiKey) {
-    return null;
-  }
-
-  try {
-    const dataUrl = await compressImageForAnnotation(filePath, mimeType);
-    if (!dataUrl) return null;
-
-    const requestBody = {
-      model: config.model,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: VISION_ANNOTATION_PROMPT },
-            { type: 'image_url', image_url: { url: dataUrl } }
-          ]
-        }
-      ],
-      max_tokens: 150,
-      temperature: 0.2
-    };
-
-    const response = await axios.post(config.endpoint, requestBody, {
-      headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 15000
-    });
-
-    const content = response.data?.choices?.[0]?.message?.content;
-    if (content) {
-      return parseAnnotationResponse(content);
+    } catch (error) {
+      safeLog('warn', `视觉标注失败(${modelId})`, { error: error.message, fileName });
     }
-    return null;
-  } catch (error) {
-    safeLog('warn', '视觉标注失败', { error: error.message, fileName });
-    return null;
   }
+  return null;
 }
 
 async function annotateWithMedia(fileName, fileSize, mediaType) {
+  const omniModels = ['qwen_omni'];
+  for (const modelId of omniModels) {
+    const config = getAIConfig(modelId);
+    if (!config || !config.apiKey) continue;
+
+    try {
+      const prompt = MEDIA_ANNOTATION_PROMPT
+        .replace(/\{mediaType\}/g, mediaType)
+        .replace('{filename}', fileName)
+        .replace('{fileSize}', formatFileSize(fileSize));
+
+      const response = await axios.post(config.endpoint, {
+        model: config.model,
+        messages: [
+          { role: 'system', content: `你是一个文件搜索标注助手。根据文件名和大小推断${mediaType}内容，生成简洁准确的搜索标注。只输出标注结果，不要多余解释。` },
+          { role: 'user', content: prompt }
+        ],
+        max_tokens: 120,
+        temperature: 0.2
+      }, {
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 8000
+      });
+
+      const content = response.data?.choices?.[0]?.message?.content;
+      if (content) {
+        const parsed = parseAnnotationResponse(content);
+        if (parsed) return parsed;
+      }
+    } catch (error) {
+      safeLog('warn', `媒体标注失败(${modelId})`, { error: error.message });
+    }
+  }
+
   const prompt = MEDIA_ANNOTATION_PROMPT
     .replace(/\{mediaType\}/g, mediaType)
     .replace('{filename}', fileName)
@@ -330,47 +369,81 @@ const TEXT_DESCRIPTION_PROMPT = `请为以下文件内容生成详细描述，�
 请描述文件的核心内容、关键信息和主要观点，200字以内。`;
 
 async function generateImageDescription(filePath, mimeType, fileName) {
-  const config = getAIConfig('mimo_omni');
-  if (!config || !config.apiKey) {
-    return null;
+  const dataUrl = await compressImageForAnnotation(filePath, mimeType);
+  if (!dataUrl) return null;
+
+  const visionModels = ['glm_4v_flash', 'qwen_vl_plus', 'mimo_omni', 'qwen_omni'];
+  for (const modelId of visionModels) {
+    const config = getAIConfig(modelId);
+    if (!config || !config.apiKey) continue;
+
+    try {
+      const requestBody = {
+        model: config.model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: VISION_DESCRIPTION_PROMPT },
+              { type: 'image_url', image_url: { url: dataUrl } }
+            ]
+          }
+        ],
+        max_tokens: 300,
+        temperature: 0.3
+      };
+
+      const response = await axios.post(config.endpoint, requestBody, {
+        headers: {
+          'Authorization': `Bearer ${config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 20000
+      });
+
+      const content = response.data?.choices?.[0]?.message?.content;
+      if (content && content.trim().length > 0) return content.trim();
+    } catch (error) {
+      safeLog('warn', `图片内容描述生成失败(${modelId})`, { error: error.message, fileName });
+    }
   }
-
-  try {
-    const dataUrl = await compressImageForAnnotation(filePath, mimeType);
-    if (!dataUrl) return null;
-
-    const requestBody = {
-      model: config.model,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: VISION_DESCRIPTION_PROMPT },
-            { type: 'image_url', image_url: { url: dataUrl } }
-          ]
-        }
-      ],
-      max_tokens: 300,
-      temperature: 0.3
-    };
-
-    const response = await axios.post(config.endpoint, requestBody, {
-      headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 20000
-    });
-
-    const content = response.data?.choices?.[0]?.message?.content;
-    return content && content.trim().length > 0 ? content.trim() : null;
-  } catch (error) {
-    safeLog('warn', '图片内容描述生成失败', { error: error.message, fileName });
-    return null;
-  }
+  return null;
 }
 
 async function generateAudioDescription(fileName, fileSize) {
+  const omniModels = ['qwen_omni'];
+  for (const modelId of omniModels) {
+    const config = getAIConfig(modelId);
+    if (!config || !config.apiKey) continue;
+
+    try {
+      const prompt = AUDIO_DESCRIPTION_PROMPT
+        .replace('{filename}', fileName)
+        .replace('{fileSize}', formatFileSize(fileSize));
+
+      const response = await axios.post(config.endpoint, {
+        model: config.model,
+        messages: [
+          { role: 'system', content: '你是一个音频内容分析助手。根据文件信息推断音频内容，生成详细描述。' },
+          { role: 'user', content: prompt }
+        ],
+        max_tokens: 200,
+        temperature: 0.3
+      }, {
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 8000
+      });
+
+      const content = response.data?.choices?.[0]?.message?.content;
+      if (content && content.trim().length > 0) return content.trim();
+    } catch (error) {
+      safeLog('warn', `音频描述生成失败(${modelId})`, { error: error.message });
+    }
+  }
+
   const prompt = AUDIO_DESCRIPTION_PROMPT
     .replace('{filename}', fileName)
     .replace('{fileSize}', formatFileSize(fileSize));
@@ -384,6 +457,39 @@ async function generateAudioDescription(fileName, fileSize) {
 }
 
 async function generateVideoDescription(fileName, fileSize) {
+  const omniModels = ['qwen_omni'];
+  for (const modelId of omniModels) {
+    const config = getAIConfig(modelId);
+    if (!config || !config.apiKey) continue;
+
+    try {
+      const prompt = VIDEO_DESCRIPTION_PROMPT
+        .replace('{filename}', fileName)
+        .replace('{fileSize}', formatFileSize(fileSize));
+
+      const response = await axios.post(config.endpoint, {
+        model: config.model,
+        messages: [
+          { role: 'system', content: '你是一个视频内容分析助手。根据文件信息推断视频内容，生成详细描述。' },
+          { role: 'user', content: prompt }
+        ],
+        max_tokens: 200,
+        temperature: 0.3
+      }, {
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 8000
+      });
+
+      const content = response.data?.choices?.[0]?.message?.content;
+      if (content && content.trim().length > 0) return content.trim();
+    } catch (error) {
+      safeLog('warn', `视频描述生成失败(${modelId})`, { error: error.message });
+    }
+  }
+
   const prompt = VIDEO_DESCRIPTION_PROMPT
     .replace('{filename}', fileName)
     .replace('{fileSize}', formatFileSize(fileSize));

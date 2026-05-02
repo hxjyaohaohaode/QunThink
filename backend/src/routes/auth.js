@@ -51,6 +51,7 @@ router.post('/auth/login-phone', validateBody(phoneLoginSchema), asyncHandler(as
 
   res.cookie('session_token', token, {
     httpOnly: true,
+    domain: isProduction ? undefined : 'localhost',
     path: '/',
     sameSite: isProduction ? 'none' : 'lax',
     maxAge: SESSION_MAX_AGE_SECONDS,
@@ -145,6 +146,7 @@ router.post('/auth/register-sms', validateBody(smsRegisterSchema), asyncHandler(
 
   res.cookie('session_token', token, {
     httpOnly: true,
+    domain: isProduction ? undefined : 'localhost',
     path: '/',
     sameSite: isProduction ? 'none' : 'lax',
     maxAge: SESSION_MAX_AGE_SECONDS,
@@ -168,27 +170,38 @@ router.post('/auth/logout', asyncHandler(async (req, res) => {
     });
   }
 
-  res.clearCookie('session_token', { path: '/' });
+  res.clearCookie('session_token', {
+    path: '/',
+    sameSite: isProduction ? 'none' : 'lax',
+    secure: isProduction
+  });
   res.json({ success: true });
 }));
 
 router.get('/auth/me', asyncHandler(async (req, res) => {
   const token = req.cookies?.session_token;
   if (!token) {
-    return res.status(401).json({ error: '未登录' });
+    return res.json({ user: null });
   }
 
   const db = getAuthDb();
   await db.read();
 
-  const session = db.data.sessions.find(s => s.token === token);
+  const session = db.data.sessions.find(s => {
+    if (s.token.length !== token.length) return false;
+    try {
+      return crypto.timingSafeEqual(Buffer.from(s.token), Buffer.from(token));
+    } catch {
+      return false;
+    }
+  });
   if (!session || new Date(session.expires_at) < new Date()) {
-    return res.status(401).json({ error: '会话已过期' });
+    return res.json({ user: null });
   }
 
   const user = db.data.users.find(u => u.id === session.userId);
   if (!user) {
-    return res.status(401).json({ error: '用户不存在' });
+    return res.json({ user: null });
   }
 
   res.json({

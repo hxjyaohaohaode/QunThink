@@ -897,9 +897,36 @@ router.get('/search', async (req, res) => {
 
           if (contentMatch || ttsMatch || attachmentMatch) {
             const groupObj = (db.data.groups || []).find(g => g.id === message.group_id);
-            const resultContent = contentMatch
-              ? content
-              : (ttsMatch ? ttsTranscript : content);
+            let resultContent = content || '';
+            let attachmentMatchPreview = null;
+            
+            if (attachmentMatch && !contentMatch && !ttsMatch) {
+              if (attachmentMatchInfo?.filename) {
+                resultContent = `[附件: ${attachmentMatchInfo.filename}] ${resultContent}`.trim();
+              }
+              const fileId = message.attachments?.[0]?.id || message.attachments?.[0]?.url?.match(/\/files\/([^/]+)/)?.[1];
+              if (fileId) {
+                const fileRecord = filesIndex[fileId];
+                if (fileRecord) {
+                  if (fileRecord.media_description) {
+                    attachmentMatchPreview = `AI识别: ${fileRecord.media_description.substring(0, 150)}`;
+                  }
+                  if (fileRecord.search_description) {
+                    attachmentMatchPreview = (attachmentMatchPreview ? attachmentMatchPreview + '\n' : '') + `摘要: ${fileRecord.search_description.substring(0, 150)}`;
+                  }
+                  if (typeof fileRecord.parsed_content === 'string' && fileRecord.parsed_content.length > 0) {
+                    const idx = fileRecord.parsed_content.toLowerCase().indexOf(searchQuery);
+                    if (idx !== -1) {
+                      const start = Math.max(0, idx - 30);
+                      const end = Math.min(fileRecord.parsed_content.length, idx + searchQuery.length + 50);
+                      const preview = (start > 0 ? '...' : '') + fileRecord.parsed_content.substring(start, end) + (end < fileRecord.parsed_content.length ? '...' : '');
+                      attachmentMatchPreview = (attachmentMatchPreview ? attachmentMatchPreview + '\n' : '') + `内容: ${preview}`;
+                    }
+                  }
+                }
+              }
+            }
+            
             results.messages.push({
               id: message.id,
               group_id: message.group_id,
@@ -912,6 +939,7 @@ router.get('/search', async (req, res) => {
               attachments: message.attachments || [],
               tts_audio: message.metadata?.tts || null,
               attachment_match: attachmentMatchInfo,
+              attachment_match_preview: attachmentMatchPreview,
               match_type: contentMatch ? 'content' : (ttsMatch ? 'tts_transcript' : 'attachment'),
               created_at: message.created_at
             });
@@ -955,7 +983,13 @@ router.get('/search', async (req, res) => {
           let matchField = nameMatch ? 'filename' : descMatch ? 'description' : tagsMatch ? 'tags' : mediaDescMatch ? 'media_description' : 'content';
 
           const linkedMessage = (db.data.messages || []).find(m =>
-            m.attachments && m.attachments.some(a => a.id === file.id || a.url?.endsWith(`/${file.id}/download`))
+            m.attachments && m.attachments.some(a => {
+              if (a.id === file.id) return true;
+              if (a.url && a.url.includes(`/${file.id}`)) return true;
+              if (a.name === file.filename) return true;
+              if (a.url && file.filename && a.url.includes(encodeURIComponent(file.filename))) return true;
+              return false;
+            })
           );
 
           results.files.push({

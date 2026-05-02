@@ -373,9 +373,9 @@ export function MessageList() {
             }
           }, 300);
         }, 100);
+        
+        setScrollToMessageId(null);
       }
-      
-      setScrollToMessageId(null);
     }
   }, [scrollToMessageId, groupMessages.length, listItems, setScrollToMessageId]);
 

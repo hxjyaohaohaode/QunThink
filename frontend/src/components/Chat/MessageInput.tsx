@@ -654,7 +654,7 @@ export function MessageInput() {
             multiple
             onChange={handleFileSelect}
             className="hidden"
-            accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.md,.py,.js,.ts,.jsx,.tsx,.html,.css,.json,.png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,.mp3,.wav,.ogg,.m4a,.aac,.flac,.mp4,.webm,.mov,.avi,.ppt,.pptx,image/*"
+            accept=".pdf,.doc,.docx,.xls,.xlsx,.csv,.txt,.md,.py,.js,.ts,.jsx,.tsx,.html,.css,.scss,.less,.json,.xml,.yaml,.yml,.toml,.sql,.java,.c,.cpp,.h,.go,.rs,.rb,.php,.swift,.kt,.vue,.svelte,.sh,.bat,.env,.dockerfile,.png,.jpg,.jpeg,.gif,.webp,.bmp,.svg,.mp3,.wav,.ogg,.m4a,.aac,.flac,.wma,.mp4,.webm,.mov,.avi,.mkv,.ppt,.pptx,.zip,.rar,.7z,image/*,video/*,audio/*"
           />
 
           <AnimatedButton

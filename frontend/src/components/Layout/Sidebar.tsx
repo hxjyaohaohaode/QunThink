@@ -23,8 +23,9 @@ dayjs.locale('zh-cn');
 
 type SidebarView = 'chats' | 'members';
 
-const EDITABLE_AI_LIST: string[] = AI_LIST.filter(id => id !== 'mimo_tts');
-const CHATTABLE_AI_LIST: string[] = AI_LIST.filter(id => id !== 'mimo_tts');
+const NON_CHATTABLE_AI = ['mimo_tts', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'];
+const EDITABLE_AI_LIST: string[] = AI_LIST.filter(id => !NON_CHATTABLE_AI.includes(id));
+const CHATTABLE_AI_LIST: string[] = AI_LIST.filter(id => !NON_CHATTABLE_AI.includes(id));
 
 function GroupAvatar({ group, personas, size = 'md' }: { group: any; personas: any; size?: 'sm' | 'md' }) {
   const sizeClass = size === 'sm' ? 'w-8 h-8' : 'w-11 h-11';
@@ -291,7 +292,12 @@ function MemberItem({ aiId, index, total, personas, onPrivateChat, onEdit, reduc
       }`}
       style={animationStyle}
       onClick={() => isChattable && onPrivateChat(aiId)}
-      title={isChattable ? `点击与 ${AI_NAMES[aiId]} 私聊` : `${AI_NAMES[aiId]} - 语音合成模型，不支持聊天`}
+      title={isChattable 
+        ? `点击与 ${AI_NAMES[aiId]} 私聊` 
+        : aiId === 'mimo_tts' 
+          ? `${AI_NAMES[aiId]} - 语音合成模型，不支持聊天` 
+          : `${AI_NAMES[aiId]} - 多模态标注专用模型，不支持聊天（仅用于附件内容识别）`
+      }
     >
       <div className="relative flex-shrink-0">
         <div
@@ -795,7 +801,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents }: S
                   {(globalSearch.activeTab === 'all' || globalSearch.activeTab === 'messages') && (globalSearch.searchData.messages || []).map(r => {
                     const senderName = r.sender_type === 'user' ? '用户' : (personas[r.sender_id || '']?.name || AI_NAMES[r.sender_id || ''] || r.sender_id || '?');
                     return (
-                      <div key={r.id} onClick={() => { selectGroup(r.group_id); setScrollToMessageId(r.id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+                      <div key={r.id} onClick={() => { selectGroup(r.group_id); joinGroup(r.group_id); setScrollToMessageId(r.id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                         <div className="flex items-start gap-1.5">
                           <div className="w-4 h-4 rounded-full flex items-center justify-center text-white text-[7px] font-semibold flex-shrink-0" style={{ backgroundColor: r.sender_type === 'user' ? '#171717' : (personas[r.sender_id || '']?.color || AI_COLORS[r.sender_id || ''] || '#737373') }}>
                             {r.sender_type === 'user' ? 'U' : (AI_AVATAR_LETTERS[r.sender_id || ''] || senderName[0])}
@@ -807,13 +813,16 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents }: S
                               <span className="text-[8px] text-text-muted ml-auto">{dayjs(r.created_at).format('M/D HH:mm')}</span>
                             </div>
                             <p className="text-[10px] text-text-secondary line-clamp-1">{r.content}</p>
+                            {r.attachment_match_preview && (
+                              <p className="text-[9px] text-accent/70 line-clamp-1 mt-0.5">{r.attachment_match_preview.split('\n')[0]}</p>
+                            )}
                           </div>
                         </div>
                       </div>
                     );
                   })}
                   {(globalSearch.activeTab === 'all' || globalSearch.activeTab === 'files') && (globalSearch.searchData.files || []).map(r => (
-                    <div key={r.id} onClick={() => { selectGroup(r.group_id); if (r.linked_message_id) setScrollToMessageId(r.linked_message_id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+                    <div key={r.id} onClick={() => { selectGroup(r.group_id); joinGroup(r.group_id); if (r.linked_message_id) setScrollToMessageId(r.linked_message_id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                       <div className="flex items-center gap-1.5">
                         <div className="w-5 h-5 rounded bg-emerald-500/10 flex items-center justify-center flex-shrink-0">
                           <svg className="w-3 h-3 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
@@ -821,6 +830,12 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents }: S
                         <div className="flex-1 min-w-0">
                           <span className="text-[10px] font-medium text-text-primary truncate block">{r.filename}</span>
                           <span className="text-[8px] text-text-muted">{r.group_name} 路 {r.mime_type?.split('/')[1] || '文件'}</span>
+                          {r.media_description && (
+                            <p className="text-[9px] text-accent/70 line-clamp-1 mt-0.5">AI: {r.media_description.substring(0, 60)}</p>
+                          )}
+                          {r.content_preview && !r.media_description && (
+                            <p className="text-[9px] text-text-muted line-clamp-1 mt-0.5">{r.content_preview.substring(0, 60)}</p>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -854,7 +869,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents }: S
                   {(globalSearch.activeTab === 'all' || globalSearch.activeTab === 'comments') && (globalSearch.searchData.comments || []).map(r => {
                     const senderName = r.sender_type === 'user' ? '用户' : (personas[r.sender_id || '']?.name || AI_NAMES[r.sender_id || ''] || r.sender_id || '?');
                     return (
-                      <div key={r.id} onClick={() => { if (r.group_id) { selectGroup(r.group_id); setScrollToMessageId(r.message_id); } setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+                      <div key={r.id} onClick={() => { if (r.group_id) { selectGroup(r.group_id); joinGroup(r.group_id); setScrollToMessageId(r.message_id); } setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                         <div className="flex items-start gap-1.5">
                           <div className="w-4 h-4 rounded-full flex items-center justify-center text-white text-[7px] font-semibold flex-shrink-0" style={{ backgroundColor: r.sender_type === 'user' ? '#171717' : (personas[r.sender_id || '']?.color || AI_COLORS[r.sender_id || ''] || '#737373') }}>
                             {r.sender_type === 'user' ? 'U' : (AI_AVATAR_LETTERS[r.sender_id || ''] || senderName[0])}

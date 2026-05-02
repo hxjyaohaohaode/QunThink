@@ -25,9 +25,9 @@ export async function parseFile(filePath, mimeType) {
       return await parseWord(filePath);
     } else if (ext === '.xls' || ext === '.xlsx' || ext === '.csv') {
       return await parseSpreadsheet(filePath, ext);
-    } else if (ext === '.txt' || ext === '.md' || ext === '.json') {
+    } else if (ext === '.txt' || ext === '.md' || ext === '.json' || ext === '.xml' || ext === '.yaml' || ext === '.yml' || ext === '.toml' || ext === '.ini' || ext === '.env' || ext === '.dockerfile' || ext === '.csv') {
       return await parseText(filePath);
-    } else if (['.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.java', '.c', '.cpp', '.go', '.rs'].includes(ext)) {
+    } else if (['.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.scss', '.less', '.java', '.c', '.cpp', '.h', '.hpp', '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala', '.lua', '.r', '.sql', '.sh', '.bash', '.zsh', '.ps1', '.bat', '.vue', '.svelte'].includes(ext)) {
       return await parseCode(filePath, ext);
     } else if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'].includes(ext)) {
       return await parseImage(filePath, ext, mimeType);

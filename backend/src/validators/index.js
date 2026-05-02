@@ -163,6 +163,7 @@ const updatePersonaSchema = z.object({
   questionProbability: z.number().min(0).max(1).optional(),
   debateTendency: z.enum(['low', 'medium', 'high']).optional(),
   silenceProbability: z.number().min(0).max(1).optional(),
+  refusalProbability: z.number().min(0).max(1).optional(),
   speakingOrder: z.number().int().min(1).max(10).optional(),
   firstSpeakerTopics: z.array(z.string().max(100)).max(20).optional()
 });

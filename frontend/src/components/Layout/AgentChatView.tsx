@@ -144,7 +144,6 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
       if (
         lastMsg.sender_type === 'agent' &&
         !lastMsg.is_streaming &&
-        !lastMsg.suggestions &&
         !activeSuggestions &&
         !loadingSuggestions
       ) {
@@ -174,13 +173,10 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
     if (
       lastMsg.sender_type === 'agent' &&
       !lastMsg.is_streaming &&
-      lastMsg.suggestions &&
-      lastMsg.suggestions.length > 0 &&
       lastMsg.id !== lastSSEMsgIdRef.current
     ) {
       lastSSEMsgIdRef.current = lastMsg.id;
       historyFetchKeyRef.current = `${agentId}:${lastMsg.id}`;
-      setActiveSuggestions({ msgId: lastMsg.id, items: lastMsg.suggestions });
     }
   }, [messages]);
 
@@ -337,6 +333,23 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
                     </div>
                   ) : (
                     <>
+                      {msg.attachments && msg.attachments.length > 0 && (
+                        <div className={`flex flex-wrap gap-1.5 mb-2 ${isUser ? 'justify-end' : 'justify-start'}`}>
+                          {msg.attachments.map((att, idx) => (
+                            <span
+                              key={idx}
+                              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs ${
+                                isUser
+                                  ? 'bg-white/20 text-white/90'
+                                  : 'bg-bg-surface2 text-text-secondary'
+                              }`}
+                            >
+                              <span>{att.type === 'image' ? '🖼️' : att.type === 'audio' ? '🎵' : att.type === 'video' ? '🎬' : '📄'}</span>
+                              <span className="max-w-[120px] truncate">{att.filename}</span>
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       {msg.content}
                       {msg.is_streaming && msg.content && (
                         <span className="inline-block w-0.5 h-4 bg-text-primary ml-0.5 animate-pulse align-text-bottom" />

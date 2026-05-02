@@ -227,14 +227,9 @@ router.post('/agents/:agentId/chat', async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
-    let fullContent = '';
-    const result = await chatWithAgent(userId, agentId, message, (chunk) => {
-      fullContent += chunk;
+    await chatWithAgent(userId, agentId, message, (chunk) => {
       res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
     }, attachments || []);
-    if (result && result.suggestions && result.suggestions.length > 0) {
-      res.write(`data: ${JSON.stringify({ type: 'suggestions', suggestions: result.suggestions })}\n\n`);
-    }
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (error) {
@@ -281,17 +276,11 @@ router.post('/agents/:agentId/chat-with-files', (req, res, next) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
-    
-    let fullContent = '';
-    const result = await chatWithAgent(userId, agentId, message, (chunk) => {
-      fullContent += chunk;
+
+    await chatWithAgent(userId, agentId, message, (chunk) => {
       res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
     }, attachments);
-    
-    if (result && result.suggestions && result.suggestions.length > 0) {
-      res.write(`data: ${JSON.stringify({ type: 'suggestions', suggestions: result.suggestions })}\n\n`);
-    }
-    
+
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (error) {

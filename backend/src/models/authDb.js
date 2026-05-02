@@ -45,9 +45,13 @@ export async function initAuthDb() {
         throw err;
       }
     } catch (recoverErr) {
-      console.warn('⚠️ 认证数据库恢复失败，使用默认数据');
+      console.error('⚠️ 认证数据库恢复失败，保留磁盘原始数据，使用内存默认数据');
+      try {
+        const backupPath = authDbFile + '.corrupted.' + Date.now();
+        await fs.copyFile(authDbFile, backupPath);
+        console.log(`📦 损坏的认证数据库已备份到: ${backupPath}`);
+      } catch {}
       authDb.data = JSON.parse(JSON.stringify(defaultAuthData));
-      await authDb.write();
     }
   }
 

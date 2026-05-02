@@ -18,15 +18,20 @@ const uploadBaseDir = getUploadsDir();
 const ALLOWED_MIME_TYPES = [
   'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp',
   'application/pdf',
-  'text/plain', 'text/csv', 'text/markdown', 'text/xml', 'text/json',
-  'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime',
-  'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp4', 'audio/aac', 'audio/flac',
+  'text/plain', 'text/csv', 'text/markdown', 'text/xml', 'text/json', 'text/html', 'text/css',
+  'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-msvideo',
+  'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp4', 'audio/aac', 'audio/flac', 'audio/x-ms-wma',
   'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/zip', 'application/gzip', 'application/x-tar', 'application/x-rar-compressed'
+  'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/zip', 'application/gzip', 'application/x-tar', 'application/x-rar-compressed',
+  'application/javascript', 'application/typescript', 'application/x-python', 'application/x-java-source',
+  'text/x-python', 'text/x-java', 'text/x-c', 'text/x-cpp', 'text/x-go', 'text/x-rust',
+  'text/x-shellscript', 'text/x-yaml', 'text/x-toml', 'text/x-ini', 'text/x-dockerfile',
+  'application/octet-stream'
 ];
 
-const DANGEROUS_EXTENSIONS = ['.exe', '.bat', '.sh', '.cmd', '.ps1', '.vbs', '.js', '.msi', '.com', '.scr', '.dll', '.pif', '.reg', '.wsf', '.ws'];
+const DANGEROUS_EXTENSIONS = ['.exe', '.bat', '.sh', '.cmd', '.ps1', '.vbs', '.msi', '.com', '.scr', '.dll', '.pif', '.reg', '.wsf', '.ws'];
 
 const MAGIC_BYTES_MAP = {
   'image/jpeg': [[0xFF, 0xD8, 0xFF]],

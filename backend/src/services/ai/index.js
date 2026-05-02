@@ -138,6 +138,51 @@ const DEFAULT_AI_CONFIGS = {
       top_p: 0.8,
       max_tokens: 200
     }
+  },
+  glm_4v_flash: {
+    name: 'glm-4.6v-flash',
+    apiKey: process.env.GLM_API_KEY || '',
+    endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+    model: 'glm-4.6v-flash',
+    enabled: true,
+    priority: 11,
+    capabilities: ['vision'],
+    note: '智谱视觉模型 - 用于图片内容识别标注，完全免费，不可对话',
+    params: {
+      temperature: 0.20,
+      top_p: 0.9,
+      max_tokens: 500
+    }
+  },
+  qwen_vl_plus: {
+    name: 'qwen-vl-plus',
+    apiKey: process.env.QWEN_API_KEY || '',
+    endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+    model: 'qwen-vl-plus',
+    enabled: true,
+    priority: 12,
+    capabilities: ['vision'],
+    note: '通义千问视觉模型 - 用于图片内容识别标注，1.5元/百万tokens（直降81%），不可对话',
+    params: {
+      temperature: 0.20,
+      top_p: 0.9,
+      max_tokens: 500
+    }
+  },
+  qwen_omni: {
+    name: 'qwen2.5-omni-7b',
+    apiKey: process.env.QWEN_API_KEY || '',
+    endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+    model: 'qwen2.5-omni-7b',
+    enabled: true,
+    priority: 13,
+    capabilities: ['vision', 'audio', 'video'],
+    note: '通义千问全模态模型 - 用于图片/音频/视频标注，2025年7月前免费，不可对话',
+    params: {
+      temperature: 0.20,
+      top_p: 0.9,
+      max_tokens: 500
+    }
   }
 };
 
@@ -561,9 +606,9 @@ function buildAttachmentHint(attachments, hasTextContent) {
     let typeLabel = '文件';
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext) || (att.type && att.type.startsWith('image/'))) {
       typeLabel = '图片';
-    } else if (['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext) || (att.type && att.type.startsWith('audio/'))) {
+    } else if (['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac', 'wma'].includes(ext) || (att.type && att.type.startsWith('audio/'))) {
       typeLabel = '音频';
-    } else if (['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext) || (att.type && att.type.startsWith('video/'))) {
+    } else if (['mp4', 'avi', 'mov', 'mkv', 'webm', 'flv', 'wmv'].includes(ext) || (att.type && att.type.startsWith('video/'))) {
       typeLabel = '视频';
     } else if (['pdf'].includes(ext) || (att.type && att.type.includes('pdf'))) {
       typeLabel = 'PDF文档';
@@ -571,10 +616,19 @@ function buildAttachmentHint(attachments, hasTextContent) {
       typeLabel = 'Word文档';
     } else if (['xls', 'xlsx', 'csv'].includes(ext)) {
       typeLabel = '表格';
+    } else if (['ppt', 'pptx'].includes(ext)) {
+      typeLabel = 'PPT演示';
+    } else if (['py', 'js', 'ts', 'java', 'c', 'cpp', 'go', 'rs', 'rb', 'php', 'swift', 'kt', 'sql', 'html', 'css', 'vue', 'svelte'].includes(ext)) {
+      typeLabel = '代码文件';
     }
-    const desc = att.media_description || '';
+
+    const desc = att.media_description || att.search_description || '';
+    const parsedContent = att.parsed_content || '';
     if (desc) {
       attParts.push(`附件${i + 1}(${typeLabel}: ${fname}): ${desc}`);
+    } else if (parsedContent && typeof parsedContent === 'string' && parsedContent.length > 0) {
+      const snippet = parsedContent.substring(0, 500);
+      attParts.push(`附件${i + 1}(${typeLabel}: ${fname}) 内容摘要:\n${snippet}`);
     } else {
       attParts.push(`附件${i + 1}(${typeLabel}: ${fname})`);
     }

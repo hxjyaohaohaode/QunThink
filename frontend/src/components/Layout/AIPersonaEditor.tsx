@@ -59,11 +59,11 @@ const defaultPersona: PersonaConfig = {
   avatar_url: null,
   keywords: [],
   firstSpeakerTopics: [],
-  speakingOrder: 3,
   messageLength: 'medium',
   questionProbability: 0.3,
   debateTendency: 'medium',
   silenceProbability: 0.1,
+  refusalProbability: 0,
   preferredRole: 'expert',
   customRoleName: '',
   responseConfig: defaultResponseConfig,
@@ -459,8 +459,8 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
                 </select>
               </div>
               <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4">
-                <div className="mb-2 flex items-center justify-between text-xs text-text-secondary"><span>发言顺序倾向</span><span>{form.speakingOrder || 3}</span></div>
-                <input type="range" min={1} max={10} value={form.speakingOrder || 3} onChange={(event) => setField('speakingOrder', Number(event.target.value))} className="w-full accent-[var(--accent)]" />
+                <div className="mb-2 flex items-center justify-between text-xs text-text-secondary"><span>拒绝回答概率</span><span>{((form.refusalProbability || 0) * 100).toFixed(0)}%</span></div>
+                <input type="range" min={0} max={1} step={0.05} value={form.refusalProbability || 0} onChange={(event) => setField('refusalProbability', Number(event.target.value))} className="w-full accent-[var(--accent)]" />
               </div>
               <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4">
                 <div className="mb-2 flex items-center justify-between text-xs text-text-secondary"><span>提问概率</span><span>{((form.questionProbability || 0) * 100).toFixed(0)}%</span></div>

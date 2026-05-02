@@ -360,20 +360,7 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
     await db.write();
   });
 
-  let suggestions = null;
-  if (agent.enable_suggestions) {
-    try {
-      const chatHistory = db.data.agent_messages
-        .filter(m => m.agent_id === agentId)
-        .slice(-10);
-      const userProfile = db.data.userProfile || null;
-      suggestions = await generateSuggestions(agent, response, messageContent, userId, chatHistory, userProfile);
-    } catch (error) {
-      console.error('[Agent对话] 生成建议回复失败:', error.message);
-    }
-  }
-
-  return { content: response, suggestions };
+  return { content: response };
 }
 
 export async function generateSuggestions(agent, agentResponse, userMessage, userId, chatHistory = [], userProfile = null) {

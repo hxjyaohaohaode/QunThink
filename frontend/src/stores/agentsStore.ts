@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
-import { Agent, AgentChatMessage, AgentQuestion } from '../types';
+import { Agent, AgentChatMessage, AgentQuestion, AgentMessageAttachment } from '../types';
 
 interface AgentUpdateData {
   name?: string;
@@ -132,12 +132,27 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
   },
 
   sendAgentMessage: async (agentId: string, message: string, files?: File[]) => {
+    let attachments: AgentMessageAttachment[] | undefined;
+    if (files && files.length > 0) {
+      attachments = files.map(f => {
+        const ext = f.name.split('.').pop()?.toLowerCase() || '';
+        const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext);
+        const isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext);
+        const isVideo = ['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext);
+        return {
+          filename: f.name,
+          type: isImage ? 'image' as const : isAudio ? 'audio' as const : isVideo ? 'video' as const : 'file' as const,
+        };
+      });
+    }
+
     const userMessage: AgentChatMessage = {
       id: `temp_${Date.now()}`,
       agent_id: agentId,
       sender_type: 'user',
       content: message,
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
+      attachments,
     };
 
     const agentMessageId = `temp_agent_${Date.now()}`;
@@ -172,7 +187,6 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
       let fullContent = '';
-      let suggestions: string[] | undefined;
 
       if (reader) {
         while (true) {
@@ -189,9 +203,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
 
               try {
                 const parsed = JSON.parse(data);
-                if (parsed.type === 'suggestions' && Array.isArray(parsed.suggestions)) {
-                  suggestions = parsed.suggestions;
-                } else if (parsed.content) {
+                if (parsed.content) {
                   fullContent += parsed.content;
                   set(state => {
                     const newAgentMessages = new Map(state.agentMessages);
@@ -229,7 +241,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
         const messages = newAgentMessages.get(agentId) || [];
         const updatedMessages = messages.map(m =>
           m.id === agentMessageId
-            ? { ...m, content: fullContent || 'No response', is_streaming: false, suggestions }
+            ? { ...m, content: fullContent || 'No response', is_streaming: false }
             : m
         );
         newAgentMessages.set(agentId, updatedMessages);

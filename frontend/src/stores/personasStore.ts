@@ -58,6 +58,7 @@ export interface PersonaConfig {
   questionProbability?: number;
   debateTendency?: string;
   silenceProbability?: number;
+  refusalProbability?: number;
   preferredRole?: PreferredRole;
   customRoleName?: string;
   responseConfig?: ResponseConfig;

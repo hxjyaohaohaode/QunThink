@@ -233,7 +233,7 @@ app.get('/api/auth/token', async (req, res) => {
 
   const token = req.cookies?.session_token;
   if (!token) {
-    return res.status(401).json({
+    return res.json({
       enabled: true,
       valid: false,
       mode: 'session',
@@ -254,7 +254,7 @@ app.get('/api/auth/token', async (req, res) => {
   const isValidSession = !!session && new Date(session.expires_at) >= new Date();
 
   if (!isValidSession) {
-    return res.status(401).json({
+    return res.json({
       enabled: true,
       valid: false,
       mode: 'session',

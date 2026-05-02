@@ -27,6 +27,9 @@ export const AI_COLORS: Record<string, string> = {
   glm_flashx: '#059669',
   qwen_flash: '#8b5cf6',
   qwen_turbo: '#8b5cf6',
+  glm_4v_flash: '#22d3ee',
+  qwen_vl_plus: '#a78bfa',
+  qwen_omni: '#f472b6',
   system: '#737373'
 };
 
@@ -42,6 +45,9 @@ export const AI_NAMES: Record<string, string> = {
   glm_flashx: 'GLM-4.7-FlashX',
   qwen_flash: 'Qwen3.5-Flash',
   qwen_turbo: 'qwen-turbo',
+  glm_4v_flash: 'GLM-4.6V-Flash',
+  qwen_vl_plus: 'Qwen-VL-Plus',
+  qwen_omni: 'Qwen2.5-Omni-7B',
   system: '系统'
 };
 
@@ -57,10 +63,13 @@ export const AI_AVATAR_LETTERS: Record<string, string> = {
   glm_flashx: 'GX',
   qwen_flash: 'QF',
   qwen_turbo: 'QT',
+  glm_4v_flash: 'GV',
+  qwen_vl_plus: 'VP',
+  qwen_omni: 'QO',
   system: 'S'
 };
 
-export const AI_LIST = ['deepseek', 'deepseek_reasoner', 'mimo_flash', 'mimo_omni', 'mimo_tts', 'glm_air', 'glm_flash', 'glm_flashx', 'qwen_flash', 'qwen_turbo'] as const;
+export const AI_LIST = ['deepseek', 'deepseek_reasoner', 'mimo_flash', 'mimo_omni', 'mimo_tts', 'glm_air', 'glm_flash', 'glm_flashx', 'qwen_flash', 'qwen_turbo', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'] as const;
 
 export type DebateStyle = 'moderate' | 'standard' | 'intense';
 
@@ -147,6 +156,14 @@ export interface AgentChatMessage {
   created_at: string;
   is_streaming?: boolean;
   suggestions?: string[];
+  attachments?: AgentMessageAttachment[];
+}
+
+export interface AgentMessageAttachment {
+  filename: string;
+  type: 'image' | 'audio' | 'video' | 'file';
+  description?: string;
+  content_preview?: string;
 }
 
 export interface AgentQuestion {

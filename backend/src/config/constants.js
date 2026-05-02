@@ -8,7 +8,10 @@ export const AI_NAMES = {
   mimo_omni: 'mimo-v2-omni',
   mimo_tts: 'mimo-v2-tts',
   qwen_flash: 'Qwen3.5-Flash',
-  qwen_turbo: 'qwen-turbo'
+  qwen_turbo: 'qwen-turbo',
+  glm_4v_flash: 'GLM-4.6V-Flash',
+  qwen_vl_plus: 'Qwen-VL-Plus',
+  qwen_omni: 'Qwen2.5-Omni-7B'
 };
 
 export const AI_MENTION_ALIASES = {
@@ -21,7 +24,10 @@ export const AI_MENTION_ALIASES = {
   mimo_omni: ['mimo-omni', 'mimo-v2-omni', 'omni', '蜜蜜全能'],
   mimo_tts: ['mimo_tts', 'mimo-v2-tts', 'tts', '语音合成', '蜜蜜语音'],
   qwen_flash: ['qwen_flash', 'Qwen3.5-Flash', 'Qwen', 'qwen3.5-flash', '千问', '通义千问'],
-  qwen_turbo: ['qwen-turbo', 'turbo', '千问turbo', '通义千问turbo']
+  qwen_turbo: ['qwen-turbo', 'turbo', '千问turbo', '通义千问turbo'],
+  glm_4v_flash: ['glm_4v_flash', 'glm-4.6v-flash', '4.6V-Flash', '智谱视觉', '免费视觉'],
+  qwen_vl_plus: ['qwen_vl_plus', 'qwen-vl-plus', 'VL-Plus', '通义视觉', '千问视觉'],
+  qwen_omni: ['qwen_omni', 'qwen2.5-omni-7b', 'Omni-7B', '通义全模态', '千问全模态']
 };
 
 export function calculateSimilarity(text1, text2) {
