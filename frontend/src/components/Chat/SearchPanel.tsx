@@ -14,8 +14,8 @@ import { useDebounce } from '../../hooks/useDebounce';
 dayjs.extend(relativeTime);
 dayjs.locale('zh-cn');
 
-type FilterTab = 'all' | 'groups' | 'messages' | 'files' | 'agents' | 'personas' | 'comments';
-type QuickFilter = 'all' | 'images' | 'files' | 'links';
+type FilterTab = 'all' | 'groups' | 'messages' | 'files' | 'agents' | 'personas' | 'comments' | 'members' | 'media';
+type QuickFilter = 'all' | 'images' | 'files' | 'links' | 'media';
 
 interface SearchResultGroup {
   id: string;
@@ -77,6 +77,37 @@ interface SearchResultComment {
   created_at: string;
 }
 
+interface SearchResultMember {
+  id: string;
+  name: string;
+  type: 'ai' | 'user';
+  group_id: string;
+  group_name: string;
+  personality?: string;
+  style?: string;
+  expertise?: string[];
+  color?: string | null;
+  avatar_url?: string | null;
+  match_field: string;
+}
+
+interface SearchResultMedia {
+  id: string;
+  group_id: string;
+  group_name: string;
+  filename: string;
+  mime_type: string;
+  media_type: 'image' | 'audio' | 'video';
+  file_size?: number;
+  media_description?: string;
+  search_description?: string;
+  search_tags?: string[];
+  content_preview?: string;
+  match_field?: string;
+  url?: string;
+  created_at: string;
+}
+
 interface GlobalSearchResponse {
   groups: SearchResultGroup[];
   messages: SearchResultMessage[];
@@ -84,6 +115,8 @@ interface GlobalSearchResponse {
   agents: SearchResultAgent[];
   personas: SearchResultPersona[];
   comments: SearchResultComment[];
+  members: SearchResultMember[];
+  media: SearchResultMedia[];
   total: number;
   query: string;
 }
@@ -197,7 +230,7 @@ export function SearchPanel() {
   const counts = useMemo(
     () => {
       if (loading) {
-        return { all: '-', groups: '-', messages: '-', files: '-', agents: '-', personas: '-', comments: '-' } as any;
+        return { all: '-', groups: '-', messages: '-', files: '-', agents: '-', personas: '-', comments: '-', members: '-', media: '-' } as any;
       }
       return {
         all: searchData?.total || 0,
@@ -207,6 +240,8 @@ export function SearchPanel() {
         agents: searchData?.agents?.length || 0,
         personas: searchData?.personas?.length || 0,
         comments: searchData?.comments?.length || 0,
+        members: searchData?.members?.length || 0,
+        media: searchData?.media?.length || 0,
       };
     },
     [searchData, loading]
@@ -262,7 +297,7 @@ export function SearchPanel() {
             data-search-input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索群聊、消息、文件、智能体和人设"
+            placeholder="搜索群聊、消息、文件、媒体、成员、智能体和人设"
             className="flex-1 rounded-xl border border-border-subtle bg-bg-surface2 px-4 py-3 text-sm text-text-primary outline-none focus:border-accent"
           />
           <select
@@ -283,8 +318,10 @@ export function SearchPanel() {
           {tabButton('groups', '群聊')}
           {tabButton('messages', '消息')}
           {tabButton('files', '文件')}
+          {tabButton('media', '媒体')}
           {tabButton('agents', '智能体')}
           {tabButton('personas', '人设')}
+          {tabButton('members', '成员')}
           {tabButton('comments', '评论')}
         </div>
 
@@ -293,6 +330,7 @@ export function SearchPanel() {
           {([
             { key: 'all' as QuickFilter, label: '全部', icon: '🔍' },
             { key: 'images' as QuickFilter, label: '图片', icon: '🖼️' },
+            { key: 'media' as QuickFilter, label: '媒体', icon: '🎬' },
             { key: 'files' as QuickFilter, label: '文件', icon: '📄' },
             { key: 'links' as QuickFilter, label: '链接', icon: '🔗' },
           ]).map((filter) => (
@@ -498,6 +536,85 @@ export function SearchPanel() {
                           <p className="mt-2 text-sm text-text-secondary">{highlightText(truncate(result.content, 160), query)}</p>
                         </button>
                       ))}
+                    </div>
+                  </section>
+                )}
+
+                {(activeTab === 'all' || activeTab === 'members') && searchData.members.length > 0 && (
+                  <section>
+                    <h5 className="mb-3 text-sm font-semibold text-text-primary">成员</h5>
+                    <div className="space-y-3">
+                      {searchData.members.map((result) => (
+                        <button key={`${result.id}_${result.group_id}`} onClick={() => goToGroup(result.group_id)} className="block w-full rounded-xl border border-border-subtle bg-bg-surface2 p-4 text-left hover:border-accent">
+                          <div className="flex items-center gap-3">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-full text-sm font-semibold text-white flex-shrink-0" style={{ backgroundColor: result.type === 'ai' ? (result.color || AI_COLORS[result.id] || '#6b7280') : AI_COLORS.user }}>
+                              {result.type === 'ai' ? (result.name?.[0] || 'A') : 'U'}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium text-text-primary">{highlightText(result.name, query)}</span>
+                                <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-medium ${result.type === 'ai' ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300' : 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'}`}>
+                                  {result.type === 'ai' ? 'AI' : '用户'}
+                                </span>
+                              </div>
+                              <div className="text-xs text-text-muted mt-0.5">{result.group_name}</div>
+                              {result.personality && (
+                                <p className="mt-1.5 text-xs text-text-secondary line-clamp-2">{highlightText(truncate(result.personality, 120), query)}</p>
+                              )}
+                              {result.expertise && result.expertise.length > 0 && (
+                                <div className="mt-1.5 flex flex-wrap gap-1">
+                                  {result.expertise.slice(0, 4).map((tag) => (
+                                    <span key={tag} className="inline-block rounded-full bg-accent/10 px-2 py-0.5 text-[10px] text-accent">{tag}</span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {(activeTab === 'all' || activeTab === 'media') && searchData.media.length > 0 && (
+                  <section>
+                    <h5 className="mb-3 text-sm font-semibold text-text-primary">媒体</h5>
+                    <div className="space-y-3">
+                      {searchData.media.map((result) => {
+                        const mediaIcon = result.media_type === 'image' ? '🖼️' : result.media_type === 'audio' ? '🎵' : '🎬';
+                        const mediaLabel = result.media_type === 'image' ? '图片' : result.media_type === 'audio' ? '音频' : '视频';
+                        return (
+                          <button key={result.id} onClick={() => goToGroup(result.group_id)} className="block w-full rounded-xl border border-border-subtle bg-bg-surface2 p-4 text-left hover:border-accent">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[14px]">{mediaIcon}</span>
+                                  <span className="text-sm font-medium text-text-primary">{highlightText(result.filename, query)}</span>
+                                  <span className="inline-block rounded-full bg-accent/10 px-2 py-0.5 text-[10px] text-accent">{mediaLabel}</span>
+                                </div>
+                                <div className="text-xs text-text-muted mt-0.5">{result.group_name} · {result.mime_type} · {formatFileSize(result.file_size)}</div>
+                                {result.media_description && (
+                                  <p className="mt-1.5 text-xs text-accent/80 line-clamp-2">AI识别: {highlightText(truncate(result.media_description, 160), query)}</p>
+                                )}
+                                {result.search_description && (
+                                  <p className="mt-1.5 text-xs text-text-secondary line-clamp-2">{highlightText(truncate(result.search_description, 160), query)}</p>
+                                )}
+                                {result.content_preview && !result.search_description && !result.media_description && (
+                                  <p className="mt-1.5 text-xs text-text-muted line-clamp-2">{highlightText(truncate(result.content_preview, 160), query)}</p>
+                                )}
+                                {result.search_tags && result.search_tags.length > 0 && (
+                                  <div className="mt-1.5 flex flex-wrap gap-1">
+                                    {result.search_tags.slice(0, 5).map((tag) => (
+                                      <span key={tag} className="inline-block rounded-full bg-accent/10 px-2 py-0.5 text-[10px] text-accent">{tag}</span>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                              <span className="text-xs text-text-muted flex-shrink-0">{dayjs(result.created_at).format('YYYY-MM-DD HH:mm')}</span>
+                            </div>
+                          </button>
+                        );
+                      })}
                     </div>
                   </section>
                 )}

@@ -85,6 +85,37 @@ export interface CommentSearchResult {
   created_at: string;
 }
 
+export interface MemberSearchResult {
+  id: string;
+  name: string;
+  type: 'ai' | 'user';
+  group_id: string;
+  group_name: string;
+  personality?: string;
+  style?: string;
+  expertise?: string[];
+  color?: string | null;
+  avatar_url?: string | null;
+  match_field: string;
+}
+
+export interface MediaSearchResult {
+  id: string;
+  group_id: string;
+  group_name: string;
+  filename: string;
+  mime_type: string;
+  media_type: 'image' | 'audio' | 'video';
+  file_size?: number;
+  media_description?: string;
+  search_description?: string;
+  search_tags?: string[];
+  content_preview?: string;
+  match_field?: string;
+  url?: string;
+  created_at: string;
+}
+
 export interface GlobalSearchResponse {
   groups: GroupSearchResult[];
   messages: MessageSearchResult[];
@@ -92,12 +123,14 @@ export interface GlobalSearchResponse {
   agents: AgentSearchResult[];
   personas: PersonaSearchResult[];
   comments: CommentSearchResult[];
+  members: MemberSearchResult[];
+  media: MediaSearchResult[];
   total: number;
   query: string;
 }
 
-export type SearchFilterTab = 'all' | 'groups' | 'messages' | 'files' | 'agents' | 'personas' | 'comments';
-export type QuickFilter = 'all' | 'images' | 'files' | 'links';
+export type SearchFilterTab = 'all' | 'groups' | 'messages' | 'files' | 'agents' | 'personas' | 'comments' | 'members' | 'media';
+export type QuickFilter = 'all' | 'images' | 'files' | 'links' | 'media';
 
 export function useGlobalSearch() {
   const [query, setQuery] = useState('');

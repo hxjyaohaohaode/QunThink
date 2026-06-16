@@ -69,6 +69,16 @@ function generateFallbackAnnotation(fileName, mimeType, fileSize) {
     'application/vnd.openxmlformats-officedocument.wordprocessingml': { desc: 'Word文档', tags: ['Word', '文档', '报告'] },
     'application/vnd.openxmlformats-officedocument.spreadsheetml': { desc: 'Excel表格', tags: ['Excel', '表格', '数据'] },
     'application/vnd.openxmlformats-officedocument.presentationml': { desc: 'PPT演示', tags: ['PPT', '演示', '幻灯片'] },
+    'application/zip': { desc: 'ZIP压缩包', tags: ['压缩包', 'ZIP', '归档'] },
+    'application/gzip': { desc: 'GZ压缩包', tags: ['压缩包', 'GZ', '归档'] },
+    'application/x-tar': { desc: 'TAR归档', tags: ['归档', 'TAR'] },
+    'application/x-rar-compressed': { desc: 'RAR压缩包', tags: ['压缩包', 'RAR', '归档'] },
+    'application/x-7z-compressed': { desc: '7z压缩包', tags: ['压缩包', '7z', '归档'] },
+    'application/epub+zip': { desc: 'EPUB电子书', tags: ['电子书', 'EPUB', '阅读'] },
+    'application/rtf': { desc: 'RTF文档', tags: ['RTF', '文档'] },
+    'application/vnd.oasis.opendocument.text': { desc: 'ODT文档', tags: ['ODT', '文档', 'LibreOffice'] },
+    'application/vnd.oasis.opendocument.spreadsheet': { desc: 'ODS表格', tags: ['ODS', '表格', 'LibreOffice'] },
+    'application/vnd.oasis.opendocument.presentation': { desc: 'ODP演示', tags: ['ODP', '演示', 'LibreOffice'] },
   };
 
   let matched = null;
@@ -107,6 +117,14 @@ function getFileTypeLabel(ext) {
     '.txt': '文本文件', '.md': 'Markdown文档', '.json': 'JSON数据',
     '.py': 'Python代码', '.js': 'JavaScript代码', '.ts': 'TypeScript代码',
     '.html': 'HTML页面', '.css': 'CSS样式表',
+    '.zip': 'ZIP压缩包', '.rar': 'RAR压缩包', '.7z': '7z压缩包',
+    '.tar': 'TAR归档', '.gz': 'GZ压缩包',
+    '.epub': 'EPUB电子书', '.mobi': 'MOBI电子书',
+    '.odt': 'ODT文档', '.ods': 'ODS表格', '.odp': 'ODP演示',
+    '.rtf': 'RTF文档', '.log': '日志文件',
+    '.dart': 'Dart代码', '.zig': 'Zig代码', '.nim': 'Nim代码',
+    '.proto': 'Protocol Buffers', '.graphql': 'GraphQL定义',
+    '.sql': 'SQL脚本', '.sh': 'Shell脚本',
   };
   return labels[ext] || '文件';
 }
@@ -309,8 +327,8 @@ async function annotateWithText(fileName, contentSnippet, ext) {
 
 export async function annotateWithoutFile(fileName, mimeType, fileSize, parsedContent) {
   const ext = path.extname(fileName).toLowerCase();
-  const isAudio = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma'].includes(ext);
-  const isVideo = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'].includes(ext);
+  const isAudio = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.amr', '.opus'].includes(ext);
+  const isVideo = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.3gp'].includes(ext);
   const textContent = typeof parsedContent === 'string' ? parsedContent : '';
   const hasTextContent = textContent.length > 20;
 
@@ -540,9 +558,9 @@ async function generateTextDescription(fileName, contentSnippet, ext) {
 
 export async function generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent) {
   const ext = path.extname(fileName).toLowerCase();
-  const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'].includes(ext);
-  const isAudio = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma'].includes(ext);
-  const isVideo = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'].includes(ext);
+  const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.tiff', '.tif', '.ico', '.avif', '.heic', '.heif'].includes(ext);
+  const isAudio = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.amr', '.opus'].includes(ext);
+  const isVideo = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.3gp'].includes(ext);
 
   const textContent = typeof parsedContent === 'string' ? parsedContent : '';
   const hasTextContent = textContent.length > 20;
@@ -614,9 +632,9 @@ async function refineImageAnnotation(annotation, fileName, fileSize) {
 
 export async function annotateFile(filePath, mimeType, fileName, fileSize, parsedContent) {
   const ext = path.extname(fileName).toLowerCase();
-  const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'].includes(ext);
-  const isAudio = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma'].includes(ext);
-  const isVideo = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'].includes(ext);
+  const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.tiff', '.tif', '.ico', '.avif', '.heic', '.heif'].includes(ext);
+  const isAudio = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.amr', '.opus'].includes(ext);
+  const isVideo = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.3gp'].includes(ext);
 
   const textContent = typeof parsedContent === 'string' ? parsedContent : '';
   const hasTextContent = textContent.length > 20;

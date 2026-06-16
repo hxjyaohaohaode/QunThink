@@ -144,13 +144,12 @@ function GroupItem({ group, isActive, onSelect, onDelete, onPin, showPinButton, 
 
   return (
     <div
-      className={`px-3 py-2.5 flex items-center gap-3 group cursor-pointer transition-colors duration-150 ${
-        isActive
-          ? 'bg-sidebar-active'
-          : group.pinned
-            ? 'hover:bg-sidebar-hover bg-[#F0F3FA] dark:bg-[#1E2235]'
-            : 'hover:bg-sidebar-hover'
-      }`}
+      className={`px-3 py-2.5 flex items-center gap-3 group cursor-pointer transition-colors duration-150 ${isActive
+        ? 'bg-sidebar-active'
+        : group.pinned
+          ? 'hover:bg-sidebar-hover bg-[#F0F3FA] dark:bg-[#1E2235]'
+          : 'hover:bg-sidebar-hover'
+        }`}
       onClick={onSelect}
     >
       <GroupAvatar group={group} personas={personas} size="sm" />
@@ -234,17 +233,15 @@ function MemberItem({ aiId, personas, onPrivateChat, onEdit, reducedMotion }: Me
 
   return (
     <div
-      className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg member-item-hover group ${
-        isChattable ? 'cursor-pointer' : 'cursor-default'
-      } ${
-        isVisible && !reducedMotion ? 'animate-member-item-in' : ''
-      }`}
+      className={`flex items-center gap-2.5 px-3 py-1.5 rounded-lg member-item-hover group ${isChattable ? 'cursor-pointer' : 'cursor-default'
+        } ${isVisible && !reducedMotion ? 'animate-member-item-in' : ''
+        }`}
       style={animationStyle}
       onClick={() => isChattable && onPrivateChat(aiId)}
-      title={isChattable 
-        ? `点击与 ${AI_NAMES[aiId]} 私聊` 
-        : aiId === 'mimo_tts' 
-          ? `${AI_NAMES[aiId]} - 语音合成模型，不支持聊天` 
+      title={isChattable
+        ? `点击与 ${AI_NAMES[aiId]} 私聊`
+        : aiId === 'mimo_tts'
+          ? `${AI_NAMES[aiId]} - 语音合成模型，不支持聊天`
           : `${AI_NAMES[aiId]} - 多模态标注专用模型，不支持聊天（仅用于附件内容识别）`
       }
     >
@@ -461,22 +458,23 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
       ...filteredPrivateChats,
     ];
     return (
-    <div className="flex-1 overflow-y-auto py-1">
-      {allItems.map((group: any) => (
-        <GroupItem
-          key={group.id}
-          group={group}
-          isActive={currentGroup?.id === group.id}
-          onSelect={() => handleSelectGroup(group.id)}
-          onDelete={(group.type === 'custom' || group.type === 'private' || group.type === 'ai_private') ? () => setShowDeleteConfirm(group.id) : undefined}
-          onPin={(group._isPinned !== undefined) ? (e: any) => handlePinGroup(group.id, !group.pinned, e) : undefined}
-          showPinButton={group._isPinned !== undefined}
-          messages={messages[group.id] || []}
-          personas={personas}
-        />
-      ))}
-    </div>
-  );};
+      <div className="flex-1 overflow-y-auto py-1">
+        {allItems.map((group: any) => (
+          <GroupItem
+            key={group.id}
+            group={group}
+            isActive={currentGroup?.id === group.id}
+            onSelect={() => handleSelectGroup(group.id)}
+            onDelete={(group.type === 'custom' || group.type === 'private' || group.type === 'ai_private') ? () => setShowDeleteConfirm(group.id) : undefined}
+            onPin={(group._isPinned !== undefined) ? (e: any) => handlePinGroup(group.id, !group.pinned, e) : undefined}
+            showPinButton={group._isPinned !== undefined}
+            messages={messages[group.id] || []}
+            personas={personas}
+          />
+        ))}
+      </div>
+    );
+  };
 
   const renderMembersList = () => (
     <div className="flex-1 overflow-y-auto p-4">
@@ -532,17 +530,17 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
           <svg viewBox="0 0 200 200" className="w-7 h-7">
             <defs>
               <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#6C5CE7"/>
-                <stop offset="100%" stopColor="#A29BFE"/>
+                <stop offset="0%" stopColor="#6C5CE7" />
+                <stop offset="100%" stopColor="#A29BFE" />
               </linearGradient>
               <filter id="logoShadow" x="-20%" y="-20%" width="140%" height="140%">
-                <feDropShadow dx="0" dy="4" stdDeviation="8" floodColor="#1A1A2E" floodOpacity="0.25"/>
+                <feDropShadow dx="0" dy="4" stdDeviation="8" floodColor="#1A1A2E" floodOpacity="0.25" />
               </filter>
             </defs>
             <g filter="url(#logoShadow)">
-              <rect x="55" y="50" width="85" height="85" rx="20" fill="#1A1A2E" opacity="0.9" transform="rotate(-12, 97, 92)"/>
-              <rect x="70" y="48" width="85" height="85" rx="20" fill="#6C5CE7" opacity="0.6" transform="rotate(8, 112, 90)"/>
-              <rect x="82" y="58" width="85" height="85" rx="20" fill="url(#logoGrad)"/>
+              <rect x="55" y="50" width="85" height="85" rx="20" fill="#1A1A2E" opacity="0.9" transform="rotate(-12, 97, 92)" />
+              <rect x="70" y="48" width="85" height="85" rx="20" fill="#6C5CE7" opacity="0.6" transform="rotate(8, 112, 90)" />
+              <rect x="82" y="58" width="85" height="85" rx="20" fill="url(#logoGrad)" />
             </g>
           </svg>
         </div>
@@ -653,18 +651,19 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
                 { key: 'groups' as SearchFilterTab, label: '群聊', count: globalSearch.searchData.groups?.length || 0 },
                 { key: 'messages' as SearchFilterTab, label: '消息', count: globalSearch.searchData.messages?.length || 0 },
                 { key: 'files' as SearchFilterTab, label: '文件', count: globalSearch.searchData.files?.length || 0 },
+                { key: 'media' as SearchFilterTab, label: '媒体', count: globalSearch.searchData.media?.length || 0 },
                 { key: 'agents' as SearchFilterTab, label: '智能体', count: globalSearch.searchData.agents?.length || 0 },
                 { key: 'personas' as SearchFilterTab, label: 'AI角色', count: globalSearch.searchData.personas?.length || 0 },
+                { key: 'members' as SearchFilterTab, label: '成员', count: globalSearch.searchData.members?.length || 0 },
                 { key: 'comments' as SearchFilterTab, label: '评论', count: globalSearch.searchData.comments?.length || 0 },
               ]).map(tab => (
                 <button
                   key={tab.key}
                   onClick={() => globalSearch.setActiveTab(tab.key)}
-                  className={`px-2 py-1 text-[9px] whitespace-nowrap transition-colors border-b-2 flex-shrink-0 ${
-                    globalSearch.activeTab === tab.key
-                      ? 'border-accent text-accent font-medium'
-                      : 'border-transparent text-text-muted hover:text-text-secondary'
-                  }`}
+                  className={`px-2 py-1 text-[9px] whitespace-nowrap transition-colors border-b-2 flex-shrink-0 ${globalSearch.activeTab === tab.key
+                    ? 'border-accent text-accent font-medium'
+                    : 'border-transparent text-text-muted hover:text-text-secondary'
+                    }`}
                 >
                   {tab.label}{tab.count > 0 ? ` ${tab.count}` : ''}
                 </button>
@@ -679,21 +678,19 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
         <div className="flex px-4 gap-1 flex-shrink-0">
           <button
             onClick={() => setActiveView('chats')}
-            className={`flex-1 py-1.5 text-[11px] font-medium rounded-lg transition-all duration-150 ${
-              activeView === 'chats'
-                ? 'bg-sidebar-active text-accent'
-                : 'text-text-muted hover:text-text-secondary hover:bg-sidebar-hover'
-            }`}
+            className={`flex-1 py-1.5 text-[11px] font-medium rounded-lg transition-all duration-150 ${activeView === 'chats'
+              ? 'bg-sidebar-active text-accent'
+              : 'text-text-muted hover:text-text-secondary hover:bg-sidebar-hover'
+              }`}
           >
             聊天
           </button>
           <button
             onClick={() => setActiveView('members')}
-            className={`flex-1 py-1.5 text-[11px] font-medium rounded-lg transition-all duration-150 ${
-              activeView === 'members'
-                ? 'bg-sidebar-active text-accent'
-                : 'text-text-muted hover:text-text-secondary hover:bg-sidebar-hover'
-            }`}
+            className={`flex-1 py-1.5 text-[11px] font-medium rounded-lg transition-all duration-150 ${activeView === 'members'
+              ? 'bg-sidebar-active text-accent'
+              : 'text-text-muted hover:text-text-secondary hover:bg-sidebar-hover'
+              }`}
           >
             成员
           </button>
@@ -817,6 +814,39 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
                       </div>
                     );
                   })}
+                  {(globalSearch.activeTab === 'all' || globalSearch.activeTab === 'members') && (globalSearch.searchData.members || []).map(r => (
+                    <div key={`${r.id}_${r.group_id}`} onClick={() => { selectGroup(r.group_id); joinGroup(r.group_id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+                      <div className="flex items-center gap-1.5">
+                        <div className="w-4 h-4 rounded-full flex items-center justify-center text-white text-[7px] font-semibold flex-shrink-0" style={{ backgroundColor: r.type === 'ai' ? (r.color || AI_COLORS[r.id] || '#6b7280') : '#171717' }}>
+                          {r.type === 'ai' ? (r.name?.[0] || 'A') : 'U'}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1">
+                            <span className="text-[10px] font-medium text-text-primary">{r.name}</span>
+                            <span className="text-[7px] px-1 rounded-full bg-accent/10 text-accent">{r.type === 'ai' ? 'AI' : '用户'}</span>
+                          </div>
+                          <span className="text-[8px] text-text-muted">{r.group_name}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  {(globalSearch.activeTab === 'all' || globalSearch.activeTab === 'media') && (globalSearch.searchData.media || []).map(r => {
+                    const mediaIcon = r.media_type === 'image' ? '🖼️' : r.media_type === 'audio' ? '🎵' : '🎬';
+                    return (
+                      <div key={r.id} onClick={() => { selectGroup(r.group_id); joinGroup(r.group_id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[12px] flex-shrink-0">{mediaIcon}</span>
+                          <div className="flex-1 min-w-0">
+                            <span className="text-[10px] font-medium text-text-primary truncate block">{r.filename}</span>
+                            <span className="text-[8px] text-text-muted">{r.group_name} · {r.media_type === 'image' ? '图片' : r.media_type === 'audio' ? '音频' : '视频'}</span>
+                            {r.media_description && (
+                              <p className="text-[9px] text-accent/70 line-clamp-1 mt-0.5">AI: {r.media_description.substring(0, 60)}</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </>
               )}
             </div>
@@ -873,15 +903,13 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
 
       {showDeleteConfirm && (
         <div
-          className={`fixed inset-0 flex items-center justify-center z-50 p-4 transition-opacity duration-200 ${
-            deleteModalVisible && !deleteModalClosing ? 'opacity-100' : 'opacity-0'
-          } bg-black/50 backdrop-blur-sm`}
+          className={`fixed inset-0 flex items-center justify-center z-50 p-4 transition-opacity duration-200 ${deleteModalVisible && !deleteModalClosing ? 'opacity-100' : 'opacity-0'
+            } bg-black/50 backdrop-blur-sm`}
           onClick={closeDeleteModal}
         >
           <div
-            className={`bg-bg-surface rounded-2xl p-6 w-full max-w-sm md:w-80 shadow-xl transition-all duration-[250ms] ${
-              deleteModalVisible && !deleteModalClosing ? 'opacity-100 scale-100' : 'opacity-0 scale-95'
-            }`}
+            className={`bg-bg-surface rounded-2xl p-6 w-full max-w-sm md:w-80 shadow-xl transition-all duration-[250ms] ${deleteModalVisible && !deleteModalClosing ? 'opacity-100 scale-100' : 'opacity-0 scale-95'
+              }`}
             style={{
               transitionTimingFunction: deleteModalVisible && !deleteModalClosing
                 ? 'cubic-bezier(0.175, 0.885, 0.32, 1.275)'

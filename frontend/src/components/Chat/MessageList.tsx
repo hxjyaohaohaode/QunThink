@@ -603,7 +603,7 @@ export function MessageList() {
           </div>
         )}
 
-        <AnimatePresence mode="wait">
+        <AnimatePresence>
           {loading && groupMessages.length === 0 ? (
             <motion.div
               key="message-loading"

@@ -815,7 +815,7 @@ router.get('/search', async (req, res) => {
     await db.read();
 
     const searchQuery = q.toLowerCase().trim();
-    const searchTypes = type ? type.split(',') : ['groups', 'messages', 'files', 'agents', 'personas', 'comments'];
+    const searchTypes = type ? type.split(',') : ['groups', 'messages', 'files', 'agents', 'personas', 'comments', 'members', 'media'];
 
     // 解析日期范围
     const fromDate = dateFrom ? new Date(dateFrom) : null;
@@ -825,6 +825,7 @@ router.get('/search', async (req, res) => {
     const quickFilterImages = quickFilter === 'images';
     const quickFilterFiles = quickFilter === 'files';
     const quickFilterLinks = quickFilter === 'links';
+    const quickFilterMedia = quickFilter === 'media';
     const results = {
       groups: [],
       messages: [],
@@ -832,6 +833,8 @@ router.get('/search', async (req, res) => {
       agents: [],
       personas: [],
       comments: [],
+      members: [],
+      media: [],
       total: 0,
       query: q
     };
@@ -1135,7 +1138,144 @@ router.get('/search', async (req, res) => {
       }
     }
 
-    results.total = results.groups.length + results.messages.length + results.files.length + results.agents.length + results.personas.length + results.comments.length;
+    if (searchTypes.includes('members')) {
+      const groups = db.data.groups || [];
+      const filteredGroups = groupId ? groups.filter(g => g.id === groupId) : groups;
+      const seenMemberIds = new Set();
+      for (const group of filteredGroups) {
+        // 搜索 AI 成员
+        const aiMembers = group.ai_members || [];
+        for (const aiId of aiMembers) {
+          if (results.members.length >= maxLimit) break;
+          const memberKey = `ai_${aiId}`;
+          if (seenMemberIds.has(memberKey)) continue;
+          const persona = AI_PERSONAS[aiId];
+          const aiName = persona?.name || aiId;
+          const nameMatch = aiName.toLowerCase().includes(searchQuery);
+          const personalityMatch = persona?.personality?.toLowerCase().includes(searchQuery);
+          const styleMatch = persona?.style?.toLowerCase().includes(searchQuery);
+          const expertiseMatch = (persona?.expertise || []).some(e => e.toLowerCase().includes(searchQuery));
+          const keywordsMatch = (persona?.keywords || []).some(k => k.toLowerCase().includes(searchQuery));
+          if (nameMatch || personalityMatch || styleMatch || expertiseMatch || keywordsMatch) {
+            seenMemberIds.add(memberKey);
+            results.members.push({
+              id: aiId,
+              name: aiName,
+              type: 'ai',
+              group_id: group.id,
+              group_name: group.name,
+              personality: persona?.personality || '',
+              style: persona?.style || '',
+              expertise: persona?.expertise || [],
+              color: persona?.color || null,
+              match_field: nameMatch ? 'name' : personalityMatch ? 'personality' : styleMatch ? 'style' : expertiseMatch ? 'expertise' : 'keywords'
+            });
+          }
+        }
+        // 搜索自定义智能体成员
+        const agents = db.data.agents || [];
+        for (const agent of agents) {
+          if (results.members.length >= maxLimit) break;
+          if (!aiMembers.includes(agent.id)) continue;
+          const memberKey = `agent_${agent.id}`;
+          if (seenMemberIds.has(memberKey)) continue;
+          const nameMatch = agent.name?.toLowerCase().includes(searchQuery);
+          const descMatch = agent.description?.toLowerCase().includes(searchQuery);
+          if (nameMatch || descMatch) {
+            seenMemberIds.add(memberKey);
+            results.members.push({
+              id: agent.id,
+              name: agent.name,
+              type: 'ai',
+              group_id: group.id,
+              group_name: group.name,
+              personality: agent.description || '',
+              avatar_url: agent.avatar_url || null,
+              match_field: nameMatch ? 'name' : 'description'
+            });
+          }
+        }
+        // 搜索用户成员
+        const userMembers = group.user_members || [];
+        for (const userId of userMembers) {
+          if (results.members.length >= maxLimit) break;
+          const memberKey = `user_${userId}`;
+          if (seenMemberIds.has(memberKey)) break;
+          const idMatch = userId.toLowerCase().includes(searchQuery);
+          if (idMatch) {
+            seenMemberIds.add(memberKey);
+            results.members.push({
+              id: userId,
+              name: userId,
+              type: 'user',
+              group_id: group.id,
+              group_name: group.name,
+              match_field: 'name'
+            });
+          }
+        }
+      }
+    }
+
+    if (searchTypes.includes('media')) {
+      const files = db.data.files || [];
+      const mediaMimeTypes = ['image/', 'audio/', 'video/'];
+      const mediaExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'];
+      for (const file of files) {
+        if (results.media.length >= maxLimit) break;
+        if (groupId && file.group_id !== groupId) continue;
+
+        const ext = (file.filename || '').split('.').pop()?.toLowerCase() || '';
+        const isMedia = mediaMimeTypes.some(t => (file.mime_type || '').startsWith(t)) || mediaExtensions.includes(`.${ext}`);
+        if (!isMedia) continue;
+
+        const nameMatch = file.filename?.toLowerCase().includes(searchQuery);
+        const mediaDescMatch = file.media_description && file.media_description.toLowerCase().includes(searchQuery);
+        const searchDescMatch = file.search_description?.toLowerCase().includes(searchQuery);
+        const tagsMatch = (file.search_tags || []).some(t => t.toLowerCase().includes(searchQuery));
+        const parsedContentMatch = typeof file.parsed_content === 'string' && file.parsed_content.toLowerCase().includes(searchQuery);
+
+        if (nameMatch || mediaDescMatch || searchDescMatch || tagsMatch || parsedContentMatch) {
+          const groupObj = (db.data.groups || []).find(g => g.id === file.group_id);
+          let matchField = nameMatch ? 'filename' : mediaDescMatch ? 'media_description' : searchDescMatch ? 'description' : tagsMatch ? 'tags' : 'content';
+
+          let contentPreview = '';
+          if (mediaDescMatch && file.media_description) {
+            contentPreview = file.media_description.substring(0, 150);
+          } else if (searchDescMatch && file.search_description) {
+            contentPreview = file.search_description.substring(0, 150);
+          } else if (parsedContentMatch && typeof file.parsed_content === 'string') {
+            const idx = file.parsed_content.toLowerCase().indexOf(searchQuery);
+            const start = Math.max(0, idx - 30);
+            const end = Math.min(file.parsed_content.length, idx + searchQuery.length + 50);
+            contentPreview = (start > 0 ? '...' : '') + file.parsed_content.substring(start, end) + (end < file.parsed_content.length ? '...' : '');
+          }
+
+          const mediaType = (file.mime_type || '').startsWith('image/') || ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'].includes(`.${ext}`) ? 'image'
+            : (file.mime_type || '').startsWith('audio/') || ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma'].includes(`.${ext}`) ? 'audio'
+              : 'video';
+
+          results.media.push({
+            id: file.id,
+            group_id: file.group_id,
+            group_name: groupObj?.name || '未知群组',
+            filename: file.filename,
+            mime_type: file.mime_type,
+            media_type: mediaType,
+            file_size: file.file_size,
+            media_description: file.media_description || '',
+            search_description: file.search_description || '',
+            search_tags: file.search_tags || [],
+            content_preview: contentPreview,
+            match_field: matchField,
+            url: `/api/files/${file.id}/download?group_id=${encodeURIComponent(file.group_id)}`,
+            created_at: file.created_at
+          });
+        }
+      }
+    }
+
+    results.total = results.groups.length + results.messages.length + results.files.length + results.agents.length + results.personas.length + results.comments.length + results.members.length + results.media.length;
 
     res.json(results);
   } catch (error) {

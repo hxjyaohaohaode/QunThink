@@ -287,19 +287,7 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
                 </div>
               ) : questions.length > 0 ? (
                 <>
-                  <div className="flex items-center justify-between">
-                    <p className="text-xs text-text-muted">请回答以下问题，帮助智能体了解自身能力</p>
-                    <button
-                      onClick={handleNextStep}
-                      disabled={loadingQuestions}
-                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-accent bg-accent/10 rounded-lg hover:bg-accent/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    >
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z" />
-                      </svg>
-                      AI生成问答
-                    </button>
-                  </div>
+                  <p className="text-xs text-text-muted">请回答以下问题，帮助智能体了解自身能力</p>
                   {questions.map((q) => (
                     <div key={q.id}>
                       <label className="block text-sm text-text-primary mb-1.5">{q.question}</label>

@@ -87,7 +87,7 @@ router.post('/synthesize', validateBody(ttsSchema), async (req, res) => {
       createdAt: new Date().toISOString(),
       transcript: speechText,
       format: audioFormat,
-      provider: audioResult.provider || 'mimo-v2-tts'
+      provider: audioResult.provider || 'mimo-v2.5-tts'
     };
 
     if (messageId) {
@@ -183,7 +183,7 @@ async function callMiMoTTS(text, voice, toneConfig) {
       const chatResponse = await axios.post(
         `${MIMO_API_BASE_URL}/chat/completions`,
         {
-          model: 'mimo-v2-tts',
+          model: 'mimo-v2.5-tts',
           modalities: ['text', 'audio'],
           audio: {
             voice: voice,
@@ -316,7 +316,7 @@ function looksLikeBase64Audio(raw) {
   return compact.length > 128 && compact.length % 4 === 0 && /^[A-Za-z0-9+/=]+$/.test(compact);
 }
 
-function buildAudioResult(base64Data, format, provider = 'mimo-v2-tts') {
+function buildAudioResult(base64Data, format, provider = 'mimo-v2.5-tts') {
   if (!looksLikeBase64Audio(base64Data)) {
     return null;
   }
@@ -337,7 +337,7 @@ function extractAudioPayload(payload, headers = {}) {
       return {
         buffer: rawBuffer,
         format: normalizeAudioFormat(contentType),
-        provider: 'mimo-v2-tts'
+        provider: 'mimo-v2.5-tts'
       };
     }
 
@@ -385,7 +385,7 @@ function extractAudioPayload(payload, headers = {}) {
       return {
         buffer: binaryBuffer,
         format: normalizeAudioFormat(candidate.format || contentType || 'wav'),
-        provider: 'mimo-v2-tts'
+        provider: 'mimo-v2.5-tts'
       };
     }
 

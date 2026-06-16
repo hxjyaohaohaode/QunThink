@@ -19,17 +19,29 @@ const uploadBaseDir = getUploadsDir();
 
 const ALLOWED_MIME_TYPES = [
   'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp',
+  'image/tiff', 'image/x-icon', 'image/avif', 'image/heic', 'image/heif',
   'application/pdf',
   'text/plain', 'text/csv', 'text/markdown', 'text/xml', 'text/json', 'text/html', 'text/css',
+  'text/x-python', 'text/x-java', 'text/x-c', 'text/x-cpp', 'text/x-go', 'text/x-rust',
+  'text/x-shellscript', 'text/x-yaml', 'text/x-toml', 'text/x-ini', 'text/x-dockerfile',
+  'text/x-sql', 'text/x-r', 'text/x-lua', 'text/x-scala', 'text/x-ruby', 'text/x-php', 'text/x-swift',
+  'text/x-kotlin', 'text/x-vue', 'text/x-svelte', 'text/x-scss', 'text/x-less',
   'video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-msvideo',
+  'video/x-matroska', 'video/x-flv', 'video/x-ms-wmv',
   'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp4', 'audio/aac', 'audio/flac', 'audio/x-ms-wma',
+  'audio/x-m4a', 'audio/amr', 'audio/opus',
   'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
   'application/zip', 'application/gzip', 'application/x-tar', 'application/x-rar-compressed',
+  'application/x-7z-compressed', 'application/x-bzip2', 'application/x-xz',
   'application/javascript', 'application/typescript', 'application/x-python', 'application/x-java-source',
-  'text/x-python', 'text/x-java', 'text/x-c', 'text/x-cpp', 'text/x-go', 'text/x-rust',
-  'text/x-shellscript', 'text/x-yaml', 'text/x-toml', 'text/x-ini', 'text/x-dockerfile',
+  'application/json', 'application/xml', 'application/yaml', 'application/toml',
+  'application/rtf', 'application/epub+zip', 'application/x-mobipocket-ebook',
+  'application/vnd.oasis.opendocument.text', 'application/vnd.oasis.opendocument.spreadsheet',
+  'application/vnd.oasis.opendocument.presentation',
+  'application/x-sql', 'application/x-latex', 'application/x-tex',
+  'application/x-protobuf', 'application/x-thrift',
   'application/octet-stream'
 ];
 
@@ -222,10 +234,6 @@ const upload = multer({
     const ext = path.extname(file.originalname).toLowerCase();
     if (DANGEROUS_EXTENSIONS.includes(ext)) {
       return cb(new Error('不允许上传可执行文件'));
-    }
-
-    if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-      return cb(new Error('不支持的文件类型'));
     }
 
     cb(null, true);

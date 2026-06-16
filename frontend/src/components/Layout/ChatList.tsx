@@ -453,6 +453,8 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
     const agentResults = searchData.agents || [];
     const personaResults = searchData.personas || [];
     const commentResults = searchData.comments || [];
+    const memberResults = searchData.members || [];
+    const mediaResults = searchData.media || [];
 
     return (
       <div className="space-y-1">
@@ -629,6 +631,71 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
             ))}
           </div>
         )}
+
+        {(activeTab === 'all' || activeTab === 'members') && memberResults.length > 0 && (
+          <div>
+            {activeTab === 'all' && (
+              <div className="flex items-center gap-1.5 px-4 py-1.5">
+                <svg className="w-3 h-3 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" /></svg>
+                <span className="text-[10px] font-medium text-indigo-500">成员</span>
+                <span className="text-[10px] text-text-muted">{memberResults.length}</span>
+              </div>
+            )}
+            {memberResults.map(r => (
+              <div key={`${r.id}_${r.group_id}`} onClick={() => { selectGroup(r.group_id); handleExitSearch(); }} className="px-4 py-2.5 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[9px] font-semibold flex-shrink-0" style={{ backgroundColor: r.type === 'ai' ? (r.color || AI_COLORS[r.id] || '#6b7280') : '#171717' }}>
+                    {r.type === 'ai' ? (r.name?.[0] || 'A') : 'U'}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1">
+                      <span className="font-medium text-[11px] text-text-primary">{highlightText(r.name, searchRegex)}</span>
+                      <span className="text-[8px] px-1 rounded-full bg-accent/10 text-accent">{r.type === 'ai' ? 'AI' : '用户'}</span>
+                    </div>
+                    <span className="text-[9px] text-text-muted">{r.group_name}</span>
+                    {r.personality && <p className="text-[10px] text-text-muted line-clamp-1">{highlightText(r.personality, searchRegex)}</p>}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {(activeTab === 'all' || activeTab === 'media') && mediaResults.length > 0 && (
+          <div>
+            {activeTab === 'all' && (
+              <div className="flex items-center gap-1.5 px-4 py-1.5">
+                <svg className="w-3 h-3 text-pink-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0 0 22.5 18.75V5.25A2.25 2.25 0 0 0 20.25 3H3.75A2.25 2.25 0 0 0 1.5 5.25v13.5A2.25 2.25 0 0 0 3.75 21Z" /></svg>
+                <span className="text-[10px] font-medium text-pink-500">媒体</span>
+                <span className="text-[10px] text-text-muted">{mediaResults.length}</span>
+              </div>
+            )}
+            {mediaResults.map(r => {
+              const mediaIcon = r.media_type === 'image' ? '🖼️' : r.media_type === 'audio' ? '🎵' : '🎬';
+              const mediaLabel = r.media_type === 'image' ? '图片' : r.media_type === 'audio' ? '音频' : '视频';
+              return (
+                <div key={r.id} onClick={() => { selectGroup(r.group_id); handleExitSearch(); }} className="px-4 py-2.5 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+                  <div className="flex items-start gap-2">
+                    <div className="w-7 h-7 rounded-lg bg-pink-500/10 flex items-center justify-center flex-shrink-0 text-[14px]">
+                      {mediaIcon}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1 mb-0.5">
+                        <span className="font-medium text-[11px] text-text-primary truncate">{highlightText(r.filename, searchRegex)}</span>
+                        <span className="text-[8px] px-1 rounded-full bg-pink-100 dark:bg-pink-900/30 text-pink-600 dark:text-pink-400">{mediaLabel}</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <span className="text-[9px] text-accent/70">{r.group_name}</span>
+                        {r.media_description && <span className="text-[9px] text-text-muted">· AI: {r.media_description.substring(0, 40)}</span>}
+                        <span className="text-[9px] text-text-muted ml-auto">{dayjs(r.created_at).format('M/D')}</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     );
   };
@@ -639,8 +706,10 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
       { key: 'groups', label: '群聊', count: globalSearch.searchData?.groups?.length || 0 },
       { key: 'messages', label: '消息', count: globalSearch.searchData?.messages?.length || 0 },
       { key: 'files', label: '文件', count: globalSearch.searchData?.files?.length || 0 },
+      { key: 'media', label: '媒体', count: globalSearch.searchData?.media?.length || 0 },
       { key: 'agents', label: '智能体', count: globalSearch.searchData?.agents?.length || 0 },
       { key: 'personas', label: 'AI角色', count: globalSearch.searchData?.personas?.length || 0 },
+      { key: 'members', label: '成员', count: globalSearch.searchData?.members?.length || 0 },
       { key: 'comments', label: '评论', count: globalSearch.searchData?.comments?.length || 0 },
     ];
 

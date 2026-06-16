@@ -78,7 +78,7 @@ const MAX_RECONNECT_ATTEMPTS = 30;
 const BASE_RECONNECT_DELAY = 500;
 const MAX_RECONNECT_DELAY = 30000;
 const HEARTBEAT_INTERVAL = 25000;
-const HEARTBEAT_TIMEOUT = 35000;
+const HEARTBEAT_TIMEOUT = 45000;
 const CONNECTION_TIMEOUT = 20000;
 let isCleanDisconnect = false;
 
@@ -365,7 +365,7 @@ export function connectWebSocket(groupId?: string) {
 
     if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       reconnectAttempts++;
-      const delay = event.code === 1006 ? Math.min(500 * reconnectAttempts, 5000) : getReconnectDelay(reconnectAttempts);
+      const delay = event.code === 1006 ? Math.min(1000 * reconnectAttempts, 5000) : getReconnectDelay(reconnectAttempts);
       if (import.meta.env.DEV) console.log(`[WS] Reconnecting... attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}, delay ${delay}ms`);
       uiStore.setConnectionStatus('connecting');
       uiStore.setConnectionError(null);
@@ -973,6 +973,7 @@ function cleanupStaleStreamMessages() {
 }
 
 let wasHidden = false;
+let hiddenAt = 0;
 let healthCheckTimer: ReturnType<typeof setInterval> | null = null;
 
 function startHealthCheck() {
@@ -988,7 +989,7 @@ function startHealthCheck() {
       reconnectAttempts = 0;
       connectWebSocket(currentGroupId || undefined);
     }
-  }, 60000);
+  }, 120000);
 }
 
 function stopHealthCheck() {
@@ -1001,17 +1002,25 @@ function stopHealthCheck() {
 function handleVisibilityChange() {
   if (document.visibilityState === 'hidden') {
     wasHidden = true;
+    hiddenAt = Date.now();
     return;
   }
 
   if (document.visibilityState === 'visible' && wasHidden) {
     wasHidden = false;
-    if (import.meta.env.DEV) console.log('[WS] Page became visible, checking connection...');
+    const hiddenDuration = Date.now() - hiddenAt;
+
+    if (import.meta.env.DEV) console.log('[WS] Page became visible, checking connection... (hidden for', hiddenDuration, 'ms)');
 
     cleanupStaleStreamMessages();
 
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      if (import.meta.env.DEV) console.log('[WS] Connection lost while hidden, force reconnecting...');
+      // 连接已断开，仅当隐藏时间超过5秒才重连，避免短暂切换标签页触发重连
+      if (hiddenDuration < 5000) {
+        if (import.meta.env.DEV) console.log('[WS] Page hidden for less than 5s, skipping reconnect');
+        return;
+      }
+      if (import.meta.env.DEV) console.log('[WS] Connection lost while hidden, reconnecting...');
       if (ws) {
         try { ws.close(); } catch { }
         ws = null;
@@ -1024,6 +1033,7 @@ function handleVisibilityChange() {
       }
       connectWebSocket(currentGroupId || undefined);
     } else {
+      // 连接仍然 OPEN，只发送 ping 和获取丢失消息，不强制关闭重连
       if (currentGroupId) {
         if (import.meta.env.DEV) console.log('[WS] Connection still alive, fetching missed messages...');
         fetchMissedMessages(currentGroupId);

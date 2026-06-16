@@ -26,18 +26,26 @@ export async function parseFile(filePath, mimeType) {
       return await parseWord(filePath);
     } else if (ext === '.xls' || ext === '.xlsx' || ext === '.csv') {
       return await parseSpreadsheet(filePath, ext);
-    } else if (ext === '.txt' || ext === '.md' || ext === '.json' || ext === '.xml' || ext === '.yaml' || ext === '.yml' || ext === '.toml' || ext === '.ini' || ext === '.env' || ext === '.dockerfile' || ext === '.csv') {
+    } else if (ext === '.txt' || ext === '.md' || ext === '.json' || ext === '.xml' || ext === '.yaml' || ext === '.yml' || ext === '.toml' || ext === '.ini' || ext === '.env' || ext === '.dockerfile' || ext === '.csv' || ext === '.rtf' || ext === '.log' || ext === '.conf' || ext === '.cfg' || ext === '.properties' || ext === '.gradle' || ext === '.cmake' || ext === '.makefile' || ext === '.gitignore' || ext === '.editorconfig' || ext === '.prettierrc' || ext === '.eslintrc' || ext === '.babelrc' || ext === '.tsconfig' || ext === '.lock' || ext === '.map') {
       return await parseText(filePath);
-    } else if (['.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.scss', '.less', '.java', '.c', '.cpp', '.h', '.hpp', '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala', '.lua', '.r', '.sql', '.sh', '.bash', '.zsh', '.ps1', '.bat', '.vue', '.svelte'].includes(ext)) {
+    } else if (['.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.scss', '.less', '.java', '.c', '.cpp', '.h', '.hpp', '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala', '.lua', '.r', '.sql', '.sh', '.bash', '.zsh', '.ps1', '.bat', '.vue', '.svelte', '.dart', '.zig', '.nim', '.ex', '.exs', '.erl', '.hs', '.ml', '.fs', '.clj', '.lisp', '.el', '.vim', '.proto', '.thrift', '.graphql', '.prisma'].includes(ext)) {
       return await parseCode(filePath, ext);
-    } else if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'].includes(ext)) {
+    } else if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.tiff', '.tif', '.ico', '.avif', '.heic', '.heif'].includes(ext)) {
       return await parseImage(filePath, ext, mimeType);
-    } else if (['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma'].includes(ext)) {
+    } else if (['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.amr', '.opus'].includes(ext)) {
       return await parseAudio(filePath, ext, mimeType);
-    } else if (['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'].includes(ext)) {
+    } else if (['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.3gp'].includes(ext)) {
       return await parseVideo(filePath, ext, mimeType);
     } else if (['.ppt', '.pptx'].includes(ext)) {
       return await parsePresentation(filePath, ext);
+    } else if (['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz'].includes(ext)) {
+      return await parseArchive(filePath, ext);
+    } else if (['.epub', '.mobi'].includes(ext)) {
+      return await parseEpub(filePath, ext);
+    } else if (['.odt', '.ods', '.odp'].includes(ext)) {
+      return await parseOpenDocument(filePath, ext);
+    } else if (['.rtf'].includes(ext)) {
+      return await parseText(filePath);
     } else {
       return `[文件类型: ${mimeType || ext}]`;
     }
@@ -216,4 +224,89 @@ async function parseCode(filePath, ext) {
   }
 }
 
-export { parsePDF, parseWord, parseSpreadsheet, parseText, parseCode, parseImage, parseAudio, parseVideo, parsePresentation };
+async function parseArchive(filePath, ext) {
+  try {
+    const stats = await fs.stat(filePath);
+    const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+    const fileSize = stats.size > 1024 * 1024 ? `${fileSizeMB}MB` : `${(stats.size / 1024).toFixed(0)}KB`;
+
+    let fileList = '';
+    if (ext === '.zip' || ext === '.odt' || ext === '.ods' || ext === '.odp') {
+      try {
+        const AdmZip = (await import('adm-zip')).default;
+        const zip = new AdmZip(filePath);
+        const entries = zip.getEntries();
+        const names = entries.slice(0, 50).map(e => e.entryName);
+        fileList = `\n包含文件:\n${names.join('\n')}`;
+        if (entries.length > 50) {
+          fileList += `\n... 共 ${entries.length} 个文件`;
+        }
+      } catch { }
+    }
+
+    return `[压缩文件] 名称=${path.basename(filePath)} · 格式=${ext.toUpperCase()} · 大小=${fileSize}${fileList}`;
+  } catch (error) {
+    safeLog('error', 'Archive parse error', { error: error?.message || error });
+    return '[压缩文件解析失败]';
+  }
+}
+
+async function parseEpub(filePath, ext) {
+  try {
+    const AdmZip = (await import('adm-zip')).default;
+    const zip = new AdmZip(filePath);
+
+    let textContent = '';
+    const htmlEntries = zip.getEntries().filter(e =>
+      e.entryName.endsWith('.html') || e.entryName.endsWith('.xhtml') || e.entryName.endsWith('.htm')
+    );
+
+    for (const entry of htmlEntries.slice(0, 20)) {
+      const html = entry.getData().toString('utf-8');
+      const stripped = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      if (stripped.length > 0) {
+        textContent += stripped + '\n\n';
+      }
+      if (textContent.length > 5000) break;
+    }
+
+    if (textContent.trim()) {
+      return textContent.trim();
+    }
+
+    return `[电子书文件] 名称=${path.basename(filePath)} · 格式=${ext.toUpperCase()}`;
+  } catch (error) {
+    safeLog('error', 'EPUB parse error', { error: error?.message || error });
+    return `[电子书解析失败: ${error.message}]`;
+  }
+}
+
+async function parseOpenDocument(filePath, ext) {
+  try {
+    const AdmZip = (await import('adm-zip')).default;
+    const zip = new AdmZip(filePath);
+    const contentEntry = zip.getEntries().find(e => e.entryName === 'content.xml');
+
+    if (contentEntry) {
+      const xmlContent = contentEntry.getData().toString('utf-8');
+      const texts = [];
+      const textRegex = /<text:p[^>]*>([^<]*(?:<[^>]+>[^<]*)*)<\/text:p>/g;
+      let match;
+      while ((match = textRegex.exec(xmlContent)) !== null) {
+        const stripped = match[1].replace(/<[^>]+>/g, '').trim();
+        if (stripped) texts.push(stripped);
+      }
+      if (texts.length > 0) {
+        return texts.join('\n');
+      }
+    }
+
+    const typeLabel = ext === '.odt' ? 'ODT文档' : ext === '.ods' ? 'ODS表格' : 'ODP演示';
+    return `[${typeLabel}] 名称=${path.basename(filePath)} · 格式=${ext.toUpperCase()}`;
+  } catch (error) {
+    safeLog('error', 'OpenDocument parse error', { error: error?.message || error });
+    return `[OpenDocument解析失败: ${error.message}]`;
+  }
+}
+
+export { parsePDF, parseWord, parseSpreadsheet, parseText, parseCode, parseImage, parseAudio, parseVideo, parsePresentation, parseArchive, parseEpub, parseOpenDocument };

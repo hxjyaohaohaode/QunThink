@@ -1,7 +1,7 @@
 import express from 'express';
 import { withWriteLock } from '../models/db.js';
 import { AI_PERSONAS } from '../config/personas.js';
-import { invalidateCustomPersonasCache } from '../services/scheduler/index.js';
+import { loadCustomPersonas } from '../services/scheduler/index.js';
 import { validateBody, updatePersonaSchema } from '../validators/index.js';
 import { broadcastPersonaUpdate, broadcastPersonasSync } from '../websocket/index.js';
 
@@ -161,7 +161,12 @@ router.put('/personas/:aiId', validateBody(updatePersonaSchema), async (req, res
     await withWriteLock(req.userId, async () => {
       await db.write();
     });
-    invalidateCustomPersonasCache(req.userId);
+    // 立即重新加载调度器缓存（而非仅删除），确保下一次AI调用使用最新人设
+    await loadCustomPersonas(req.userId);
+    // 通过WebSocket广播人设更新，确保前端和其他进程立即感知变更
+    broadcastPersonaUpdate(aiId, req.userId).catch(err =>
+      console.error('广播人设更新失败:', err)
+    );
     const custom = db.data.customPersonas[aiId];
     const defaultPersona = AI_PERSONAS[aiId];
     const merged = mergePersona(defaultPersona, custom);
@@ -222,13 +227,18 @@ router.patch('/personas/:aiId', async (req, res) => {
     // 标记最后更新时间戳
     db.data.customPersonas[aiId]._updatedAt = Date.now();
 
-    // 立即写入并失效所有相关缓存
+    // 立即写入并重新加载缓存
     await withWriteLock(req.userId, async () => {
       await db.write();
     });
 
-    // 失效调度器中的自定义人设缓存
-    invalidateCustomPersonasCache(req.userId);
+    // 立即重新加载调度器缓存（而非仅删除），确保下一次AI调用使用最新人设
+    await loadCustomPersonas(req.userId);
+
+    // 通过WebSocket广播人设更新，确保前端和其他进程立即感知变更
+    broadcastPersonaUpdate(aiId, req.userId).catch(err =>
+      console.error('广播人设更新失败:', err)
+    );
 
     // 构建合并后的人设返回
     const custom = db.data.customPersonas[aiId];
@@ -256,7 +266,8 @@ router.put('/personas/:aiId/reset', async (req, res) => {
     await withWriteLock(req.userId, async () => {
       await db.write();
     });
-    invalidateCustomPersonasCache(req.userId);
+    // 立即重新加载调度器缓存，确保重置后下一次AI调用使用默认人设
+    await loadCustomPersonas(req.userId);
     const defaultPersona = AI_PERSONAS[aiId];
     const resetPersona = mergePersona(defaultPersona);
 
