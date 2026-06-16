@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useMemo, useState, useCallback } from 'react';
 import { Virtuoso } from 'react-virtuoso';
+import { motion, AnimatePresence } from 'framer-motion';
 import dayjs from 'dayjs';
 import { useMessagesStore } from '../../stores/messagesStore';
 import type { Message } from '../../types';
@@ -58,17 +59,17 @@ function VirtuosoFooter({ typingAiIds }: { typingAiIds: string[] }) {
   );
 }
 
-type ListItem = 
+type ListItem =
   | { type: 'message'; data: Message; showTimeDivider: boolean };
 
 const MAX_ANIMATED_MESSAGES = 2;
 
-const MessageItemWrapper = React.memo(({ 
-  children, 
+const MessageItemWrapper = React.memo(({
+  children,
   isNew = false,
   reducedMotion = false,
-}: { 
-  children: React.ReactNode; 
+}: {
+  children: React.ReactNode;
   isNew?: boolean;
   reducedMotion?: boolean;
 }) => {
@@ -115,11 +116,16 @@ export function MessageList() {
       }
     };
   }, []);
-  
+
   const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
   const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
+  const selectedMessageIdsRef = useRef<Set<string>>(new Set());
   const [showDebatePanel, setShowDebatePanel] = useState(false);
-  const selectedMessageIdsKey = Array.from(selectedMessageIds).sort().join(',');
+
+  // 同步 selectedMessageIds 到 ref，避免 renderItem 不必要的重渲染
+  useEffect(() => {
+    selectedMessageIdsRef.current = selectedMessageIds;
+  }, [selectedMessageIds]);
 
   const visibleMessageIds = useRef<Set<string>>(new Set());
 
@@ -127,20 +133,26 @@ export function MessageList() {
     if (!currentGroup) return;
     try {
       await api.markMessageRead(currentGroup.id, messageId);
-    } catch (error) {}
+    } catch (error) { }
   };
-  
+
   const isDebateMode = currentGroup?.debate_mode || false;
 
-  const groupMessages = currentGroup ? messages[currentGroup.id] || [] : [];
-  const groupTyping = currentGroup ? typingIndicators[currentGroup.id] || {} : {};
-  const groupPagination = currentGroup ? pagination[currentGroup.id] || { hasMore: false, loadingMore: false, oldestMessageId: null } : { hasMore: false, loadingMore: false, oldestMessageId: null };
+  const groupMessages = useMemo(() => {
+    return currentGroup ? (messages[currentGroup.id] || []) : [];
+  }, [currentGroup?.id, messages]);
+  const groupTyping = useMemo(() => {
+    return currentGroup ? (typingIndicators[currentGroup.id] || {}) : {};
+  }, [currentGroup?.id, typingIndicators]);
+  const groupPagination = useMemo(() => {
+    return currentGroup ? (pagination[currentGroup.id] || { hasMore: false, loadingMore: false, oldestMessageId: null }) : { hasMore: false, loadingMore: false, oldestMessageId: null };
+  }, [currentGroup?.id, pagination]);
 
-  const typingAiIds = Object.entries(groupTyping)
+  const typingAiIds = useMemo(() => Object.entries(groupTyping)
     .filter(([_, isTyping]) => isTyping)
-    .map(([aiId]) => aiId);
+    .map(([aiId]) => aiId), [groupTyping]);
 
-  const hasStreamingMessages = groupMessages.some(m => m.is_streaming);
+  const hasStreamingMessages = useMemo(() => groupMessages.some(m => m.is_streaming), [groupMessages]);
 
   const listItems = useMemo(() => {
     const result: ListItem[] = [];
@@ -150,11 +162,11 @@ export function MessageList() {
       const prevMessage = index > 0 ? groupMessages[index - 1] : null;
       const prevTime = prevMessage ? dayjs(prevMessage.created_at) : null;
       const shouldShowDivider = prevTime === null || messageTime.diff(prevTime, 'minute') >= TIME_GAP_MINUTES;
-      
-      result.push({ 
-        type: 'message', 
-        data: message, 
-        showTimeDivider: shouldShowDivider 
+
+      result.push({
+        type: 'message',
+        data: message,
+        showTimeDivider: shouldShowDivider
       });
     });
 
@@ -213,13 +225,13 @@ export function MessageList() {
     }
 
     setIsAtBottom(atBottom);
-    
+
     if (!atBottom) {
       if (isScrollingRef.current) {
         clearAwaitingResponse();
       }
     }
-    
+
     if (!wasAtBottom && atBottom && unreadCount > 0) {
       setUnreadCount(0);
       setFirstUnreadMessageId(null);
@@ -234,9 +246,9 @@ export function MessageList() {
           scrollPositionRef.current = virtuosoState.scrollTop;
         }
       }
-      
+
       loadingMoreRef.current = true;
-      
+
       loadMoreMessages(currentGroup.id).then(() => {
         setTimeout(() => {
           loadingMoreRef.current = false;
@@ -249,7 +261,7 @@ export function MessageList() {
 
   useEffect(() => {
     const currentCount = groupMessages.length;
-    
+
     if (currentCount > prevMessageCount.current) {
       const newMessages = groupMessages.slice(prevMessageCount.current);
       newMessages.forEach(msg => {
@@ -258,7 +270,7 @@ export function MessageList() {
           newMessageIdsRef.current.delete(msg.id);
         }, 1000);
       });
-      
+
       const hasUserMessage = newMessages.some(m => m.sender_type === 'user');
       if (hasUserMessage) {
         setIsAtBottom(true);
@@ -272,12 +284,12 @@ export function MessageList() {
         }, 30000);
         setTimeout(() => scrollToBottom('smooth'), 50);
       }
-      
+
       if (!isAtBottom && !awaitingResponseRef.current) {
         const aiMessageCount = newMessages.filter(m => m.sender_type === 'ai').length;
         if (aiMessageCount > 0) {
           setUnreadCount(prev => prev + aiMessageCount);
-          
+
           if (!firstUnreadMessageId) {
             const firstNewAiMsg = newMessages.find(m => m.sender_type === 'ai');
             if (firstNewAiMsg) {
@@ -291,7 +303,7 @@ export function MessageList() {
         setTimeout(() => scrollToBottom('smooth'), 50);
       }
     }
-    
+
     prevMessageCount.current = currentCount;
   }, [groupMessages.length, isAtBottom, listItems.length, scrollToBottom, firstUnreadMessageId]);
 
@@ -331,11 +343,9 @@ export function MessageList() {
   useEffect(() => {
     if (hasStreamingMessages && awaitingResponseRef.current) {
       const now = Date.now();
-      if (now - lastStreamScrollRef.current >= 150) {
+      if (now - lastStreamScrollRef.current >= 100) {
         lastStreamScrollRef.current = now;
-        requestAnimationFrame(() => {
-          scrollToBottom('auto');
-        });
+        scrollToBottom('auto');
       }
     }
   }, [streamUpdateCounter, hasStreamingMessages, scrollToBottom]);
@@ -354,7 +364,7 @@ export function MessageList() {
       const itemIndex = listItems.findIndex(
         item => item.type === 'message' && item.data.id === scrollToMessageId
       );
-      
+
       if (itemIndex !== -1) {
         setTimeout(() => {
           virtuosoRef.current?.scrollToIndex({
@@ -362,7 +372,7 @@ export function MessageList() {
             behavior: 'smooth',
             align: 'center'
           });
-          
+
           setTimeout(() => {
             const messageElement = document.querySelector(`[data-message-id="${scrollToMessageId}"]`);
             if (messageElement) {
@@ -373,7 +383,7 @@ export function MessageList() {
             }
           }, 300);
         }, 100);
-        
+
         setScrollToMessageId(null);
       }
     }
@@ -448,7 +458,7 @@ export function MessageList() {
           behavior: 'smooth',
           align: 'center'
         });
-        
+
         setTimeout(() => {
           const messageElement = document.querySelector(`[data-message-id="${firstUnreadMessageId}"]`);
           if (messageElement) {
@@ -468,13 +478,13 @@ export function MessageList() {
 
   const renderItem = useCallback((_index: number, item: ListItem) => {
     const message = item.data as Message;
-    const isSelected = selectedMessageIds.has(message.id);
+    const isSelected = selectedMessageIdsRef.current.has(message.id);
     const isRecentNew = newMessageIdsRef.current.has(message.id) && !initialLoadRef.current;
     const isNearBottom = _index >= listItems.length - MAX_ANIMATED_MESSAGES;
     const isNew = isRecentNew && isNearBottom;
-    
+
     return (
-      <MessageItemWrapper 
+      <MessageItemWrapper
         key={message.id}
         isNew={isNew}
         reducedMotion={reducedMotion}
@@ -487,11 +497,10 @@ export function MessageList() {
           {isMultiSelectMode && (
             <div className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-6 z-10">
               <div
-                className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${
-                  isSelected
-                    ? 'bg-blue-500 border-blue-500'
-                    : 'border-border bg-bg-surface'
-                }`}
+                className={`w-5 h-5 rounded border-2 flex items-center justify-center transition-colors ${isSelected
+                  ? 'bg-blue-500 border-blue-500'
+                  : 'border-border bg-bg-surface'
+                  }`}
               >
                 {isSelected && (
                   <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
@@ -502,7 +511,7 @@ export function MessageList() {
             </div>
           )}
           <div className={`transition-all duration-200 ${isSelected ? 'bg-blue-500/10 dark:bg-blue-500/20 rounded-lg' : ''}`}>
-            <MessageBubble 
+            <MessageBubble
               message={message}
               showTimeDivider={item.showTimeDivider}
               onReply={() => !isMultiSelectMode && addReplyingTo(message.id)}
@@ -513,17 +522,22 @@ export function MessageList() {
         </div>
       </MessageItemWrapper>
     );
-  }, [selectedMessageIdsKey, isMultiSelectMode, toggleMessageSelection, addReplyingTo, isDebateMode, reducedMotion, listItems.length]);
+  }, [isMultiSelectMode, toggleMessageSelection, addReplyingTo, isDebateMode, reducedMotion, listItems.length]);
 
   if (!currentGroup) {
     return (
-      <div className="flex-1 flex items-center justify-center bg-gradient-to-b from-bg-primary to-bg-surface2">
+      <motion.div
+        className="flex-1 flex items-center justify-center bg-gradient-to-b from-bg-primary to-bg-surface2"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.3 }}
+      >
         <div className="text-center">
           <div className="text-6xl mb-4"><svg className="w-16 h-16 mx-auto text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={0.75}><path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg></div>
           <p className="text-text-secondary text-lg mb-2">选择一个群组开始聊天</p>
           <p className="text-text-muted text-sm">或点击左上角 + 创建新对话</p>
         </div>
-      </div>
+      </motion.div>
     );
   }
 
@@ -565,8 +579,8 @@ export function MessageList() {
           </div>
         </div>
       )}
-      
-      <div 
+
+      <div
         className="flex-1 relative flex flex-col bg-gradient-to-b from-bg-primary to-bg-surface2"
         style={{ minHeight: 0 }}
       >
@@ -588,45 +602,69 @@ export function MessageList() {
             </button>
           </div>
         )}
-        
-        {loading && groupMessages.length === 0 ? (
-          <div className="flex items-center justify-center h-full">
-            <MessageListSkeleton count={6} />
-          </div>
-        ) : groupMessages.length === 0 ? (
-          <div className="flex items-center justify-center h-full">
-            <div className="text-center">
-              <div className="text-6xl mb-4">👋</div>
-              <p className="text-text-secondary mb-2">开始你的第一个问题吧！</p>
-              <p className="text-text-muted text-sm">
-                试试问：「帮我分析一下这段代码有什么问题」
-              </p>
-            </div>
-          </div>
-        ) : (
-          <Virtuoso
-            ref={virtuosoRef}
-            data={listItems}
-            itemContent={renderItem}
-            scrollerRef={(ref) => { scrollerRef.current = ref; }}
-            isScrolling={handleIsScrolling}
-            atBottomStateChange={handleAtBottomStateChange}
-            atTopStateChange={handleAtTopStateChange}
-            increaseViewportBy={{ top: 200, bottom: 200 }}
-            overscan={5}
-            style={{ flex: 1, minHeight: 0 }}
-            rangeChanged={handleRangeChanged}
-            followOutput={isAtBottom ? 'smooth' : false}
-            components={virtuosoComponents}
-          />
-        )}
 
-        <NewMessageBadge 
+        <AnimatePresence mode="wait">
+          {loading && groupMessages.length === 0 ? (
+            <motion.div
+              key="message-loading"
+              className="flex items-center justify-center h-full"
+              initial={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+            >
+              <MessageListSkeleton count={6} />
+            </motion.div>
+          ) : groupMessages.length === 0 ? (
+            <motion.div
+              key="message-empty"
+              className="flex items-center justify-center h-full"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+            >
+              <div className="text-center">
+                <div className="text-6xl mb-4">👋</div>
+                <p className="text-text-secondary mb-2">开始你的第一个问题吧！</p>
+                <p className="text-text-muted text-sm">
+                  试试问：「帮我分析一下这段代码有什么问题」
+                </p>
+              </div>
+            </motion.div>
+          ) : (
+            <motion.div
+              key="message-content"
+              style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.25 }}
+            >
+              <Virtuoso
+                ref={virtuosoRef}
+                data={listItems}
+                itemContent={renderItem}
+                scrollerRef={(ref) => { scrollerRef.current = ref; }}
+                isScrolling={handleIsScrolling}
+                atBottomStateChange={handleAtBottomStateChange}
+                atTopStateChange={handleAtTopStateChange}
+                increaseViewportBy={{ top: 400, bottom: 400 }}
+                overscan={10}
+                style={{ flex: 1, minHeight: 0 }}
+                rangeChanged={handleRangeChanged}
+                followOutput={isAtBottom ? 'smooth' : false}
+                components={virtuosoComponents}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <NewMessageBadge
           count={unreadCount}
           onClick={scrollToFirstUnread}
         />
       </div>
-      
+
       {currentGroup && (
         <DebateControlPanel
           groupId={currentGroup.id}

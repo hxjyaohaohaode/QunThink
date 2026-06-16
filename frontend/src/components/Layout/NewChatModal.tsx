@@ -64,6 +64,7 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
   }, [isOpen]);
 
   const handleClose = () => {
+    resetForm();
     setModalClosing(true);
     setModalVisible(false);
     setTimeout(() => {
@@ -227,8 +228,9 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
       resetForm();
       handleClose();
       onSelectGroup(group.id);
-    } catch (error) {
-      showToast({ message: '创建群聊失败', type: 'error' });
+    } catch (error: any) {
+      const message = error?.response?.data?.message || (error?.code === 'ERR_NETWORK' ? '网络连接失败，请检查网络' : '创建群聊失败');
+      showToast({ message, type: 'error' });
     } finally {
       setCreating(false);
     }
@@ -507,8 +509,9 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
               <input
                 type="text"
                 value={newGroupName}
-                onChange={(e) => setNewGroupName(e.target.value)}
+                onChange={(e) => setNewGroupName(e.target.value.slice(0, 50))}
                 placeholder="输入群聊名称"
+                maxLength={50}
                 className="w-full px-3 py-2 bg-bg-surface2 border border-border-subtle rounded-[10px] text-sm outline-none text-text-primary placeholder-text-muted focus:border-accent focus:ring-2 focus:ring-accent/20"
               />
             </div>

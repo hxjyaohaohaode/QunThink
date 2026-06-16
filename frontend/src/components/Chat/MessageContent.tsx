@@ -49,6 +49,7 @@ export const MessageContent = React.memo(function MessageContent({
 }: MessageContentProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const COLLAPSE_THRESHOLD = 600;
+  const USER_COLLAPSE_THRESHOLD = 2000;
 
   const processedContent = useMemo(() => {
     if (contentType === 'text' || !contentType) {
@@ -57,9 +58,10 @@ export const MessageContent = React.memo(function MessageContent({
     return content;
   }, [content, contentType]);
 
-  const shouldCollapse = !isUser && processedContent.length > COLLAPSE_THRESHOLD && !isExpanded;
+  const collapseThreshold = isUser ? USER_COLLAPSE_THRESHOLD : COLLAPSE_THRESHOLD;
+  const shouldCollapse = processedContent.length > collapseThreshold && !isExpanded && !isStreaming;
   const displayContent = shouldCollapse
-    ? processedContent.substring(0, COLLAPSE_THRESHOLD) + '...'
+    ? processedContent.substring(0, collapseThreshold) + '...'
     : processedContent;
 
   if (contentType === 'code') {
@@ -91,7 +93,7 @@ export const MessageContent = React.memo(function MessageContent({
           )}
         </>
       )}
-      {!isUser && processedContent.length > COLLAPSE_THRESHOLD && !isStreaming && (
+      {processedContent.length > collapseThreshold && !isStreaming && (
         <button
           onClick={(e) => {
             e.stopPropagation();

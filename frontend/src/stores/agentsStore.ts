@@ -31,6 +31,9 @@ interface AgentsState {
   fetchAgentSuggestions: (agentId: string, context?: string) => Promise<string[]>;
 }
 
+// 按 agentId 存储活跃的 AbortController，确保新消息发送时中断旧流
+const activeStreamControllers = new Map<string, AbortController>();
+
 export const useAgentsStore = create<AgentsState>((set, get) => ({
   agents: [],
   currentAgent: null,
@@ -128,6 +131,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       });
     } catch (error) {
       if (import.meta.env.DEV) console.error('Failed to fetch agent messages:', error);
+      set({ error: error instanceof Error ? error.message : '获取智能体消息失败' });
     }
   },
 
@@ -173,6 +177,14 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     });
 
     try {
+      // 中断同一 agent 的旧流请求
+      const oldController = activeStreamControllers.get(agentId);
+      if (oldController) {
+        oldController.abort();
+      }
+      const abortController = new AbortController();
+      activeStreamControllers.set(agentId, abortController);
+
       let response;
       if (files && files.length > 0) {
         response = await api.sendAgentMessageWithFiles(agentId, message, files);
@@ -189,22 +201,44 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       let fullContent = '';
 
       if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+        try {
+          while (true) {
+            // 30秒超时读取
+            const readResult = await Promise.race([
+              reader.read(),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('SSE read timeout')), 30000)
+              )
+            ]);
+            const { done, value } = readResult;
+            if (done) break;
 
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n');
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
 
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const data = line.slice(6);
-              if (data === '[DONE]') continue;
+            for (const line of lines) {
+              if (line.startsWith('data: ')) {
+                const data = line.slice(6);
+                if (data.trim() === '[DONE]') continue;
 
-              try {
-                const parsed = JSON.parse(data);
-                if (parsed.content) {
-                  fullContent += parsed.content;
+                try {
+                  const parsed = JSON.parse(data);
+                  if (parsed.content) {
+                    fullContent += parsed.content;
+                    set(state => {
+                      const newAgentMessages = new Map(state.agentMessages);
+                      const messages = newAgentMessages.get(agentId) || [];
+                      const updatedMessages = messages.map(m =>
+                        m.id === agentMessageId
+                          ? { ...m, content: fullContent }
+                          : m
+                      );
+                      newAgentMessages.set(agentId, updatedMessages);
+                      return { agentMessages: newAgentMessages };
+                    });
+                  }
+                } catch {
+                  fullContent += data;
                   set(state => {
                     const newAgentMessages = new Map(state.agentMessages);
                     const messages = newAgentMessages.get(agentId) || [];
@@ -217,25 +251,18 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
                     return { agentMessages: newAgentMessages };
                   });
                 }
-              } catch {
-                fullContent += data;
-                set(state => {
-                  const newAgentMessages = new Map(state.agentMessages);
-                  const messages = newAgentMessages.get(agentId) || [];
-                  const updatedMessages = messages.map(m =>
-                    m.id === agentMessageId
-                      ? { ...m, content: fullContent }
-                      : m
-                  );
-                  newAgentMessages.set(agentId, updatedMessages);
-                  return { agentMessages: newAgentMessages };
-                });
               }
             }
           }
+        } catch (readError) {
+          console.error('SSE流读取错误:', readError);
+        } finally {
+          reader.releaseLock();
+          activeStreamControllers.delete(agentId);
         }
       }
 
+      // 流式完成后，从后端重新加载消息以获取真实 ID（替换临时 ID）
       set(state => {
         const newAgentMessages = new Map(state.agentMessages);
         const messages = newAgentMessages.get(agentId) || [];
@@ -247,7 +274,20 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
         newAgentMessages.set(agentId, updatedMessages);
         return { agentMessages: newAgentMessages };
       });
+
+      // 同步后端真实消息数据，替换前端临时 ID
+      try {
+        const backendMessages = await api.getAgentMessages(agentId);
+        if (backendMessages && backendMessages.length > 0) {
+          set(state => {
+            const newAgentMessages = new Map(state.agentMessages);
+            newAgentMessages.set(agentId, backendMessages);
+            return { agentMessages: newAgentMessages };
+          });
+        }
+      } catch { /* 静默失败，前端临时消息仍然可用 */ }
     } catch (error) {
+      activeStreamControllers.delete(agentId);
       set(state => {
         const newAgentMessages = new Map(state.agentMessages);
         const messages = newAgentMessages.get(agentId) || [];
@@ -279,6 +319,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
           console.error('[generateQuestions] Error data:', response?.data);
         }
       }
+      set({ error: error instanceof Error ? error.message : '生成问题失败' });
       throw error;
     }
   },
@@ -288,6 +329,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       const result = await api.getAgentSuggestions(agentId, context);
       return result.suggestions || [];
     } catch {
+      set({ error: '获取建议失败' });
       return [];
     }
   }

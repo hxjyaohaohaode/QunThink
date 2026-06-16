@@ -35,6 +35,7 @@ function populateGroupCache(userId, db) {
 }
 
 const DEBATE_PHASES = {
+  PREPARATION: 'preparation',
   OPENING: 'opening',
   REBUTTAL: 'rebuttal',
   FREE_DEBATE: 'free_debate',
@@ -45,6 +46,7 @@ const DEBATE_PHASES = {
 };
 
 const PHASE_NAMES = {
+  [DEBATE_PHASES.PREPARATION]: '准备阶段',
   [DEBATE_PHASES.OPENING]: '立论阶段',
   [DEBATE_PHASES.REBUTTAL]: '驳论阶段',
   [DEBATE_PHASES.FREE_DEBATE]: '自由辩论阶段',
@@ -75,7 +77,7 @@ async function findGroupAndMessagesInAnyUserDb(groupId) {
       return { db, userId: cachedUserId, group, messages };
     }
   }
-  
+
   const userIds = await listUserDatabases();
   for (const userId of userIds) {
     const db = await getUserDb(userId);
@@ -93,20 +95,20 @@ async function findGroupAndMessagesInAnyUserDb(groupId) {
 function allocateDebateRoles(aiMembers, rolePreferences = {}, selectedParticipants = null) {
   let debateMembers = aiMembers;
   let audienceMembers = [];
-  
+
   if (selectedParticipants && Array.isArray(selectedParticipants) && selectedParticipants.length >= 2) {
     debateMembers = selectedParticipants.filter(id => aiMembers.includes(id));
     audienceMembers = aiMembers.filter(id => !debateMembers.includes(id));
   }
-  
+
   const totalMembers = debateMembers.length;
-  
+
   if (totalMembers < 2) {
     throw new Error('至少需要2个AI参与辩论');
   }
-  
+
   let proponentCount, opponentCount, judgeCount;
-  
+
   if (totalMembers === 2) {
     proponentCount = 1;
     opponentCount = 1;
@@ -128,7 +130,7 @@ function allocateDebateRoles(aiMembers, rolePreferences = {}, selectedParticipan
     opponentCount = Math.floor((totalMembers - 1) / 2);
     judgeCount = 1;
   }
-  
+
   const availableMembers = [...debateMembers];
   const roles = {
     proponents: [],
@@ -136,12 +138,12 @@ function allocateDebateRoles(aiMembers, rolePreferences = {}, selectedParticipan
     judge: null,
     audience: audienceMembers
   };
-  
+
   for (const [aiId, preferredRole] of Object.entries(rolePreferences)) {
     if (!availableMembers.includes(aiId)) continue;
-    
+
     const memberIndex = availableMembers.indexOf(aiId);
-    
+
     if (preferredRole === 'proponent' && roles.proponents.length < proponentCount) {
       roles.proponents.push(aiId);
       availableMembers.splice(memberIndex, 1);
@@ -153,21 +155,21 @@ function allocateDebateRoles(aiMembers, rolePreferences = {}, selectedParticipan
       availableMembers.splice(memberIndex, 1);
     }
   }
-  
+
   while (roles.proponents.length < proponentCount && availableMembers.length > 0) {
     const randomIndex = Math.floor(Math.random() * availableMembers.length);
     roles.proponents.push(availableMembers.splice(randomIndex, 1)[0]);
   }
-  
+
   while (roles.opponents.length < opponentCount && availableMembers.length > 0) {
     const randomIndex = Math.floor(Math.random() * availableMembers.length);
     roles.opponents.push(availableMembers.splice(randomIndex, 1)[0]);
   }
-  
+
   if (judgeCount > 0 && !roles.judge && availableMembers.length > 0) {
     roles.judge = availableMembers[0];
   }
-  
+
   return {
     ...roles,
     totalProponents: roles.proponents.length,
@@ -179,32 +181,57 @@ function allocateDebateRoles(aiMembers, rolePreferences = {}, selectedParticipan
 
 function getDebatePhaseConfig(phase, roles) {
   const hasJudge = roles.hasJudge;
-  
+  const totalSpeakers = roles.proponents.length + roles.opponents.length;
+
   switch (phase) {
+    case DEBATE_PHASES.PREPARATION:
+      return {
+        name: PHASE_NAMES[phase],
+        speakers: [],
+        speakerRoles: {},
+        instructions: '准备阶段：各位辩手正在熟悉辩题，准备立论材料。',
+        turnsPerSpeaker: 0,
+        isTransition: true
+      };
+
     case DEBATE_PHASES.OPENING:
+      // 立论：正方先发言，然后反方发言（交替进行）
+      const openingSpeakers = [];
+      const maxOpenings = Math.max(roles.proponents.length, roles.opponents.length);
+      for (let i = 0; i < maxOpenings; i++) {
+        if (roles.proponents[i]) openingSpeakers.push(roles.proponents[i]);
+        if (roles.opponents[i]) openingSpeakers.push(roles.opponents[i]);
+      }
       return {
         name: PHASE_NAMES[phase],
-        speakers: [...roles.proponents, ...roles.opponents],
+        speakers: openingSpeakers,
         speakerRoles: {
           ...Object.fromEntries(roles.proponents.map(id => [id, 'proponent'])),
           ...Object.fromEntries(roles.opponents.map(id => [id, 'opponent']))
         },
-        instructions: '立论阶段：请阐述你方的核心观点和主要论据。正方支持辩题，反方反对辩题。',
+        instructions: `立论阶段：正方先阐述核心观点和主要论据，反方随后阐述。共${totalSpeakers}位辩手参与立论。`,
         turnsPerSpeaker: 1
       };
-      
+
     case DEBATE_PHASES.REBUTTAL:
+      // 驳论：反方先反驳，正方后反驳（交替进行）
+      const rebuttalSpeakers = [];
+      const maxRebuttals = Math.max(roles.proponents.length, roles.opponents.length);
+      for (let i = 0; i < maxRebuttals; i++) {
+        if (roles.opponents[i]) rebuttalSpeakers.push(roles.opponents[i]);
+        if (roles.proponents[i]) rebuttalSpeakers.push(roles.proponents[i]);
+      }
       return {
         name: PHASE_NAMES[phase],
-        speakers: [...roles.proponents, ...roles.opponents],
+        speakers: rebuttalSpeakers,
         speakerRoles: {
           ...Object.fromEntries(roles.proponents.map(id => [id, 'proponent'])),
           ...Object.fromEntries(roles.opponents.map(id => [id, 'opponent']))
         },
-        instructions: '驳论阶段：请针对对方的立论进行反驳，指出对方论点的漏洞和不足。',
+        instructions: '驳论阶段：反方先针对正方立论进行反驳，正方随后回应。请指出对方论点的逻辑漏洞和证据不足。',
         turnsPerSpeaker: 1
       };
-      
+
     case DEBATE_PHASES.FREE_DEBATE:
       return {
         name: PHASE_NAMES[phase],
@@ -213,22 +240,26 @@ function getDebatePhaseConfig(phase, roles) {
           ...Object.fromEntries(roles.proponents.map(id => [id, 'proponent'])),
           ...Object.fromEntries(roles.opponents.map(id => [id, 'opponent']))
         },
-        instructions: '自由辩论阶段：双方可以自由发言，针对对方观点进行辩论，也可以补充己方论据。',
-        turnsPerSpeaker: 2
+        instructions: '自由辩论阶段：双方自由发言，可针对对方观点进行辩论，也可补充己方论据。AI自主决定发言时机，动态回应。',
+        turnsPerSpeaker: totalSpeakers >= 4 ? 2 : 3
       };
-      
+
     case DEBATE_PHASES.CLOSING:
+      // 总结：反方先总结，正方最后总结（正方有最后发言权）
+      const closingSpeakers = [];
+      if (roles.opponents.length > 0) closingSpeakers.push(roles.opponents[roles.opponents.length - 1]);
+      if (roles.proponents.length > 0) closingSpeakers.push(roles.proponents[roles.proponents.length - 1]);
       return {
         name: PHASE_NAMES[phase],
-        speakers: [...roles.proponents.slice(-1), ...roles.opponents.slice(-1)],
+        speakers: closingSpeakers,
         speakerRoles: {
           ...Object.fromEntries(roles.proponents.slice(-1).map(id => [id, 'proponent'])),
           ...Object.fromEntries(roles.opponents.slice(-1).map(id => [id, 'opponent']))
         },
-        instructions: '总结阶段：请总结你方的核心观点，强调最有力的论据。',
+        instructions: '总结阶段：反方先总结核心观点，正方最后总结。请回顾辩论全程，强调最有力的论据，升华主题。',
         turnsPerSpeaker: 1
       };
-      
+
     case DEBATE_PHASES.JUDGMENT:
       if (!hasJudge) {
         return {
@@ -243,10 +274,10 @@ function getDebatePhaseConfig(phase, roles) {
         name: PHASE_NAMES[phase],
         speakers: [roles.judge],
         speakerRoles: { [roles.judge]: 'judge' },
-        instructions: '裁判评判阶段：请公正地评价双方的表现，指出双方的优缺点，并给出你的判断。',
+        instructions: '裁判评判阶段：请公正评价双方表现，从逻辑性、说服力、团队协作、引用准确性四个维度评分，并给出最终判断。',
         turnsPerSpeaker: 1
       };
-      
+
     case DEBATE_PHASES.AUDIENCE_COMMENT:
       if (!roles.hasAudience || roles.audience.length === 0) {
         return {
@@ -264,7 +295,7 @@ function getDebatePhaseConfig(phase, roles) {
         instructions: '观众评论阶段：作为观众，请对刚才的辩论发表你的看法和评论。',
         turnsPerSpeaker: 1
       };
-      
+
     case DEBATE_PHASES.FINISHED:
     default:
       return {
@@ -290,20 +321,20 @@ function buildDebateRolePrompt(persona, role, topic, phase, phaseConfig, recentM
     qwen_flash: 'Qwen3.5-Flash',
     qwen_turbo: 'qwen-turbo'
   };
-  
+
   const roleNames = {
     proponent: '正方',
     opponent: '反方',
     judge: '裁判',
     audience: '观众'
   };
-  
+
   const currentAiId = persona?.id;
   const roleName = roleNames[role] || '辩手';
-  
+
   let teammates = [];
   let opponents = [];
-  
+
   if (role === 'proponent') {
     teammates = allRoles.proponents.filter(id => id !== currentAiId);
     opponents = allRoles.opponents;
@@ -311,24 +342,24 @@ function buildDebateRolePrompt(persona, role, topic, phase, phaseConfig, recentM
     teammates = allRoles.opponents.filter(id => id !== currentAiId);
     opponents = allRoles.proponents;
   }
-  
+
   const teammateNames = teammates.map(id => aiNames[id] || id).join('、');
   const opponentNames = opponents.map(id => aiNames[id] || id).join('、');
-  
+
   let contextSection = '';
   if (recentMessages && recentMessages.length > 0) {
     const contextMessages = recentMessages.slice(-30);
     contextSection = `\n\n【辩论记录】\n` + contextMessages.map(m => {
       const senderRole = allRoles.proponents.includes(m.sender_id) ? '[正方]' :
-                        allRoles.opponents.includes(m.sender_id) ? '[反方]' :
-                        allRoles.judge === m.sender_id ? '[裁判]' : '';
+        allRoles.opponents.includes(m.sender_id) ? '[反方]' :
+          allRoles.judge === m.sender_id ? '[裁判]' : '';
       const senderName = m.sender_type === 'user' ? '用户' : (aiNames[m.sender_id] || m.sender_id);
       return `${senderRole}${senderName}: ${m.content.substring(0, 200)}${m.content.length > 200 ? '...' : ''}`;
     }).join('\n');
   }
-  
+
   let roleSpecificInstructions = '';
-  
+
   if (role === 'proponent') {
     roleSpecificInstructions = `
 【正方立场】
@@ -362,50 +393,75 @@ function buildDebateRolePrompt(persona, role, topic, phase, phaseConfig, recentM
 - 可以表达你支持哪一方以及原因
 - 保持客观和尊重，不要过于偏激${proponentNames ? `\n- 正方辩手：${proponentNames}` : ''}${opponentNames ? `\n- 反方辩手：${opponentNames}` : ''}`;
   }
-  
+
   let phaseInstructions = '';
   switch (phase) {
+    case DEBATE_PHASES.PREPARATION:
+      phaseInstructions = `
+【准备阶段 - 赛前准备】
+- 你正在为即将开始的辩论做准备
+- 仔细思考辩题的核心含义
+- 预判对方可能提出的论点和反驳角度
+- 准备你方的主要论据和论证框架
+- 不需要输出内容，这只是内部准备阶段`;
+      break;
     case DEBATE_PHASES.OPENING:
       phaseInstructions = `
-【立论阶段要求】
-- 清晰阐述你的核心观点
-- 提出2-3个主要论据
+【立论阶段要求 - 主张 Claim】
+- 这是辩论的起始阶段
+- 清晰阐述你的核心主张和立场
+- 提出2-3个主要论据来支撑你的观点
 - 论据要有逻辑性和说服力
+- 为后续的辩论奠定基础
 - 不要回应对方（对方还没发言）`;
       break;
     case DEBATE_PHASES.REBUTTAL:
       phaseInstructions = `
-【驳论阶段要求】
-- 针对对方立论中的薄弱环节进行反驳
-- 指出对方论据的逻辑漏洞
-- 可以用@名称来直接回应特定辩友
-- 保持攻击性但不要人身攻击`;
+【驳论阶段要求 - 反驳 Counterclaim】
+- 仔细审视对方在立论阶段提出的每一个论点
+- 针对对方论据中的薄弱环节、逻辑漏洞进行有力反驳
+- 用"@对方名字"来明确你在回应谁的观点
+- 必须引用对方原话后再反驳（"> 对方说：xxx"）
+- 保持攻击性但不要人身攻击
+- 在反驳的同时，强化己方更有力的论点`;
       break;
     case DEBATE_PHASES.FREE_DEBATE:
       phaseInstructions = `
-【自由辩论阶段要求】
-- 可以自由发言，回应对方的任何观点
-- 可以补充新的论据
-- 可以与队友配合
-- 用@名称来直接回应特定辩友
-- 保持辩论的节奏和张力`;
+【自由辩论阶段要求 - 再反驳 Rebuttal → 综合 Synthesis】
+- 这是辩论最激烈、最动态的阶段
+- 每个AI都可以自由选择发言时机，自己决定何时介入
+- 你可以直接回应任何辩友的发言（用"@对方名字"格式）
+- 必须引用对方的具体论点进行反驳（> 引用格式）
+- 与队友配合：补充队友论点，形成合力
+- 反驳对方新论据，同时提出己方新论据
+- 开始综合各方观点，走向更高层次的论证
+- 如果陷入僵局，提出新的角度推动辩论
+- 保持辩论节奏，但不要只是为了说话而说话
+- 每个AI独立决定发言时机，不需要等待轮次`;
       break;
     case DEBATE_PHASES.CLOSING:
       phaseInstructions = `
-【总结阶段要求】
-- 总结你方最核心的观点
-- 强调最有力的论据
-- 不要引入新的论点
-- 给出一个有力的结尾`;
+【总结阶段要求 - 综合 Synthesis】
+- 系统性地总结你方最核心的观点
+- 回顾辩论过程中最有力的论据和关键时刻
+- 综合回应对方的关键质疑
+- 给出一个有力的、说服性的结尾
+- 升华主题，提升论证高度
+- 不要引入全新的论点`;
       break;
     case DEBATE_PHASES.JUDGMENT:
       phaseInstructions = `
-【裁判评判要求】
-- 客观评价正方的表现和论点
-- 客观评价反方的表现和论点
-- 指出双方的优点和不足
-- 给出你的最终判断（可以宣布获胜方或表示平局）
-- 解释你的判断理由`;
+【裁判评判要求 - 四维度评分】
+请从以下四个维度分别评价双方表现，并给出最终判断：
+
+1. **逻辑性**（30%）：论点是否清晰、论证是否严密、逻辑是否自洽
+2. **说服力**（30%）：论据是否充分、引用是否恰当、表达是否有力
+3. **团队协作**（20%）：队友之间是否配合默契、论点是否互相支撑
+4. **引用准确性**（20%）：对对方观点的引用是否准确、反驳是否到位
+
+最后给出你的判断：
+- 获胜方：正方/反方/平局
+- 简要理由（100字以内）`;
       break;
     case DEBATE_PHASES.AUDIENCE_COMMENT:
       phaseInstructions = `
@@ -417,7 +473,7 @@ function buildDebateRolePrompt(persona, role, topic, phase, phaseConfig, recentM
 - 保持友好和尊重的态度`;
       break;
   }
-  
+
   return `【正规辩论】${new Date().toLocaleString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
 
 你是${persona.name}，在本场辩论中担任【${roleName}】。你必须严格按照你的人设来发言，不得偏离你的人设设定。
@@ -473,61 +529,165 @@ ${contextSection}`;
 
 async function generateDebateResponse(aiId, groupId, topic, role, phase, phaseConfig, recentMessages, allRoles, context) {
   if (context.cancel) return null;
-  
+
   await loadCustomPersonas(context.userId);
   const persona = getEffectivePersona(aiId, context.userId);
   if (!persona) return null;
-  
+
   const delay = 1000 + Math.random() * 2000;
   await sleep(delay);
-  
+
   if (context.cancel) return null;
-  
+
   broadcastTypingStatus(groupId, aiId, true);
-  
+
   try {
     const systemPrompt = buildDebateRolePrompt(
-      persona, 
-      role, 
-      topic, 
-      phase, 
-      phaseConfig, 
-      recentMessages, 
+      persona,
+      role,
+      topic,
+      phase,
+      phaseConfig,
+      recentMessages,
       allRoles
     );
-    
+
     const debateRound = context.currentRound || 1;
     const totalRounds = context.totalRounds || 5;
     const debateLevel = context.debateLevel || 2;
-    
+
     const rawContent = await callAIDebate(
-      aiId, 
-      persona, 
-      topic, 
-      recentMessages, 
-      debateRound, 
-      totalRounds, 
+      aiId,
+      persona,
+      topic,
+      recentMessages,
+      debateRound,
+      totalRounds,
       debateLevel,
       context.groupMembers,
       context.userId
     );
-    
+
     let content = normalizeResponse(rawContent);
-    
+
     if (!content || content.trim().length === 0) {
       broadcastTypingStatus(groupId, aiId, false);
       return null;
     }
-    
+
     content = applyMessageLengthLimit(content, { ...persona, socialConfig: { maxMessageLength: Math.max(persona?.socialConfig?.maxMessageLength || 800, 800) } });
-    
+
     broadcastTypingStatus(groupId, aiId, false);
-    
+
     return { aiId, content, persona, role };
-    
+
   } catch (error) {
     console.error(`AI ${aiId} 辩论生成失败:`, error.message);
     broadcastTypingStatus(groupId, aiId, false);
+    return null;
+  }
+}
+
+/**
+ * 生成AI之间直接回应 - 让辩论更加动态
+ * @param {string} responderId - 回应的AI
+ * @param {string} targetId - 被回应的AI
+ * @param {string} role - 回应的AI角色
+ * @param {object} context - 辩论上下文
+ */
+async function generateInterAIResponse(responderId, targetId, targetRole, topic, allRoles, recentMessages, groupId, context) {
+  if (context.cancel) return null;
+
+  const targetPersona = getEffectivePersona(targetId, context.userId);
+  if (!targetPersona) return null;
+
+  // 获取目标AI最近的消息
+  const targetMessages = recentMessages
+    .filter(m => m.sender_id === targetId && m.sender_type === 'ai')
+    .slice(-3);
+  if (targetMessages.length === 0) return null;
+
+  // 检查回应者最近是否已经回复过该目标
+  const recentResponses = recentMessages
+    .filter(m => m.sender_id === responderId && m.sender_type === 'ai')
+    .slice(-5);
+  if (recentResponses.some(m => m.content && m.content.includes(`@${targetPersona.name}`))) {
+    // 已经回复过该目标，跳过
+    return null;
+  }
+
+  const persona = getEffectivePersona(responderId, context.userId);
+  if (!persona) return null;
+
+  const delay = 2000 + Math.random() * 3000;
+  await sleep(delay);
+
+  if (context.cancel) return null;
+
+  broadcastTypingStatus(groupId, responderId, true);
+
+  try {
+    const role = allRoles.proponents.includes(responderId) ? 'proponent' :
+      allRoles.opponents.includes(responderId) ? 'opponent' : null;
+    if (!role) return null;
+
+    const roleName = role === 'proponent' ? '正方' : '反方';
+    const targetRoleName = targetRole === 'proponent' ? '正方' : '反方';
+
+    const targetContent = targetMessages[targetMessages.length - 1].content.substring(0, 300);
+
+    const systemPrompt = `【辩论AI间直接回应】
+你是${persona.name}（${roleName}），你正在辩论中回应${targetRoleName}辩手${targetPersona.name}的发言。
+
+辩题：${topic}
+
+${targetPersona.name}（${targetRoleName}）刚才说：
+> ${targetContent}
+
+请针对他/她的观点进行直接反驳或回应。记住你的人设：
+${persona.personality ? `性格：${persona.personality}` : ''}
+${persona.style ? `风格：${persona.style}` : ''}
+${persona.debateTendency === 'high' ? '你必须激烈有力地反驳对方，不能温吞。' : ''}
+${persona.debateTendency === 'medium' ? '理性反驳，既要有力又要尊重对方。' : ''}
+${persona.debateTendency === 'low' ? '温和地表达不同意见，寻找共识。' : ''}
+
+要求：
+- 用"@${targetPersona.name}"明确指出你在回应谁
+- 引用对方原话并逐条反驳
+- 补充己方论据
+- 控制在200-400字`;
+
+    const rawContent = await callAIDebate(
+      responderId,
+      persona,
+      topic,
+      recentMessages,
+      context.currentRound || 2,
+      context.totalRounds || 5,
+      context.debateLevel || 2,
+      context.groupMembers,
+      context.userId
+    );
+
+    let content = normalizeResponse(rawContent);
+
+    if (content && content.trim().length > 0) {
+      content = `@${targetPersona.name} ${content.trim()}`;
+      content = applyMessageLengthLimit(content, {
+        ...persona,
+        socialConfig: { maxMessageLength: Math.max(persona?.socialConfig?.maxMessageLength || 600, 600) }
+      });
+
+      broadcastTypingStatus(groupId, responderId, false);
+      return { aiId: responderId, content, persona, role };
+    }
+
+    broadcastTypingStatus(groupId, responderId, false);
+    return null;
+
+  } catch (error) {
+    console.error(`AI间直接回应 ${responderId}→${targetId} 失败:`, error.message);
+    broadcastTypingStatus(groupId, responderId, false);
     return null;
   }
 }
@@ -539,13 +699,13 @@ function broadcastDebatePhaseChange(groupId, phase, phaseConfig, roles, userId =
     judge: '裁判',
     audience: '观众'
   };
-  
+
   const speakers = phaseConfig.speakers.map(id => {
     const role = phaseConfig.speakerRoles[id];
     const persona = getEffectivePersona(id, userId);
     return `${roleNames[role] || '辩手'}: ${persona?.name || id}`;
   });
-  
+
   broadcastToGroup(groupId, {
     type: 'debate_phase_change',
     group_id: groupId,
@@ -564,7 +724,7 @@ function broadcastDebateMessage(groupId, aiId, content, role, messageId) {
     judge: '裁判',
     audience: '观众'
   };
-  
+
   broadcastToGroup(groupId, {
     type: 'new_message',
     group_id: groupId,
@@ -591,7 +751,7 @@ async function getRecentMessages(groupId, limit = 50) {
       .slice(-limit);
     if (messages.length > 0) return messages;
   }
-  
+
   const userIds = await listUserDatabases();
   for (const userId of userIds) {
     const db = await getUserDb(userId);
@@ -608,7 +768,7 @@ async function getRecentMessages(groupId, limit = 50) {
 async function saveMessage(groupId, aiId, content, role) {
   const result = await findGroupAndMessagesInAnyUserDb(groupId);
   if (!result) throw new Error(`找不到群组 ${groupId}`);
-  
+
   const { db: userDb } = result;
   const messageId = uuidv4();
   const roleNames = {
@@ -617,7 +777,7 @@ async function saveMessage(groupId, aiId, content, role) {
     judge: '裁判',
     audience: '观众'
   };
-  
+
   const message = {
     id: messageId,
     group_id: groupId,
@@ -632,13 +792,13 @@ async function saveMessage(groupId, aiId, content, role) {
     },
     created_at: new Date().toISOString()
   };
-  
+
   await withWriteLock(result.userId, async () => {
     await userDb.read();
     userDb.data.messages.push(message);
     await userDb.write();
   });
-  
+
   return messageId;
 }
 
@@ -647,26 +807,28 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
   if (!result || !result.group || !result.group.ai_members || result.group.ai_members.length < 2) {
     return { groupId, status: 'error', error: '群组不存在或AI成员不足' };
   }
-  
+
   const { db: userDb, group, userId } = result;
-  
+
   await loadCustomPersonas(userId);
-  
+
   const debateKey = `debate:${groupId}`;
   if (activeDebates.has(debateKey)) {
     return { groupId, status: 'error', error: '辩论已在进行中' };
   }
-  
+
   const roles = allocateDebateRoles(group.ai_members, rolePreferences, selectedParticipants);
-  
-  let phases = roles.hasJudge 
-    ? [DEBATE_PHASES.OPENING, DEBATE_PHASES.REBUTTAL, DEBATE_PHASES.FREE_DEBATE, DEBATE_PHASES.CLOSING, DEBATE_PHASES.JUDGMENT]
-    : [DEBATE_PHASES.OPENING, DEBATE_PHASES.REBUTTAL, DEBATE_PHASES.FREE_DEBATE, DEBATE_PHASES.CLOSING];
-  
+
+  let phases = [DEBATE_PHASES.PREPARATION, DEBATE_PHASES.OPENING, DEBATE_PHASES.REBUTTAL, DEBATE_PHASES.FREE_DEBATE, DEBATE_PHASES.CLOSING];
+
+  if (roles.hasJudge) {
+    phases.push(DEBATE_PHASES.JUDGMENT);
+  }
+
   if (roles.hasAudience) {
     phases.push(DEBATE_PHASES.AUDIENCE_COMMENT);
   }
-  
+
   const context = {
     cancel: false,
     topic,
@@ -682,9 +844,9 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
     startTime: Date.now(),
     userId
   };
-  
+
   activeDebates.set(debateKey, context);
-  
+
   group.debate_mode = true;
   group.debate_level = debateLevel;
   group.debate_topic = topic;
@@ -692,7 +854,7 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
   await withWriteLock(userId, async () => {
     await userDb.write();
   });
-  
+
   broadcastToGroup(groupId, {
     type: 'debate_started',
     group_id: groupId,
@@ -706,34 +868,45 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
     phases: phases.map(p => PHASE_NAMES[p]),
     timestamp: new Date().toISOString()
   });
-  
+
   try {
     for (let phaseIndex = 0; phaseIndex < phases.length; phaseIndex++) {
       if (context.cancel) break;
-      
+
       context.currentPhaseIndex = phaseIndex;
       const phase = phases[phaseIndex];
       const phaseConfig = getDebatePhaseConfig(phase, roles);
-      
+
       broadcastDebatePhaseChange(groupId, phase, phaseConfig, roles, userId);
-      
+
+      // 准备阶段：短暂等待，让用户看到当前阶段
+      if (phase === DEBATE_PHASES.PREPARATION) {
+        await sleep(2000);
+        continue;
+      }
+
       await sleep(1500);
-      
-      const speakerOrder = phase === DEBATE_PHASES.OPENING 
-        ? [...roles.proponents, ...roles.opponents]
+
+      const speakerOrder = phase === DEBATE_PHASES.OPENING
+        ? phaseConfig.speakers  // 正方先（已在getDebatePhaseConfig中排列好）
         : phase === DEBATE_PHASES.CLOSING
-        ? [...roles.opponents.slice(-1), ...roles.proponents.slice(-1)]
-        : phase === DEBATE_PHASES.AUDIENCE_COMMENT
-        ? [...phaseConfig.speakers]
-        : [...phaseConfig.speakers].sort(() => Math.random() - 0.5);
-      
+          ? phaseConfig.speakers  // 反方先，正方最后（已在getDebatePhaseConfig中排列好）
+          : phase === DEBATE_PHASES.REBUTTAL
+            ? phaseConfig.speakers  // 反方先（已在getDebatePhaseConfig中排列好）
+            : phase === DEBATE_PHASES.AUDIENCE_COMMENT
+              ? [...phaseConfig.speakers]
+              : [...phaseConfig.speakers].sort(() => Math.random() - 0.5);
+
+      // Track which AIs have spoken this turn for inter-AI targeting
+      const spokenThisTurn = new Set();
+
       for (let turn = 0; turn < phaseConfig.turnsPerSpeaker; turn++) {
         for (const speakerId of speakerOrder) {
           if (context.cancel) break;
-          
+
           const role = phaseConfig.speakerRoles[speakerId];
           const recentMessages = await getRecentMessages(groupId);
-          
+
           const result = await generateDebateResponse(
             speakerId,
             groupId,
@@ -745,23 +918,83 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
             roles,
             context
           );
-          
+
           if (result) {
             const messageId = await saveMessage(groupId, speakerId, result.content, role);
             broadcastDebateMessage(groupId, speakerId, result.content, role, messageId);
+            spokenThisTurn.add(speakerId);
           }
-          
+
           await sleep(500 + Math.random() * 1000);
         }
+
+        // 在驳论和自由辩论阶段，添加AI间直接回应 (Inter-AI direct responses)
+        if ((phase === DEBATE_PHASES.REBUTTAL || phase === DEBATE_PHASES.FREE_DEBATE)
+          && !context.cancel && spokenThisTurn.size > 0) {
+
+          // 最多触发2轮AI间回应
+          for (let interRound = 0; interRound < 2; interRound++) {
+            if (context.cancel) break;
+
+            const recentMessages = await getRecentMessages(groupId);
+            const recentAIMessages = recentMessages
+              .filter(m => m.sender_type === 'ai' && spokenThisTurn.has(m.sender_id))
+              .slice(-3);
+
+            if (recentAIMessages.length === 0) break;
+
+            // 选择最近的发言者和可能的回应者
+            for (const targetMsg of recentAIMessages.slice(0, 1)) {
+              const targetId = targetMsg.sender_id;
+              const targetRole = roles.proponents.includes(targetId) ? 'proponent' : 'opponent';
+
+              // 找到对立方的AI作为回应者
+              const opposingSide = targetRole === 'proponent' ? roles.opponents : roles.proponents;
+              const availableResponders = opposingSide.filter(id =>
+                id !== targetId && !context.cancel
+              );
+
+              if (availableResponders.length === 0) continue;
+
+              // 随机选择1-2个回应者
+              const responderCount = Math.min(Math.ceil(Math.random() * 2), availableResponders.length);
+              const shuffled = [...availableResponders].sort(() => Math.random() - 0.5);
+              const selectedResponders = shuffled.slice(0, responderCount);
+
+              for (const responderId of selectedResponders) {
+                if (context.cancel) break;
+
+                const interResult = await generateInterAIResponse(
+                  responderId,
+                  targetId,
+                  targetRole,
+                  topic,
+                  roles,
+                  recentMessages,
+                  groupId,
+                  context
+                );
+
+                if (interResult) {
+                  const interMsgId = await saveMessage(groupId, responderId, interResult.content, interResult.role);
+                  broadcastDebateMessage(groupId, responderId, interResult.content, interResult.role, interMsgId);
+                  spokenThisTurn.add(responderId);
+                }
+
+                await sleep(800 + Math.random() * 1200);
+              }
+            }
+          }
+        }
       }
-      
+
       if (phaseIndex < phases.length - 1 && !context.cancel) {
         await sleep(2000);
       }
     }
-    
+
     activeDebates.delete(debateKey);
-    
+
     await withWriteLock(userId, async () => {
       await userDb.read();
       const group = userDb.data.groups.find(g => g.id === groupId);
@@ -770,20 +1003,20 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
         await userDb.write();
       }
     });
-    
+
     broadcastToGroup(groupId, {
       type: 'debate_finished',
       group_id: groupId,
       timestamp: new Date().toISOString()
     });
-    
+
     return { groupId, status: 'success', message: '辩论已完成' };
-    
+
   } catch (error) {
     console.error(`辩论错误:`, error);
-    
+
     activeDebates.delete(debateKey);
-    
+
     await withWriteLock(userId, async () => {
       await userDb.read();
       const group = userDb.data.groups.find(g => g.id === groupId);
@@ -792,14 +1025,14 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
         await userDb.write();
       }
     });
-    
+
     broadcastToGroup(groupId, {
       type: 'debate_error',
       group_id: groupId,
       error: error.message,
       timestamp: new Date().toISOString()
     });
-    
+
     return { groupId, status: 'error', error: error.message };
   }
 }
@@ -807,16 +1040,16 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
 export async function stopFormalDebate(groupId) {
   const debateKey = `debate:${groupId}`;
   const context = activeDebates.get(debateKey);
-  
+
   if (context) {
     context.cancel = true;
-    
+
     broadcastToGroup(groupId, {
       type: 'debate_stopped',
       group_id: groupId,
       timestamp: new Date().toISOString()
     });
-    
+
     await new Promise(resolve => {
       const checkInterval = setInterval(() => {
         if (!activeDebates.has(debateKey)) {
@@ -830,21 +1063,21 @@ export async function stopFormalDebate(groupId) {
         resolve();
       }, 5000);
     });
-    
+
     return { success: true, message: '辩论已停止' };
   }
-  
+
   return { success: false, message: '没有正在进行的辩论' };
 }
 
 export function getDebateStatus(groupId) {
   const debateKey = `debate:${groupId}`;
   const context = activeDebates.get(debateKey);
-  
+
   if (context) {
     const currentPhase = context.phases[context.currentPhaseIndex];
     const phaseConfig = getDebatePhaseConfig(currentPhase, context.roles);
-    
+
     return {
       isRunning: true,
       status: 'running',
@@ -857,7 +1090,7 @@ export function getDebateStatus(groupId) {
       hasAudience: context.roles.hasAudience
     };
   }
-  
+
   return {
     isRunning: false,
     status: 'stopped'
@@ -869,7 +1102,7 @@ export async function triggerAudienceComment(groupId, audienceMembers) {
   if (!result) {
     return { success: false, error: '群组不存在' };
   }
-  
+
   const { db: userDb, group, messages, userId } = result;
   const recentMessages = messages.slice(-50);
   const topic = group.debate_topic || '辩论';
@@ -883,17 +1116,17 @@ export async function triggerAudienceComment(groupId, audienceMembers) {
     audience: audienceMembers,
     hasAudience: true
   };
-  
+
   const phaseConfig = getDebatePhaseConfig(DEBATE_PHASES.AUDIENCE_COMMENT, roles);
-  
+
   broadcastDebatePhaseChange(groupId, DEBATE_PHASES.AUDIENCE_COMMENT, phaseConfig, roles, userId);
-  
+
   for (const audienceId of audienceMembers) {
     const persona = getEffectivePersona(audienceId, userId);
     if (!persona) continue;
-    
+
     broadcastTypingStatus(groupId, audienceId, true);
-    
+
     try {
       const systemPrompt = buildDebateRolePrompt(
         persona,
@@ -904,7 +1137,7 @@ export async function triggerAudienceComment(groupId, audienceMembers) {
         recentMessages,
         roles
       );
-      
+
       const rawContent = await callAIDebate(
         audienceId,
         persona,
@@ -916,9 +1149,9 @@ export async function triggerAudienceComment(groupId, audienceMembers) {
         audienceMembers,
         userId
       );
-      
+
       let content = normalizeResponse(rawContent);
-      
+
       if (content && content.trim().length > 0) {
         content = applyMessageLengthLimit(content, { ...persona, socialConfig: { maxMessageLength: Math.max(persona?.socialConfig?.maxMessageLength || 600, 600) } });
         const messageId = await saveMessage(groupId, audienceId, content, 'audience');
@@ -927,17 +1160,17 @@ export async function triggerAudienceComment(groupId, audienceMembers) {
     } catch (error) {
       console.error(`观众 ${audienceId} 评论生成失败:`, error.message);
     }
-    
+
     broadcastTypingStatus(groupId, audienceId, false);
     await sleep(500 + Math.random() * 1000);
   }
-  
+
   broadcastToGroup(groupId, {
     type: 'audience_comment_finished',
     group_id: groupId,
     timestamp: new Date().toISOString()
   });
-  
+
   return { success: true, message: '观众评论已完成' };
 }
 

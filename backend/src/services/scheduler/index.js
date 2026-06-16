@@ -3,6 +3,7 @@ import { getUserDb, listUserDatabases, updateGroupActivityById, withWriteLock } 
 import { callAI, callAIStream, cancelStream, normalizeResponse, applyMessageLengthLimit } from '../ai/index.js';
 import { broadcastToGroup, broadcastStreamChunk, broadcastStreamStart, broadcastStreamEnd, broadcastTypingStatus, broadcastAIMessage } from '../../websocket/index.js';
 import { AI_PERSONAS } from '../../config/personas.js';
+import { TEXT_CHAT_AIS, getEffectiveRelationship } from '../../config/personas.js';
 import { decryptText } from '../../utils/encryption.js';
 import { AI_NAMES, AI_MENTION_ALIASES, calculateSimilarity } from '../../config/constants.js';
 import { invokeAgentInGroup } from '../agent/index.js';
@@ -553,48 +554,51 @@ export function cancelGroupGeneration(groupId) {
   const chatKey = `group:${groupId}`;
   const aiChatKey = `ai_private:${groupId}`;
   const autonomousKey = `autonomous:${groupId}`;
-  
+
   let cancelled = false;
-  
+
+  // 取消某个 context 下所有正在进行的流(支持真并发场景下精确取消每个 AI 的流)
+  const cancelAllStreams = (context) => {
+    // 新:streamIds Map(多 AI 并发)
+    if (context.streamIds && context.streamIds.size > 0) {
+      for (const sid of context.streamIds.values()) {
+        try { cancelStream(sid); } catch (e) {}
+      }
+      context.streamIds.clear();
+    }
+    // 兼容旧:单值 streamId
+    if (context.streamId) {
+      try { cancelStream(context.streamId); } catch (e) {}
+    }
+  };
+
   if (activeGroups.has(chatKey)) {
     const context = activeGroups.get(chatKey);
     context.cancel = true;
-    
-    if (context.streamId) {
-      cancelStream(context.streamId);
-    }
-    
+    cancelAllStreams(context);
     activeGroups.delete(chatKey);
     cancelled = true;
   }
-  
+
   if (activeGroups.has(aiChatKey)) {
     const context = activeGroups.get(aiChatKey);
     context.cancel = true;
     context.isRunning = false;
-    
-    if (context.streamId) {
-      cancelStream(context.streamId);
-    }
-    
+    cancelAllStreams(context);
     activeGroups.delete(aiChatKey);
     cancelled = true;
   }
-  
+
   if (activeGroups.has(autonomousKey)) {
     const context = activeGroups.get(autonomousKey);
     context.cancel = true;
     context.conversationActive = false;
-    
-    if (context.streamId) {
-      cancelStream(context.streamId);
-    }
-    
+    cancelAllStreams(context);
     activeGroups.delete(autonomousKey);
     stopAutonomousChatTimer(groupId);
     cancelled = true;
   }
-  
+
   return cancelled;
 }
 
@@ -740,12 +744,32 @@ function buildWeChatStylePrompt(persona, userMessage, recentMessages, groupMembe
   if (!isPrivateChat) {
     const otherMembers = groupMembers?.filter(id => id !== persona.id) || [];
     if (otherMembers.length > 0) {
+      // 注入【关系感知】:告诉当前 AI 它和每个其他成员的关系,让它能"分清彼此关系"
+      const relationshipLines = otherMembers.map(id => {
+        const otherPersona = getEffectivePersona(id, userId);
+        const otherName = otherPersona?.name || AI_NAMES[id] || id;
+        const rel = getEffectiveRelationship(persona.id, id, persona);
+        const stanceText = rel.stance === 'ally' ? '友好' : rel.stance === 'rival' ? '对立' : '中立';
+        const tendencyText = rel.stance === 'ally'
+          ? '倾向支持、附和Ta'
+          : rel.stance === 'rival'
+            ? '倾向反驳、质疑Ta'
+            : '保持客观';
+        const noteText = rel.note ? `(${rel.note})` : '';
+        return `- ${otherName}:关系【${stanceText}】,亲和度${rel.affinity.toFixed(1)},${tendencyText}${noteText}`;
+      });
+      parts.push(`【你与群成员的关系】\n你必须根据以下关系来决定对每个人的态度和回应方式:\n${relationshipLines.join('\n')}`);
+
       const otherNames = otherMembers.map(id => {
-        const p = getEffectivePersona(id);
+        const p = getEffectivePersona(id, userId);
         return p?.name || id;
       }).join('、');
       parts.push(`群里还有：${otherNames}`);
     }
+
+    // 注入【随机发言指引】——让AI凭感觉加入对话,而非等轮次
+    parts.push('【发言方式】这是自由流动的群聊,没有固定发言顺序。你凭自己的感觉决定是否加入对话:可以中途插话、可以保持沉默、可以连续发言,也可以只回复特定的人。不要为了说话而说话,只在你想说的时候说。');
+    parts.push('【识别发言者】聊天记录中,标记为"用户"的消息来自真实用户,你需要真诚回应;标记为其他AI名字的消息来自对应AI成员。严禁混淆发言者——不要把用户的话当成某个AI的,也不要把A的话当成B的。回复某人时用"@对方名字"明确指向。');
   }
 
   if (recentMessages && recentMessages.length > 0) {
@@ -807,12 +831,132 @@ function buildWeChatStylePrompt(persona, userMessage, recentMessages, groupMembe
   };
 }
 
+/**
+ * 智能回复概率计算(纯概率,零额外LLM调用)
+ * 综合考虑:基础回复频率、话题相关性、与最后发言者的关系、连续发言惩罚等
+ * 让 AI "凭感觉"决定要不要加入对话
+ *
+ * @param {string} aiId - 当前 AI
+ * @param {Array} recentMessages - 最近的群消息(已解密)
+ * @param {object} persona - 已合并的完整 persona
+ * @param {object} context - 对话上下文(含 lastSpeakerId 等)
+ * @param {string} userId - 用户ID(用于读取其他AI人设推断关系)
+ * @returns {number} 0~1 的回复概率
+ */
+function calculateReplyProbability(aiId, recentMessages, persona, context, userId = null) {
+  // 基础分:用户配置的回复频率
+  let prob = (persona.responseConfig?.responseFrequency) ?? 0.8;
+
+  if (!recentMessages || recentMessages.length === 0) {
+    return Math.min(prob, 0.98);
+  }
+
+  const lastMessage = recentMessages[recentMessages.length - 1];
+  const lastContent = (lastMessage.content || '').toLowerCase();
+  const lastSenderId = lastMessage.sender_id;
+  const lastSenderType = lastMessage.sender_type;
+
+  // --- 1. 话题相关性加权(命中 keywords / expertise / firstSpeakerTopics) ---
+  const keywords = persona.keywords || [];
+  let keywordHits = 0;
+  for (const kw of keywords) {
+    if (kw && lastContent.includes(String(kw).toLowerCase())) keywordHits++;
+  }
+  if (keywordHits > 0) {
+    prob += Math.min(keywordHits * 0.12, 0.3); // 命中越多加越多,封顶 +0.3
+  }
+
+  const expertise = persona.expertise || [];
+  for (const ex of expertise) {
+    if (ex && lastContent.includes(String(ex).toLowerCase())) {
+      prob += 0.1;
+      break;
+    }
+  }
+
+  // 群冷场(最近长时间无消息)且 AI 有主动话题 → 更可能破冰
+  const firstSpeakerTopics = persona.firstSpeakerTopics || [];
+  if (firstSpeakerTopics.length > 0 && lastSenderType === 'ai') {
+    const timeSinceLast = Date.now() - new Date(lastMessage.created_at).getTime();
+    if (timeSinceLast > 30000) {
+      for (const t of firstSpeakerTopics) {
+        if (t && lastContent.includes(String(t).toLowerCase())) {
+          prob += 0.2;
+          break;
+        }
+      }
+    }
+  }
+
+  // --- 2. 关系加权(与最后发言者的关系影响回复意愿) ---
+  if (lastSenderType === 'ai' && lastSenderId && lastSenderId !== aiId) {
+    const rel = getEffectiveRelationship(aiId, lastSenderId, persona);
+    const debateTendency = persona.debateTendency || 'medium';
+
+    if (rel.affinity > 0.3) {
+      // 关系好 → 更愿意接话/附和
+      prob += 0.1;
+    } else if (rel.affinity < -0.3) {
+      // 对立 → 高辩论倾向者爱抬杠,低辩论倾向者倾向回避
+      if (debateTendency === 'high') {
+        prob += 0.15; // 爱抬杠,更想反驳
+      } else if (debateTendency === 'low') {
+        prob -= 0.1;  // 温和派遇到对立者倾向沉默
+      }
+    }
+  }
+
+  // 用户发言 → 文本类 AI 基础上有更高回应意愿(用户是核心)
+  if (lastSenderType === 'user') {
+    prob += 0.05;
+  }
+
+  // --- 3. 连续发言惩罚(避免某个 AI 刷屏) ---
+  // 统计最近由该 AI 连续发言的条数
+  let consecutiveSelfCount = 0;
+  for (let i = recentMessages.length - 1; i >= 0; i--) {
+    const m = recentMessages[i];
+    if (m.sender_type === 'ai' && m.sender_id === aiId) {
+      consecutiveSelfCount++;
+    } else {
+      break;
+    }
+  }
+  if (consecutiveSelfCount >= 2) {
+    prob -= 0.4; // 刚连说2条+,大幅降低再次发言概率
+  } else if (consecutiveSelfCount === 1) {
+    prob -= 0.15;
+  }
+
+  // --- 4. 轮次衰减(对话越深入,整体发言意愿略降,避免无限循环) ---
+  if (context && context.conversationDepth) {
+    const depth = context.conversationDepth;
+    const maxDepth = context.maxConversationDepth || 6;
+    if (depth > maxDepth * 0.6) {
+      prob -= 0.1 * (depth / maxDepth); // 后半程逐步降温
+    }
+  }
+
+  // 钳制到合理区间
+  return Math.max(0.02, Math.min(prob, 0.98));
+}
+
+/**
+ * 从活跃对话上下文中获取某 AI 的当前流(用于并发管理)
+ */
+function getActiveStreamId(context, aiId) {
+  if (context?.streamIds instanceof Map) {
+    return context.streamIds.get(aiId) || null;
+  }
+  return null;
+}
+
 async function generateAIResponse(aiId, groupId, userMessage, recentMessages, groupMembers, context, isMentioned = false, userAgents = null, isPrivateChat = false, userProfile = null, mentionedByName = null, userId = null, attachmentDescriptions = null) {
   if (context.cancel) return null;
-  
+
   const persona = getEffectivePersona(aiId, userId);
   if (!persona) return null;
-  
+
   const responseConfig = persona.responseConfig || {};
   if (responseConfig.enabled === false) return null;
 
@@ -835,16 +979,18 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
       return null;
     }
   }
-  
-  let responseFrequency = responseConfig.responseFrequency ?? 0.8;
-  if (isMentioned) {
-    responseFrequency = 1.0;
+
+  // ============ 智能概率决策(纯概率,零额外LLM调用)============
+  // 私聊 / 被@ → 必回;否则用 calculateReplyProbability 综合判断
+  let shouldReply = false;
+  if (isPrivateChat || isMentioned) {
+    shouldReply = true;
+  } else {
+    const prob = calculateReplyProbability(aiId, recentMessages, persona, context, userId);
+    shouldReply = Math.random() < prob;
   }
-  if (isPrivateChat) {
-    responseFrequency = 1.0;
-  }
-  
-  if (Math.random() > responseFrequency) {
+
+  if (!shouldReply) {
     return null;
   }
 
@@ -926,12 +1072,12 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
   
   const messageId = uuidv4();
   const streamId = `stream_${groupId}_${aiId}_${messageId}`;
-  
+
   try {
     const { systemPrompt, userMessage: promptMessage, suggestedReplyTo } = buildWeChatStylePrompt(
-      persona, 
-      userMessage, 
-      recentMessages, 
+      persona,
+      userMessage,
+      recentMessages,
       groupMembers,
       isMentioned,
       isPrivateChat ? null : userAgents,
@@ -940,18 +1086,18 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
       mentionedByName,
       attachmentDescriptions
     );
-    
+
     let accumulatedContent = '';
     let lastBroadcastTime = Date.now();
     let lastBroadcastLength = 0;
     const broadcastThrottleMs = 50;
-    
+
     broadcastStreamStart(groupId, aiId, messageId);
-    
+
     const onChunk = (chunk) => {
       if (context.cancel) return;
       accumulatedContent += chunk;
-      
+
       const now = Date.now();
       if (now - lastBroadcastTime >= broadcastThrottleMs) {
         const incremental = accumulatedContent.substring(lastBroadcastLength);
@@ -960,8 +1106,12 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
         lastBroadcastTime = now;
       }
     };
-    
-    context.streamId = streamId;
+
+    // 支持真并发:每个 AI 的 streamId 独立记录,便于精确取消单个 AI 的流
+    if (!context.streamIds) {
+      context.streamIds = new Map();
+    }
+    context.streamIds.set(aiId, streamId);
     
     const rawContent = await callAIStream(
       aiId, 
@@ -1167,17 +1317,18 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null) {
     }
   }
   
-  const context = { 
+  const context = {
     cancel: false,
     conversationDepth: 0,
     maxConversationDepth,
     lastSpeakerId: null,
     conversationActive: !isPrivateChat,
     mentionedAIs,
-    isPrivateChat
+    isPrivateChat,
+    streamIds: new Map() // 真并发:每个 AI 独立的流ID
   };
   activeGroups.set(chatKey, context);
-  
+
   const recentMessages = await getRecentMessages(groupId);
 
   let attachmentDescriptions = [];
@@ -1187,19 +1338,26 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null) {
     console.warn('[AI消息队列] 收集附件描述失败:', error.message);
   }
 
+  // 发言顺序:彻底随机 + 凭感觉
+  // 不再使用 speakingOrder 固定优先级,改为打乱顺序,仅保证被@的 AI 优先发起
   let orderedAiMembers = [...group.ai_members];
-  orderedAiMembers.sort((a, b) => {
-    const aMentioned = mentionedAIs.includes(a);
-    const bMentioned = mentionedAIs.includes(b);
-    if (aMentioned && !bMentioned) return -1;
-    if (!aMentioned && bMentioned) return 1;
-    const aPersona = getEffectivePersona(a, userId);
-    const bPersona = getEffectivePersona(b, userId);
-    const aOrder = aPersona?.speakingOrder ?? 3;
-    const bOrder = bPersona?.speakingOrder ?? 3;
-    return aOrder - bOrder;
-  });
-  
+
+  // 先按"是否被@"分成两组
+  const mentioned = orderedAiMembers.filter(id => mentionedAIs.includes(id));
+  const notMentioned = orderedAiMembers.filter(id => !mentionedAIs.includes(id));
+
+  // 各组内部随机打乱(Fisher-Yates)
+  const shuffle = (arr) => {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  };
+
+  orderedAiMembers = [...shuffle(mentioned), ...shuffle(notMentioned)];
+
   if (isPrivateChat) {
     orderedAiMembers = orderedAiMembers.slice(0, 1);
   }
@@ -1306,11 +1464,197 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null) {
 async function continueAIConversation(groupId, context, aiMembers, userAgents = null, userProfile = null, userId = null) {
   let dbResult = await findGroupAndMessagesInAnyUserDb(groupId);
   if (!dbResult) return;
-  
+
+  // 提取"上一条 AI 消息里 @了谁"(并发模型下所有候选 AI 共用这份解析)
+  function parseMentionsFromMessage(message) {
+    const mentionedAIs = [];
+    const mentionedByNames = {};
+    if (!message || !message.content) return { mentionedAIs, mentionedByNames };
+
+    const allMentionRegex = /@所有人/g;
+    if (allMentionRegex.test(message.content)) {
+      for (const aiId of aiMembers) {
+        if (!mentionedAIs.includes(aiId)) {
+          mentionedAIs.push(aiId);
+          const senderPersona = getEffectivePersona(message.sender_id, userId);
+          mentionedByNames[aiId] = senderPersona?.name || message.sender_id;
+        }
+      }
+      return { mentionedAIs, mentionedByNames };
+    }
+
+    const mentionRegex = /@([a-zA-Z0-9_.\u4e00-\u9fff\s-]+)/g;
+    let match;
+    while ((match = mentionRegex.exec(message.content)) !== null) {
+      const mentionText = match[1].trim();
+      let matched = false;
+      for (const [aiId, aliases] of Object.entries(AI_MENTION_ALIASES)) {
+        if (aliases.some(alias => alias.toLowerCase() === mentionText.toLowerCase())) {
+          if (aiMembers.includes(aiId) && !mentionedAIs.includes(aiId)) {
+            mentionedAIs.push(aiId);
+            const senderPersona = getEffectivePersona(message.sender_id, userId);
+            mentionedByNames[aiId] = senderPersona?.name || message.sender_id;
+          }
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) {
+        for (const aiId of aiMembers) {
+          const persona = getEffectivePersona(aiId, userId);
+          if (persona && persona.name && mentionText.toLowerCase() === persona.name.toLowerCase()) {
+            if (!mentionedAIs.includes(aiId)) {
+              mentionedAIs.push(aiId);
+              const senderPersona = getEffectivePersona(message.sender_id, userId);
+              mentionedByNames[aiId] = senderPersona?.name || message.sender_id;
+            }
+            break;
+          }
+        }
+      }
+    }
+    return { mentionedAIs, mentionedByNames };
+  }
+
+  // 处理单个 AI:生成 + 清洗 + 保存 + 广播 + 社交动作
+  // 在并发模型里,每个 AI 是一个独立的 promise,流式输出可交错(WS 层已支持)
+  async function processOneAI(aiId, recentMessages, lastAiMessage, mentionedAIs, mentionedByNames) {
+    if (context.cancel) return null;
+
+    const persona = getEffectivePersona(aiId, userId);
+    if (!persona) return null;
+
+    const isMentioned = mentionedAIs.includes(aiId);
+
+    // 智能概率:被@必回;否则用 calculateReplyProbability("凭感觉")
+    let willRespond = isMentioned;
+    if (!willRespond) {
+      const prob = calculateReplyProbability(aiId, recentMessages, persona, context, userId);
+      willRespond = Math.random() < prob;
+    }
+
+    if (!willRespond) {
+      console.log(`[AI对话] ${aiId} 凭感觉选择不回应 (基于智能概率)`);
+      // 拒绝概率仍保留(产生系统提示)
+      const refusalProb = persona.refusalProbability ?? 0;
+      if (refusalProb > 0 && Math.random() < refusalProb) {
+        const refusalMsg = await generateRefusalMessage(aiId, userId, recentMessages);
+        if (refusalMsg) {
+          const refusalMessageId = uuidv4();
+          const refusalMessage = {
+            id: refusalMessageId,
+            group_id: groupId,
+            sender_type: 'system',
+            sender_id: aiId,
+            content: refusalMsg,
+            content_type: 'system',
+            metadata: { refusal: true },
+            created_at: new Date().toISOString()
+          };
+          await withWriteLock(dbResult.userId, async () => {
+            await dbResult.db.read();
+            dbResult.db.data.messages.push(refusalMessage);
+            updateGroupActivityById(dbResult.db, groupId, refusalMessage);
+            await dbResult.db.write();
+          });
+          broadcastToGroup(groupId, {
+            type: 'system_message',
+            group_id: groupId,
+            content: refusalMsg,
+            sender_id: aiId,
+            metadata: { refusal: true },
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+      return null;
+    }
+
+    // 每个 AI 独立的随机思考延迟(凭感觉的发言时机,错落出现)
+    const responseDelay = 300 + Math.random() * 1800;
+    await sleep(responseDelay);
+    if (context.cancel) return null;
+
+    console.log(`[AI对话] ${aiId} 开始生成回应${isMentioned ? ' (被@)' : ''}`);
+
+    const mentionedByName = mentionedByNames[aiId] || null;
+    const result = await generateAIResponse(aiId, groupId, null, recentMessages, aiMembers, context, isMentioned, userAgents, false, userProfile, mentionedByName, userId);
+
+    if (context.cancel || !result) return null;
+
+    const { aiId: resultAiId, content, suggestedReplyTo, messageId } = result;
+
+    const { replyToId, replyToIds, cleanedContent, socialActions } = parseReplyReference(content, recentMessages);
+
+    if (!cleanedContent || cleanedContent.trim().length === 0) {
+      console.warn(`[AI对话] ${resultAiId} 的内容在清理后为空，跳过保存`);
+      return null;
+    }
+
+    let finalContent = cleanedContent;
+    let agentCallInfo = null;
+
+    const agentCallRegex = /\[CALL_AGENT:([a-zA-Z0-9_-]+)\]/g;
+    const agentCallMatches = [...finalContent.matchAll(agentCallRegex)];
+
+    if (agentCallMatches.length > 0) {
+      const convUserId = dbResult.userId;
+      for (const match of agentCallMatches) {
+        const agentId = match[1];
+        try {
+          const agentResponse = await invokeAgentInGroup(convUserId, agentId, finalContent);
+          const agentName = (userAgents || []).find(a => a.id === agentId)?.name || agentId;
+          finalContent = finalContent.replace(match[0], agentResponse || '');
+          agentCallInfo = { agentId, agentName };
+        } catch (e) {
+          console.warn(`[AI对话] 调用智能体 ${agentId} 失败:`, e.message);
+          finalContent = finalContent.replace(match[0], `[智能体${agentId}调用失败]`);
+        }
+      }
+    }
+
+    const effectiveReplyTo = replyToId || suggestedReplyTo || lastAiMessage.id;
+    const finalReplyToIds = replyToIds && replyToIds.length > 0 ? replyToIds : null;
+
+    const finalMessageId = messageId || uuidv4();
+    const message = {
+      id: finalMessageId,
+      group_id: groupId,
+      sender_type: 'ai',
+      sender_id: resultAiId,
+      content: finalContent,
+      content_type: 'text',
+      reply_to: effectiveReplyTo,
+      reply_to_ids: finalReplyToIds,
+      metadata: agentCallInfo ? { agent_call: agentCallInfo } : undefined,
+      created_at: new Date().toISOString()
+    };
+
+    await withWriteLock(dbResult.userId, async () => {
+      await dbResult.db.read();
+      dbResult.db.data.messages.push(message);
+      updateGroupActivityById(dbResult.db, groupId, message);
+      await dbResult.db.write();
+    });
+
+    broadcastStreamEnd(groupId, resultAiId, finalMessageId, finalContent, effectiveReplyTo, finalReplyToIds);
+
+    console.log(`[AI对话] ${resultAiId} 发送了消息: ${cleanedContent.substring(0, 50)}...`);
+
+    if (socialActions && socialActions.length > 0 && effectiveReplyTo) {
+      await processSocialActions(groupId, effectiveReplyTo, resultAiId, socialActions);
+    }
+
+    context.lastSpeakerId = resultAiId;
+    return resultAiId;
+  }
+
+  // ============ 并发插话主循环 ============
   while (context.conversationActive && context.conversationDepth < context.maxConversationDepth && !context.cancel) {
     context.conversationDepth++;
-    console.log(`[AI对话] 群组 ${groupId} 第 ${context.conversationDepth} 轮对话开始`);
-    
+    console.log(`[AI对话] 群组 ${groupId} 第 ${context.conversationDepth} 轮对话开始(并发模式)`);
+
+    // 轮次间的冷却(取所有 AI 的最大冷却,避免刷屏)
     const cooldownMs = (() => {
       const cooldowns = aiMembers.map(aiId => {
         const p = getEffectivePersona(aiId, userId);
@@ -1318,233 +1662,45 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
       });
       return Math.max(...cooldowns);
     })();
-    const delay = cooldownMs + Math.random() * 1500;
+    const delay = cooldownMs + Math.random() * 1200;
     await sleep(delay);
-    
+
     if (context.cancel) break;
-    
+
     const recentMessages = await getRecentMessages(groupId, 50);
-    
     const lastAiMessage = [...recentMessages].reverse().find(m => m.sender_type === 'ai');
     if (!lastAiMessage) {
       console.log(`[AI对话] 没有找到AI消息，退出对话`);
       break;
     }
-    
-    let mentionedAIs = [];
-    const mentionedByNames = {};
-    if (lastAiMessage.content) {
-      const allMentionRegex = /@所有人/g;
-      const hasAllMention = allMentionRegex.test(lastAiMessage.content);
-      
-      if (hasAllMention) {
-        for (const aiId of aiMembers) {
-          if (!mentionedAIs.includes(aiId)) {
-            mentionedAIs.push(aiId);
-            const senderPersona = getEffectivePersona(lastAiMessage.sender_id, userId);
-            mentionedByNames[aiId] = senderPersona?.name || lastAiMessage.sender_id;
-          }
-        }
-      } else {
-        const mentionRegex = /@([a-zA-Z0-9_.\u4e00-\u9fff\s-]+)/g;
-        let match;
-        while ((match = mentionRegex.exec(lastAiMessage.content)) !== null) {
-          const mentionText = match[1].trim();
-          for (const [aiId, aliases] of Object.entries(AI_MENTION_ALIASES)) {
-            if (aliases.some(alias => alias.toLowerCase() === mentionText.toLowerCase())) {
-              if (aiMembers.includes(aiId) && !mentionedAIs.includes(aiId)) {
-                mentionedAIs.push(aiId);
-                const senderPersona = getEffectivePersona(lastAiMessage.sender_id, userId);
-                mentionedByNames[aiId] = senderPersona?.name || lastAiMessage.sender_id;
-              }
-              break;
-            }
-          }
-          
-          if (!mentionedAIs.length) {
-            for (const aiId of aiMembers) {
-              const persona = getEffectivePersona(aiId, userId);
-              if (persona && persona.name && mentionText.toLowerCase() === persona.name.toLowerCase()) {
-                if (!mentionedAIs.includes(aiId)) {
-                  mentionedAIs.push(aiId);
-                  const senderPersona = getEffectivePersona(lastAiMessage.sender_id, userId);
-                  mentionedByNames[aiId] = senderPersona?.name || lastAiMessage.sender_id;
-                }
-                break;
-              }
-            }
-          }
-        }
-      }
-    }
-    
-    let respondingAis = [...aiMembers];
-    
-    if (mentionedAIs.length > 0) {
-      respondingAis.sort((a, b) => {
-        const aMentioned = mentionedAIs.includes(a);
-        const bMentioned = mentionedAIs.includes(b);
-        if (aMentioned && !bMentioned) return -1;
-        if (!aMentioned && bMentioned) return 1;
-        return 0;
-      });
-    }
-    
-    console.log(`[AI对话] 准备让 ${respondingAis.join(', ')} 回应`);
-    
-    let validResponseCount = 0;
-    
-    for (const aiId of respondingAis) {
-      if (context.cancel) break;
-      
-      const persona = getEffectivePersona(aiId, userId);
-      if (!persona) continue;
-      
-      const isMentioned = mentionedAIs.includes(aiId);
-      let interactionProb = persona.socialConfig?.interactionProbability ?? 0.9;
-      if (isMentioned) {
-        interactionProb = 1.0;
-      }
-      
-      if (Math.random() > interactionProb) {
-        console.log(`[AI对话] ${aiId} 决定不回应`);
-        
-        const refusalProb = persona.refusalProbability ?? 0;
-        if (refusalProb > 0 && Math.random() < refusalProb) {
-          const refusalMsg = await generateRefusalMessage(aiId, userId, recentMessages);
-          if (refusalMsg) {
-            const refusalMessageId = uuidv4();
-            const refusalMessage = {
-              id: refusalMessageId,
-              group_id: groupId,
-              sender_type: 'system',
-              sender_id: aiId,
-              content: refusalMsg,
-              content_type: 'system',
-              metadata: { refusal: true },
-              created_at: new Date().toISOString()
-            };
-            
-            await withWriteLock(dbResult.userId, async () => {
-              await dbResult.db.read();
-              dbResult.db.data.messages.push(refusalMessage);
-              updateGroupActivityById(dbResult.db, groupId, refusalMessage);
-              await dbResult.db.write();
-            });
-            
-            broadcastToGroup(groupId, {
-              type: 'system_message',
-              group_id: groupId,
-              content: refusalMsg,
-              sender_id: aiId,
-              metadata: { refusal: true },
-              timestamp: new Date().toISOString()
-            });
-          }
-        }
-        
-        continue;
-      }
-      
-      const responseDelay = 500 + Math.random() * 1500;
-      await sleep(responseDelay);
-      
-      if (context.cancel) break;
-      
-      console.log(`[AI对话] ${aiId} 开始生成回应${isMentioned ? ' (被@)' : ''}`);
-      
-      const mentionedByName = mentionedByNames[aiId] || null;
-      const result = await generateAIResponse(aiId, groupId, null, recentMessages, aiMembers, context, isMentioned, userAgents, false, userProfile, mentionedByName, userId);
-      
-      if (context.cancel || !result) continue;
-      
-      const { aiId: resultAiId, content, suggestedReplyTo, messageId } = result;
-      
-      const { replyToId, replyToIds, cleanedContent, socialActions } = parseReplyReference(content, recentMessages);
-      
-      if (!cleanedContent || cleanedContent.trim().length === 0) {
-        console.warn(`[AI对话] ${resultAiId} 的内容在清理后为空，跳过保存`);
-        continue;
-      }
-      
-      let finalContent = cleanedContent;
-      let agentCallInfo = null;
-      
-      const agentCallRegex = /\[CALL_AGENT:([a-zA-Z0-9_-]+)\]/g;
-      const agentCallMatches = [...finalContent.matchAll(agentCallRegex)];
-      
-      if (agentCallMatches.length > 0) {
-        const convUserId = dbResult.userId;
-        for (const match of agentCallMatches) {
-          const agentId = match[1];
-          try {
-            const agentResponse = await invokeAgentInGroup(convUserId, agentId, finalContent);
-            const agentName = (userAgents || []).find(a => a.id === agentId)?.name || agentId;
-            finalContent = finalContent.replace(match[0], agentResponse || '');
-            agentCallInfo = { agentId, agentName };
-          } catch (e) {
-            console.warn(`[AI对话] 调用智能体 ${agentId} 失败:`, e.message);
-            finalContent = finalContent.replace(match[0], `[智能体${agentId}调用失败]`);
-          }
-        }
-      }
-      
-      const effectiveReplyTo = replyToId || suggestedReplyTo || lastAiMessage.id;
-      const finalReplyToIds = replyToIds && replyToIds.length > 0 ? replyToIds : null;
-      
-      const finalMessageId = messageId || uuidv4();
-      const message = {
-        id: finalMessageId,
-        group_id: groupId,
-        sender_type: 'ai',
-        sender_id: resultAiId,
-        content: finalContent,
-        content_type: 'text',
-        reply_to: effectiveReplyTo,
-        reply_to_ids: finalReplyToIds,
-        metadata: agentCallInfo ? { agent_call: agentCallInfo } : undefined,
-        created_at: new Date().toISOString()
-      };
-      
-      await withWriteLock(dbResult.userId, async () => {
-        await dbResult.db.read();
-        dbResult.db.data.messages.push(message);
-        updateGroupActivityById(dbResult.db, groupId, message);
-        await dbResult.db.write();
-      });
-      
-      broadcastStreamEnd(groupId, resultAiId, finalMessageId, finalContent, effectiveReplyTo, finalReplyToIds);
-      
-      console.log(`[AI对话] ${resultAiId} 发送了消息: ${cleanedContent.substring(0, 50)}...`);
-      
-      if (socialActions && socialActions.length > 0 && effectiveReplyTo) {
-        await processSocialActions(groupId, effectiveReplyTo, resultAiId, socialActions);
-      }
-      
-      context.lastSpeakerId = resultAiId;
-      validResponseCount++;
-      
-      const updatedRecentMessages = await getRecentMessages(groupId, 50);
-      const newLastMessage = [...updatedRecentMessages].reverse().find(m => m.sender_type === 'ai');
-      if (newLastMessage && newLastMessage.id !== lastAiMessage.id) {
-        recentMessages.length = 0;
-        recentMessages.push(...updatedRecentMessages);
-      }
-    }
-    
+
+    const { mentionedAIs, mentionedByNames } = parseMentionsFromMessage(lastAiMessage);
+
+    // 候选 AI:随机打乱顺序(彻底随机),被@的不额外排序——并发下谁先想好谁先说
+    const candidates = [...aiMembers].sort(() => Math.random() - 0.5);
+
+    console.log(`[AI对话] 并发候选: ${candidates.join(', ')}`);
+
+    // 并发处理所有候选 AI —— 流式输出会自然交错(WS 层按 message_id 分组,前端已支持)
+    const results = await Promise.allSettled(
+      candidates.map(aiId => processOneAI(aiId, recentMessages, lastAiMessage, mentionedAIs, mentionedByNames))
+    );
+
+    const validResponseCount = results.filter(r => r.status === 'fulfilled' && r.value).length;
+
     console.log(`[AI对话] 第 ${context.conversationDepth} 轮完成，${validResponseCount} 个AI回应了`);
-    
+
     if (validResponseCount === 0) {
       console.log(`[AI对话] 没有AI回应，结束对话`);
       context.conversationActive = false;
     }
-    
+
     if (context.conversationDepth >= context.maxConversationDepth) {
       console.log(`[AI对话] 达到最大对话深度 ${context.maxConversationDepth}，结束对话`);
       context.conversationActive = false;
     }
   }
-  
+
   console.log(`[AI对话] 群组 ${groupId} 对话结束，共 ${context.conversationDepth} 轮`);
 }
 

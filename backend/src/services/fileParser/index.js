@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { safeLog } from '../../utils/logger.js';
 import { fileURLToPath } from 'url';
 import pdf from 'pdf-parse';
 import mammoth from 'mammoth';
@@ -41,7 +42,7 @@ export async function parseFile(filePath, mimeType) {
       return `[文件类型: ${mimeType || ext}]`;
     }
   } catch (error) {
-    console.error('File parsing error:', error);
+    safeLog('error', 'File parsing error', { error: error?.message || error });
     return `[文件解析失败: ${error.message}]`;
   }
 }
@@ -53,7 +54,7 @@ async function parseImage(filePath, ext, mimeType) {
     const fileSizeKB = (stats.size / 1024).toFixed(1);
     const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
     const fileSize = stats.size > 1024 * 1024 ? `${fileSizeMB}MB` : `${fileSizeKB}KB`;
-    
+
     let dimensions = '';
     try {
       const sharp = (await import('sharp')).default;
@@ -62,7 +63,7 @@ async function parseImage(filePath, ext, mimeType) {
         dimensions = ` · ${metadata.width}x${metadata.height}px`;
         if (metadata.format) ext = metadata.format;
       }
-    } catch {}
+    } catch { }
 
     return `[图片文件] 名称=${path.basename(filePath)} · 格式=${ext.toUpperCase()} · 大小=${fileSize}${dimensions}`;
   } catch (error) {
@@ -98,9 +99,7 @@ async function parseVideo(filePath, ext, mimeType) {
 
 async function parsePresentation(filePath, ext) {
   try {
-    const isNewFormat = ext === '.pptx';
-    
-    if (isNewFormat) {
+    if (ext === '.pptx') {
       try {
         const AdmZip = (await import('adm-zip')).default;
         const zip = new AdmZip(filePath);
@@ -111,7 +110,7 @@ async function parsePresentation(filePath, ext) {
             const nb = parseInt(b.entryName.match(/slide(\d+)/i)?.[1] || '0');
             return na - nb;
           });
-        
+
         if (slideEntries.length > 0) {
           let result = '';
           for (const entry of slideEntries) {
@@ -129,12 +128,15 @@ async function parsePresentation(filePath, ext) {
           }
           if (result.trim()) return result.trim();
         }
-      } catch {}
+      } catch {
+        // .pptx XML解析失败，降级到占位文本
+      }
     }
-    
+
+    // .ppt 和 .pptx 统一降级占位文本
     return `[PPT文件: ${path.basename(filePath)}, 格式: ${ext.toUpperCase()}]`;
   } catch (error) {
-    console.error('Presentation parse error:', error);
+    safeLog('error', 'Presentation parse error', { error: error?.message || error });
     return `[PPT解析失败: ${error.message}]`;
   }
 }
@@ -145,7 +147,7 @@ async function parsePDF(filePath) {
     const data = await pdf(dataBuffer);
     return data.text || '';
   } catch (error) {
-    console.error('PDF parse error:', error);
+    safeLog('error', 'PDF parse error', { error: error?.message || error });
     return '[PDF解析失败]';
   }
 }
@@ -155,7 +157,7 @@ async function parseWord(filePath) {
     const result = await mammoth.extractRawText({ path: filePath });
     return result.value || '';
   } catch (error) {
-    console.error('Word parse error:', error);
+    safeLog('error', 'Word parse error', { error: error?.message || error });
     return '[Word文档解析失败]';
   }
 }
@@ -164,18 +166,33 @@ async function parseSpreadsheet(filePath, ext) {
   try {
     const buffer = await fs.readFile(filePath);
     const workbook = xlsx.read(buffer);
-    
+    const MAX_ROWS = 10000;
+
     let result = '';
-    
+    let totalRows = 0;
+
     for (const sheetName of workbook.SheetNames) {
       const sheet = workbook.Sheets[sheetName];
       const csv = xlsx.utils.sheet_to_csv(sheet);
+      const lines = csv.split('\n');
+      totalRows += lines.length;
+
+      if (totalRows > MAX_ROWS) {
+        const remaining = MAX_ROWS - (totalRows - lines.length);
+        if (remaining > 0) {
+          const truncated = lines.slice(0, remaining).join('\n');
+          result += `--- Sheet: ${sheetName} ---\n${truncated}\n\n`;
+        }
+        result = `解析表格（共${totalRows}行，仅显示前${MAX_ROWS}行）：\n${result}`;
+        return result;
+      }
+
       result += `--- Sheet: ${sheetName} ---\n${csv}\n\n`;
     }
-    
+
     return result;
   } catch (error) {
-    console.error('Spreadsheet parse error:', error);
+    safeLog('error', 'Spreadsheet parse error', { error: error?.message || error });
     return '[表格解析失败]';
   }
 }
@@ -184,7 +201,7 @@ async function parseText(filePath) {
   try {
     return await fs.readFile(filePath, 'utf-8');
   } catch (error) {
-    console.error('Text parse error:', error);
+    safeLog('error', 'Text parse error', { error: error?.message || error });
     return '[文本解析失败]';
   }
 }
@@ -194,7 +211,7 @@ async function parseCode(filePath, ext) {
     const content = await fs.readFile(filePath, 'utf-8');
     return `\`\`\`${ext.slice(1)}\n${content}\n\`\`\``;
   } catch (error) {
-    console.error('Code parse error:', error);
+    safeLog('error', 'Code parse error', { error: error?.message || error });
     return '[代码解析失败]';
   }
 }

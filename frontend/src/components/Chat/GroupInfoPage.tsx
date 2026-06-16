@@ -1,4 +1,4 @@
-﻿import { useState, useRef, useEffect, useMemo, type ReactNode } from 'react';
+import { useState, useRef, useEffect, useMemo, type ReactNode } from 'react';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { usePersonasStore } from '../../stores/personasStore';
 import { useMessagesStoreInternal } from '../../stores/messagesStore';
@@ -109,6 +109,10 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
   }, [activeTab, groupId]);
 
   const handleClose = () => {
+    if (isDirty) {
+      const confirmed = window.confirm('有未保存的更改，确定关闭吗？');
+      if (!confirmed) return;
+    }
     setIsClosing(true);
     setTimeout(() => {
       setIsVisible(false);
@@ -179,6 +183,7 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
       updateGroupSettings(groupId, { background_url: result.background_url });
     } catch (error) {
       console.error('上传背景失败:', error);
+      showToast({ message: '上传背景失败，请重试', type: 'error' });
     } finally {
       setUploading(false);
     }
@@ -190,6 +195,7 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
       updateGroupSettings(groupId, { background_url: '' });
     } catch (error) {
       console.error('重置背景失败:', error);
+      showToast({ message: '重置背景失败，请重试', type: 'error' });
     }
   };
 
@@ -202,6 +208,7 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
       setEditingName(false);
     } catch (error) {
       console.error('保存名称失败:', error);
+      showToast({ message: '保存名称失败，请重试', type: 'error' });
     } finally {
       setSaving(false);
     }
@@ -215,6 +222,7 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
       setEditingDesc(false);
     } catch (error) {
       console.error('保存描述失败:', error);
+      showToast({ message: '保存描述失败，请重试', type: 'error' });
     } finally {
       setSaving(false);
     }
@@ -243,6 +251,7 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
       showToast({ message: '成员已移除', type: 'success' });
     } catch (error) {
       console.error('移除成员失败:', error);
+      showToast({ message: '移除成员失败，请重试', type: 'error' });
     }
   };
 
@@ -252,6 +261,7 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
       showToast({ message: '成员已添加', type: 'success' });
     } catch (error) {
       console.error('添加成员失败:', error);
+      showToast({ message: '添加成员失败，请重试', type: 'error' });
     }
   };
 
@@ -306,6 +316,7 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
       showToast({ message: '所有文件已清空', type: 'success' });
     } catch (error) {
       console.error('清空文件失败:', error);
+      showToast({ message: '清空文件失败，请重试', type: 'error' });
     }
   };
 
@@ -330,6 +341,7 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
       showToast({ message: '记忆已清除', type: 'success' });
     } catch (error) {
       console.error('清除记忆失败:', error);
+      showToast({ message: '清除记忆失败，请重试', type: 'error' });
     }
   };
 

@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useUIStore } from '../../stores/uiStore';
 import { DebateControlPanel } from './DebateControlPanel';
 import { GroupInfoPage } from './GroupInfoPage';
+import { useToast } from '../Common';
 
 interface ChatHeaderProps {
   showGroupInfoButton?: boolean;
@@ -27,6 +28,7 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
     fetchChatStatus
   } = useGroupsStore();
   const { toggleSidebar } = useNavigationStore();
+  const { showToast, Toast } = useToast();
   const [showTopicModal, setShowTopicModal] = useState(false);
   const [topic, setTopic] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
@@ -35,6 +37,7 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
   const [autonomousRunning, setAutonomousRunning] = useState(false);
   const [autonomousPaused, setAutonomousPaused] = useState(false);
   const [debateLevelAnim, setDebateLevelAnim] = useState<number | null>(null);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isPrivateChat = currentGroup?.is_private === true;
   const isAIPrivateChat = currentGroup?.is_ai_private === true || currentGroup?.type === 'ai_private';
@@ -47,12 +50,18 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
     if (currentGroup && isAIPrivateChat) {
       fetchChatStatus(currentGroup.id);
       if (connectionStatus !== 'connected') {
-        const interval = setInterval(() => {
+        if (intervalRef.current) clearInterval(intervalRef.current);
+        intervalRef.current = setInterval(() => {
           fetchChatStatus(currentGroup.id);
         }, 10000);
-        return () => clearInterval(interval);
       }
     }
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
   }, [currentGroup?.id, isAIPrivateChat, connectionStatus]);
 
   useEffect(() => {
@@ -78,6 +87,7 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
   }
 
   const handleStartChat = async () => {
+    if (!currentGroup) return;
     setShowTopicModal(false);
     setTopic('');
     setActionLoading(true);
@@ -95,6 +105,7 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
   };
 
   const handleStartAutonomousChat = async () => {
+    if (!currentGroup) return;
     setShowTopicModal(false);
     setTopic('');
     setActionLoading(true);
@@ -112,6 +123,7 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
   };
 
   const handleStopAutonomousChat = async () => {
+    if (!currentGroup) return;
     setActionLoading(true);
     try {
       const result = await stopAutonomousChat(currentGroup.id);
@@ -121,12 +133,14 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
       setTypingAI(currentGroup.id, null);
     } catch (error) {
       console.error('停止自主对话失败:', error);
+      showToast({ message: '停止对话失败，请重试', type: 'error' });
     } finally {
       setActionLoading(false);
     }
   };
 
   const handleStopChat = async () => {
+    if (!currentGroup) return;
     setActionLoading(true);
     try {
       const result = await stopAIPrivateChat(currentGroup.id);
@@ -135,6 +149,7 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
       setTypingAI(currentGroup.id, null);
     } catch (error) {
       console.error('停止私聊失败:', error);
+      showToast({ message: '停止对话失败，请重试', type: 'error' });
     } finally {
       setActionLoading(false);
     }
@@ -416,6 +431,7 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
           onClose={() => setShowGroupInfo(false)}
         />
       )}
+      {Toast}
     </>
   );
 }

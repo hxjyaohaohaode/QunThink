@@ -4,9 +4,9 @@ import { sanitizeObject, PROFILE_SANITIZE_CONFIG } from '../utils/sanitize.js';
 
 const router = express.Router();
 
-const PROFILE_ALLOWED_FIELDS = (process.env.PROFILE_EXTRA_FIELDS 
-  ? ['nickname', 'gender', 'age', 'height', 'weight', 'occupation', 'education', 'hobbies', 'personality', 'goals', 'bio', ...process.env.PROFILE_EXTRA_FIELDS.split(',')]
-  : ['nickname', 'gender', 'age', 'height', 'weight', 'occupation', 'education', 'hobbies', 'personality', 'goals', 'bio']
+const PROFILE_ALLOWED_FIELDS = (process.env.PROFILE_EXTRA_FIELDS
+  ? ['nickname', 'gender', 'age', 'height', 'weight', 'occupation', 'education', 'hobbies', 'personality', 'goals', 'bio', 'avatar_url', ...process.env.PROFILE_EXTRA_FIELDS.split(',')]
+  : ['nickname', 'gender', 'age', 'height', 'weight', 'occupation', 'education', 'hobbies', 'personality', 'goals', 'bio', 'avatar_url']
 );
 
 router.get('/profile', async (req, res) => {

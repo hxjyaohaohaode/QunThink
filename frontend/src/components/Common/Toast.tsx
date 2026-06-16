@@ -9,6 +9,7 @@ interface ToastProps {
   title?: string;
   type: ToastType;
   duration?: number;
+  toastId?: number;
   onClose: () => void;
 }
 
@@ -33,11 +34,12 @@ const TOAST_ICON_COLORS: Record<ToastType, string> = {
   info: 'text-accent',
 };
 
-export function Toast({ visible, message, title, type, duration = 2500, onClose }: ToastProps) {
+export function Toast({ visible, message, title, type, duration = 2500, toastId, onClose }: ToastProps) {
   const [show, setShow] = useState(false);
   const [isHiding, setIsHiding] = useState(false);
   const reducedMotion = useReducedMotion();
   const timersRef = useRef<number[]>([]);
+  const currentToastIdRef = useRef<number | undefined>(toastId);
 
   const safeSetTimeout = (fn: () => void, delay: number) => {
     const id = window.setTimeout(() => {
@@ -56,6 +58,7 @@ export function Toast({ visible, message, title, type, duration = 2500, onClose 
 
   useEffect(() => {
     if (visible) {
+      currentToastIdRef.current = toastId;
       setShow(true);
       setIsHiding(false);
       const timer = safeSetTimeout(() => {
@@ -63,7 +66,9 @@ export function Toast({ visible, message, title, type, duration = 2500, onClose 
         safeSetTimeout(() => {
           setShow(false);
           setIsHiding(false);
-          onClose();
+          if (currentToastIdRef.current === toastId) {
+            onClose();
+          }
         }, reducedMotion ? 0 : 250);
       }, duration);
       return () => clearTimeout(timer);
@@ -71,7 +76,7 @@ export function Toast({ visible, message, title, type, duration = 2500, onClose 
       setShow(false);
       setIsHiding(false);
     }
-  }, [visible, duration, onClose, reducedMotion]);
+  }, [visible, duration, toastId, onClose, reducedMotion]);
 
   if (!visible && !show) return null;
 
@@ -104,7 +109,7 @@ export function Toast({ visible, message, title, type, duration = 2500, onClose 
               {title}
             </div>
           )}
-          <div className={`text-xs text-text-secondary ${title ? 'mt-0.5' : 'text-sm font-medium text-text-primary'}`}>
+          <div className={`text-xs text-text-secondary overflow-hidden text-ellipsis ${title ? 'mt-0.5' : 'text-sm font-medium text-text-primary'}`}>
             {message}
           </div>
         </div>

@@ -2,6 +2,7 @@ import { useEffect, useCallback } from 'react';
 import { useUIStore } from '../stores/uiStore';
 import { useMessagesStore } from '../stores/messagesStore';
 import { useGroupsStore } from '../stores/groupsStore';
+import { useNavigationStore } from '../stores/navigationStore';
 
 interface ShortcutConfig {
   key: string;
@@ -29,9 +30,14 @@ export function useKeyboardShortcuts() {
         ctrl: true,
         description: '打开搜索',
         action: () => {
-          const searchInput = document.querySelector('[data-search-input]') as HTMLElement;
-          if (searchInput) {
-            searchInput.focus();
+          const { searchPanelOpen, setSearchPanelOpen } = useNavigationStore.getState();
+          if (searchPanelOpen) {
+            // 搜索面板已打开，聚焦搜索输入框
+            const searchInput = document.querySelector('[data-search-input]') as HTMLElement;
+            if (searchInput) searchInput.focus();
+          } else {
+            // 打开搜索面板
+            setSearchPanelOpen(true);
           }
         },
       },
@@ -130,7 +136,7 @@ export function useKeyboardShortcuts() {
       // 忽略输入框中的快捷键（除了特定允许的）
       const target = e.target as HTMLElement;
       const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
-      
+
       for (const shortcut of shortcuts) {
         const keyMatch = e.key === shortcut.key;
         const ctrlMatch = !!shortcut.ctrl === (e.ctrlKey || e.metaKey);

@@ -5,9 +5,11 @@ import { useMessagesStore } from '../../stores/messagesStore';
 import { usePersonasStore } from '../../stores/personasStore';
 import { useAgentsStore } from '../../stores/agentsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { useReducedMotion } from '../../hooks/useReducedMotion';
 import { AI_NAMES, AI_COLORS, AI_AVATAR_LETTERS, type Group } from '../../types';
 import { ChatListSkeleton } from '../Common';
 import { useGlobalSearch, type SearchFilterTab } from '../../hooks/useGlobalSearch';
+import { replaceOldModelNames } from '../../utils/modelNames';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import 'dayjs/locale/zh-cn';
@@ -74,8 +76,9 @@ function formatFileSize(bytes: number) {
 function highlightText(text: string, searchRegex: RegExp | null) {
   if (!searchRegex) return text;
   const parts = text.split(searchRegex);
+  const testRegex = new RegExp(searchRegex.source, 'i');
   return parts.map((part, index) =>
-    searchRegex.test(part) ? (
+    testRegex.test(part) ? (
       <mark key={index} className="bg-yellow-200 dark:bg-yellow-800/60 text-inherit rounded px-0.5">{part}</mark>
     ) : (
       part
@@ -96,6 +99,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
   const { personas } = usePersonasStore();
   const { selectAgent } = useAgentsStore();
   const { setScrollToMessageId } = useNavigationStore();
+  const reducedMotion = useReducedMotion();
   const [showSearch, setShowSearch] = useState(false);
   const [timeUpdateKey, setTimeUpdateKey] = useState(0);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -128,10 +132,10 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
   }, []);
 
   useEffect(() => {
-    fetchGroups(true).catch(() => {});
+    fetchGroups(true).catch(() => { });
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
-        fetchGroups(true).catch(() => {});
+        fetchGroups(true).catch(() => { });
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
@@ -159,32 +163,19 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
     if (group.avatar_url) {
       return { color: 'transparent', letter: '', avatarUrl: group.avatar_url, name: null, isGroup: false };
     }
-    if (group.ai_members && group.ai_members.length > 0) {
-      if (group.ai_members.length === 1) {
-        const aiId = group.ai_members[0];
-        const persona = personas[aiId];
-        return {
-          color: persona?.color || AI_COLORS[aiId] || '#888',
-          letter: persona?.name?.charAt(0) || AI_AVATAR_LETTERS[aiId] || 'A',
-          avatarUrl: persona?.avatar_url || null,
-          name: persona?.name || AI_NAMES[aiId] || aiId,
-          isGroup: false
-        };
-      }
-      const memberColors = group.ai_members.slice(0, 4).map(id => {
-        const persona = personas[id];
-        return persona?.color || AI_COLORS[id] || '#888';
-      });
+    if (group.ai_members && group.ai_members.length === 1) {
+      const aiId = group.ai_members[0];
+      const persona = personas[aiId];
       return {
-        color: memberColors[0],
-        letter: '',
-        avatarUrl: null,
-        name: null,
-        isGroup: true,
-        memberColors
+        color: persona?.color || AI_COLORS[aiId] || '#888',
+        letter: persona?.name?.charAt(0) || AI_AVATAR_LETTERS[aiId] || 'A',
+        avatarUrl: persona?.avatar_url || null,
+        name: persona?.name || AI_NAMES[aiId] || aiId,
+        isGroup: false
       };
     }
-    return { color: '#888', letter: group.name.charAt(0).toUpperCase(), avatarUrl: null, name: null, isGroup: false };
+    const letter = (group.name || '群')[0].toUpperCase();
+    return { color: '#95B1D4', letter, avatarUrl: null, name: null, isGroup: false };
   }, [personas]);
 
   const formatTime = useCallback((dateStr: string) => {
@@ -224,6 +215,8 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
 
   const handleDeleteGroup = async (e: React.MouseEvent, groupId: string) => {
     e.stopPropagation();
+    const confirmed = window.confirm('确定要删除该聊天吗？所有聊天记录将被清除。');
+    if (!confirmed) return;
     await deleteGroup(groupId);
   };
 
@@ -268,107 +261,102 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
     return AI_AVATAR_LETTERS[senderId || ''] || senderId?.[0]?.toUpperCase() || '?';
   };
 
-  const renderChatItem = (group: Group, index: number, _groupKey: string) => {
+  const renderChatItem = (group: Group, _index: number, _groupKey: string) => {
     const lastMsg = getGroupLastMessage(group);
     const avatarInfo = getGroupAvatarInfo(group);
     const isHovered = hoveredId === group.id;
-    const delay = Math.min(index * 50, 500);
     const displayTime = lastMsg ? formatTime(lastMsg.created_at) : (group.last_message_at ? formatTime(group.last_message_at) : dayjs(group.created_at).fromNow());
-    const displayPreview = lastMsg
+    const displayPreview = replaceOldModelNames(lastMsg
       ? (lastMsg.sender_type === 'user' ? '[我] ' : '') + lastMsg.content.substring(0, 40) + (lastMsg.content.length > 40 ? '...' : '')
-      : (group.last_message_preview || group.description || '暂无消息');
+      : (group.last_message_preview || group.description || '暂无消息'));
 
     return (
       <motion.div
         key={group.id}
-        layout
-        initial={{ opacity: 0, height: 0 }}
-        animate={{ opacity: 1, height: 'auto' }}
-        exit={{ opacity: 0, height: 0 }}
-        transition={{ duration: 0.25, ease: 'easeInOut', delay }}
+        initial={reducedMotion ? { opacity: 1 } : { opacity: 0, x: -8 }}
+        animate={{ opacity: 1, x: 0 }}
+        exit={reducedMotion ? { opacity: 1 } : { opacity: 0 }}
+        transition={reducedMotion ? { duration: 0.1 } : { duration: 0.2, ease: [0.0, 0.0, 0.2, 1] }}
         onClick={() => handleSelectGroup(group.id)}
         onMouseEnter={() => setHoveredId(group.id)}
         onMouseLeave={() => setHoveredId(null)}
         className={`
-          chat-item ${currentGroup?.id === group.id ? 'active' : ''}
-          ${isHovered && currentGroup?.id !== group.id ? 'hover:bg-sidebar-hover' : ''}
+          chat-item group ${currentGroup?.id === group.id ? 'active' : ''}
           overflow-hidden
         `}
       >
-        <div className="relative flex-shrink-0">
-          {avatarInfo.isGroup && avatarInfo.memberColors ? (
-            <div className="w-9 h-9 rounded-lg flex items-center justify-center overflow-hidden transition-transform duration-150" style={{ transform: isHovered ? 'scale(1.02)' : 'scale(1)' }}>
-              <div className="w-full h-full grid grid-cols-2 grid-rows-2 gap-px p-0.5 bg-bg-surface">
-                {avatarInfo.memberColors.slice(0, 4).map((c: string, i: number) => (
-                  <div key={i} className="rounded-sm" style={{ backgroundColor: c }} />
-                ))}
-                {avatarInfo.memberColors.length < 4 && Array.from({ length: 4 - avatarInfo.memberColors.length }).map((_, i) => (
-                  <div key={`empty-${i}`} className="rounded-sm bg-bg-surface3" />
-                ))}
-              </div>
-            </div>
-          ) : (
+        <div className={`flex items-center gap-3 px-3 py-2.5 ${group.pinned ? 'bg-[rgb(var(--sidebar-pinned))]' : ''
+          }`}>
+          <div className="relative flex-shrink-0">
             <div
-              className="w-9 h-9 rounded-lg flex items-center justify-center text-white text-sm font-semibold overflow-hidden transition-transform duration-150"
+              className="w-9 h-9 rounded flex items-center justify-center text-white text-sm font-semibold overflow-hidden transition-transform duration-150"
               style={{
-                backgroundColor: avatarInfo.avatarUrl ? 'transparent' : avatarInfo.color,
-                backgroundImage: avatarInfo.avatarUrl ? `url(${avatarInfo.avatarUrl})` : 'none',
-                backgroundSize: 'cover',
-                backgroundPosition: 'center',
+                backgroundColor: avatarInfo.color,
                 transform: isHovered ? 'scale(1.02)' : 'scale(1)',
               }}
             >
-              {!avatarInfo.avatarUrl && avatarInfo.letter}
+              {avatarInfo.letter && (
+                <span className="absolute inset-0 flex items-center justify-center">{avatarInfo.letter}</span>
+              )}
+              {avatarInfo.avatarUrl && (
+                <img
+                  src={avatarInfo.avatarUrl}
+                  alt=""
+                  className="w-full h-full object-cover relative z-10"
+                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                />
+              )}
             </div>
-          )}
-          {group.type === 'ai_private' && (
-            <div className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 bg-purple-500 rounded-full border-2 border-bg-surface" />
-          )}
-        </div>
+          </div>
 
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5 min-w-0">
-              <span className="font-medium text-text-primary text-sm truncate transition-colors duration-150">
-                {group.name}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="font-medium text-text-primary text-sm truncate transition-colors duration-150">
+                  {replaceOldModelNames(group.name)}
+                </span>
+                {group.pinned && (
+                  <svg className="w-3 h-3 text-text-muted flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
+                  </svg>
+                )}
+              </div>
+              <span className="text-xs text-text-muted ml-2 flex-shrink-0 select-none">
+                {displayTime}
               </span>
-              {group.pinned && (
-                <svg className="w-3 h-3 text-text-muted flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
-                </svg>
-              )}
             </div>
-            <span className="text-xs text-text-muted ml-2 flex-shrink-0">
-              {displayTime}
-            </span>
+            <div className="mt-0.5">
+              <p className="text-xs text-text-secondary truncate">
+                {lastMsg ? (
+                  <>{displayPreview}</>
+                ) : (
+                  <span className="text-text-muted">{displayPreview}</span>
+                )}
+              </p>
+            </div>
           </div>
-          <div className="flex items-center justify-between mt-0.5">
-            <p className="text-xs text-text-secondary truncate">
-              {lastMsg ? (
-                <>{displayPreview}</>
-              ) : (
-                <span className="text-text-muted">{displayPreview}</span>
-              )}
-            </p>
-          </div>
-        </div>
 
-        <div
-          className={`
-            absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1
-            transition-all duration-150
-            ${isHovered ? 'opacity-100' : 'opacity-0 pointer-events-none'}
-          `}
-        >
-          <button
-            onClick={(e) => handleDeleteGroup(e, group.id)}
-            className="w-6 h-6 flex items-center justify-center rounded-md bg-bg-surface2/90 hover:bg-error/20 text-text-muted hover:text-error transition-all duration-150 animate-action-btn-in"
-            title="删除聊天"
-          >
-            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity duration-150 flex-shrink-0">
+            {group.pinned && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  useGroupsStore.getState().updateGroupSettings(group.id, { pinned: !group.pinned } as Partial<Group>);
+                }}
+                className="w-5 h-5 rounded flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-sidebar-hover"
+                title="取消置顶"
+              >
+                <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" /></svg>
+              </button>
+            )}
+            <button
+              onClick={(e) => handleDeleteGroup(e, group.id)}
+              className="w-5 h-5 rounded flex items-center justify-center text-text-muted hover:text-red-400 hover:bg-red-500/10"
+              title="删除聊天"
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+          </div>
         </div>
       </motion.div>
     );
@@ -382,10 +370,10 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
     let itemIndex = 0;
 
     return (
-      <div key={groupKey} className="animate-chat-group-in">
+      <div key={groupKey}>
         <button
           onClick={(e) => toggleGroup(groupKey, e)}
-          className="w-full flex items-center gap-2 px-4 py-2 text-[10px] font-medium text-text-muted uppercase tracking-wider hover:bg-sidebar-hover transition-colors duration-150 select-none"
+          className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] font-medium text-text-muted hover:bg-sidebar-hover/50 transition-colors duration-150 select-none"
         >
           <svg
             className={`w-3 h-3 transition-transform duration-200 ${isExpanded ? '' : '-rotate-90'}`}
@@ -593,7 +581,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
             {activeTab === 'all' && (
               <div className="flex items-center gap-1.5 px-4 py-1.5">
                 <svg className="w-3 h-3 text-cyan-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" /></svg>
-                <span className="text-[10px] font-medium text-cyan-500">AI瑙掕壊</span>
+                <span className="text-[10px] font-medium text-cyan-500">AI角色</span>
                 <span className="text-[10px] text-text-muted">{personaResults.length}</span>
               </div>
             )}
@@ -685,11 +673,10 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
               <button
                 key={tab.key}
                 onClick={() => globalSearch.setActiveTab(tab.key)}
-                className={`px-2.5 py-2 text-[10px] whitespace-nowrap transition-colors border-b-2 flex-shrink-0 ${
-                  globalSearch.activeTab === tab.key
-                    ? 'border-accent text-accent font-medium'
-                    : 'border-transparent text-text-muted hover:text-text-secondary'
-                }`}
+                className={`px-2.5 py-2 text-[10px] whitespace-nowrap transition-colors border-b-2 flex-shrink-0 ${globalSearch.activeTab === tab.key
+                  ? 'border-accent text-accent font-medium'
+                  : 'border-transparent text-text-muted hover:text-text-secondary'
+                  }`}
               >
                 {tab.label}
                 {tab.count > 0 && <span className="ml-0.5">{tab.count}</span>}
@@ -727,27 +714,41 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto pb-safe">
-        {loading && groups.length === 0 ? (
-          <ChatListSkeleton count={8} />
-        ) : (
-          <>
-            {renderGroupSection('pinned', groupedGroups.pinned)}
-            {renderGroupSection('today', groupedGroups.today)}
-            {renderGroupSection('yesterday', groupedGroups.yesterday)}
-            {renderGroupSection('thisWeek', groupedGroups.thisWeek)}
-            {renderGroupSection('earlier', groupedGroups.earlier)}
-          </>
-        )}
+        <AnimatePresence mode="wait">
+          {loading && groups.length === 0 ? (
+            <motion.div
+              key="chat-list-skeleton"
+              initial={{ opacity: 1 }}
+              exit={reducedMotion ? { opacity: 1 } : { opacity: 0 }}
+              transition={{ duration: 0.15 }}
+            >
+              <ChatListSkeleton count={8} />
+            </motion.div>
+          ) : (
+            <motion.div
+              key="chat-list-content"
+              initial={reducedMotion ? { opacity: 1 } : { opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.2, ease: [0.0, 0.0, 0.2, 1] }}
+            >
+              {renderGroupSection('pinned', groupedGroups.pinned)}
+              {renderGroupSection('today', groupedGroups.today)}
+              {renderGroupSection('yesterday', groupedGroups.yesterday)}
+              {renderGroupSection('thisWeek', groupedGroups.thisWeek)}
+              {renderGroupSection('earlier', groupedGroups.earlier)}
 
-        {!loading && sortedGroups.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-64 text-text-muted animate-fade-in">
-            <svg className="w-16 h-16 mb-4 opacity-30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-            </svg>
-            <span className="text-sm">还没有聊天</span>
-            <span className="text-xs mt-1">点击右上角 + 创建新聊天</span>
-          </div>
-        )}
+              {!loading && sortedGroups.length === 0 && (
+                <div className="flex flex-col items-center justify-center h-64 text-text-muted animate-fade-in">
+                  <svg className="w-16 h-16 mb-4 opacity-30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                  </svg>
+                  <span className="text-sm">还没有聊天</span>
+                  <span className="text-xs mt-1">点击右上角 + 创建新聊天</span>
+                </div>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     </div>
   );

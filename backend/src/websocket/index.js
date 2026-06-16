@@ -13,6 +13,7 @@ const messageQueue = new Map();
 const sendBuffers = new Map();
 const sendBufferTimers = new Map();
 const connectionRateLimit = new Map();
+const clientMsgRate = new Map();
 
 const SEND_BUFFER_DELAY = 5;
 const HEARTBEAT_INTERVAL = 30000;
@@ -66,19 +67,27 @@ async function verifySessionToken(token) {
   try {
     const authDb = getAuthDb();
     await authDb.read();
-    const session = authDb.data.sessions.find(s => s.token === token);
+    const session = authDb.data.sessions.find(s => {
+      if (s.token.length !== token.length) return false;
+      try {
+        return require('crypto').timingSafeEqual(Buffer.from(s.token), Buffer.from(token));
+      } catch {
+        return false;
+      }
+    });
     if (!session || new Date(session.expires_at) < new Date()) {
       return null;
     }
     return session.userId;
   } catch (error) {
-    console.error('WebSocket session verification failed:', error);
+    safeLog('error', 'WebSocket session verification failed', { error: error.message });
     return null;
   }
 }
 
 function startServerHeartbeat(wss) {
-  setInterval(() => {
+  const timers = [];
+  timers.push(setInterval(() => {
     clients.forEach((client, clientId) => {
       if (client.ws.readyState !== 1) return;
 
@@ -87,8 +96,8 @@ function startServerHeartbeat(wss) {
         const missed = (missedPings.get(clientId) || 0) + 1;
         missedPings.set(clientId, missed);
         if (missed >= MAX_MISSED_PINGS) {
-          console.log(`Client ${clientId} 心跳超时(${missed}次未响应)，断开连接`);
-          try { client.ws.terminate(); } catch {}
+          safeLog('info', `Client ${clientId} 心跳超时(${missed}次未响应)，断开连接`);
+          try { client.ws.terminate(); } catch { }
           cleanupClient(clientId);
           return;
         }
@@ -100,17 +109,17 @@ function startServerHeartbeat(wss) {
         client.ws.send(JSON.stringify({ type: 'ping' }));
         pendingPings.set(clientId, true);
       } catch (error) {
-        try { client.ws.terminate(); } catch {}
+        try { client.ws.terminate(); } catch { }
         cleanupClient(clientId);
       }
     });
-  }, HEARTBEAT_INTERVAL);
+  }, HEARTBEAT_INTERVAL));
 
-  setInterval(() => {
+  timers.push(setInterval(() => {
     clients.forEach((client, clientId) => {
       if (client.ws.readyState !== 1 && client.ws.readyState !== 0) {
-        console.log(`定时清理: 清理非活跃客户端 ${clientId}, readyState=${client.ws.readyState}`);
-        try { client.ws.terminate(); } catch {}
+        safeLog('info', `定时清理: 清理非活跃客户端 ${clientId}, readyState=${client.ws.readyState}`);
+        try { client.ws.terminate(); } catch { }
         cleanupClient(clientId);
       }
     });
@@ -125,25 +134,47 @@ function startServerHeartbeat(wss) {
         groupSubscriptions.delete(groupId);
       }
     });
-  }, 5 * 60 * 1000);
+
+    // 清理过期60秒以上的clientMsgRate条目
+    const rateNow = Date.now();
+    clientMsgRate.forEach((entry, clientId) => {
+      entry.timestamps = entry.timestamps.filter(t => rateNow - t < 60000);
+      if (entry.timestamps.length === 0) {
+        clientMsgRate.delete(clientId);
+      }
+    });
+
+    // 清理过期1小时以上的connectionRateLimit条目
+    const connNow = Date.now();
+    connectionRateLimit.forEach((timestamps, ip) => {
+      const recent = timestamps.filter(t => connNow - t < 3600000);
+      if (recent.length === 0) {
+        connectionRateLimit.delete(ip);
+      } else {
+        connectionRateLimit.set(ip, recent);
+      }
+    });
+  }, 5 * 60 * 1000));
+
+  return () => timers.forEach(t => clearInterval(t));
 }
 
 function flushSendBuffer(clientId) {
   const client = clients.get(clientId);
   const buffer = sendBuffers.get(clientId);
-  
+
   if (!client || client.ws.readyState !== 1 || !buffer || buffer.length === 0) {
     return;
   }
-  
+
   const messagesToSend = [...buffer];
   buffer.length = 0;
-  
+
   if (messagesToSend.length === 1) {
     try {
       client.ws.send(messagesToSend[0]);
     } catch (e) {
-      console.error('WebSocket send error:', e);
+      safeLog('error', 'WebSocket send error', { error: e?.message || e });
     }
   } else {
     const batchMessage = JSON.stringify({
@@ -156,7 +187,7 @@ function flushSendBuffer(clientId) {
     try {
       client.ws.send(batchMessage);
     } catch (e) {
-      console.error('WebSocket batch send error:', e);
+      safeLog('error', 'WebSocket batch send error', { error: e?.message || e });
     }
   }
 }
@@ -174,7 +205,7 @@ function sendToClientOptimized(clientId, message) {
     return;
   }
   if (client.ws.readyState !== 1) {
-    const importantTypes = ['new_message', 'system_message', 'message_stream', 'message_stream_start', 'message_stream_end'];
+    const importantTypes = ['new_message', 'system_message', 'message_stream', 'message_stream_start', 'message_stream_end', 'persona_updated', 'personas_sync', 'group_update'];
     if (importantTypes.includes(message.type)) {
       const queue = messageQueue.get(clientId);
       if (queue && queue.length < 100) {
@@ -189,7 +220,7 @@ function sendToClientOptimized(clientId, message) {
     try {
       client.ws.send(JSON.stringify(message));
     } catch (e) {
-      console.error('WebSocket realtime send error:', e);
+      safeLog('error', 'WebSocket realtime send error', { error: e?.message || e });
     }
     return;
   }
@@ -219,7 +250,7 @@ function sendToClientOptimized(clientId, message) {
 }
 
 export function setupWebSocket(wss) {
-  startServerHeartbeat(wss);
+  const cleanup = startServerHeartbeat(wss);
 
   wss.on('connection', async (ws, req) => {
     const now = Date.now();
@@ -241,16 +272,16 @@ export function setupWebSocket(wss) {
     const origin = req.headers.origin;
     const isProduction = process.env.NODE_ENV === 'production';
     const isLocalDev = !isProduction && origin && /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin);
-    
+
     if (origin && !allowedOrigins.includes(origin) && !isLocalDev) {
-      console.warn(`WebSocket connection rejected: invalid origin ${origin}`);
+      safeLog('warn', 'WebSocket connection rejected: invalid origin', { origin });
       ws.close(4001, 'Invalid origin');
       return;
     }
 
     const authMode = process.env.AUTH_MODE || 'session';
     let userId = null;
-    
+
     if (authMode === 'dev') {
       if (isProduction) {
         ws.close(4001, '开发模式不允许在生产环境使用');
@@ -266,16 +297,16 @@ export function setupWebSocket(wss) {
     } else {
       const cookies = parseCookies(req.headers.cookie);
       const token = cookies.session_token;
-      
+
       if (!token) {
-        console.log('WebSocket connection rejected: no session token');
+        safeLog('info', 'WebSocket connection rejected: no session token');
         ws.close(4001, '未认证');
         return;
       }
-      
+
       userId = await verifySessionToken(token);
       if (!userId) {
-        console.log('WebSocket connection rejected: invalid session');
+        safeLog('info', 'WebSocket connection rejected: invalid session');
         ws.close(4001, '会话已过期或无效');
         return;
       }
@@ -286,28 +317,34 @@ export function setupWebSocket(wss) {
     missedPings.set(clientId, 0);
     messageQueue.set(clientId, []);
 
-    console.log(`WebSocket client connected: ${clientId}, user: ${userId}`);
+    safeLog('info', `WebSocket client connected: ${clientId}, user: ${userId}`);
 
     ws.on('message', (data) => {
       try {
-        const message = JSON.parse(data.toString());
+        // 限制单条消息最大1MB，防止内存耗尽攻击
+        const raw = data.toString();
+        if (raw.length > 1024 * 1024) {
+          safeLog('warn', '[WS] Message too large', { clientId, size: raw.length });
+          return;
+        }
+        const message = JSON.parse(raw);
         // 收到任何消息时重置 missedPings
         if (message.type !== 'ping' && message.type !== 'pong') {
           missedPings.set(clientId, 0);
         }
         handleMessage(clientId, message);
       } catch (error) {
-        console.error('WebSocket message error:', error);
+        safeLog('error', 'WebSocket message error', { error: error?.message || error });
       }
     });
 
     ws.on('close', () => {
       cleanupClient(clientId);
-      console.log(`WebSocket client disconnected: ${clientId}`);
+      safeLog('info', 'WebSocket client disconnected: ' + clientId);
     });
 
     ws.on('error', (error) => {
-      console.error('WebSocket error:', error);
+      safeLog('error', 'WebSocket error', { error: error?.message || error });
     });
   });
 }
@@ -318,8 +355,22 @@ function generateClientId() {
 
 async function handleMessage(clientId, message) {
   const client = clients.get(clientId);
-  console.log('[WS] Received message:', message.type, message.group_id || '', message.content ? `[content length: ${message.content.length}]` : '');
+  safeLog('info', '[WS] Received message: ' + message.type, { group_id: message.group_id, content_length: message.content?.length });
   if (!client) return;
+
+  // Per-client message rate limiting
+  const now = Date.now();
+  let rateEntry = clientMsgRate.get(clientId);
+  if (!rateEntry) {
+    rateEntry = { timestamps: [] };
+    clientMsgRate.set(clientId, rateEntry);
+  }
+  rateEntry.timestamps = rateEntry.timestamps.filter(t => now - t < 1000);
+  if (rateEntry.timestamps.length > 50) {
+    safeLog('warn', '[WS] Rate limit exceeded', { clientId });
+    return; // 丢弃消息但不断开
+  }
+  rateEntry.timestamps.push(now);
 
   switch (message.type) {
     case 'join_group':
@@ -366,7 +417,7 @@ async function handleMessage(clientId, message) {
               timestamp: new Date().toISOString()
             });
           } catch (error) {
-            console.error('停止生成权限检查失败:', error);
+            safeLog('error', '停止生成权限检查失败', { error: error?.message || error });
             sendToClient(clientId, {
               type: 'error',
               message: '停止生成权限检查失败'
@@ -403,7 +454,7 @@ async function joinGroup(clientId, groupId) {
         return;
       }
     } catch (error) {
-      console.error('群组访问权限检查失败:', error);
+      safeLog('error', '群组访问权限检查失败', { error: error?.message || error });
       sendToClient(clientId, {
         type: 'error',
         message: '群组访问权限检查失败'
@@ -427,7 +478,7 @@ async function joinGroup(clientId, groupId) {
   if (queuedMessages && queuedMessages.length > 0) {
     const messagesToSend = [...queuedMessages];
     queuedMessages.length = 0;
-    
+
     for (const msg of messagesToSend) {
       if (msg.group_id === groupId) {
         sendToClient(clientId, msg);
@@ -467,14 +518,14 @@ function broadcastTyping(clientId, message) {
 
 export function broadcastToGroup(groupId, message) {
   const subscribers = groupSubscriptions.get(groupId);
-  console.log(`[Broadcast] Group ${groupId}, type: ${message.type}, message_id: ${message.id || message.message_id || 'N/A'}, subscribers: ${subscribers?.size || 0}`);
+  safeLog('info', `[Broadcast] Group ${groupId}, type: ${message.type}, message_id: ${message.id || message.message_id || 'N/A'}, subscribers: ${subscribers?.size || 0}`);
   if (!subscribers) {
-    console.warn(`[Broadcast] No subscribers for group ${groupId}, message type: ${message.type}`);
+    safeLog('warn', '[Broadcast] No subscribers for group', { groupId, messageType: message.type });
     return;
   }
 
   subscribers.forEach(clientId => {
-    console.log(`[Broadcast] Sending to client ${clientId}: ${message.type}`);
+    safeLog('info', `[Broadcast] Sending to client ${clientId}: ${message.type}`);
     sendToClient(clientId, message);
   });
 }
@@ -546,7 +597,7 @@ export function broadcastSystemMessage(groupId, content) {
 }
 
 export function broadcastTypingStatus(groupId, aiId, isTyping) {
-  console.log(`[Typing] Broadcasting to group ${groupId}: ${aiId} is ${isTyping ? 'typing' : 'stopped'}`);
+  safeLog('info', `[Typing] Broadcasting to group ${groupId}: ${aiId} is ${isTyping ? 'typing' : 'stopped'}`);
   broadcastToGroup(groupId, {
     type: isTyping ? 'ai_typing' : 'ai_typing_stop',
     group_id: groupId,
@@ -577,4 +628,62 @@ export function broadcastTypingStatusWithTimeout(groupId, aiId, isTyping, timeou
 
 function sendToClient(clientId, message) {
   sendToClientOptimized(clientId, message);
+}
+
+export async function broadcastPersonaUpdate(aiId, userId) {
+  if (!userId) {
+    safeLog('warn', '[WS] broadcastPersonaUpdate: userId is null/undefined');
+    return;
+  }
+
+  try {
+    const db = await getUserDb(userId);
+    await db.read();
+    const customPersonas = db.data.customPersonas || {};
+    const merged = buildMergedPersonas(customPersonas);
+    const persona = merged[aiId];
+    if (!persona) return;
+
+    const allSubscribers = new Set();
+    groupSubscriptions.forEach(subscribers => {
+      subscribers.forEach(clientId => {
+        const client = clients.get(clientId);
+        if (client && client.userId === userId) {
+          allSubscribers.add(clientId);
+        }
+      });
+    });
+
+    allSubscribers.forEach(clientId => {
+      sendToClient(clientId, {
+        type: 'persona_updated',
+        aiId,
+        persona,
+        timestamp: new Date().toISOString()
+      });
+    });
+  } catch (error) {
+    safeLog('error', '广播人设更新失败', { error: error?.message || error });
+  }
+}
+
+export async function broadcastPersonasSync(userId) {
+  try {
+    const db = await getUserDb(userId);
+    await db.read();
+    const customPersonas = db.data.customPersonas || {};
+    const merged = buildMergedPersonas(customPersonas);
+
+    clients.forEach((client, clientId) => {
+      if (client.userId === userId && client.ws.readyState === 1) {
+        sendToClient(clientId, {
+          type: 'personas_sync',
+          all_personas: merged,
+          timestamp: new Date().toISOString()
+        });
+      }
+    });
+  } catch (error) {
+    safeLog('error', '广播全量人设同步失败', { error: error?.message || error });
+  }
 }

@@ -104,7 +104,20 @@ export function saveCache<T>(key: string, data: T): boolean {
       return true;
     } catch (retryError) {
       console.warn('localStorage retry write failed:', retryError);
-      return false;
+      // 更激进的清理：仅保留最近5个最活跃群组的缓存，或清理当前用户的所有缓存
+      aggressiveCleanup();
+      try {
+        const cacheData: CacheData<T> = {
+          data,
+          timestamp: Date.now(),
+          version: CACHE_VERSION
+        };
+        localStorage.setItem(getFullKey(key), JSON.stringify(cacheData));
+        return true;
+      } catch (lastError) {
+        console.warn('localStorage aggressive cleanup still failed:', lastError);
+        return false;
+      }
     }
   }
 }
@@ -194,6 +207,48 @@ export function clearOldCaches(): void {
     });
   } catch (e) {
     console.warn('clearOldCaches failed:', e);
+  }
+}
+
+function aggressiveCleanup(): void {
+  try {
+    const userPrefix = CACHE_PREFIX + getUserPrefix();
+    // 收集所有缓存条目并按时间戳排序
+    const entries: { key: string; timestamp: number }[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(userPrefix)) {
+        try {
+          const raw = localStorage.getItem(key);
+          if (raw) {
+            const cache = JSON.parse(raw);
+            entries.push({ key, timestamp: cache.timestamp || 0 });
+          }
+        } catch {
+          // 损坏的条目直接删除
+          try { localStorage.removeItem(key!); } catch {}
+        }
+      }
+    }
+    
+    // 按时间戳降序排序，保留最近5个条目，删除其余
+    entries.sort((a, b) => b.timestamp - a.timestamp);
+    const toDelete = entries.slice(5);
+    for (const { key } of toDelete) {
+      try {
+        localStorage.removeItem(key);
+      } catch {}
+    }
+    
+    if (toDelete.length > 0) {
+      console.warn(`[Cache] Aggressive cleanup: removed ${toDelete.length} entries, kept ${Math.min(entries.length, 5)} most recent`);
+    }
+  } catch (e) {
+    console.warn('[Cache] Aggressive cleanup failed:', e);
+    // 最后手段：清理当前用户的所有缓存
+    try {
+      clearAllCachesForUser();
+    } catch {}
   }
 }
 

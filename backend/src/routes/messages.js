@@ -131,7 +131,7 @@ router.get('/groups/:groupId/messages', async (req, res) => {
       }
       return message;
     } catch (error) {
-      console.warn(`解密消息 ${message.id} 内容失败:`, error.message);
+      safeLog('warn', '解密消息内容失败', { messageId: message.id, error: error.message });
       return message;
     }
   });
@@ -183,11 +183,11 @@ router.post('/groups/:groupId/messages', validateBody(sendMessageSchema), async 
   }
 
   const messageId = uuidv4();
-  
+
   // 加密消息内容（如果支持加密）
   let encryptedContent = content;
   let encryptionInfo = null;
-  
+
   try {
     if (content && content.trim().length > 0 && content_type === 'text') {
       encryptedContent = encryptionUtils.encryptText(content);
@@ -198,9 +198,9 @@ router.post('/groups/:groupId/messages', validateBody(sendMessageSchema), async 
       };
     }
   } catch (error) {
-    console.warn('消息内容加密失败，将使用明文存储:', error.message);
+    safeLog('warn', '消息内容加密失败，将使用明文存储', { error: error.message });
   }
-  
+
   const message = {
     id: messageId,
     group_id: groupId,
@@ -273,8 +273,8 @@ router.put('/messages/:id', validateBody(editMessageSchema), async (req, res) =>
   const { id } = req.params;
   const { content } = req.body;
 
-  if (!content || typeof content !== 'string' || content.trim().length === 0) {
-    return res.status(400).json({ error: 'Content is required' });
+  if (!content.trim()) {
+    return res.status(400).json({ error: '消息内容不能为空' });
   }
 
   const message = db.data.messages.find(m => m.id === id);
@@ -292,7 +292,7 @@ router.put('/messages/:id', validateBody(editMessageSchema), async (req, res) =>
 
   let encryptedContent = content;
   let encryptionInfo = message.metadata?.encryption || null;
-  
+
   try {
     if (content && content.trim().length > 0 && message.content_type === 'text') {
       encryptedContent = encryptionUtils.encryptText(content);
@@ -304,7 +304,7 @@ router.put('/messages/:id', validateBody(editMessageSchema), async (req, res) =>
       };
     }
   } catch (error) {
-    console.warn('消息内容加密失败，将使用明文存储:', error.message);
+    safeLog('warn', '消息内容加密失败，将使用明文存储', { error: error.message });
   }
 
   message.content = encryptedContent;
@@ -324,7 +324,7 @@ router.put('/messages/:id', validateBody(editMessageSchema), async (req, res) =>
     content_type: message.content_type,
     created_at: new Date().toISOString()
   });
-  
+
   await withWriteLock(req.userId, async () => {
     await db.write();
   });
@@ -513,7 +513,7 @@ router.post('/messages/:id/dislike', async (req, res) => {
         disliked_by_type: userId === 'user' ? 'user' : 'ai',
         timestamp: new Date().toISOString()
       });
-      
+
       if (message.sender_type === 'ai') {
         setTimeout(() => {
           handleUserReaction(message.group_id, id, 'dislike', userId);
@@ -624,7 +624,7 @@ router.post('/comments', validateBody(commentSchema), async (req, res) => {
     comment,
     message_id
   });
-  
+
   if (message.sender_type === 'ai') {
     setTimeout(() => {
       handleUserComment(message.group_id, message_id, comment, comment.id);
@@ -640,16 +640,21 @@ router.post('/messages/:id/like', async (req, res) => {
     const user_id = req.userId;
     if (!user_id) return res.status(401).json({ error: '未认证' });
     const db = await req.getUserDb();
-    await db.read();
-    const message = db.data.messages.find(m => m.id === id);
-    if (!message) return res.status(404).json({ error: 'Message not found' });
-    normalizeLikeState(message);
-    if (!message.likes.includes(user_id)) {
-      message.likes.push(user_id);
-      message.liked_by = [...message.likes];
-      await withWriteLock(req.userId, async () => {
-        await db.write();
-      });
+
+    await withWriteLock(req.userId, async () => {
+      await db.read();
+      const message = db.data.messages.find(m => m.id === id);
+      if (!message) {
+        const err = new Error('Message not found');
+        err.status = 404;
+        throw err;
+      }
+      normalizeLikeState(message);
+      if (!message.likes.includes(user_id)) {
+        message.likes.push(user_id);
+        message.liked_by = [...message.likes];
+      }
+      await db.write();
 
       broadcastToGroup(message.group_id, {
         type: 'message_liked',
@@ -659,15 +664,19 @@ router.post('/messages/:id/like', async (req, res) => {
         liked_by_type: user_id === 'user' ? 'user' : 'ai',
         timestamp: new Date().toISOString()
       });
-      
+
       if (message.group_id && message.sender_type === 'ai') {
         setTimeout(() => {
           handleUserReaction(message.group_id, id, 'like', user_id);
         }, 500);
       }
-    }
-    res.json({ likes: message.likes, liked_by: message.liked_by, likes_count: message.likes.length });
+
+      res.json({ likes: message.likes, liked_by: message.liked_by, likes_count: message.likes.length });
+    });
   } catch (error) {
+    if (error.status === 404) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
     safeLog('error', '点赞操作失败', { error: error.message });
     res.status(500).json(safeErrorResponse(error));
   }
@@ -700,7 +709,7 @@ router.delete('/messages/:id/like', async (req, res) => {
         timestamp: new Date().toISOString()
       });
     }
-    
+
     res.json({ likes: message.likes, liked_by: message.liked_by, likes_count: message.likes.length });
   } catch (error) {
     safeLog('error', '取消点赞操作失败', { error: error.message });
@@ -712,9 +721,9 @@ router.post('/groups/:groupId/autonomous-chat/start', async (req, res) => {
   try {
     const { groupId } = req.params;
     const { topic } = req.body;
-    
+
     const result = await startAutonomousChat(groupId, topic);
-    
+
     if (result.success) {
       res.json(result);
     } else {
@@ -752,10 +761,10 @@ router.post('/groups/:groupId/private-chat/start', async (req, res) => {
   try {
     const { groupId } = req.params;
     const { topic } = req.body;
-    
+
     const { startAIPrivateChat } = await import('../services/scheduler/index.js');
     const result = await startAIPrivateChat(groupId, topic);
-    
+
     if (result.status === 'success') {
       res.json(result);
     } else if (result.status === 'already_active') {
@@ -795,7 +804,7 @@ router.get('/groups/:groupId/private-chat/status', async (req, res) => {
 
 router.get('/search', async (req, res) => {
   try {
-    const { q, type, groupId, limit = 20 } = req.query;
+    const { q, type, groupId, limit = 20, quickFilter, dateFrom, dateTo } = req.query;
     const maxLimit = Math.min(parseInt(limit) || 20, 50);
 
     if (!q || typeof q !== 'string' || q.trim().length === 0) {
@@ -807,6 +816,15 @@ router.get('/search', async (req, res) => {
 
     const searchQuery = q.toLowerCase().trim();
     const searchTypes = type ? type.split(',') : ['groups', 'messages', 'files', 'agents', 'personas', 'comments'];
+
+    // 解析日期范围
+    const fromDate = dateFrom ? new Date(dateFrom) : null;
+    const toDate = dateTo ? new Date(dateTo + 'T23:59:59.999Z') : null;
+
+    // 快速筛选：根据 quickFilter 限定消息搜索类型
+    const quickFilterImages = quickFilter === 'images';
+    const quickFilterFiles = quickFilter === 'files';
+    const quickFilterLinks = quickFilter === 'links';
     const results = {
       groups: [],
       messages: [],
@@ -846,6 +864,32 @@ router.get('/search', async (req, res) => {
       if (groupId) {
         messages = messages.filter(m => m.group_id === groupId);
       }
+
+      // 按日期范围筛选
+      if (fromDate || toDate) {
+        messages = messages.filter(m => {
+          const msgDate = new Date(m.created_at);
+          if (fromDate && msgDate < fromDate) return false;
+          if (toDate && msgDate > toDate) return false;
+          return true;
+        });
+      }
+
+      // 按 quickFilter 预筛选消息附件类型
+      if (quickFilterImages || quickFilterFiles || quickFilterLinks) {
+        messages = messages.filter(m => {
+          if (!m.attachments || m.attachments.length === 0) return false;
+          return m.attachments.some(att => {
+            const mimeType = (att.type || att.mime_type || '').toLowerCase();
+            const fileName = (att.name || att.filename || '').toLowerCase();
+            if (quickFilterImages) return mimeType.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(fileName);
+            if (quickFilterFiles) return !mimeType.startsWith('image/') && !/\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(fileName) && !/^https?:\/\//i.test(att.url || '');
+            if (quickFilterLinks) return /^https?:\/\//i.test(att.url || '') || /^https?:\/\//i.test(att.name || '') || m.content_type === 'link' || /https?:\/\/[^\s]+/.test(m.content || '');
+            return false;
+          });
+        });
+      }
+
       const filesIndex = {};
       for (const f of (db.data.files || [])) {
         filesIndex[f.id] = f;
@@ -904,7 +948,7 @@ router.get('/search', async (req, res) => {
             const groupObj = (db.data.groups || []).find(g => g.id === message.group_id);
             let resultContent = content || '';
             let attachmentMatchPreview = null;
-            
+
             if (attachmentMatch && !contentMatch && !ttsMatch) {
               if (attachmentMatchInfo?.filename) {
                 resultContent = `[附件: ${attachmentMatchInfo.filename}] ${resultContent}`.trim();
@@ -931,7 +975,7 @@ router.get('/search', async (req, res) => {
                 }
               }
             }
-            
+
             results.messages.push({
               id: message.id,
               group_id: message.group_id,
@@ -950,7 +994,7 @@ router.get('/search', async (req, res) => {
             });
           }
         } catch (e) {
-          // skip
+          safeLog('debug', '搜索解密失败跳过', { messageId: message.id, error: e.message });
         }
       }
       results.messages.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -1118,7 +1162,7 @@ router.post('/groups/:groupId/messages/:messageId/read', async (req, res) => {
     });
     res.json({ success: true, messageId, read: true });
   } catch (error) {
-    console.error('标记已读错误:', error);
+    safeLog('error', '标记已读错误', { error: error?.message || error });
     res.status(500).json({ success: false, error: '标记已读失败' });
   }
 });

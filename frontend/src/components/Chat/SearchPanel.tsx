@@ -15,6 +15,7 @@ dayjs.extend(relativeTime);
 dayjs.locale('zh-cn');
 
 type FilterTab = 'all' | 'groups' | 'messages' | 'files' | 'agents' | 'personas' | 'comments';
+type QuickFilter = 'all' | 'images' | 'files' | 'links';
 
 interface SearchResultGroup {
   id: string;
@@ -106,7 +107,7 @@ function highlightText(text: string, query: string): React.ReactNode {
   const parts = text.split(regex);
   if (parts.length === 1) return text;
   return parts.map((part, i) =>
-    regex.test(part)
+    part.toLowerCase() === query.toLowerCase()
       ? <mark key={i} className="bg-yellow-200 dark:bg-yellow-800 text-inherit rounded px-0.5">{part}</mark>
       : part
   );
@@ -116,6 +117,10 @@ export function SearchPanel() {
   const [query, setQuery] = useState('');
   const [activeTab, setActiveTab] = useState<FilterTab>('all');
   const [selectedGroupId, setSelectedGroupId] = useState('');
+  const [quickFilter, setQuickFilter] = useState<QuickFilter>('all');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [showDateFilter, setShowDateFilter] = useState(false);
   const [searchData, setSearchData] = useState<GlobalSearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -165,10 +170,15 @@ export function SearchPanel() {
     setLoading(true);
     setError(null);
     try {
-      const result = await api.globalSearch(normalized, {
+      const params: Record<string, any> = {
         type: activeTab === 'all' ? undefined : activeTab,
         groupId: selectedGroupId || undefined,
-      });
+      };
+      if (dateFrom) params.dateFrom = dateFrom;
+      if (dateTo) params.dateTo = dateTo;
+      if (quickFilter !== 'all') params.quickFilter = quickFilter;
+
+      const result = await api.globalSearch(normalized, params);
       setSearchData(result as GlobalSearchResponse);
       saveHistory(normalized);
     } catch (err) {
@@ -178,23 +188,28 @@ export function SearchPanel() {
     } finally {
       setLoading(false);
     }
-  }, [activeTab, debouncedQuery, saveHistory, selectedGroupId]);
+  }, [activeTab, debouncedQuery, saveHistory, selectedGroupId, quickFilter, dateFrom, dateTo]);
 
   useEffect(() => {
     executeSearch();
   }, [executeSearch]);
 
   const counts = useMemo(
-    () => ({
-      all: searchData?.total || 0,
-      groups: searchData?.groups?.length || 0,
-      messages: searchData?.messages?.length || 0,
-      files: searchData?.files?.length || 0,
-      agents: searchData?.agents?.length || 0,
-      personas: searchData?.personas?.length || 0,
-      comments: searchData?.comments?.length || 0,
-    }),
-    [searchData]
+    () => {
+      if (loading) {
+        return { all: '-', groups: '-', messages: '-', files: '-', agents: '-', personas: '-', comments: '-' } as any;
+      }
+      return {
+        all: searchData?.total || 0,
+        groups: searchData?.groups?.length || 0,
+        messages: searchData?.messages?.length || 0,
+        files: searchData?.files?.length || 0,
+        agents: searchData?.agents?.length || 0,
+        personas: searchData?.personas?.length || 0,
+        comments: searchData?.comments?.length || 0,
+      };
+    },
+    [searchData, loading]
   );
 
   const goToGroup = (groupId: string) => {
@@ -239,11 +254,12 @@ export function SearchPanel() {
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 pt-10" onClick={close}>
-      <div className="max-h-[86vh] w-full max-w-5xl overflow-hidden rounded-2xl border border-border-subtle bg-bg-surface shadow-2xl" onClick={(event) => event.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 backdrop-blur-sm pt-10 modal-overlay" onClick={close}>
+      <div className="max-h-[86vh] w-full max-w-5xl overflow-hidden rounded-2xl border border-border-subtle bg-bg-surface shadow-2xl modal-content" onClick={(event) => event.stopPropagation()}>
         <div className="flex items-center gap-3 border-b border-border-subtle px-5 py-4">
           <input
             autoFocus
+            data-search-input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="搜索群聊、消息、文件、智能体和人设"
@@ -270,6 +286,66 @@ export function SearchPanel() {
           {tabButton('agents', '智能体')}
           {tabButton('personas', '人设')}
           {tabButton('comments', '评论')}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 border-b border-border-subtle px-5 py-2">
+          <span className="text-[10px] text-text-muted mr-1">筛选：</span>
+          {([
+            { key: 'all' as QuickFilter, label: '全部', icon: '🔍' },
+            { key: 'images' as QuickFilter, label: '图片', icon: '🖼️' },
+            { key: 'files' as QuickFilter, label: '文件', icon: '📄' },
+            { key: 'links' as QuickFilter, label: '链接', icon: '🔗' },
+          ]).map((filter) => (
+            <button
+              key={filter.key}
+              onClick={() => setQuickFilter(filter.key)}
+              className={`flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-medium transition-colors ${quickFilter === filter.key
+                ? 'bg-accent text-white'
+                : 'bg-bg-surface2 text-text-secondary hover:text-text-primary'
+                }`}
+            >
+              <span className="text-[11px]">{filter.icon}</span>
+              {filter.label}
+            </button>
+          ))}
+          <div className="w-px h-4 bg-border-subtle mx-1" />
+          <button
+            onClick={() => setShowDateFilter(!showDateFilter)}
+            className={`flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-medium transition-colors ${showDateFilter || dateFrom || dateTo
+              ? 'bg-accent text-white'
+              : 'bg-bg-surface2 text-text-secondary hover:text-text-primary'
+              }`}
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0v-7.5A2.25 2.25 0 015.25 9h13.5A2.25 2.25 0 0121 11.25v7.5" />
+            </svg>
+            日期
+          </button>
+          {showDateFilter && (
+            <div className="flex items-center gap-2 ml-1 animate-fade-in">
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className="w-[110px] rounded-lg border border-border-subtle bg-bg-surface2 px-2 py-1 text-[10px] text-text-primary outline-none focus:border-accent"
+              />
+              <span className="text-[10px] text-text-muted">至</span>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="w-[110px] rounded-lg border border-border-subtle bg-bg-surface2 px-2 py-1 text-[10px] text-text-primary outline-none focus:border-accent"
+              />
+              {(dateFrom || dateTo) && (
+                <button
+                  onClick={() => { setDateFrom(''); setDateTo(''); }}
+                  className="text-[10px] text-text-muted hover:text-text-primary"
+                >
+                  清除
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="grid gap-0 md:grid-cols-[240px_1fr]">

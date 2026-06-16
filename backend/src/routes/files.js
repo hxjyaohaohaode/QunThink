@@ -8,6 +8,7 @@ import fs from 'fs';
 import { getUploadsDir, withWriteLock } from '../models/db.js';
 import { parseFile } from '../services/fileParser/index.js';
 import { annotateFile, annotateWithoutFile, generateMediaDescription, annotateAndDescribe } from '../services/fileAnnotation/index.js';
+import { safeLog } from '../utils/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -95,7 +96,14 @@ function validateExtensionMimeConsistency(filename, mimeType) {
 
   const expectedMime = EXTENSION_MIME_MAP[ext];
   if (expectedMime && expectedMime !== mimeType) {
-    if (OFFICE_MIME_TYPES.has(mimeType) && expectedMime === 'application/zip') {
+    // Office文档精确匹配：MIME必须与扩展名一一对应
+    const OFFICE_MIME_MAP = {
+      '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    };
+    const officeExpectedMime = OFFICE_MIME_MAP[ext];
+    if (officeExpectedMime && mimeType === officeExpectedMime) {
       return true;
     }
     return false;
@@ -133,7 +141,7 @@ function getUploadDir(userId) {
     try {
       fs.mkdirSync(userDir, { recursive: true });
     } catch (err) {
-      console.warn('上传目录创建失败:', err.message);
+      safeLog('warn', '上传目录创建失败', { error: err.message });
     }
   }
   return userDir;
@@ -215,11 +223,11 @@ const upload = multer({
     if (DANGEROUS_EXTENSIONS.includes(ext)) {
       return cb(new Error('不允许上传可执行文件'));
     }
-    
+
     if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
       return cb(new Error('不支持的文件类型'));
     }
-    
+
     cb(null, true);
   }
 });
@@ -265,7 +273,7 @@ router.post('/files/upload', (req, res, next) => {
   if (!group) {
     for (const file of req.files) {
       if (file?.path && fs.existsSync(file.path)) {
-        await fs.promises.unlink(file.path).catch(() => {});
+        await fs.promises.unlink(file.path).catch(() => { });
       }
     }
     return res.status(404).json({ error: '群组不存在' });
@@ -307,7 +315,7 @@ router.post('/files/upload', (req, res, next) => {
     try {
       parsedContent = await parseFile(filePath, mimeType);
     } catch (error) {
-      console.error('File parse error:', error);
+      safeLog('error', 'File parse error', { error: error?.message || error });
       parseError = error.message;
       parsedContent = `[解析失败: ${error.message}]`;
     }
@@ -328,7 +336,7 @@ router.post('/files/upload', (req, res, next) => {
         mediaDescription = description;
       }
     } catch (error) {
-      console.error('File annotation/description error:', error);
+      safeLog('error', 'File annotation/description error', { error: error?.message || error });
       annotateError = error.message;
     }
 
@@ -468,7 +476,7 @@ router.post('/files/:id/analyze', async (req, res) => {
       status: 'success'
     });
   } catch (error) {
-    console.error('File analysis error:', error);
+    safeLog('error', 'File analysis error', { error: error?.message || error });
     res.status(500).json({ error: '文件分析失败' });
   }
 });
@@ -544,7 +552,7 @@ router.delete('/files/:id', async (req, res) => {
     return res.status(status).json({ error });
   }
 
-  await removeStoredFileFromDisk(file, req.userId).catch(() => {});
+  await removeStoredFileFromDisk(file, req.userId).catch(() => { });
   db.data.files = (db.data.files || []).filter(entry => entry.id !== id);
   await withWriteLock(req.userId, async () => {
     await db.write();
@@ -585,7 +593,7 @@ router.post('/files/reindex', async (req, res) => {
           }
         }
       } catch (e) {
-        console.error('Reindex annotation error:', e.message);
+        safeLog('error', 'Reindex annotation error', { error: e.message });
       }
 
       if (!searchDescription && !searchTags.length) {
@@ -617,7 +625,7 @@ router.post('/files/reindex', async (req, res) => {
             file.media_description = file.parsed_content.substring(0, 500);
           }
         } catch (e) {
-          console.error('Reindex media description error:', e.message);
+          safeLog('error', 'Reindex media description error', { error: e.message });
           file.media_description = file.search_description || '';
         }
       }
@@ -631,7 +639,7 @@ router.post('/files/reindex', async (req, res) => {
 
     res.json({ reindexed, total: files.length });
   } catch (error) {
-    console.error('File reindex error:', error);
+    safeLog('error', 'File reindex error', { error: error?.message || error });
     res.status(500).json({ error: '重新索引失败' });
   }
 });

@@ -59,9 +59,11 @@ export function errorHandler(err, req, res, _next) {
     code: errorCode
   };
 
+  // 堆栈信息仅在日志中记录，不通过HTTP响应返回
   if (!isProduction) {
-    response.stack = err.stack;
-    response.details = err.details || undefined;
+    safeLog('error', '服务器内部错误', { stack: err.stack, details: err.details });
+  } else {
+    safeLog('error', '服务器内部错误', { message: err.message, details: err.details });
   }
 
   res.status(statusCode).json(response);

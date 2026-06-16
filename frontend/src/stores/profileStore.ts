@@ -4,6 +4,7 @@ import { loadProfileCache, saveProfileCache, saveProfileCacheAsync } from '../ut
 
 export interface UserProfile {
   nickname: string;
+  avatar_url?: string;
   gender: string;
   age: number | null;
   height: number | null;
@@ -20,12 +21,14 @@ interface ProfileState {
   profile: UserProfile;
   loading: boolean;
   initialized: boolean;
+  error: string | null;
   fetchProfile: () => Promise<void>;
   updateProfile: (updates: Partial<UserProfile>) => Promise<void>;
 }
 
 const defaultProfile: UserProfile = {
   nickname: '',
+  avatar_url: '',
   gender: '',
   age: null,
   height: null,
@@ -46,6 +49,7 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
   profile: defaultProfile,
   loading: false,
   initialized: false,
+  error: null,
 
   fetchProfile: async () => {
     const state = get();
@@ -72,11 +76,11 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
         const data = await api.getProfile();
         lastProfileFetchAt = Date.now();
         saveProfileCache(data);
-        saveProfileCacheAsync(data).catch(() => {});
+        saveProfileCacheAsync(data).catch(() => { });
         set({ profile: data, loading: false, initialized: true });
       } catch (error) {
         console.error('Failed to fetch profile:', error);
-        set({ loading: false, initialized: true });
+        set({ error: error instanceof Error ? error.message : '获取用户信息失败', loading: false, initialized: true });
       } finally {
         profileFetchPromise = null;
       }
@@ -90,10 +94,11 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
       const updated = await api.updateProfile(updates);
       lastProfileFetchAt = Date.now();
       saveProfileCache(updated);
-      saveProfileCacheAsync(updated).catch(() => {});
+      saveProfileCacheAsync(updated).catch(() => { });
       set({ profile: updated, initialized: true });
     } catch (error) {
       console.error('Failed to update profile:', error);
+      set({ error: error instanceof Error ? error.message : '更新用户信息失败' });
       throw error;
     }
   }

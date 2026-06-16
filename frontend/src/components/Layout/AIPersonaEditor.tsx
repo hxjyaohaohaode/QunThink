@@ -9,8 +9,9 @@ import {
   pausePersonasAutoRefresh,
   resumePersonasAutoRefresh,
 } from '../../stores/personasStore';
-import { AI_COLORS, AI_NAMES } from '../../types';
+import { AI_COLORS, AI_NAMES, AI_LIST } from '../../types';
 import { useToast } from '../Common';
+import { useModalAnimation } from '../../hooks/useModalAnimation';
 
 interface AIPersonaEditorProps {
   aiId: string;
@@ -71,6 +72,7 @@ const defaultPersona: PersonaConfig = {
   modelConfig: defaultModelConfig,
   expertise: [],
   speakingTraits: '',
+  relationships: {},
 };
 
 const roleOptions: PreferredRole[] = [
@@ -155,19 +157,29 @@ function mergePersona(persona?: PersonaConfig): PersonaConfig {
 }
 
 export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps) {
+  const { isVisible, close: handleClose, overlayClass, contentClass, sheetClass } = useModalAnimation(isOpen, onClose);
   const { personas, fetchPersonas, updatePersona, resetPersona } = usePersonasStore();
   const { showToast, Toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [form, setForm] = useState<PersonaConfig>(defaultPersona);
+  const [saving, setSaving] = useState(false);
+  const [isDirty, setIsDirty] = useState(false);
+
+  // 关闭时脏数据检查（必须在 isDirty 声明之后）
+  const handleCloseWithDirtyCheck = useCallback(() => {
+    if (isDirty) {
+      const confirmed = window.confirm('有未保存的更改，确定离开吗？');
+      if (!confirmed) return;
+    }
+    handleClose();
+  }, [isDirty, handleClose]);
   const [phrasesText, setPhrasesText] = useState('');
   const [keywordsText, setKeywordsText] = useState('');
   const [topicsText, setTopicsText] = useState('');
   const [expertiseText, setExpertiseText] = useState('');
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [activeTab, setActiveTab] = useState<'basic' | 'behavior' | 'social' | 'model'>('basic');
-  const [isDirty, setIsDirty] = useState(false);
+  const [activeTab, setActiveTab] = useState<'basic' | 'behavior' | 'social' | 'relationships' | 'model'>('basic');
   const formRef = useRef<PersonaConfig>(defaultPersona);
 
   const currentPersona = personas[aiId];
@@ -218,13 +230,13 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
 
   const handleDragEnd = useCallback(() => {
     if (dragOffsetY > 120) {
-      onClose();
+      handleClose();
     }
     setDragStartY(null);
     setDragOffsetY(0);
-  }, [dragOffsetY, onClose]);
+  }, [dragOffsetY, handleClose]);
 
-  if (!isOpen) return null;
+  if (!isVisible) return null;
 
   const setField = <K extends keyof PersonaConfig>(key: K, value: PersonaConfig[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -284,12 +296,13 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
   };
 
   const handleReset = async () => {
+    if (!window.confirm('将恢复为默认设置，此操作不可撤销。')) return;
     setSaving(true);
     try {
       await resetPersona(aiId);
       setIsDirty(false);
       showToast({ message: '人设已重置。', type: 'success' });
-      onClose();
+      handleClose();
     } catch (error) {
       const message = error instanceof Error ? error.message : '重置失败。';
       showToast({ message, type: 'error' });
@@ -299,6 +312,10 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
   };
 
   const handleSave = async () => {
+    if (!form.name?.trim()) {
+      showToast({ message: '智能体名称不能为空', type: 'error' });
+      return;
+    }
     setSaving(true);
     try {
       await updatePersona(aiId, {
@@ -311,7 +328,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
       });
       setIsDirty(false);
       showToast({ message: '人设已保存。', type: 'success' });
-      onClose();
+      handleClose();
     } catch (error) {
       const message = error instanceof Error ? error.message : '保存失败。';
       showToast({ message, type: 'error' });
@@ -320,7 +337,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
     }
   };
 
-  const tabButton = (tab: 'basic' | 'behavior' | 'social' | 'model', label: string) => (
+  const tabButton = (tab: 'basic' | 'behavior' | 'social' | 'relationships' | 'model', label: string) => (
     <button
       key={tab}
       onClick={() => setActiveTab(tab)}
@@ -331,9 +348,9 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
   );
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-end md:items-center justify-center bg-black/50 md:p-4" onClick={onClose}>
+    <div className={`fixed inset-0 z-[70] flex items-end md:items-center justify-center bg-black/50 md:p-4 ${overlayClass}`} onClick={handleCloseWithDirtyCheck}>
       <div
-        className="flex max-h-[100dvh] md:max-h-[92vh] w-full md:max-w-3xl flex-col overflow-hidden rounded-t-2xl md:rounded-2xl border border-border-subtle bg-bg-surface shadow-2xl"
+        className={`flex max-h-[100dvh] md:max-h-[92vh] w-full md:max-w-3xl flex-col overflow-hidden rounded-t-2xl md:rounded-2xl border border-border-subtle bg-bg-surface shadow-2xl ${sheetClass} md:${contentClass}`}
         style={{ transform: dragOffsetY > 0 ? `translateY(${dragOffsetY}px)` : undefined, transition: dragStartY === null ? 'transform 0.2s ease' : 'none' }}
         onClick={(event) => event.stopPropagation()}
       >
@@ -355,13 +372,14 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
             <h3 className="text-lg font-semibold text-text-primary">人设编辑器</h3>
             <p className="text-sm text-text-muted">为 {title} 配置性格、行为和模型参数。</p>
           </div>
-          <button onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-text-secondary hover:bg-bg-surface2 hover:text-text-primary">关闭</button>
+          <button onClick={handleCloseWithDirtyCheck} className="rounded-lg px-3 py-2 text-sm text-text-secondary hover:bg-bg-surface2 hover:text-text-primary">关闭</button>
         </div>
 
         <div className="flex shrink-0 flex-wrap gap-2 border-b border-border-subtle px-4 md:px-6 py-3">
           {tabButton('basic', '基础')}
           {tabButton('behavior', '行为')}
           {tabButton('social', '社交')}
+          {tabButton('relationships', '关系')}
           {tabButton('model', '模型')}
         </div>
 
@@ -402,15 +420,15 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-text-secondary">性格描述</label>
-                  <textarea value={form.personality || ''} onChange={(event) => setField('personality', event.target.value)} rows={5} className="w-full rounded-xl border border-border-subtle bg-bg-surface2 px-3 py-2 text-sm text-text-primary" />
+                  <textarea value={form.personality || ''} onChange={(event) => setField('personality', event.target.value)} rows={5} maxLength={2000} className="w-full rounded-xl border border-border-subtle bg-bg-surface2 px-3 py-2 text-sm text-text-primary" />
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-text-secondary">说话特点（描述你说话的独特方式）</label>
-                  <textarea value={form.speakingTraits || ''} onChange={(event) => setField('speakingTraits', event.target.value)} rows={3} className="w-full rounded-xl border border-border-subtle bg-bg-surface2 px-3 py-2 text-sm text-text-primary" />
+                  <textarea value={form.speakingTraits || ''} onChange={(event) => setField('speakingTraits', event.target.value)} rows={3} maxLength={500} className="w-full rounded-xl border border-border-subtle bg-bg-surface2 px-3 py-2 text-sm text-text-primary" />
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-text-secondary">常用语句</label>
-                  <textarea value={phrasesText} onChange={(event) => { setPhrasesText(event.target.value); setIsDirty(true); }} rows={5} placeholder="每行一条常用语句" className="w-full rounded-xl border border-border-subtle bg-bg-surface2 px-3 py-2 text-sm text-text-primary" />
+                  <textarea value={phrasesText} onChange={(event) => { setPhrasesText(event.target.value); setIsDirty(true); }} rows={5} maxLength={5000} placeholder="每行一条常用语句" className="w-full rounded-xl border border-border-subtle bg-bg-surface2 px-3 py-2 text-sm text-text-primary" />
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-text-secondary">擅长领域（逗号分隔）</label>
@@ -544,6 +562,96 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
             </section>
           )}
 
+          {activeTab === 'relationships' && (
+            <section className="space-y-4">
+              <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4">
+                <p className="text-xs text-text-secondary mb-3">
+                  配置当前AI与其他AI成员的关系。关系会影响AI的发言意愿和互动方式:对友好关系的AI倾向支持附和,对立关系的AI倾向反驳质疑。
+                </p>
+                <div className="grid gap-3 md:grid-cols-2">
+                  {[...AI_LIST]
+                    .filter(id => id !== aiId && AI_NAMES[id])
+                    .map(otherId => {
+                      const otherName = AI_NAMES[otherId] || otherId;
+                      const rel = form.relationships?.[otherId] || { affinity: 0, stance: 'neutral' as const, note: '' };
+                      return (
+                        <div key={otherId} className="rounded-xl border border-border-subtle bg-bg-surface p-3 space-y-2">
+                          <div className="flex items-center gap-2">
+                            <div className="w-3 h-3 rounded-full" style={{ backgroundColor: AI_COLORS[otherId] || '#6b7280' }} />
+                            <span className="text-sm font-medium text-text-primary">{otherName}</span>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-text-muted mb-1">关系类型</label>
+                            <select
+                              value={rel.stance || 'neutral'}
+                              onChange={(e) => {
+                                const newStance = e.target.value as 'neutral' | 'ally' | 'rival';
+                                const newAffinity = newStance === 'ally' ? 0.4 : newStance === 'rival' ? -0.3 : 0;
+                                setField('relationships', {
+                                  ...(form.relationships || {}),
+                                  [otherId]: { ...rel, stance: newStance, affinity: newAffinity }
+                                });
+                              }}
+                              className="w-full rounded-lg border border-border-subtle bg-bg-surface2 px-2 py-1 text-xs text-text-primary"
+                            >
+                              <option value="neutral">中立</option>
+                              <option value="ally">友好</option>
+                              <option value="rival">对立</option>
+                            </select>
+                          </div>
+                          <div>
+                            <div className="mb-1 flex items-center justify-between text-[10px] text-text-muted">
+                              <span>亲和度</span>
+                              <span>{rel.affinity?.toFixed(1) ?? '0.0'}</span>
+                            </div>
+                            <input
+                              type="range"
+                              min={-1}
+                              max={1}
+                              step={0.1}
+                              value={rel.affinity ?? 0}
+                              onChange={(e) => {
+                                const aff = Number(e.target.value);
+                                setField('relationships', {
+                                  ...(form.relationships || {}),
+                                  [otherId]: { ...rel, affinity: aff }
+                                });
+                              }}
+                              className="w-full accent-[var(--accent)]"
+                            />
+                            <div className="flex justify-between text-[9px] text-text-muted mt-0.5">
+                              <span>排斥 -1</span>
+                              <span>中立 0</span>
+                              <span>亲密 +1</span>
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-text-muted mb-1">备注(可选)</label>
+                            <input
+                              type="text"
+                              value={rel.note || ''}
+                              onChange={(e) => {
+                                setField('relationships', {
+                                  ...(form.relationships || {}),
+                                  [otherId]: { ...rel, note: e.target.value }
+                                });
+                              }}
+                              placeholder="如:喜欢和Ta讨论逻辑..."
+                              className="w-full rounded-lg border border-border-subtle bg-bg-surface2 px-2 py-1 text-xs text-text-primary"
+                              maxLength={200}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+                {[...AI_LIST].filter(id => id !== aiId && AI_NAMES[id]).length === 0 && (
+                  <p className="text-xs text-text-muted text-center py-4">当前没有可配置关系的AI成员</p>
+                )}
+              </div>
+            </section>
+          )}
+
           {activeTab === 'model' && (
             <section className="grid gap-4 md:grid-cols-2">
               <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4">
@@ -611,7 +719,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
         <div className="flex shrink-0 items-center justify-between border-t border-border-subtle px-4 md:px-6 py-3 md:py-4" style={{ paddingBottom: 'max(0.75rem, calc(env(safe-area-inset-bottom, 0px) + 60px))' }}>
           <button onClick={handleReset} disabled={saving} className="rounded-xl border border-border-subtle px-4 py-2 text-sm font-medium text-text-primary disabled:opacity-50">重置</button>
           <div className="flex gap-3">
-            <button onClick={onClose} disabled={saving} className="rounded-xl border border-border-subtle px-4 py-2 text-sm font-medium text-text-primary disabled:opacity-50">取消</button>
+            <button onClick={handleCloseWithDirtyCheck} disabled={saving} className="rounded-xl border border-border-subtle px-4 py-2 text-sm font-medium text-text-primary disabled:opacity-50">取消</button>
             <button onClick={handleSave} disabled={saving || (form.responseConfig !== undefined && form.responseConfig.minDelay >= form.responseConfig.maxDelay)} className="rounded-xl bg-accent px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{saving ? '保存中...' : '保存'}</button>
           </div>
         </div>

@@ -8,6 +8,19 @@ import { FontSizeSelector } from './FontSizeToggle';
 import { useConfirm, useToast } from '../Common';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
 import { AI_LIST, AI_NAMES } from '../../types';
+import { api } from '../../services/api';
+
+interface ApiProviderConfig {
+  apiKey: string;
+  baseUrl: string;
+}
+
+const API_VENDORS: { key: string; label: string; desc: string; color: string }[] = [
+  { key: 'deepseek', label: 'DeepSeek', desc: 'DeepSeek-V3 / R1 系列模型', color: '#4D6BFE' },
+  { key: 'zhipu', label: '智谱AI (GLM)', desc: 'GLM-4 / GLM-4V 系列模型', color: '#3B5FFF' },
+  { key: 'mimo', label: 'MiMo', desc: 'MiMo-TTS 语音模型', color: '#FF6A00' },
+  { key: 'qwen', label: '通义千问 (Qwen)', desc: 'Qwen-Max / Qwen-VL 系列模型', color: '#6C5CE7' },
+];
 
 export function SettingsPage() {
   const APP_VERSION = import.meta.env.VITE_APP_VERSION || '2.8.9';
@@ -28,6 +41,13 @@ export function SettingsPage() {
   const [showProfileEditor, setShowProfileEditor] = useState(false);
   const { canInstall, isInstalled, isStandalone, isOnline, install, getInstallGuidance, platform } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
+  const [apiConfig, setApiConfig] = useState<Record<string, ApiProviderConfig>>({});
+  const [apiConfigVisible, setApiConfigVisible] = useState<Record<string, boolean>>({});
+  const [expandedVendors, setExpandedVendors] = useState<Record<string, boolean>>({});
+  const [savingApiConfig, setSavingApiConfig] = useState(false);
+  const [apiConfigLoaded, setApiConfigLoaded] = useState(false);
+  const [apiConfigSaveError, setApiConfigSaveError] = useState(false);
+  const apiConfigOriginalRef = useRef<Record<string, ApiProviderConfig>>({});
 
   const aiMembers = Array.from(new Set(groups.flatMap(g => g.ai_members || [])));
   const totalAIModels = AI_LIST.length;
@@ -48,7 +68,7 @@ export function SettingsPage() {
   }, [fetchPersonas]);
 
   useEffect(() => {
-    const sectionCount = 9;
+    const sectionCount = 10;
     const timers: ReturnType<typeof setTimeout>[] = [];
 
     Array.from({ length: sectionCount }).forEach((_, index) => {
@@ -64,6 +84,17 @@ export function SettingsPage() {
   useEffect(() => {
     setIsDarkMode(theme === 'dark');
   }, [theme]);
+
+  useEffect(() => {
+    if (!apiConfigLoaded) {
+      api.getUserApiConfig().then((data) => {
+        if (data?.config && typeof data.config === 'object') {
+          setApiConfig(data.config);
+          apiConfigOriginalRef.current = JSON.parse(JSON.stringify(data.config));
+        }
+      }).catch(() => { }).finally(() => setApiConfigLoaded(true));
+    }
+  }, [apiConfigLoaded]);
 
   const toggleDarkMode = () => {
     setIsThemeChanging(true);
@@ -123,12 +154,45 @@ export function SettingsPage() {
     transition: 'opacity 400ms cubic-bezier(0.0, 0.0, 0.2, 1), transform 400ms cubic-bezier(0.0, 0.0, 0.2, 1)',
   });
 
+  const handleApiConfigChange = (vendor: string, field: 'apiKey' | 'baseUrl', value: string) => {
+    setApiConfigSaveError(false);
+    setApiConfig(prev => ({
+      ...prev,
+      [vendor]: {
+        ...prev[vendor],
+        [field]: value,
+      },
+    }));
+  };
+
+  const toggleApiConfigVisibility = (vendor: string) => {
+    setApiConfigVisible(prev => ({ ...prev, [vendor]: !prev[vendor] }));
+  };
+
+  const toggleVendorExpand = (vendor: string) => {
+    setExpandedVendors(prev => ({ ...prev, [vendor]: !prev[vendor] }));
+  };
+
+  const handleSaveApiConfig = async () => {
+    setSavingApiConfig(true);
+    setApiConfigSaveError(false);
+    try {
+      await api.updateUserApiConfig(apiConfig);
+      apiConfigOriginalRef.current = JSON.parse(JSON.stringify(apiConfig));
+      showToast({ message: 'API配置已保存', type: 'success' });
+    } catch {
+      setApiConfigSaveError(true);
+      showToast({ message: '保存失败，请重试', type: 'error' });
+    } finally {
+      setSavingApiConfig(false);
+    }
+  };
+
   return (
     <>
-      <div 
-        className={`md:hidden h-full flex flex-col bg-bg-primary pb-14 settings-theme-transition ${
-          isPageEntered ? 'settings-page-enter' : 'opacity-0'
-        }`}
+      <div
+        className={`md:hidden h-full flex flex-col bg-bg-primary pb-14 settings-theme-transition ${isPageEntered ? 'settings-page-enter' : 'opacity-0'
+          }`}
       >
         <div className="px-4 py-3 bg-bg-surface border-b border-border-subtle settings-theme-transition">
           <h1 className="text-lg font-semibold text-text-primary settings-theme-transition">设置</h1>
@@ -242,7 +306,7 @@ export function SettingsPage() {
               </div>
             </div>
 
-            <div 
+            <div
               ref={el => { sectionRefs.current[1] = el }}
               style={getSectionStyle(1)}
               className="px-4"
@@ -253,9 +317,8 @@ export function SettingsPage() {
                   <button
                     key={mode}
                     onClick={() => handleThemeModeSelect(mode)}
-                    className={`theme-mode-btn w-full flex items-center justify-between p-3 ${
-                      theme === mode ? 'selected bg-bg-primary/50' : ''
-                    }`}
+                    className={`theme-mode-btn w-full flex items-center justify-between p-3 ${theme === mode ? 'selected bg-bg-primary/50' : ''
+                      }`}
                     style={{
                       animationDelay: `${index * 50}ms`,
                     }}
@@ -285,11 +348,11 @@ export function SettingsPage() {
                       </span>
                     </div>
                     {theme === mode && (
-                      <svg 
-                        className="w-5 h-5 text-user animate-checkmark settings-theme-transition" 
-                        viewBox="0 0 24 24" 
-                        fill="none" 
-                        stroke="currentColor" 
+                      <svg
+                        className="w-5 h-5 text-user animate-checkmark settings-theme-transition"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
                         strokeWidth="2.5"
                       >
                         <path className="animate-draw-check" d="M20 6L9 17l-5-5" />
@@ -307,6 +370,110 @@ export function SettingsPage() {
             >
               <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3 settings-theme-transition">字体大小</h2>
               <FontSizeSelector />
+            </div>
+
+            <div
+              ref={el => { sectionRefs.current[8] = el }}
+              style={getSectionStyle(8)}
+              className="px-4"
+            >
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider settings-theme-transition">API配置</h2>
+                <div className="flex items-center gap-2">
+                  {apiConfigSaveError && (
+                    <button
+                      onClick={() => {
+                        setApiConfig(JSON.parse(JSON.stringify(apiConfigOriginalRef.current)));
+                        setApiConfigSaveError(false);
+                      }}
+                      className="px-2 py-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 border border-amber-500/30 rounded-lg hover:bg-amber-500/5 transition-colors"
+                    >
+                      放弃更改
+                    </button>
+                  )}
+                  <button
+                    onClick={handleSaveApiConfig}
+                    disabled={savingApiConfig}
+                    className="px-3 py-1.5 text-xs font-medium text-white bg-accent rounded-lg hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors settings-theme-transition"
+                  >
+                    {savingApiConfig ? '保存中...' : '保存'}
+                  </button>
+                </div>
+              </div>
+              {apiConfigSaveError && (
+                <p className="text-xs text-amber-600 dark:text-amber-400 mb-2">配置尚未保存</p>
+              )}
+              <div className="space-y-2">
+                {API_VENDORS.map((vendor) => {
+                  const cfg = apiConfig[vendor.key] || { apiKey: '', baseUrl: '' };
+                  const showPw = apiConfigVisible[vendor.key] || false;
+                  const isExpanded = expandedVendors[vendor.key] || false;
+                  const isConfigured = !!(cfg.apiKey && cfg.apiKey.trim());
+
+                  return (
+                    <div key={vendor.key} className="bg-bg-surface border border-border-subtle rounded-xl overflow-hidden settings-theme-transition settings-card">
+                      <button
+                        onClick={() => toggleVendorExpand(vendor.key)}
+                        className="w-full flex items-center gap-2.5 p-3 settings-theme-transition"
+                      >
+                        <div
+                          className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0"
+                          style={{ backgroundColor: vendor.color }}
+                        >
+                          {vendor.label[0]}
+                        </div>
+                        <div className="flex-1 text-left min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-medium text-text-primary settings-theme-transition">{vendor.label}</span>
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isConfigured ? 'bg-green-500' : 'bg-text-muted/30'}`}
+                            />
+                          </div>
+                          <span className="text-[10px] text-text-muted settings-theme-transition">{vendor.desc}</span>
+                        </div>
+                        <svg
+                          className={`w-3.5 h-3.5 text-text-muted transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
+                          fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+
+                      {isExpanded && (
+                        <div className="px-3 pb-3 space-y-2 border-t border-border-subtle/30 pt-2.5 settings-theme-transition">
+                          <div className="relative">
+                            <input
+                              type={showPw ? 'text' : 'password'}
+                              value={cfg.apiKey}
+                              onChange={(e) => handleApiConfigChange(vendor.key, 'apiKey', e.target.value)}
+                              placeholder="API Key"
+                              className="w-full px-3 py-2 pr-10 bg-bg-surface2 border border-border-subtle rounded-[10px] text-xs outline-none text-text-primary placeholder-text-muted focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all settings-theme-transition"
+                            />
+                            <button
+                              onClick={() => toggleApiConfigVisibility(vendor.key)}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 flex items-center justify-center rounded-md hover:bg-bg-surface3 text-text-muted hover:text-text-secondary transition-colors"
+                              title={showPw ? '隐藏' : '显示'}
+                            >
+                              {showPw ? (
+                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
+                              ) : (
+                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
+                              )}
+                            </button>
+                          </div>
+                          <input
+                            type="text"
+                            value={cfg.baseUrl}
+                            onChange={(e) => handleApiConfigChange(vendor.key, 'baseUrl', e.target.value)}
+                            placeholder="Base URL（可选自定义地址）"
+                            className="w-full px-3 py-2 bg-bg-surface2 border border-border-subtle rounded-[10px] text-xs outline-none text-text-primary placeholder-text-muted focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all settings-theme-transition"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
 
             <div
@@ -503,7 +670,7 @@ export function SettingsPage() {
               </div>
             </div>
 
-            <div 
+            <div
               ref={el => { sectionRefs.current[4] = el }}
               style={getSectionStyle(4)}
               className="px-4"
@@ -514,13 +681,13 @@ export function SettingsPage() {
                   <svg viewBox="0 0 200 200" className="w-8 h-8 flex-shrink-0">
                     <defs>
                       <linearGradient id="aboutGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                        <stop offset="0%" stopColor="#6C5CE7"/>
-                        <stop offset="100%" stopColor="#A29BFE"/>
+                        <stop offset="0%" stopColor="#6C5CE7" />
+                        <stop offset="100%" stopColor="#A29BFE" />
                       </linearGradient>
                     </defs>
-                    <rect x="55" y="50" width="85" height="85" rx="20" fill="#1A1A2E" opacity="0.9" transform="rotate(-12, 97, 92)"/>
-                    <rect x="70" y="48" width="85" height="85" rx="20" fill="#6C5CE7" opacity="0.6" transform="rotate(8, 112, 90)"/>
-                    <rect x="82" y="58" width="85" height="85" rx="20" fill="url(#aboutGrad)"/>
+                    <rect x="55" y="50" width="85" height="85" rx="20" fill="#1A1A2E" opacity="0.9" transform="rotate(-12, 97, 92)" />
+                    <rect x="70" y="48" width="85" height="85" rx="20" fill="#6C5CE7" opacity="0.6" transform="rotate(8, 112, 90)" />
+                    <rect x="82" y="58" width="85" height="85" rx="20" fill="url(#aboutGrad)" />
                   </svg>
                   <div className="flex-1">
                     <div className="flex items-baseline gap-2">
@@ -557,6 +724,9 @@ export function SettingsPage() {
                         groups: groups,
                         personas: personas,
                       };
+                      if (Object.keys(exportData).length > 10000) {
+                        showToast({ message: '数据量较大，导出可能需要一些时间...', type: 'info' });
+                      }
                       const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
                       const url = URL.createObjectURL(blob);
                       const a = document.createElement('a');
@@ -579,9 +749,9 @@ export function SettingsPage() {
               </div>
             </div>
 
-            <div 
-              ref={el => { sectionRefs.current[6] = el }}
-              style={getSectionStyle(6)}
+            <div
+              ref={el => { sectionRefs.current[9] = el }}
+              style={getSectionStyle(9)}
               className="px-4"
             >
               <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3 settings-theme-transition">显示</h2>
@@ -604,19 +774,17 @@ export function SettingsPage() {
                   </div>
                   <button
                     onClick={toggleDarkMode}
-                    className={`relative w-12 h-7 rounded-full transition-all duration-300 ease-out settings-theme-transition ${
-                      isDarkMode ? 'bg-accent' : 'bg-bg-surface'
-                    }`}
+                    className={`relative w-12 h-7 rounded-full transition-all duration-300 ease-out settings-theme-transition ${isDarkMode ? 'bg-accent' : 'bg-bg-surface'
+                      }`}
                     style={{
-                      boxShadow: isDarkMode 
-                        ? '0 0 0 2px rgba(23, 23, 23, 0.1), 0 2px 8px rgba(0, 0, 0, 0.15)' 
+                      boxShadow: isDarkMode
+                        ? '0 0 0 2px rgba(23, 23, 23, 0.1), 0 2px 8px rgba(0, 0, 0, 0.15)'
                         : '0 0 0 1px var(--border-color), 0 2px 4px rgba(0, 0, 0, 0.05)'
                     }}
                   >
                     <div
-                      className={`absolute top-1 w-5 h-5 rounded-full bg-white shadow-md transition-all duration-300 ease-out ${
-                        isDarkMode ? 'toggle-switch-on' : 'toggle-switch-off'
-                      }`}
+                      className={`absolute top-1 w-5 h-5 rounded-full bg-white shadow-md transition-all duration-300 ease-out ${isDarkMode ? 'toggle-switch-on' : 'toggle-switch-off'
+                        }`}
                       style={{
                         left: isDarkMode ? 'auto' : '4px',
                         right: isDarkMode ? '4px' : 'auto',
@@ -638,7 +806,7 @@ export function SettingsPage() {
               </div>
             </div>
 
-            <div 
+            <div
               ref={el => { sectionRefs.current[7] = el }}
               style={getSectionStyle(7)}
               className="px-4 pb-4"

@@ -91,6 +91,7 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
   const { showToast, Toast } = useToast();
   const { getTTSAudio, setTTSAudio, setTTSLoading, isTTSLoading, removeTTSAudio } = useAudioStore();
   const [showTTSModal, setShowTTSModal] = useState(false);
+  const deletingRef = useRef(false);
 
   const persistedTtsAudio = useMemo(() => {
     const rawTts = message.metadata?.tts as Record<string, unknown> | undefined;
@@ -127,9 +128,9 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
   const senderId = message.sender_id || 'system';
 
   const customPersona = personas[senderId];
-  const color = customPersona?.color || AI_COLORS[senderId] || AI_COLORS.system;
-  const avatarUrl = customPersona?.avatar_url;
   const userProfile = useProfileStore(state => state.profile);
+  const color = customPersona?.color || AI_COLORS[senderId] || AI_COLORS.system;
+  const avatarUrl = isUser ? (userProfile?.avatar_url || undefined) : (customPersona?.avatar_url);
   const name = isUser ? (userProfile?.nickname || '我') : (customPersona?.name || AI_NAMES[senderId] || senderId);
   const avatarLetter = isUser ? (userProfile?.nickname?.charAt(0) || '我') : (AI_AVATAR_LETTERS[senderId] || name.charAt(0).toUpperCase());
 
@@ -147,9 +148,15 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
   }, [message.reply_to, allMessages]);
 
   const handleDelete = async () => {
+    if (deletingRef.current) return;
     const confirmed = await confirm({ title: '删除消息', description: '确定要删除这条消息吗？', danger: true });
     if (confirmed) {
-      deleteMessage(message.id, message.group_id);
+      deletingRef.current = true;
+      try {
+        await deleteMessage(message.id, message.group_id);
+      } finally {
+        deletingRef.current = false;
+      }
     }
   };
 
@@ -223,11 +230,10 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
 
     return (
       <div className="flex justify-center my-3 animate-fade-in">
-        <div className={`flex items-center gap-2 backdrop-blur-sm px-3 py-1.5 rounded-full max-w-[85%] shadow-sm border ${
-          isRefusal
-            ? 'bg-amber-50/90 dark:bg-amber-900/30 border-amber-200/50 dark:border-amber-700/50'
-            : 'bg-bg-surface2/80 dark:bg-bg-surface/80 border-border/30'
-        }`}>
+        <div className={`flex items-center gap-2 backdrop-blur-sm px-3 py-1.5 rounded-full max-w-[85%] shadow-sm border ${isRefusal
+          ? 'bg-amber-50/90 dark:bg-amber-900/30 border-amber-200/50 dark:border-amber-700/50'
+          : 'bg-bg-surface2/80 dark:bg-bg-surface/80 border-border/30'
+          }`}>
           {systemSenderId && (
             <div
               className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[8px] font-semibold flex-shrink-0 shadow-sm overflow-hidden"
@@ -264,6 +270,7 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
 
       <motion.div
         className={`flex gap-1.5 md:gap-3 ${isLastInGroup ? 'mb-2.5 md:mb-4' : 'mb-0.5 md:mb-1'} ${isUser ? 'flex-row-reverse' : 'flex-row'} group`}
+        style={{ willChange: 'transform, opacity' }}
         data-message-id={message.id}
         onContextMenu={isMultiSelectMode ? undefined : (e) => handleContextMenu(e, message.id)}
         {...(isMultiSelectMode ? {} : handleLongPress(message.id))}
@@ -279,7 +286,7 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
       >
         {!isUser && (
           <div
-            className="w-7 h-7 md:w-8 md:h-8 rounded-full flex items-center justify-center text-white font-semibold text-xs md:text-sm flex-shrink-0 shadow-sm overflow-hidden cursor-pointer hover:ring-2 hover:ring-offset-2 hover:ring-gray-300 transition-all"
+            className="w-9 h-9 rounded flex items-center justify-center text-white font-semibold text-xs md:text-sm flex-shrink-0 shadow-sm overflow-hidden cursor-pointer hover:ring-2 hover:ring-offset-2 hover:ring-gray-300 transition-all"
             style={{
               backgroundColor: avatarUrl ? 'transparent' : color,
               backgroundImage: avatarUrl ? `url(${sanitizeUrl(avatarUrl)})` : 'none',
@@ -295,6 +302,17 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
           >
             {!avatarUrl && avatarLetter}
           </div>
+        )}
+
+        {isUser && userProfile?.avatar_url && (
+          <div
+            className="w-9 h-9 rounded flex items-center justify-center text-white font-semibold text-xs md:text-sm flex-shrink-0 shadow-sm overflow-hidden ml-1.5 md:ml-4"
+            style={{
+              backgroundImage: `url(${sanitizeUrl(userProfile.avatar_url)})`,
+              backgroundSize: 'cover',
+              backgroundPosition: 'center'
+            }}
+          />
         )}
 
         <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} ${isUser ? 'max-w-[75%] md:max-w-[70%] mr-1.5 md:mr-4' : 'max-w-[75%] md:max-w-[75%] ai-message-bubble-container ml-0.5 md:ml-3'}`}>
@@ -318,53 +336,76 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
               {!!message.metadata?.source && (
                 <span className="text-xs text-text-muted bg-bg-surface2 px-1.5 py-0.5 rounded">
                   {String(message.metadata.source) === 'debate' ? <><svg className="w-3 h-3 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" /></svg> 辩论</> :
-                   String(message.metadata.source) === 'reply' ? <><svg className="w-3 h-3 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" /></svg> 回复</> :
-                   String(message.metadata.source)}
+                    String(message.metadata.source) === 'reply' ? <><svg className="w-3 h-3 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" /></svg> 回复</> :
+                      String(message.metadata.source)}
                 </span>
               )}
             </div>
           )}
 
-          {replyToMessages.length > 0 && replyToMessages.map((replyTarget, idx) => (
-            <div
-              key={replyTarget!.id}
-              className={`mb-1.5 px-3 py-2 rounded-lg text-xs max-w-[300px] cursor-pointer hover:bg-opacity-80 transition-all quote-card ${isUser ? 'mr-2 bg-green-50/80 dark:bg-green-900/30 border-l-[3px] border-green-400' : 'ml-1 bg-bg-surface2 border-l-[3px] border-border'}`}
-              onClick={(e) => {
-                e.stopPropagation();
-                const element = document.querySelector(`[data-message-id="${replyTarget!.id}"]`);
-                if (element) {
+          {replyToMessages.length > 0 && replyToMessages.map((replyTarget, idx) => {
+            const replySenderType = replyTarget!.sender_type;
+            const replySenderId = replyTarget!.sender_id || '';
+            // 正确获取引用消息发送者名称：用户消息使用昵称，AI消息使用AI_NAMES映射
+            const replySenderName = replySenderType === 'user'
+              ? (userProfile?.nickname || '用户')
+              : (personas[replySenderId]?.name || AI_NAMES[replySenderId] || replySenderId);
+            const replySenderColor = replySenderType === 'user'
+              ? '#171717'
+              : (personas[replySenderId]?.color || AI_COLORS[replySenderId] || AI_COLORS.system);
+            const replySenderAvatar = replySenderType === 'user'
+              ? null
+              : personas[replySenderId]?.avatar_url;
+            const replyContent = replyTarget!.content || '';
+            const replyTruncated = replyContent.length > 60
+              ? replyContent.substring(0, 60) + '...'
+              : replyContent;
+
+            return (
+              <div
+                key={replyTarget!.id}
+                className={`mb-1.5 px-3 py-2 rounded-lg text-xs max-w-[300px] cursor-pointer hover:bg-opacity-80 transition-all quote-card ${isUser ? 'mr-2 bg-green-50/80 dark:bg-green-900/30 border-l-[3px] border-green-400' : 'ml-1 bg-bg-surface2 border-l-[3px] border-border'}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const element = document.querySelector(`[data-message-id="${replyTarget!.id}"]`);
+                  if (!element) {
+                    showToast({ message: '引用的消息不存在或尚未加载', type: 'warning' });
+                    return;
+                  }
                   element.scrollIntoView({ behavior: 'smooth', block: 'center' });
                   element.classList.add('highlight-message');
-                }
-              }}
-            >
-              <div className="flex items-center gap-1.5 mb-1">
-                {replyToMessages.length > 1 && (
-                  <span className="text-text-muted text-[9px] bg-bg-surface3 px-1 py-0.5 rounded">{idx + 1}/{replyToMessages.length}</span>
-                )}
-                <span className="text-text-muted text-[10px]"><svg className="w-2.5 h-2.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" /></svg></span>
-                <div
-                  className="w-4 h-4 rounded-full flex items-center justify-center text-white text-[8px] shadow-sm overflow-hidden flex-shrink-0"
-                  style={{
-                    backgroundColor: personas[replyTarget!.sender_id || '']?.avatar_url ? 'transparent' : (personas[replyTarget!.sender_id || '']?.color || AI_COLORS[replyTarget!.sender_id || 'system']),
-                    backgroundImage: personas[replyTarget!.sender_id || '']?.avatar_url ? `url(${sanitizeUrl(personas[replyTarget!.sender_id || '']?.avatar_url)})` : 'none',
-                    backgroundSize: 'cover',
-                    backgroundPosition: 'center'
-                  }}
-                >
-                  {!personas[replyTarget!.sender_id || '']?.avatar_url && (AI_AVATAR_LETTERS[replyTarget!.sender_id || 'system'])}
+                }}
+              >
+                <div className="flex items-center gap-1.5 mb-1">
+                  {replyToMessages.length > 1 && (
+                    <span className="text-text-muted text-[9px] bg-bg-surface3 px-1 py-0.5 rounded">{idx + 1}/{replyToMessages.length}</span>
+                  )}
+                  <span className="text-text-muted text-[10px]"><svg className="w-2.5 h-2.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" /></svg></span>
+                  <div
+                    className="w-4 h-4 rounded-full flex items-center justify-center text-white text-[8px] shadow-sm overflow-hidden flex-shrink-0"
+                    style={{
+                      backgroundColor: replySenderAvatar ? 'transparent' : replySenderColor,
+                      backgroundImage: replySenderAvatar ? `url(${sanitizeUrl(replySenderAvatar)})` : 'none',
+                      backgroundSize: 'cover',
+                      backgroundPosition: 'center'
+                    }}
+                  >
+                    {!replySenderAvatar && (replySenderType === 'user'
+                      ? (userProfile?.nickname?.charAt(0) || '用')
+                      : (AI_AVATAR_LETTERS[replySenderId] || replySenderName.charAt(0).toUpperCase()))}
+                  </div>
+                  <span style={{ color: replySenderColor }} className="font-semibold">
+                    {replySenderName}
+                  </span>
                 </div>
-                <span style={{ color: personas[replyTarget!.sender_id || '']?.color || AI_COLORS[replyTarget!.sender_id || 'system'] }} className="font-semibold">
-                  {personas[replyTarget!.sender_id || '']?.name || AI_NAMES[replyTarget!.sender_id || ''] || replyTarget!.sender_id}
-                </span>
+                <div className="text-text-secondary line-clamp-2 leading-relaxed pl-4 border-l-2 border-border">
+                  {replyTruncated}
+                </div>
               </div>
-              <div className="text-text-secondary line-clamp-2 leading-relaxed pl-4 border-l-2 border-border">
-                {(replyTarget!.content || '').substring(0, 80)}{(replyTarget!.content || '').length > 80 ? '...' : ''}
-              </div>
-            </div>
-          ))}
+            );
+          })}
 
-          <div className={`message-bubble ${isUser ? 'user-message rounded-2xl rounded-tr-sm' : 'ai-message rounded-2xl rounded-tl-sm'} ${showSendGlow ? 'message-send-glow' : ''}`}>
+          <div className={`message-bubble ${isUser ? 'user-message rounded-lg' : 'ai-message rounded-lg'} ${showSendGlow ? 'message-send-glow' : ''}`}>
             {message.attachments && message.attachments.length > 0 && (
               <div className="mb-2">
                 <AttachmentStack
@@ -378,7 +419,8 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
               <div className="flex flex-col gap-2">
                 <textarea
                   value={editContent}
-                  onChange={(e) => setEditContent(e.target.value)}
+                  onChange={(e) => setEditContent(e.target.value.length > 5000 ? e.target.value.substring(0, 5000) : e.target.value)}
+                  maxLength={5000}
                   className="w-full min-h-[60px] p-2 text-[15px] border border-border rounded-lg resize-none focus:outline-none focus:border-accent bg-bg-surface text-text-primary"
                   autoFocus
                   onKeyDown={(e) => {
@@ -423,11 +465,10 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
                   type="button"
                   onClick={handleTTSClick}
                   disabled={ttsLoading}
-                  className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
-                    isUser
-                      ? 'bg-white/20 text-white hover:bg-white/25'
-                      : 'bg-purple-500/10 text-purple-600 hover:bg-purple-500/15 dark:text-purple-300'
-                  } ${ttsLoading ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${isUser
+                    ? 'bg-black/5 text-text-secondary hover:bg-black/10'
+                    : 'bg-purple-500/10 text-purple-600 hover:bg-purple-500/15 dark:text-purple-300'
+                    } ${ttsLoading ? 'opacity-60 cursor-not-allowed' : ''}`}
                   title="生成语音"
                 >
                   <svg className={`w-3.5 h-3.5 ${ttsLoading ? 'animate-pulse' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
@@ -528,7 +569,7 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
               </div>
             )}
 
-            {isUser && (!message.status || message.status === 'sent') && (
+            {isUser && (message.status === 'sent' || (!message.status && message.status !== 'failed')) && (
               <div className="message-status sent">
                 <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                   <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
@@ -571,7 +612,7 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
           x={contextMenu.x}
           y={contextMenu.y}
           actions={[
-            { label: '复制', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>, onClick: () => { try { if (navigator.clipboard) { navigator.clipboard.writeText(message.content); } else { const ta = document.createElement('textarea'); ta.value = message.content; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); } } catch {} } },
+            { label: '复制', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" /></svg>, onClick: () => { try { if (navigator.clipboard) { navigator.clipboard.writeText(message.content); } else { const ta = document.createElement('textarea'); ta.value = message.content; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); } } catch { } } },
             { label: '回复', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" /></svg>, onClick: () => { if (onReply) onReply(message.id); addReplyingTo(message.id); } },
             ...(isUser ? [{ label: '编辑', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0115.75 21H5.25A2.25 2.25 0 013 18.75V8.25A2.25 2.25 0 015.25 6H10" /></svg>, onClick: handleEdit }] : []),
             ...(isUser ? [{ label: '删除', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.108 0 00-7.5 0" /></svg>, onClick: handleDelete, danger: true }] : []),
@@ -604,6 +645,11 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
 };
 
 export const MessageBubble = React.memo(MessageBubbleComponent, (prevProps, nextProps) => {
+  const prevLikedBy = prevProps.message.liked_by || [];
+  const nextLikedBy = nextProps.message.liked_by || [];
+  const prevDislikedBy = prevProps.message.disliked_by || [];
+  const nextDislikedBy = nextProps.message.disliked_by || [];
+
   return (
     prevProps.message.id === nextProps.message.id &&
     prevProps.message.content === nextProps.message.content &&
@@ -612,6 +658,10 @@ export const MessageBubble = React.memo(MessageBubbleComponent, (prevProps, next
     prevProps.message.is_edited === nextProps.message.is_edited &&
     prevProps.message.likes?.length === nextProps.message.likes?.length &&
     prevProps.message.dislikes === nextProps.message.dislikes &&
+    prevLikedBy.length === nextLikedBy.length &&
+    prevLikedBy.every((id: string, i: number) => id === nextLikedBy[i]) &&
+    prevDislikedBy.length === nextDislikedBy.length &&
+    prevDislikedBy.every((id: string, i: number) => id === nextDislikedBy[i]) &&
     prevProps.message.comments?.length === nextProps.message.comments?.length &&
     prevProps.message.comments?.[prevProps.message.comments.length - 1]?.id === nextProps.message.comments?.[nextProps.message.comments.length - 1]?.id &&
     prevProps.message.attachments?.length === nextProps.message.attachments?.length &&

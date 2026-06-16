@@ -35,11 +35,11 @@ export const AI_COLORS: Record<string, string> = {
 
 export const AI_NAMES: Record<string, string> = {
   user: '用户',
-  deepseek: 'deepseek-chat',
-  deepseek_reasoner: 'deepseek-reasoner',
-  mimo_flash: 'MiMo-V2.5',
-  mimo_omni: 'mimo-v2-omni',
-  mimo_tts: 'mimo-v2-tts',
+  deepseek: 'deepseek-v4-flash',
+  deepseek_reasoner: 'deepseek-v4-pro',
+  mimo_flash: 'mimo-v2.5-pro',
+  mimo_omni: 'mimo-v2.5',
+  mimo_tts: 'mimo-v2.5-tts-voicedesign',
   glm_air: 'GLM-4.5-Air',
   glm_flash: 'GLM-4.7-Flash',
   glm_flashx: 'GLM-4.7-FlashX',
@@ -143,6 +143,7 @@ export interface Agent {
     multimodal: boolean;
   };
   model_roles: AgentModelRole[];
+  model_selection_reasoning?: string;
   system_prompt: string;
   created_at: string;
   updated_at?: string;

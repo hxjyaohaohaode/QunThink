@@ -3,6 +3,7 @@ import { withWriteLock } from '../models/db.js';
 import { AI_PERSONAS } from '../config/personas.js';
 import { invalidateCustomPersonasCache } from '../services/scheduler/index.js';
 import { validateBody, updatePersonaSchema } from '../validators/index.js';
+import { broadcastPersonaUpdate, broadcastPersonasSync } from '../websocket/index.js';
 
 const router = express.Router();
 
@@ -72,7 +73,9 @@ function mergePersona(defaultPersona, customPersona = {}) {
     responseConfig: customPersona.responseConfig !== undefined ? { ...defaultResp, ...customPersona.responseConfig } : defaultResp,
     socialConfig: customPersona.socialConfig !== undefined ? { ...defaultSocial, ...customPersona.socialConfig } : defaultSocial,
     modelConfig: customPersona.modelConfig !== undefined ? { ...defaultModel, ...customPersona.modelConfig } : defaultModel,
-    debateConfig: customPersona.debateConfig !== undefined ? { ...defaultDebate, ...customPersona.debateConfig } : defaultDebate
+    debateConfig: customPersona.debateConfig !== undefined ? { ...defaultDebate, ...customPersona.debateConfig } : defaultDebate,
+    // relationships:用户自定义覆盖默认(空对象表示走自动推断)
+    relationships: customPersona.relationships !== undefined ? customPersona.relationships : (defaultPersona.relationships || {})
   };
 }
 
@@ -91,7 +94,14 @@ router.get('/personas', async (req, res) => {
     await db.read();
     const customPersonas = db.data.customPersonas || {};
     const merged = buildMergedPersonas(customPersonas);
-    res.json({ success: true, personas: merged });
+
+    // 无缓存头 - 确保前端始终获取最新数据
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Surrogate-Control', 'no-store');
+
+    res.json({ success: true, personas: merged, _timestamp: Date.now() });
   } catch (error) {
     console.error('获取AI人设错误:', error);
     res.status(500).json({ success: false, error: '获取AI人设失败', details: error.message });
@@ -115,7 +125,8 @@ router.put('/personas/:aiId', validateBody(updatePersonaSchema), async (req, res
       'typicalPhrases', 'expertise', 'speakingTraits', 'keywords', 'messageLength',
       'responseConfig', 'socialConfig', 'modelConfig', 'debateConfig',
       'preferredRole', 'customRoleName', 'questionProbability', 'debateTendency',
-      'silenceProbability', 'refusalProbability', 'speakingOrder', 'firstSpeakerTopics'
+      'silenceProbability', 'refusalProbability', 'speakingOrder', 'firstSpeakerTopics',
+      'relationships'
     ];
     if (!db.data.customPersonas[aiId]) {
       db.data.customPersonas[aiId] = {};
@@ -161,6 +172,78 @@ router.put('/personas/:aiId', validateBody(updatePersonaSchema), async (req, res
   }
 });
 
+// PATCH /api/personas/:aiId - 实时部分更新人设（轻量级，快速生效）
+router.patch('/personas/:aiId', async (req, res) => {
+  try {
+    const { aiId } = req.params;
+    if (!AI_PERSONAS[aiId]) {
+      return res.status(404).json({ error: '未找到该AI' });
+    }
+
+    const db = await req.getUserDb();
+    await db.read();
+
+    const updates = req.body;
+    if (!updates || typeof updates !== 'object' || Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: '更新数据不能为空' });
+    }
+
+    const allowedFields = [
+      'name', 'avatar', 'avatar_url', 'color', 'styleTag', 'style', 'replyStyle', 'personality',
+      'typicalPhrases', 'expertise', 'speakingTraits', 'keywords', 'messageLength',
+      'responseConfig', 'socialConfig', 'modelConfig', 'debateConfig',
+      'preferredRole', 'customRoleName', 'questionProbability', 'debateTendency',
+      'silenceProbability', 'refusalProbability', 'speakingOrder', 'firstSpeakerTopics',
+      'relationships'
+    ];
+
+    if (!db.data.customPersonas) {
+      db.data.customPersonas = {};
+    }
+    if (!db.data.customPersonas[aiId]) {
+      db.data.customPersonas[aiId] = {};
+    }
+
+    // 支持嵌套对象的部分更新
+    const nestedKeys = ['responseConfig', 'socialConfig', 'modelConfig', 'debateConfig', 'relationships'];
+    for (const key of Object.keys(updates)) {
+      if (!allowedFields.includes(key)) continue;
+
+      if (nestedKeys.includes(key) && updates[key] && typeof updates[key] === 'object') {
+        if (!db.data.customPersonas[aiId][key]) {
+          db.data.customPersonas[aiId][key] = {};
+        }
+        Object.assign(db.data.customPersonas[aiId][key], updates[key]);
+      } else {
+        db.data.customPersonas[aiId][key] = updates[key];
+      }
+    }
+
+    // 标记最后更新时间戳
+    db.data.customPersonas[aiId]._updatedAt = Date.now();
+
+    // 立即写入并失效所有相关缓存
+    await withWriteLock(req.userId, async () => {
+      await db.write();
+    });
+
+    // 失效调度器中的自定义人设缓存
+    invalidateCustomPersonasCache(req.userId);
+
+    // 构建合并后的人设返回
+    const custom = db.data.customPersonas[aiId];
+    const defaultPersona = AI_PERSONAS[aiId];
+    const merged = mergePersona(defaultPersona, custom);
+
+    // 确保响应不会被缓存
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.json({ success: true, persona: merged, _timestamp: Date.now() });
+  } catch (error) {
+    console.error('实时更新AI人设错误:', error);
+    res.status(500).json({ success: false, error: '实时更新AI人设失败', details: error.message });
+  }
+});
+
 router.put('/personas/:aiId/reset', async (req, res) => {
   try {
     const { aiId } = req.params;
@@ -175,9 +258,16 @@ router.put('/personas/:aiId/reset', async (req, res) => {
     });
     invalidateCustomPersonasCache(req.userId);
     const defaultPersona = AI_PERSONAS[aiId];
+    const resetPersona = mergePersona(defaultPersona);
+
+    // 通过WebSocket广播人设更新（重置为默认）
+    broadcastPersonaUpdate(aiId, req.userId).catch(err =>
+      console.error('广播人设重置更新失败:', err)
+    );
+
     res.json({
       success: true,
-      persona: mergePersona(defaultPersona)
+      persona: resetPersona
     });
   } catch (error) {
     console.error('重置AI人设错误:', error);

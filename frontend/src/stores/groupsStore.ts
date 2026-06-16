@@ -130,7 +130,8 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
               ...g,
               avatar_url: existingGroup.avatar_url || g.avatar_url,
               background_url: existingGroup.background_url || g.background_url,
-              announcement: existingGroup.announcement || g.announcement
+              announcement: existingGroup.announcement || g.announcement,
+              last_message_preview: existingGroup.last_message_preview || g.last_message_preview
             };
           }
           return g;
@@ -138,7 +139,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
 
         lastGroupsFetchAt = Date.now();
         saveGroupsCache(mergedGroups);
-        saveGroupsCacheAsync(mergedGroups).catch(() => {});
+        saveGroupsCacheAsync(mergedGroups).catch(() => { });
 
         const currentGroupId = get().currentGroup?.id;
         const updatedCurrentGroup = currentGroupId
@@ -161,6 +162,13 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
               ? cachedGroups.find((g: Group) => g.id === currentGroupId) || null
               : null;
             set({ groups: cachedGroups, currentGroup: updatedCurrentGroup });
+          } else {
+            // 首次加载失败且无缓存数据，5秒后自动重试
+            setTimeout(() => {
+              if (get().groups.length === 0) {
+                get().fetchGroups(true);
+              }
+            }, 5000);
           }
         }
       } finally {
@@ -177,23 +185,26 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       return;
     }
     const group = get().groups.find(g => g.id === groupId);
-    if (group) {
-      set({ currentGroup: group });
-    }
+    set({ currentGroup: group || null });
   },
 
   createGroup: async (name: string, description: string, aiMembers?: string[], avatarUrl?: string) => {
     try {
       const newGroup = await api.createGroup(name, description, aiMembers, avatarUrl);
-      
-      set(state => ({
-        groups: [...state.groups, newGroup],
-        currentGroup: newGroup
-      }));
-      
+
+      set(state => {
+        const updatedGroups = [...state.groups, newGroup];
+        saveGroupsCacheAsync(updatedGroups).catch(() => saveGroupsCache(updatedGroups));
+        return {
+          groups: updatedGroups,
+          currentGroup: newGroup
+        };
+      });
+
       return newGroup;
     } catch (error) {
       console.error('Failed to create group:', error);
+      set({ error: error instanceof Error ? error.message : '创建群组失败' });
       throw error;
     }
   },
@@ -201,28 +212,31 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
   deleteGroup: async (groupId: string) => {
     try {
       await api.deleteGroup(groupId);
-      
+
       removeCache(`messages_${groupId}`);
-      
+
       const cachedMessages = await loadMessagesCacheAsync().catch(() => loadMessagesCache());
       if (cachedMessages && cachedMessages[groupId]) {
         delete cachedMessages[groupId];
         saveMessagesCacheAsync(cachedMessages).catch(() => saveMessagesCache(cachedMessages));
       }
-      
+
       set(state => {
         const newGroups = state.groups.filter(g => g.id !== groupId);
-        const newCurrentGroup = state.currentGroup?.id === groupId 
+        const newCurrentGroup = state.currentGroup?.id === groupId
           ? null
           : state.currentGroup;
-        
+
         const newChatStatus = new Map(state.chatStatus);
         newChatStatus.delete(groupId);
         const newTypingAIs = new Map(state.typingAIs);
         newTypingAIs.delete(groupId);
         const newDebateStatus = new Map(state.debateStatus);
         newDebateStatus.delete(groupId);
-        
+
+        // 持久化更新后的groups缓存
+        saveGroupsCacheAsync(newGroups).catch(() => saveGroupsCache(newGroups));
+
         return {
           groups: newGroups,
           currentGroup: newCurrentGroup,
@@ -233,6 +247,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       });
     } catch (error) {
       console.error('Failed to delete group:', error);
+      set({ error: error instanceof Error ? error.message : '删除群组失败' });
       throw error;
     }
   },
@@ -240,13 +255,14 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
   pinGroup: async (groupId: string, pinned: boolean) => {
     try {
       const updated = await api.pinGroup(groupId, pinned);
-      
+
       set(state => ({
         groups: state.groups.map(g => g.id === groupId ? updated : g),
         currentGroup: state.currentGroup?.id === groupId ? updated : state.currentGroup
       }));
     } catch (error) {
       console.error('Failed to pin group:', error);
+      set({ error: error instanceof Error ? error.message : '置顶操作失败' });
       throw error;
     }
   },
@@ -254,7 +270,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
   getOrCreatePrivateChat: async (aiId: string) => {
     try {
       const privateChat = await api.getOrCreatePrivateChat(aiId);
-      
+
       set(state => {
         const existingGroup = state.groups.find(g => g.id === privateChat.id);
         if (existingGroup) {
@@ -265,10 +281,11 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
           currentGroup: privateChat
         };
       });
-      
+
       return privateChat;
     } catch (error) {
       console.error('Failed to get or create private chat:', error);
+      set({ error: error instanceof Error ? error.message : '创建私聊失败' });
       throw error;
     }
   },
@@ -286,6 +303,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       }));
     } catch (error) {
       console.error('Failed to toggle debate mode:', error);
+      set({ error: error instanceof Error ? error.message : '切换辩论模式失败' });
     }
   },
 
@@ -302,19 +320,21 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       }));
     } catch (error) {
       console.error('Failed to set debate level:', error);
+      set({ error: error instanceof Error ? error.message : '设置辩论等级失败' });
     }
   },
 
   addGroupMember: async (groupId: string, aiId: string) => {
     try {
       const result = await api.addGroupMember(groupId, aiId);
-      
+
       set(state => ({
         groups: state.groups.map(g => g.id === groupId ? result.group : g),
         currentGroup: state.currentGroup?.id === groupId ? result.group : state.currentGroup
       }));
     } catch (error) {
       console.error('Failed to add group member:', error);
+      set({ error: error instanceof Error ? error.message : '添加成员失败' });
       throw error;
     }
   },
@@ -322,13 +342,14 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
   removeGroupMember: async (groupId: string, aiId: string) => {
     try {
       const result = await api.removeGroupMember(groupId, aiId);
-      
+
       set(state => ({
         groups: state.groups.map(g => g.id === groupId ? result.group : g),
         currentGroup: state.currentGroup?.id === groupId ? result.group : state.currentGroup
       }));
     } catch (error) {
       console.error('Failed to remove group member:', error);
+      set({ error: error instanceof Error ? error.message : '移除成员失败' });
       throw error;
     }
   },
@@ -339,6 +360,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       return aiPrivateChats;
     } catch (error) {
       console.error('Failed to get AI private chats:', error);
+      set({ error: error instanceof Error ? error.message : '获取AI私聊失败' });
       return [];
     }
   },
@@ -346,7 +368,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
   createAIPrivateChat: async (aiMembers: string[], topic?: string, customName?: string) => {
     try {
       const newChat = await api.createAIPrivateChat(aiMembers, topic || undefined, customName);
-      
+
       set(state => {
         const existingChat = state.groups.find(g => g.id === newChat.id);
         if (existingChat) {
@@ -357,10 +379,11 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
           currentGroup: newChat
         };
       });
-      
+
       return newChat;
     } catch (error) {
       console.error('Failed to create AI private chat:', error);
+      set({ error: error instanceof Error ? error.message : '创建AI私聊失败' });
       throw error;
     }
   },
@@ -368,13 +391,28 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
   deleteAIPrivateChat: async (chatId: string) => {
     try {
       await api.deleteAIPrivateChat(chatId);
-      
-      set(state => ({
-        groups: state.groups.filter(g => g.id !== chatId),
-        currentGroup: state.currentGroup?.id === chatId ? null : state.currentGroup
-      }));
+
+      set(state => {
+        // 清理所有关联的运行时状态，防止内存泄漏
+        const newChatStatus = new Map(state.chatStatus);
+        newChatStatus.delete(chatId);
+        const newTypingAIs = new Map(state.typingAIs);
+        newTypingAIs.delete(chatId);
+        const newDebateStatus = new Map(state.debateStatus);
+        newDebateStatus.delete(chatId);
+        saveGroupsCacheAsync(state.groups.filter(g => g.id !== chatId)).catch(() => { });
+
+        return {
+          groups: state.groups.filter(g => g.id !== chatId),
+          currentGroup: state.currentGroup?.id === chatId ? null : state.currentGroup,
+          chatStatus: newChatStatus,
+          typingAIs: newTypingAIs,
+          debateStatus: newDebateStatus
+        };
+      });
     } catch (error) {
       console.error('Failed to delete AI private chat:', error);
+      set({ error: error instanceof Error ? error.message : '删除AI私聊失败' });
       throw error;
     }
   },
@@ -385,6 +423,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       return result;
     } catch (error) {
       console.error('Failed to start AI private chat:', error);
+      set({ error: error instanceof Error ? error.message : '启动AI私聊失败' });
       throw error;
     }
   },
@@ -395,6 +434,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       return result;
     } catch (error) {
       console.error('Failed to continue AI private chat:', error);
+      set({ error: error instanceof Error ? error.message : '继续AI私聊失败' });
       throw error;
     }
   },
@@ -412,6 +452,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       return result;
     } catch (error) {
       console.error('Failed to stop AI private chat:', error);
+      set({ error: error instanceof Error ? error.message : '停止AI私聊失败' });
       throw error;
     }
   },
@@ -427,6 +468,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       return result;
     } catch (error) {
       console.error('Failed to start autonomous chat:', error);
+      set({ error: error instanceof Error ? error.message : '启动自主聊天失败' });
       throw error;
     }
   },
@@ -444,6 +486,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       return result;
     } catch (error) {
       console.error('Failed to stop autonomous chat:', error);
+      set({ error: error instanceof Error ? error.message : '停止自主聊天失败' });
       throw error;
     }
   },
@@ -456,6 +499,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       if (!(isAxiosError(error) && error.response?.status === 429)) {
         console.error('Failed to get autonomous chat status:', error);
       }
+      set({ error: error instanceof Error ? error.message : '获取聊天状态失败' });
       return { isRunning: false, status: 'stopped' };
     }
   },
@@ -491,6 +535,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       return status;
     } catch (error) {
       console.error('Failed to fetch chat status:', error);
+      set({ error: error instanceof Error ? error.message : '获取聊天状态失败' });
       return { isRunning: false, currentSpeaker: null, status: 'stopped' };
     }
   },
@@ -511,6 +556,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       return result;
     } catch (error) {
       console.error('Failed to start formal debate:', error);
+      set({ error: error instanceof Error ? error.message : '启动正式辩论失败' });
       throw error;
     }
   },
@@ -526,6 +572,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       return result;
     } catch (error) {
       console.error('Failed to stop formal debate:', error);
+      set({ error: error instanceof Error ? error.message : '停止正式辩论失败' });
       throw error;
     }
   },
@@ -541,6 +588,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       return status;
     } catch (error) {
       console.error('Failed to get formal debate status:', error);
+      set({ error: error instanceof Error ? error.message : '获取辩论状态失败' });
       return { isRunning: false, status: 'stopped' };
     }
   },
@@ -551,6 +599,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       return result;
     } catch (error) {
       console.error('Failed to allocate debate roles:', error);
+      set({ error: error instanceof Error ? error.message : '分配辩论角色失败' });
       throw error;
     }
   },
@@ -561,6 +610,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
       return result;
     } catch (error) {
       console.error('Failed to trigger audience comment:', error);
+      set({ error: error instanceof Error ? error.message : '触发观众评论失败' });
       throw error;
     }
   },
@@ -575,20 +625,20 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
 
   updateGroupSettings: (groupId: string, settings: Partial<Group>) => {
     set(state => {
-      const updatedGroups = state.groups.map(g => 
+      const updatedGroups = state.groups.map(g =>
         g.id === groupId ? { ...g, ...settings } : g
       );
       const updatedCurrentGroup = state.currentGroup?.id === groupId
         ? { ...state.currentGroup, ...settings }
         : state.currentGroup;
-      
+
       const groupsToCache = updatedGroups.map(g => ({
         ...g,
         avatar_url: g.avatar_url,
         background_url: g.background_url
       }));
       saveGroupsCacheAsync(groupsToCache).catch(() => saveGroupsCache(groupsToCache));
-      
+
       return { groups: updatedGroups, currentGroup: updatedCurrentGroup };
     });
   }

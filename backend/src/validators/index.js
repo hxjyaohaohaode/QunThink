@@ -52,13 +52,13 @@ const pinGroupSchema = z.object({
 const sendMessageSchema = z.object({
   content: z.string().min(1).max(10000),
   content_type: z.enum(['text', 'code', 'file', 'system']).optional(),
-  reply_to: z.string().optional(),
+  reply_to: z.string().min(1, '回复ID不能为空字符串').optional().nullable(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   attachments: z.array(z.object({
-    id: z.string(),
-    name: z.string(),
-    type: z.string(),
-    size: z.number(),
+    id: z.string().min(1, '附件ID不能为空'),
+    name: z.string().min(1, '附件名称不能为空').max(256, '附件名称不能超过256字符'),
+    type: z.string().min(1, '附件类型不能为空'),
+    size: z.number().min(0, '附件大小不能为负数'),
     url: z.string().optional()
   })).max(10).optional()
 });
@@ -109,6 +109,7 @@ const retrieveMemorySchema = z.object({
 
 const updatePersonaSchema = z.object({
   name: z.string().min(1).max(50).optional(),
+  systemPrompt: z.string().max(8000, '系统提示词不能超过8000字符').optional(),
   avatar: z.string().max(2048).nullable().optional(),
   avatar_url: z.string().max(2048).nullable().optional(),
   color: z.string().max(32).nullable().optional(),
@@ -165,7 +166,15 @@ const updatePersonaSchema = z.object({
   silenceProbability: z.number().min(0).max(1).optional(),
   refusalProbability: z.number().min(0).max(1).optional(),
   speakingOrder: z.number().int().min(1).max(10).optional(),
-  firstSpeakerTopics: z.array(z.string().max(100)).max(20).optional()
+  firstSpeakerTopics: z.array(z.string().max(100)).max(20).optional(),
+  relationships: z.record(
+    z.string(),
+    z.object({
+      affinity: z.number().min(-1).max(1).optional(),
+      stance: z.enum(['neutral', 'ally', 'rival']).optional(),
+      note: z.string().max(200).optional()
+    })
+  ).optional()
 });
 
 const updateProfileSchema = z.object({

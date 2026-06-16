@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useLayoutEffect, useRef, useCallback } from 'react';
 
 interface ContextMenuAction {
   label: string;
@@ -19,7 +19,7 @@ export function MessageContextMenu({ x, y, actions, onClose }: MessageContextMen
   const menuRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ x, y });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!menuRef.current) return;
 
     const rect = menuRef.current.getBoundingClientRect();
@@ -41,7 +41,7 @@ export function MessageContextMenu({ x, y, actions, onClose }: MessageContextMen
     setPosition({ x: adjustedX, y: adjustedY });
   }, [x, y]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const handleClick = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose();

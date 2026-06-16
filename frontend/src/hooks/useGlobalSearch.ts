@@ -97,6 +97,7 @@ export interface GlobalSearchResponse {
 }
 
 export type SearchFilterTab = 'all' | 'groups' | 'messages' | 'files' | 'agents' | 'personas' | 'comments';
+export type QuickFilter = 'all' | 'images' | 'files' | 'links';
 
 export function useGlobalSearch() {
   const [query, setQuery] = useState('');
@@ -104,6 +105,10 @@ export function useGlobalSearch() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<SearchFilterTab>('all');
+  const [groupId, setGroupId] = useState<string>('');
+  const [quickFilter, setQuickFilter] = useState<QuickFilter>('all');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
 
   const debouncedQuery = useDebounce(query, 300);
 
@@ -118,9 +123,13 @@ export function useGlobalSearch() {
 
     try {
       const typeParam = tab === 'all' ? undefined : tab;
-      const response: GlobalSearchResponse = await api.globalSearch(searchQuery, {
-        type: typeParam,
-      });
+      const options: Record<string, any> = { type: typeParam };
+      if (groupId) options.groupId = groupId;
+      if (quickFilter !== 'all') options.quickFilter = quickFilter;
+      if (dateFrom) options.dateFrom = dateFrom;
+      if (dateTo) options.dateTo = dateTo;
+
+      const response: GlobalSearchResponse = await api.globalSearch(searchQuery, options);
       setSearchData(response);
     } catch (err) {
       setError('搜索失败');
@@ -128,7 +137,7 @@ export function useGlobalSearch() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [groupId, quickFilter, dateFrom, dateTo]);
 
   useEffect(() => {
     handleSearch(debouncedQuery, activeTab);
@@ -140,6 +149,10 @@ export function useGlobalSearch() {
     setLoading(false);
     setError(null);
     setActiveTab('all');
+    setGroupId('');
+    setQuickFilter('all');
+    setDateFrom('');
+    setDateTo('');
   }, []);
 
   return {
@@ -150,6 +163,14 @@ export function useGlobalSearch() {
     error,
     activeTab,
     setActiveTab,
+    groupId,
+    setGroupId,
+    quickFilter,
+    setQuickFilter,
+    dateFrom,
+    setDateFrom,
+    dateTo,
+    setDateTo,
     resetSearch,
   };
 }

@@ -71,6 +71,7 @@ export function MessageInput() {
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [showSendSuccess, setShowSendSuccess] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
+  const successTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
   const MAX_CHARS = 5000;
   const charCount = input.length;
   const isOverLimit = charCount > MAX_CHARS;
@@ -80,11 +81,25 @@ export function MessageInput() {
   const mentionMenuRef = useRef<HTMLDivElement>(null);
   const sendingRef = useRef(false);
   const mentionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resizeRAFRef = useRef<number | null>(null);
+  const mentionDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 使用 RAF 调整 textarea 高度，避免布局抖动
+  const adjustTextareaHeight = useCallback(() => {
+    if (resizeRAFRef.current) cancelAnimationFrame(resizeRAFRef.current);
+    resizeRAFRef.current = requestAnimationFrame(() => {
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 150)}px`;
+      }
+      resizeRAFRef.current = null;
+    });
+  }, []);
 
   const { currentGroup, chatStatus } = useGroupsStore();
   const { sendMessage, messages, sending } = useMessagesStore();
-  const { replyingTo, clearReplyingTo, removeReplyingTo, typingIndicators } = useUIStore();
-  const connectionStatus = useUIStore(state => state.connectionStatus);
+  const { replyingTo, clearReplyingTo, removeReplyingTo, typingIndicators, connectionStatus } = useUIStore();
+  const isSending = currentGroup ? (sending[currentGroup.id] || false) : false;
 
   const currentGroupAIs = useMemo(() => {
     if (!currentGroup?.ai_members || currentGroup.ai_members.length === 0) {
@@ -134,11 +149,8 @@ export function MessageInput() {
     : [];
 
   useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 150)}px`;
-    }
-  }, [input]);
+    adjustTextareaHeight();
+  }, [input, adjustTextareaHeight]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -209,6 +221,12 @@ export function MessageInput() {
       if (mentionTimeoutRef.current) {
         clearTimeout(mentionTimeoutRef.current);
       }
+      if (resizeRAFRef.current) {
+        cancelAnimationFrame(resizeRAFRef.current);
+      }
+      if (mentionDebounceRef.current) {
+        clearTimeout(mentionDebounceRef.current);
+      }
     };
   }, []);
 
@@ -255,22 +273,26 @@ export function MessageInput() {
     setInput(value);
     if (sendError) setSendError(null);
 
-    const cursorPos = e.target.selectionStart || value.length;
-    const textBeforeCursor = value.slice(0, cursorPos);
-    const atIndex = textBeforeCursor.lastIndexOf('@');
+    // 使用 debounce 检测 @ 提及，避免每次按键都触发
+    if (mentionDebounceRef.current) clearTimeout(mentionDebounceRef.current);
+    mentionDebounceRef.current = setTimeout(() => {
+      const cursorPos = e.target.selectionStart || value.length;
+      const textBeforeCursor = value.slice(0, cursorPos);
+      const atIndex = textBeforeCursor.lastIndexOf('@');
 
-    if (atIndex !== -1) {
-      const textAfterAt = textBeforeCursor.slice(atIndex + 1);
-      if (!textAfterAt.includes(' ') && textAfterAt.length < 20) {
-        setIsClosing(false);
-        setShowMentions(true);
-        setMentionFilter(textAfterAt.toLowerCase());
+      if (atIndex !== -1) {
+        const textAfterAt = textBeforeCursor.slice(atIndex + 1);
+        if (!textAfterAt.includes(' ') && textAfterAt.length < 20) {
+          setIsClosing(false);
+          setShowMentions(true);
+          setMentionFilter(textAfterAt.toLowerCase());
+        } else {
+          closeMentions();
+        }
       } else {
         closeMentions();
       }
-    } else {
-      closeMentions();
-    }
+    }, 80);
   };
 
   const uploadSelectedFiles = useCallback(async (selectedFiles: File[]) => {
@@ -370,7 +392,13 @@ export function MessageInput() {
     const textBeforeAt = textBeforeCursor.slice(0, atIndex);
     
     const newInput = textBeforeAt + `@${displayName} ` + textAfterCursor;
-    setInput(newInput);
+    if (newInput.length > MAX_CHARS) {
+      setInput(newInput.substring(0, MAX_CHARS));
+      setSendError(`已超出${MAX_CHARS}字符限制，内容已截断`);
+      setTimeout(() => setSendError(null), 3000);
+    } else {
+      setInput(newInput);
+    }
     closeMentions();
     
     setTimeout(() => {
@@ -416,27 +444,32 @@ export function MessageInput() {
 
   const handleSend = useCallback(async () => {
     if (sendingRef.current) return;
-    if (!currentGroup || (!input.trim() && readyAttachments.length === 0) || sending || hasPendingUploads || uploading) return;
+    if (!currentGroup || (!input.trim() && readyAttachments.length === 0) || isSending || hasPendingUploads || uploading) return;
 
     setSendError(null);
+    clearTimeout(successTimeoutRef.current);
     sendingRef.current = true;
     setJustSentMessage(true);
 
     const contentToSend = input.trim();
     try {
-      const result = await sendMessage(
-        currentGroup.id,
-        contentToSend,
-        replyingTo.length > 0 ? replyingTo : undefined,
-        readyAttachments.length > 0 ? readyAttachments : undefined
-      );
+      const SEND_TIMEOUT_MS = 30000;
+      const result = await Promise.race([
+        sendMessage(
+          currentGroup.id,
+          contentToSend,
+          replyingTo.length > 0 ? replyingTo : undefined,
+          readyAttachments.length > 0 ? readyAttachments : undefined
+        ),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('发送超时，请检查网络连接')), SEND_TIMEOUT_MS))
+      ]);
       if (result.success) {
         setInput('');
         setAttachments([]);
         setLastFailedContent(null);
         clearReplyingTo();
         setShowSendSuccess(true);
-        setTimeout(() => setShowSendSuccess(false), 1500);
+        successTimeoutRef.current = setTimeout(() => setShowSendSuccess(false), 1500);
       } else {
         setLastFailedContent(contentToSend);
         setSendError(result.error || '发送失败，请检查网络连接');
@@ -449,7 +482,7 @@ export function MessageInput() {
     } finally {
       sendingRef.current = false;
     }
-  }, [currentGroup, hasPendingUploads, input, readyAttachments, replyingTo, sendMessage, sending, clearReplyingTo, uploading]);
+  }, [currentGroup, hasPendingUploads, input, readyAttachments, replyingTo, sendMessage, isSending, clearReplyingTo, uploading]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
@@ -481,7 +514,13 @@ export function MessageInput() {
     const atIndex = textBeforeCursor.lastIndexOf('@');
     const textBeforeAt = textBeforeCursor.slice(0, atIndex);
     const newInput = textBeforeAt + '@所有人 ' + textAfterCursor;
-    setInput(newInput);
+    if (newInput.length > MAX_CHARS) {
+      setInput(newInput.substring(0, MAX_CHARS));
+      setSendError(`已超出${MAX_CHARS}字符限制，内容已截断`);
+      setTimeout(() => setSendError(null), 3000);
+    } else {
+      setInput(newInput);
+    }
     closeMentions();
     setTimeout(() => {
       const newCursorPos = textBeforeAt.length + 5;
@@ -605,22 +644,12 @@ export function MessageInput() {
               onKeyDown={handleKeyDown}
               onFocus={() => {
                 setIsInputFocused(true);
-                // 使用 requestAnimationFrame 确保在键盘动画完成后滚动
-                requestAnimationFrame(() => {
-                  setTimeout(() => {
-                    textareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-                    const messageList = document.querySelector<HTMLElement>('[data-message-scroller]');
-                    if (messageList) {
-                      messageList.scrollTop = messageList.scrollHeight;
-                    }
-                  }, 100);
-                });
               }}
               onBlur={() => {
                 setIsInputFocused(false);
               }}
               placeholder={isAIPrivateChat ? "输入旁白内容，引导AI对话方向..." : (isUserPrivateChat ? "输入消息..." : (currentGroup ? "输入消息，@提及 AI 成员..." : "选择一个群组开始聊天"))}
-              disabled={!currentGroup || sending}
+              disabled={!currentGroup || isSending}
               className={`w-full bg-bg-surface2 border rounded-2xl px-4 py-3 text-body text-text-primary placeholder:text-text-muted resize-none focus:outline-none disabled:opacity-50 transition-all duration-200 ${
                 isInputFocused 
                   ? 'border-accent ring-2 ring-accent/20' 
@@ -701,7 +730,12 @@ export function MessageInput() {
               size="sm"
               onClick={() => {
                 if (currentGroup) {
-                  stopGeneration(currentGroup.id);
+                  try {
+                    stopGeneration(currentGroup.id);
+                  } catch (e) {
+                    setSendError('停止生成失败，请重试');
+                    setTimeout(() => setSendError(null), 3000);
+                  }
                   setJustSentMessage(false);
                 }
               }}
@@ -716,10 +750,10 @@ export function MessageInput() {
             variant="primary"
             size="md"
             onClick={handleSend}
-            disabled={!currentGroup || (!input.trim() && readyAttachments.length === 0) || sending || uploading || hasPendingUploads}
-            className={`w-10 h-10 rounded-full !min-w-0 !md:min-w-0 flex items-center justify-center ${(!currentGroup || (!input.trim() && readyAttachments.length === 0) || sending || uploading || hasPendingUploads) ? 'opacity-50' : ''} ${showSendSuccess ? 'animate-send-success' : ''}`}
+            disabled={!currentGroup || (!input.trim() && readyAttachments.length === 0) || isSending || uploading || hasPendingUploads || connectionStatus === 'disconnected'}
+            className={`w-10 h-10 rounded-full !min-w-0 !md:min-w-0 flex items-center justify-center ${(!currentGroup || (!input.trim() && readyAttachments.length === 0) || isSending || uploading || hasPendingUploads) ? 'opacity-50' : ''} ${showSendSuccess ? 'animate-send-success' : ''}`}
           >
-            {sending || uploading || hasPendingUploads ? (
+            {isSending || uploading || hasPendingUploads ? (
               <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />

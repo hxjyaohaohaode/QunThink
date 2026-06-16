@@ -1,7 +1,8 @@
 import axios from 'axios';
 import aiLoadBalancer from './loadBalancer.js';
-import { AI_NAMES, calculateSimilarity } from '../../config/constants.js';
+import { AI_NAMES, AI_MENTION_ALIASES, calculateSimilarity } from '../../config/constants.js';
 import { safeLog } from '../../utils/logger.js';
+import { getEffectiveRelationship } from '../../config/personas.js';
 
 const DEFAULT_AI_CONFIGS = {
   glm_flash: {
@@ -20,10 +21,10 @@ const DEFAULT_AI_CONFIGS = {
     }
   },
   mimo_flash: {
-    name: 'mimo-v2.5',
+    name: 'mimo-v2.5-pro',
     apiKey: process.env.MIMO_API_KEY || '',
     endpoint: process.env.MIMO_BASE_URL ? `${process.env.MIMO_BASE_URL}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions',
-    model: 'mimo-v2.5',
+    model: 'mimo-v2.5-pro',
     enabled: true,
     priority: 2,
     params: {
@@ -46,10 +47,10 @@ const DEFAULT_AI_CONFIGS = {
     }
   },
   deepseek: {
-    name: 'deepseek-chat',
+    name: 'deepseek-v4-flash',
     apiKey: process.env.DEEPSEEK_API_KEY || '',
     endpoint: 'https://api.deepseek.com/chat/completions',
-    model: 'deepseek-chat',
+    model: 'deepseek-v4-flash',
     enabled: true,
     priority: 4,
     params: {
@@ -100,10 +101,10 @@ const DEFAULT_AI_CONFIGS = {
     }
   },
   mimo_omni: {
-    name: 'mimo-v2-omni',
+    name: 'mimo-v2.5',
     apiKey: process.env.MIMO_API_KEY || '',
     endpoint: process.env.MIMO_BASE_URL ? `${process.env.MIMO_BASE_URL}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions',
-    model: 'mimo-v2-omni',
+    model: 'mimo-v2.5',
     enabled: true,
     priority: 8,
     params: {
@@ -113,10 +114,10 @@ const DEFAULT_AI_CONFIGS = {
     }
   },
   deepseek_reasoner: {
-    name: 'deepseek-reasoner',
+    name: 'deepseek-v4-pro',
     apiKey: process.env.DEEPSEEK_API_KEY || '',
     endpoint: 'https://api.deepseek.com/chat/completions',
-    model: 'deepseek-reasoner',
+    model: 'deepseek-v4-pro',
     enabled: true,
     priority: 9,
     params: {
@@ -125,10 +126,10 @@ const DEFAULT_AI_CONFIGS = {
     note: 'DeepSeek推理模型 - 不支持temperature/top_p/frequency_penalty/presence_penalty参数'
   },
   mimo_tts: {
-    name: 'mimo-v2-tts',
+    name: 'mimo-v2.5-tts-voicedesign',
     apiKey: process.env.MIMO_API_KEY || '',
     endpoint: process.env.MIMO_BASE_URL ? `${process.env.MIMO_BASE_URL}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions',
-    model: 'mimo-v2-tts',
+    model: 'mimo-v2.5-tts-voicedesign',
     enabled: true,
     priority: 10,
     isTTS: true,
@@ -187,6 +188,74 @@ const DEFAULT_AI_CONFIGS = {
 
 let aiConfigs = { ...DEFAULT_AI_CONFIGS };
 
+// 模型ID到厂商映射
+function mapModelToVendor(modelId) {
+  if (modelId === 'deepseek' || modelId === 'deepseek_reasoner') return 'deepseek';
+  if (modelId.startsWith('glm_')) return 'zhipu';
+  if (modelId.startsWith('mimo_')) return 'mimo';
+  if (modelId.startsWith('qwen_')) return 'qwen';
+  return null;
+}
+
+// Vision-capable model IDs
+const VISION_MODELS = ['glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'];
+
+/**
+ * 获取用户对特定模型的API配置
+ * @param {string} userId
+ * @param {string} modelId - AI模型ID (如 deepseek, glm_flash, etc.)
+ * @returns {object|null} { apiKey, baseUrl } or null
+ */
+export async function getUserApiConfigForModel(userId, modelId) {
+  if (!userId || !modelId) return null;
+  try {
+    const { getUserDb } = await import('../../models/db.js');
+    const db = await getUserDb(userId);
+    await db.read();
+    const aiApiConfigs = db.data.aiApiConfigs || {};
+    const vendor = mapModelToVendor(modelId);
+    if (!vendor) return null;
+    const vendorConfig = aiApiConfigs[vendor];
+    if (!vendorConfig) return null;
+    const result = {};
+    if (vendorConfig.apiKey && vendorConfig.apiKey.trim().length > 0) {
+      result.apiKey = vendorConfig.apiKey.trim();
+    }
+    if (vendorConfig.baseUrl && vendorConfig.baseUrl.trim().length > 0) {
+      result.baseUrl = vendorConfig.baseUrl.trim();
+    }
+    return Object.keys(result).length > 0 ? result : null;
+  } catch (error) {
+    safeLog('warn', '[AI配置] 获取用户API配置失败', { error: error.message });
+    return null;
+  }
+}
+
+/**
+ * 检查消息中是否包含图片
+ */
+export function messagesContainImages(attachments) {
+  if (!attachments || attachments.length === 0) return false;
+  return attachments.some(att => {
+    const ext = (att.name || att.filename || '').split('.').pop()?.toLowerCase();
+    const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'];
+    return imageExts.includes(ext) || (att.type && att.type.startsWith('image/'));
+  });
+}
+
+/**
+ * 根据消息中的附件选择合适的视觉模型
+ */
+export function selectVisionModel(modelId) {
+  if (VISION_MODELS.includes(modelId)) return modelId;
+  // 如果当前模型不是视觉模型，选择对应的视觉模型
+  const vendor = mapModelToVendor(modelId);
+  if (vendor === 'zhipu') return 'glm_4v_flash';
+  if (vendor === 'qwen') return 'qwen_vl_plus';
+  // 如果都不匹配，默认使用免费的智谱视觉模型
+  return 'glm_4v_flash';
+}
+
 export async function loadAIConfigsFromDB(userId) {
   try {
     const { getUserDb } = await import('../../models/db.js');
@@ -200,9 +269,27 @@ export async function loadAIConfigsFromDB(userId) {
         aiConfigs[id] = custom;
       }
     }
-    console.log('[AI配置] 已从数据库加载模型配置');
+
+    // 加载用户自定义API配置
+    if (userId) {
+      const aiApiConfigs = db.data.aiApiConfigs || {};
+      for (const [vendor, cfg] of Object.entries(aiApiConfigs)) {
+        if (!cfg || typeof cfg !== 'object') continue;
+        for (const [modelId, config] of Object.entries(aiConfigs)) {
+          if (mapModelToVendor(modelId) !== vendor) continue;
+          if (cfg.apiKey && cfg.apiKey.trim().length > 0) {
+            aiConfigs[modelId] = { ...aiConfigs[modelId], apiKey: cfg.apiKey.trim() };
+          }
+          if (cfg.baseUrl && cfg.baseUrl.trim().length > 0) {
+            aiConfigs[modelId] = { ...aiConfigs[modelId], endpoint: cfg.baseUrl.trim() };
+          }
+        }
+      }
+    }
+
+    safeLog('info', '[AI配置] 已从数据库加载模型配置');
   } catch (error) {
-    console.warn('[AI配置] 从数据库加载失败，使用默认配置:', error.message);
+    safeLog('warn', '[AI配置] 从数据库加载失败，使用默认配置', { error: error.message });
   }
 }
 
@@ -213,7 +300,7 @@ export async function getUserCustomPersona(userId, aiId) {
     await db.read();
     return db.data.customPersonas?.[aiId] || null;
   } catch (error) {
-    console.warn('[AI] 获取用户自定义角色失败:', error.message);
+    safeLog('warn', '[AI] 获取用户自定义角色失败', { error: error.message });
     return null;
   }
 }
@@ -227,10 +314,128 @@ function getMockResponse(aiId, persona, responseType, recentMessages) {
   return `[${persona?.name || aiId}] 暂时无法连接，请稍后再试。`;
 }
 
+/**
+ * 判断AI是否应该回复 - 拟人化随机回复决策
+ * @param {object} persona - AI角色配置
+ * @param {array} recentMessages - 最近消息列表
+ * @param {string} aiId - AI的ID
+ * @param {object} options - 额外选项
+ * @param {string} options.lastMessageText - 最后一条消息的文本内容（用于@提及检测）
+ * @returns {{ shouldReply: boolean, delay: number }} 是否应该回复，以及建议延迟时间(ms)
+ */
+export function shouldAIReply(persona, recentMessages = [], aiId, options = {}) {
+  const responseConfig = persona?.responseConfig || {};
+  const replyProbability = responseConfig.responseFrequency != null ? responseConfig.responseFrequency : 0.4;
+
+  if (recentMessages && recentMessages.length > 0) {
+    const lastMsg = recentMessages[recentMessages.length - 1];
+    const lastMsgContent = options.lastMessageText || lastMsg.content || '';
+
+    // 规则1: @提及强制回复 - 如果最后一条消息@了该AI，100%回复
+    const isMentioned = isAIMentioned(lastMsgContent, aiId);
+    if (isMentioned) {
+      const baseDelay = responseConfig.minDelay != null ? responseConfig.minDelay : 500;
+      const maxDelay = responseConfig.maxDelay != null ? responseConfig.maxDelay : 3000;
+      const delay = baseDelay + Math.floor(Math.random() * (maxDelay - baseDelay + 1));
+      return { shouldReply: true, delay };
+    }
+
+    // 规则2: 区分消息来源，采用不同回复概率
+    let effectiveProbability = replyProbability;
+    if (lastMsg.sender_type === 'user') {
+      // 用户发消息，提高回复概率（用户期望得到回应）
+      effectiveProbability = Math.min(replyProbability * 1.5, 0.95);
+    } else if (lastMsg.sender_type === 'ai') {
+      // 其他AI发消息，降低回复概率（避免AI之间过度对话）
+      effectiveProbability = replyProbability * 0.6;
+    }
+
+    // 随机决策
+    const roll = Math.random();
+    if (roll > effectiveProbability) return { shouldReply: false, delay: 0 };
+
+    // 规则3: 去重逻辑 - 避免短时间内重复回复
+    const recent = recentMessages.slice(-8);
+
+    // 如果该AI是最后一条消息的发送者，大幅降低再次回复概率
+    if (lastMsg.sender_id === aiId) {
+      // 自己刚说完话，不立即接话，80%概率跳过
+      if (Math.random() < 0.8) return { shouldReply: false, delay: 0 };
+    }
+
+    // 检查该AI在最近3条AI消息中是否已经发过言
+    const recentAISenders = recent
+      .filter(m => m.sender_type === 'ai')
+      .slice(-4)
+      .map(m => m.sender_id);
+
+    // 如果该AI在最近4条AI消息中已经出现过，降低回复概率
+    if (recentAISenders.includes(aiId)) {
+      if (Math.random() < 0.6) return { shouldReply: false, delay: 0 };
+    }
+
+    // 检查最近消息是否已经有多个AI发言（避免AI刷屏）
+    const aiCountInRecent = recentAISenders.length;
+    if (aiCountInRecent >= 3 && !recentAISenders.includes(aiId)) {
+      // 已经有3个以上的AI在说话了，减少新AI加入的概率
+      if (Math.random() < 0.5) return { shouldReply: false, delay: 0 };
+    }
+  }
+
+  // 使用 persona 配置的回复延迟范围（minDelay/maxDelay），叠加±30%随机波动
+  const baseMinDelay = responseConfig.minDelay != null ? responseConfig.minDelay : 2000;
+  const baseMaxDelay = responseConfig.maxDelay != null ? responseConfig.maxDelay : 5000;
+  const variation = 0.3; // ±30%
+  const minDelay = Math.round(baseMinDelay * (1 - variation));
+  const maxDelay = Math.round(baseMaxDelay * (1 + variation));
+  const delay = minDelay + Math.floor(Math.random() * (maxDelay - minDelay + 1));
+
+  return { shouldReply: true, delay };
+}
+
+/**
+ * 检测消息中是否@提到了指定的AI
+ * @param {string} messageContent - 消息文本内容
+ * @param {string} aiId - AI的ID
+ * @returns {boolean} 是否被提到
+ */
+function isAIMentioned(messageContent, aiId) {
+  if (!messageContent || typeof messageContent !== 'string') return false;
+  const content = messageContent.toLowerCase();
+
+  // 获取该AI的所有别名
+  const aliases = AI_MENTION_ALIASES[aiId] || [];
+  if (aliases.length === 0) return false;
+
+  // 检查是否包含@别名
+  for (const alias of aliases) {
+    const aliasLower = alias.toLowerCase();
+    // 检查 @别名 模式
+    if (content.includes(`@${aliasLower}`)) return true;
+    // 也检查 @别名 后面跟空格或标点的情况
+    const mentionRegex = new RegExp(`@${escapeRegex(aliasLower)}(?=[\\s，。！？；、,.:;!?\\-]|$)`, 'i');
+    if (mentionRegex.test(content)) return true;
+  }
+
+  // 对于"用户"标签，检查常见的@用户模式
+  if (aiId === 'user') {
+    if (/@用户/.test(content)) return true;
+  }
+
+  return false;
+}
+
+/**
+ * 转义正则表达式特殊字符
+ */
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function applyMessageLengthLimit(content, persona) {
   const maxMessageLength = persona?.socialConfig?.maxMessageLength || persona?.maxMessageLength || 500;
   if (content.length <= maxMessageLength) return content;
-  
+
   const truncated = content.substring(0, maxMessageLength);
   const lastSentenceEnd = Math.max(
     truncated.lastIndexOf('。'),
@@ -244,11 +449,11 @@ function applyMessageLengthLimit(content, persona) {
     truncated.lastIndexOf(';'),
     truncated.lastIndexOf('\n')
   );
-  
+
   if (lastSentenceEnd > maxMessageLength * 0.3) {
     return truncated.substring(0, lastSentenceEnd + 1);
   }
-  
+
   const lastComma = Math.max(
     truncated.lastIndexOf('，'),
     truncated.lastIndexOf(','),
@@ -257,7 +462,7 @@ function applyMessageLengthLimit(content, persona) {
   if (lastComma > maxMessageLength * 0.5) {
     return truncated.substring(0, lastComma) + '…';
   }
-  
+
   return truncated + '…';
 }
 
@@ -278,89 +483,104 @@ export async function callAI(aiId, persona, userMessage, recentMessages, respons
   }
 
   const config = aiConfigs[aiId];
-  
-  if (!config || !config.apiKey) {
-    safeLog('warn', `AI ${aiId} 配置不存在，使用模拟回复`, { apiKey: config?.apiKey || '' });
+
+  // 应用用户自定义API配置
+  let effectiveConfig = config;
+  if (userId && config) {
+    const userApiConfig = await getUserApiConfigForModel(userId, aiId);
+    if (userApiConfig) {
+      effectiveConfig = { ...config };
+      if (userApiConfig.apiKey) {
+        effectiveConfig.apiKey = userApiConfig.apiKey;
+      }
+      if (userApiConfig.baseUrl) {
+        effectiveConfig.endpoint = userApiConfig.baseUrl;
+      }
+    }
+  }
+
+  if (!effectiveConfig || !effectiveConfig.apiKey) {
+    safeLog('warn', `AI ${aiId} 配置不存在，使用模拟回复`, { apiKey: effectiveConfig?.apiKey || '' });
     return getMockResponse(aiId, effectivePersona, responseType, recentMessages);
   }
-  
+
   const maxRetries = 5;
   let lastError = null;
-  
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const startTime = Date.now();
-    
+
     try {
-      const response = await callStandardAPI(config, effectivePersona, userMessage, recentMessages, responseType, userProfile, replyToMessages, feedbackInfo, groupMembers, isPrivateChat, privateChatHistory, userAgents);
-      
+      const response = await callStandardAPI(effectiveConfig, effectivePersona, userMessage, recentMessages, responseType, userProfile, replyToMessages, feedbackInfo, groupMembers, isPrivateChat, privateChatHistory, userAgents);
+
       const normalizedResponse = normalizeResponse(response);
-      
+
       if (!normalizedResponse || normalizedResponse.trim().length === 0) {
         throw new Error(`AI ${aiId} returned empty normalized response on attempt ${attempt + 1}`);
       }
-      
+
       if (recentMessages && recentMessages.length > 0) {
         const recentOtherMessages = recentMessages
           .filter(m => m.sender_id !== aiId && m.sender_type === 'ai')
           .slice(-3);
-        
+
         for (const prevMsg of recentOtherMessages) {
           const prevContent = prevMsg.content || '';
           if (prevContent.length > 20) {
             const similarity = calculateSimilarity(normalizedResponse, prevContent);
             if (similarity > 0.7) {
-              console.warn(`[去重警告] AI ${aiId} 的回复与 ${prevMsg.sender_id} 的消息相似度 ${similarity.toFixed(2)} 过高，可能存在复制行为`);
+              safeLog('warn', `[去重警告] AI ${aiId} 的回复与 ${prevMsg.sender_id} 的消息相似度过高，可能存在复制行为`, { similarity: similarity.toFixed(2) });
               break;
             }
           }
         }
       }
-      
+
       const responseTime = Date.now() - startTime;
-      
+
       try {
         const relevanceScore = aiLoadBalancer.calculateRelevanceScore(userMessage, normalizedResponse);
         aiLoadBalancer.recordSuccess(aiId, responseTime, relevanceScore);
       } catch (metricsError) {
-        console.warn('记录指标失败:', metricsError);
+        safeLog('warn', '记录指标失败', { error: metricsError?.message || metricsError });
       }
-      
+
       try {
         checkResponseRelevance(userMessage, normalizedResponse);
       } catch (e) {
       }
-      
+
       aiHealthStatus.set(aiId, { status: 'healthy', lastCheck: Date.now(), error: null, responseTime });
-      
+
       return normalizedResponse;
-      
+
     } catch (error) {
       lastError = error;
       const responseTime = Date.now() - startTime;
-      
+
       const status = error.response?.status;
       if (status && status >= 400 && status < 500 && status !== 429) {
-        console.warn(`AI ${aiId} 客户端错误(${status})，不重试:`, error.message);
+        safeLog('warn', `AI ${aiId} 客户端错误(${status})，不重试`, { error: error.message });
         break;
       }
-      
+
       try {
         aiLoadBalancer.recordFailure(aiId, error);
       } catch (metricsError) {
-        console.warn('记录失败指标失败:', metricsError);
+        safeLog('warn', '记录失败指标失败', { error: metricsError?.message || metricsError });
       }
-      
+
       if (attempt < maxRetries - 1) {
         const delay = status === 429 ? 2000 * (attempt + 1) : 500 * Math.pow(2, attempt);
-        console.warn(`AI ${aiId} 调用失败(第${attempt + 1}次)，${delay}ms后重试:`, error.message);
+        safeLog('warn', `AI ${aiId} 调用失败(第${attempt + 1}次)，${delay}ms后重试`, { error: error.message });
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
   }
-  
+
   aiHealthStatus.set(aiId, { status: 'unhealthy', lastCheck: Date.now(), error: lastError?.message, responseTime: 0 });
   safeLog('warn', `AI ${aiId} 所有重试失败，使用模拟回复`, { error: lastError?.message });
-  
+
   return getMockResponse(aiId, effectivePersona, responseType, recentMessages);
 }
 
@@ -370,40 +590,40 @@ async function checkAIHealth(aiId) {
     aiHealthStatus.set(aiId, { status: 'unhealthy', lastCheck: Date.now(), error: '模型未启用或配置不存在', responseTime: 0 });
     return false;
   }
-  
+
   if (config.skipHealthCheck) {
     aiHealthStatus.set(aiId, { status: 'healthy', lastCheck: Date.now(), error: null, responseTime: 0 });
     return true;
   }
-  
+
   aiHealthStatus.set(aiId, { status: 'checking', lastCheck: Date.now(), error: null, responseTime: 0 });
-  
+
   const startTime = Date.now();
-  
+
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 20000);
 
     const requestBody = config.isTTS
       ? {
-          model: config.model,
-          modalities: ['text', 'audio'],
-          audio: {
-            voice: 'mimo_default',
-            format: 'wav'
-          },
-          messages: [
-            { role: 'user', content: '请将下一条 assistant 消息转成语音。' },
-            { role: 'assistant', content: '你好' }
-          ],
-          stream: false
-        }
+        model: config.model,
+        modalities: ['text', 'audio'],
+        audio: {
+          voice: 'mimo_default',
+          format: 'wav'
+        },
+        messages: [
+          { role: 'user', content: '请将下一条 assistant 消息转成语音。' },
+          { role: 'assistant', content: '你好' }
+        ],
+        stream: false
+      }
       : {
-          model: config.model,
-          messages: [{ role: 'user', content: '你好' }],
-          max_tokens: 5,
-          temperature: 0
-        };
+        model: config.model,
+        messages: [{ role: 'user', content: '你好' }],
+        max_tokens: 5,
+        temperature: 0
+      };
 
     await axios.post(config.endpoint, requestBody, {
       headers: {
@@ -413,7 +633,7 @@ async function checkAIHealth(aiId) {
       signal: controller.signal,
       timeout: 20000
     });
-    
+
     clearTimeout(timeoutId);
     const responseTime = Date.now() - startTime;
     aiHealthStatus.set(aiId, { status: 'healthy', lastCheck: Date.now(), error: null, responseTime });
@@ -421,7 +641,7 @@ async function checkAIHealth(aiId) {
   } catch (error) {
     const responseTime = Date.now() - startTime;
     aiHealthStatus.set(aiId, { status: 'unhealthy', lastCheck: Date.now(), error: error.message, responseTime });
-    console.warn(`AI ${aiId} 健康检查失败:`, error.message);
+    safeLog('warn', `AI ${aiId} 健康检查失败`, { error: error.message });
     return false;
   }
 }
@@ -430,51 +650,62 @@ async function checkAllAIHealth() {
   const results = {};
   const promises = Object.keys(aiConfigs).map(async (aiId) => {
     results[aiId] = await checkAIHealth(aiId);
-    console.log(`AI ${aiId} 健康状态: ${results[aiId] ? '✅ 正常' : '❌ 异常'}`);
+    safeLog('info', `AI ${aiId} 健康状态: ${results[aiId] ? '正常' : '异常'}`);
   });
-  
+
   await Promise.allSettled(promises);
   return results;
 }
 
 function checkResponseRelevance(userMessage, aiResponse) {
   const stopWords = new Set(['的', '了', '是', '在', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '上', '也', '很', '到', '说', '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这', '那', '他', '她', '它', '们', '什么', '怎么', '如何', '为什么', '哪', '哪个', '吗', '呢', '吧', '啊', '哦', '嗯']);
-  
+
   const userKeywords = userMessage
     .replace(/[^\w\u4e00-\u9fff]/g, ' ')
     .split(/\s+/)
     .filter(w => w.length > 1 && !stopWords.has(w));
-  
+
   if (userKeywords.length === 0) return 1.0;
-  
+
   const responseLower = aiResponse.toLowerCase();
   const matchedKeywords = userKeywords.filter(kw => responseLower.includes(kw.toLowerCase()));
-  
+
   const score = matchedKeywords.length / userKeywords.length;
-  
+
   if (score < 0.3) {
-    console.warn(`[相关性警告] AI回复可能与用户问题不相关 (分数: ${score.toFixed(2)})`);
-    console.warn(`  用户关键词: ${userKeywords.join(', ')}`);
-    console.warn(`  匹配关键词: ${matchedKeywords.join(', ')}`);
+    safeLog('warn', `[相关性警告] AI回复可能与用户问题不相关`, { score: score.toFixed(2) });
+    safeLog('warn', '用户关键词', { keywords: userKeywords.join(', ') });
+    safeLog('warn', '匹配关键词', { keywords: matchedKeywords.join(', ') });
   }
-  
+
   return score;
 }
 
+// 行首"[发送者名]:" 标签清洗白名单 —— 动态从 AI_NAMES 构建,避免名字遗漏或新增AI后失配
+const SENDER_LABEL_PATTERN = (() => {
+  const names = Object.values(AI_NAMES || {})
+    .map(n => String(n).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .filter(Boolean);
+  // 兜底手动补充若干常见自称
+  names.push('用户', '我');
+  return new RegExp(`^\\[(${names.join('|')})\\]\\s*`, 'gm');
+})();
+
 function normalizeResponse(content) {
   if (!content || typeof content !== 'string') return content;
-  
+
   let normalized = content;
   normalized = normalized.replace(/\r\n/g, '\n');
   normalized = normalized.replace(/\r/g, '\n');
   normalized = normalized.replace(/\n{3,}/g, '\n\n');
-  
-  normalized = normalized.replace(/^\[(deepseek-chat|deepseek-reasoner|GLM-4\.5-Air|mimo-v2\.5|mimo-v2-flash|Qwen3\.5-Flash|用户|我)\]\s*/gm, '');
-  
+
+  // 去掉行首的"[发送者名称]:" 标签(用动态白名单,与 AI_NAMES 保持同步)
+  normalized = normalized.replace(SENDER_LABEL_PATTERN, '');
+
   normalized = normalized.replace(/^【[^】]*】\s*/gm, '');
-  
+
   normalized = normalized.replace(/^(?:我|作为\w+?)[：:]\s*/gm, '');
-  
+
   const thinkMatch = normalized.match(/<think[^>]*>([\s\S]*?)<\/think>/);
   if (thinkMatch) {
     const thinkContent = thinkMatch[1].trim();
@@ -484,9 +715,9 @@ function normalizeResponse(content) {
     }
   }
   normalized = normalized.replace(/<think[^>]*>[\s\S]*?<\/think>/g, '');
-  
+
   normalized = normalized.trim();
-  
+
   return normalized;
 }
 
@@ -510,18 +741,18 @@ async function callStandardAPI(config, persona, userMessage, recentMessages, res
     top_p: effectiveTopP
   };
 
-  if (config.note && config.note.includes('不支持temperature')) {
-    delete requestBody.temperature;
-    delete requestBody.top_p;
-    delete requestBody.frequency_penalty;
-    delete requestBody.presence_penalty;
-  }
-
   if (effectiveFreqPenalty !== undefined) {
     requestBody.frequency_penalty = effectiveFreqPenalty;
   }
   if (effectivePresPenalty !== undefined) {
     requestBody.presence_penalty = effectivePresPenalty;
+  }
+
+  if (config.note && config.note.includes('不支持temperature')) {
+    delete requestBody.temperature;
+    delete requestBody.top_p;
+    delete requestBody.frequency_penalty;
+    delete requestBody.presence_penalty;
   }
 
   const response = await axios.post(config.endpoint, requestBody, {
@@ -559,7 +790,7 @@ async function callStandardAPI(config, persona, userMessage, recentMessages, res
 
   if (!content || content.trim().length === 0) {
     const rawResponse = JSON.stringify(response.data.choices[0]);
-    console.warn(`AI ${config.model} returned empty content. Raw choice: ${rawResponse.substring(0, 500)}`);
+    safeLog('warn', `AI ${config.model} returned empty content`, { raw: rawResponse.substring(0, 500) });
     throw new Error(`AI ${config.model} returned empty response`);
   }
 
@@ -687,43 +918,54 @@ function buildAPIMessages(systemPrompt, userMessage, recentMessages, persona, re
     const msg = effectiveMessages[i];
     let content = msg.content || '';
     const msgId = msg.id;
-    
+
     if (msg.sender_type === 'user' && msgId === lastUserMsgId && content === userMessage) {
       lastUserMsgAttachmentHint = buildAttachmentHint(msg.attachments, !!(userMessage && userMessage.trim().length > 0));
       continue;
     }
-    
+
+    // 改进的引用回复处理 - 标准化的引用格式
     let replyHint = '';
-    if (!isPrivateChat && msg.reply_to) {
+    if (msg.reply_to) {
       const replyMsg = effectiveMessages.find(m => m.id === msg.reply_to);
       if (replyMsg) {
-        const replySender = replyMsg.sender_type === 'user' ? (userProfile?.nickname || '用户') : (AI_NAMES[replyMsg.sender_id] || replyMsg.sender_id || 'AI');
-        replyHint = ` [回复${replySender}]`;
+        const replySenderName = replyMsg.sender_type === 'user'
+          ? (userProfile?.nickname || '用户')
+          : (AI_NAMES[replyMsg.sender_id] || replyMsg.sender_id || 'AI');
+        const replyContentPreview = (replyMsg.content || '').substring(0, 100);
+        if (isPrivateChat) {
+          replyHint = `\n「引用回复 - ${replySenderName}：${replyContentPreview}${replyMsg.content?.length > 100 ? '...' : ''}」`;
+        } else {
+          replyHint = `\n「引用 @${replySenderName}：${replyContentPreview}${replyMsg.content?.length > 100 ? '...' : ''}」`;
+        }
       }
     }
 
+    // 为所有消息包含附件内容（parsed_content, media_description）
     let attachmentHint = buildAttachmentHint(msg.attachments, !!(content && content.trim().length > 0));
-    
+
     const fullContent = content + attachmentHint;
-    
+
     if (msg.sender_type === 'user') {
       if (isPrivateChat) {
         messages.push({ role: 'user', content: fullContent + replyHint });
       } else {
         const userName = userProfile?.nickname || '用户';
-        messages.push({ role: 'user', content: `[${userName}]${replyHint}: ${fullContent}` });
+        messages.push({ role: 'user', content: `[${userName}]: ${fullContent}${replyHint}` });
       }
     } else if (msg.sender_type === 'ai' && msg.sender_id === persona.id) {
+      // 自己的消息也包含附件提示
       messages.push({ role: 'assistant', content: fullContent + replyHint });
     } else if (msg.sender_type === 'ai') {
       const aiName = AI_NAMES[msg.sender_id] || msg.sender_id || 'AI';
       const truncated = fullContent.substring(0, 300) + (fullContent.length > 300 ? '...' : '');
-      messages.push({ role: 'user', content: `[${aiName}]${replyHint}: ${truncated}` });
+      messages.push({ role: 'user', content: `[${aiName}]: ${truncated}${replyHint}` });
     } else {
       messages.push({ role: 'user', content: fullContent + replyHint });
     }
   }
 
+  // 优化的引用回复消息处理
   if (replyToMessages && replyToMessages.length > 0) {
     const quotedContents = replyToMessages.map(msg => {
       let senderName;
@@ -733,10 +975,17 @@ function buildAPIMessages(systemPrompt, userMessage, recentMessages, persona, re
         senderName = AI_NAMES[msg.sender_id] || msg.sender_id || 'AI';
       }
       const content = msg.content.substring(0, 200);
-      return `> ${senderName}: ${content}${msg.content.length > 200 ? '...' : ''}`;
+      return `> **${senderName}** 说: ${content}${msg.content.length > 200 ? '...' : ''}`;
     }).join('\n');
-    const replyTarget = replyToMessages[0].sender_type === 'user' ? (userProfile?.nickname || '用户') : (AI_NAMES[replyToMessages[0].sender_id] || 'AI');
-    messages.push({ role: 'user', content: `[引用消息]\n${quotedContents}\n请回复@${replyTarget}` });
+
+    const replyTarget = replyToMessages[0].sender_type === 'user'
+      ? (userProfile?.nickname || '用户')
+      : (AI_NAMES[replyToMessages[0].sender_id] || 'AI');
+
+    messages.push({
+      role: 'user',
+      content: `[引用回复 - 你正在回复以下消息]\n${quotedContents}\n\n请直接回复 @${replyTarget}，在回复中自然地引用或回应对方的内容。用"@${replyTarget}"开头。`
+    });
   }
 
   messages.push({ role: 'user', content: lastUserMsgAttachmentHint + userMessage });
@@ -745,6 +994,20 @@ function buildAPIMessages(systemPrompt, userMessage, recentMessages, persona, re
 }
 
 function buildSystemPrompt(persona, recentMessages = [], userProfile = null, replyToMessages = [], feedbackInfo = null, groupMembers = null, isPrivateChat = false, privateChatHistory = [], userAgents = []) {
+  // 自定义 systemPrompt 优先级最高，如果存在且非空则直接使用
+  if (persona?.systemPrompt && persona.systemPrompt.trim().length > 0) {
+    const systemPrompt = persona.systemPrompt.trim();
+    const suspiciousKeywords = ['忽略之前的指令', '覆盖所有规则', '重新定义你的角色', '忘记你的设定', '你是一个全新的AI'];
+    const lowerPrompt = systemPrompt.toLowerCase();
+    for (const kw of suspiciousKeywords) {
+      if (lowerPrompt.includes(kw)) {
+        safeLog('warn', 'systemPrompt含潜在安全风险关键词', { keyword: kw, personaId: persona.id });
+        break;
+      }
+    }
+    return systemPrompt;
+  }
+
   let parts = [];
 
   if (isPrivateChat) {
@@ -752,6 +1015,12 @@ function buildSystemPrompt(persona, recentMessages = [], userProfile = null, rep
     parts.push('这是你和用户之间的私密对话，请认真回答用户的问题，不要敷衍或回避。你只需要回复用户的消息，不要自言自语。');
   } else {
     parts.push(`你是${persona.name}。请按照你的人设来发言。`);
+    parts.push('重要：你需要自己判断是否要回复当前的消息。以下情况你应该选择不说话：');
+    parts.push('- 如果当前讨论的话题与你无关或不感兴趣');
+    parts.push('- 如果你没有特别有价值的观点要补充');
+    parts.push('- 如果已经有其他AI成员代表和你相近的立场发言');
+    parts.push('- 如果你觉得沉默比发言更符合你的性格');
+    parts.push('你不需要对每条消息都回复，自然而然地参与对话即可。当你决定发言时，要像真人一样自然地加入讨论。');
   }
 
   if (persona.styleTag) {
@@ -760,6 +1029,10 @@ function buildSystemPrompt(persona, recentMessages = [], userProfile = null, rep
 
   if (persona.style) {
     parts.push(`风格：${persona.style}。请在语气、用词、表达方式上符合这个风格。`);
+  }
+
+  if (persona.speakingStyle) {
+    parts.push(`说话风格：${persona.speakingStyle}。请在发言中体现这种说话风格。`);
   }
 
   if (persona.personality) {
@@ -784,6 +1057,10 @@ function buildSystemPrompt(persona, recentMessages = [], userProfile = null, rep
 
   if (persona.expertise && persona.expertise.length > 0) {
     parts.push(`你擅长的领域：${persona.expertise.join('、')}。涉及这些领域时，可以展现专业深度。`);
+  }
+
+  if (persona.interests && persona.interests.length > 0) {
+    parts.push(`你感兴趣的话题：${persona.interests.join('、')}。讨论这些话题时你会更加活跃，愿意分享观点。`);
   }
 
   if (persona.speakingTraits) {
@@ -849,18 +1126,66 @@ function buildSystemPrompt(persona, recentMessages = [], userProfile = null, rep
     }
   }
 
+  // 注入 responseConfig 中的参数信息
+  const responseConfig = persona.responseConfig || {};
+  if (responseConfig.enabled === false) {
+    parts.push('注意：你当前处于静默模式，请尽量少发言或保持沉默。');
+  } else if (responseConfig.responseFrequency !== undefined) {
+    if (responseConfig.responseFrequency > 0.8) {
+      parts.push('你是一个活跃的聊天参与者，倾向于积极地参与各种话题的讨论。');
+    } else if (responseConfig.responseFrequency > 0.5) {
+      parts.push('你会适度参与群聊讨论，在有价值的话题上发言。');
+    } else if (responseConfig.responseFrequency > 0.2) {
+      parts.push('你较为安静，只在特别感兴趣的话题上发言。');
+    } else {
+      parts.push('你很少主动发言，通常只在被直接提到时才回应。');
+    }
+  }
+
+  // 注入 modelConfig 参数提示
+  const modelConfig = persona.modelConfig || {};
+  if (modelConfig.temperature !== undefined) {
+    if (modelConfig.temperature > 0.8) {
+      parts.push('你的回复风格偏向创造性，可以适度发挥想象力和创造性思维。');
+    } else if (modelConfig.temperature < 0.3) {
+      parts.push('你的回复风格偏向严谨精确，请保持回答的准确性和一致性。');
+    }
+  }
+
   if (!isPrivateChat) {
-    parts.push('当前场景：这是一个群聊。');
-    parts.push('群聊规则：');
-    parts.push('1. 每条消息前都有发送者名称，格式为"发送者: 消息内容"，你必须仔细辨认是谁在说话。');
-    parts.push('2. 当你回复某人的消息时，请用"@"+对方名字的方式明确指出你在回复谁，例如"@小明 你说得对"。');
-    parts.push('3. 如果你在引用某人的消息，请用"> 对方名字: 对方说的话"的格式引用。');
-    parts.push('4. 不要把不同人说的话混淆，不要把用户的消息当成其他AI的，也不要把其他AI的消息当成用户的。');
+    parts.push('当前场景：这是一个多人群聊，你是群聊中的一名AI成员。群聊中有真实用户和其他AI成员同时参与讨论。');
+    parts.push('群聊核心规则：');
+    parts.push('1. 每条消息前都有发送者名称标记，格式为"[发送者名称]: 消息内容"。标题行"[最近的群聊消息]"下面就是群里的实际对话记录。');
+    parts.push('2. 标记为"用户"（或用户昵称）的消息来自真实用户，你需要特别关注并真诚回应。标记为其他名称（如"deepseek-v4-flash"、"GLM-4.5-Air"等）的消息来自其他AI成员。');
+    parts.push('3. 当你回复某人的消息时，必须用"@"+对方名字明确指出你在回复谁，例如"@用户"回复用户，或"@deepseek-v4-flash"回应另一个AI。');
+    parts.push('4. 如果你在引用某人的消息，请用"> 对方名字: 对方说的话"的格式引用。');
+    parts.push('5. 严禁把不同人说的话混淆。不要把用户的消息当成其他AI的，也不要把其他AI的消息当成用户的。');
+    parts.push('6. 对于用户的消息，你应该认真、真诚地回应，帮助用户解决问题或参与讨论。对于其他AI的消息，你可以赞同、补充、反驳或忽略，取决于你的人设和话题相关性。');
+    parts.push('7. 你不是唯一在说话的AI——还有其他AI同时参与讨论。关注其他AI的发言，但不能直接替其他AI说话。');
   }
 
   if (!isPrivateChat && groupMembers && groupMembers.length > 0) {
+    const otherMembers = groupMembers.filter(id => id !== persona.id);
+    // 注入【关系感知】:让 AI 知道它和每个其他成员的关系,从而分清彼此
+    if (otherMembers.length > 0) {
+      const relationshipLines = otherMembers.map(id => {
+        const otherName = AI_NAMES[id] || id;
+        const rel = getEffectiveRelationship(persona.id, id, persona);
+        const stanceText = rel.stance === 'ally' ? '友好' : rel.stance === 'rival' ? '对立' : '中立';
+        const tendencyText = rel.stance === 'ally'
+          ? '倾向支持、附和Ta'
+          : rel.stance === 'rival'
+            ? '倾向反驳、质疑Ta'
+            : '保持客观';
+        const noteText = rel.note ? `(${rel.note})` : '';
+        return `- ${otherName}:关系【${stanceText}】,亲和度${rel.affinity.toFixed(1)},${tendencyText}${noteText}`;
+      });
+      parts.push(`【你与群成员的关系】\n你必须根据以下关系来决定对每个人的态度和回应方式:\n${relationshipLines.join('\n')}`);
+    }
     const memberNames = groupMembers.map(id => AI_NAMES[id] || id);
     parts.push(`群聊成员：${memberNames.join('、')}`);
+    // 注入【随机发言指引】
+    parts.push('【发言方式】这是自由流动的群聊,没有固定发言顺序。你凭自己的感觉决定是否加入对话:可以中途插话、可以保持沉默、可以连续发言,也可以只回复特定的人。不要为了说话而说话,只在你想说的时候说。');
   }
 
   if (recentMessages && recentMessages.length > 0) {
@@ -947,9 +1272,9 @@ if (process.env.NODE_ENV !== 'test') {
     for (const [streamId, entry] of activeStreams.entries()) {
       const createdAt = entry._createdAt || 0;
       if (now - createdAt > maxAge) {
-        try { entry.abort(); } catch {}
+        try { entry.abort(); } catch { }
         activeStreams.delete(streamId);
-        console.warn(`🧹 清理超时流: ${streamId}`);
+        safeLog('info', '清理超时流', { streamId });
       }
     }
   }, 60 * 1000);
@@ -984,8 +1309,23 @@ export async function callAIStream(aiId, persona, userMessage, recentMessages, r
   }
 
   const config = aiConfigs[aiId];
-  
-  if (!config || !config.apiKey) {
+
+  // 应用用户自定义API配置
+  let effectiveConfig = config;
+  if (userId && config) {
+    const userApiConfig = await getUserApiConfigForModel(userId, aiId);
+    if (userApiConfig) {
+      effectiveConfig = { ...config };
+      if (userApiConfig.apiKey) {
+        effectiveConfig.apiKey = userApiConfig.apiKey;
+      }
+      if (userApiConfig.baseUrl) {
+        effectiveConfig.endpoint = userApiConfig.baseUrl;
+      }
+    }
+  }
+
+  if (!effectiveConfig || !effectiveConfig.apiKey) {
     const mockResponse = getMockResponse(aiId, effectivePersona, responseType, recentMessages);
     if (onChunk) {
       const words = mockResponse.split('');
@@ -996,55 +1336,64 @@ export async function callAIStream(aiId, persona, userMessage, recentMessages, r
     }
     return mockResponse;
   }
-  
+
   const systemPrompt = customPrompt || buildSystemPrompt(effectivePersona, recentMessages, userProfile, replyToMessages, feedbackInfo, groupMembers, isPrivateChat, privateChatHistory, userAgents || []);
   const messages = buildAPIMessages(systemPrompt, userMessage, recentMessages, effectivePersona, replyToMessages, isPrivateChat, userProfile);
-  
+
   const modelConfig = effectivePersona?.modelConfig || {};
-  const effectiveTemperature = modelConfig.temperature ?? effectivePersona?.temperature ?? config.params?.temperature ?? 0.7;
-  const effectiveMaxTokens = modelConfig.maxTokens ?? effectivePersona?.maxTokens ?? config.params?.max_tokens ?? 1500;
-  const effectiveTopP = modelConfig.topP ?? config.params?.top_p ?? 0.9;
-  const effectiveFreqPenalty = modelConfig.frequencyPenalty ?? config.params?.frequency_penalty;
-  const effectivePresPenalty = modelConfig.presencePenalty ?? config.params?.presence_penalty;
+  const effectiveTemperature = modelConfig.temperature ?? effectivePersona?.temperature ?? effectiveConfig.params?.temperature ?? 0.7;
+  const effectiveMaxTokens = modelConfig.maxTokens ?? effectivePersona?.maxTokens ?? effectiveConfig.params?.max_tokens ?? 1500;
+  const effectiveTopP = modelConfig.topP ?? effectiveConfig.params?.top_p ?? 0.9;
+  const effectiveFreqPenalty = modelConfig.frequencyPenalty ?? effectiveConfig.params?.frequency_penalty;
+  const effectivePresPenalty = modelConfig.presencePenalty ?? effectiveConfig.params?.presence_penalty;
 
   const controller = new AbortController();
   controller._createdAt = Date.now();
   if (streamId) {
     activeStreams.set(streamId, controller);
   }
-  
+
   try {
     const requestBody = {
-      model: config.model,
+      model: effectiveConfig.model,
       messages,
       stream: true,
       temperature: effectiveTemperature,
       max_tokens: effectiveMaxTokens,
       top_p: effectiveTopP
     };
-    if (config.note && config.note.includes('不支持temperature')) {
+    if (effectiveFreqPenalty !== undefined) requestBody.frequency_penalty = effectiveFreqPenalty;
+    if (effectivePresPenalty !== undefined) requestBody.presence_penalty = effectivePresPenalty;
+    if (effectiveConfig.note && effectiveConfig.note.includes('不支持temperature')) {
       delete requestBody.temperature;
       delete requestBody.top_p;
       delete requestBody.frequency_penalty;
       delete requestBody.presence_penalty;
     }
-    if (effectiveFreqPenalty !== undefined) requestBody.frequency_penalty = effectiveFreqPenalty;
-    if (effectivePresPenalty !== undefined) requestBody.presence_penalty = effectivePresPenalty;
 
-    const response = await axios.post(config.endpoint, requestBody, {
+    const response = await axios.post(effectiveConfig.endpoint, requestBody, {
       headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
+        'Authorization': `Bearer ${effectiveConfig.apiKey}`,
         'Content-Type': 'application/json'
       },
       responseType: 'stream',
       signal: controller.signal,
-      timeout: 90000
+      timeout: 120000
     });
-    
+
     let fullContent = '';
-    
-    return new Promise((resolve, reject) => {
+    let streamTimedOut = false;
+
+    const streamResult = new Promise((resolve, reject) => {
+      const streamTimeout = setTimeout(() => {
+        streamTimedOut = true;
+        if (streamId) activeStreams.delete(streamId);
+        try { response.data.destroy(); } catch { }
+        reject(new Error('AI流式调用超时(120s)'));
+      }, 120000);
+
       response.data.on('data', (chunk) => {
+        if (streamTimedOut) return;
         const lines = chunk.toString().split('\n').filter(line => line.trim() !== '');
         for (const line of lines) {
           if (line.startsWith('data: ')) {
@@ -1057,33 +1406,39 @@ export async function callAIStream(aiId, persona, userMessage, recentMessages, r
                 fullContent += content;
                 if (onChunk) onChunk(content);
               }
-            } catch {}
+            } catch (parseError) {
+              safeLog('warn', '流式SSE JSON解析失败', { raw: line ? line.substring(0, 100) : '(empty)' });
+            }
           }
         }
       });
-      
+
       response.data.on('end', () => {
+        clearTimeout(streamTimeout);
         if (streamId) activeStreams.delete(streamId);
         resolve(fullContent);
       });
-      
+
       response.data.on('error', (err) => {
+        clearTimeout(streamTimeout);
         if (streamId) activeStreams.delete(streamId);
         reject(err);
       });
     });
+
+    return streamResult;
   } catch (error) {
     if (streamId) activeStreams.delete(streamId);
     if (error.name === 'AbortError' || error.code === 'ERR_CANCELED') {
       return '';
     }
-    console.error(`[AI流式调用错误] ${aiId}:`, error.message);
+    safeLog('error', `[AI流式调用错误] ${aiId}`, { error: error.message });
     const mockResponse = getMockResponse(aiId, effectivePersona, responseType, recentMessages);
     if (onChunk) {
-      const words = mockResponse.split('');
+      const words = mockResponse.match(/.{1,2}/g) || [mockResponse];
       for (let i = 0; i < words.length; i++) {
         onChunk(words[i]);
-        await new Promise(r => setTimeout(r, 30));
+        await new Promise(r => setTimeout(r, 10));
       }
     }
     return mockResponse;
@@ -1093,6 +1448,11 @@ export async function callAIStream(aiId, persona, userMessage, recentMessages, r
 export { aiHealthStatus, checkAIHealth, checkAllAIHealth, checkResponseRelevance, normalizeResponse, applyMessageLengthLimit };
 
 export function buildDebateSystemPrompt(persona, debateRound, totalRounds, debateLevel, recentMessages = [], groupMembers = null, userMessage = '') {
+  // 自定义 systemPrompt 优先级最高
+  if (persona?.systemPrompt && persona.systemPrompt.trim().length > 0) {
+    return persona.systemPrompt.trim();
+  }
+
   let parts = [];
 
   parts.push(`你是${persona.name}，正在参与一场辩论。请按照你的人设来发言。`);
@@ -1103,6 +1463,10 @@ export function buildDebateSystemPrompt(persona, debateRound, totalRounds, debat
 
   if (persona.style) {
     parts.push(`风格：${persona.style}。请在语气、用词、论证方式上符合这个风格。`);
+  }
+
+  if (persona.speakingStyle) {
+    parts.push(`说话风格：${persona.speakingStyle}。请在辩论中体现这种说话风格。`);
   }
 
   if (persona.personality) {
@@ -1127,6 +1491,10 @@ export function buildDebateSystemPrompt(persona, debateRound, totalRounds, debat
 
   if (persona.expertise && persona.expertise.length > 0) {
     parts.push(`你擅长的领域：${persona.expertise.join('、')}。涉及这些领域时，可以展现专业深度。`);
+  }
+
+  if (persona.interests && persona.interests.length > 0) {
+    parts.push(`你感兴趣的话题：${persona.interests.join('、')}。辩论涉及这些话题时你会更加活跃。`);
   }
 
   if (persona.speakingTraits) {
@@ -1230,14 +1598,29 @@ export async function callAIDebate(aiId, persona, userMessage, recentMessages, d
   } : persona;
 
   const config = aiConfigs[aiId];
-  
-  if (!config || !config.apiKey) {
-    safeLog('warn', `AI ${aiId} 配置不存在，使用模拟回复`, { apiKey: config?.apiKey || '' });
+
+  // 应用用户自定义API配置
+  let effectiveConfig = config;
+  if (userId && config) {
+    const userApiConfig = await getUserApiConfigForModel(userId, aiId);
+    if (userApiConfig) {
+      effectiveConfig = { ...config };
+      if (userApiConfig.apiKey) {
+        effectiveConfig.apiKey = userApiConfig.apiKey;
+      }
+      if (userApiConfig.baseUrl) {
+        effectiveConfig.endpoint = userApiConfig.baseUrl;
+      }
+    }
+  }
+
+  if (!effectiveConfig || !effectiveConfig.apiKey) {
+    safeLog('warn', `AI ${aiId} 配置不存在，使用模拟回复`, { apiKey: effectiveConfig?.apiKey || '' });
     return getMockResponse(aiId, effectivePersona, 'free_chat', recentMessages);
   }
 
   const systemPrompt = buildDebateSystemPrompt(effectivePersona, debateRound, totalRounds, debateLevel, recentMessages, groupMembers, userMessage);
-  
+
   const messages = [
     { role: 'system', content: systemPrompt }
   ];
@@ -1257,7 +1640,7 @@ export async function callAIDebate(aiId, persona, userMessage, recentMessages, d
     }
   }
 
-  const debatePrompt = debateRound === 1 
+  const debatePrompt = debateRound === 1
     ? `请就"${userMessage}"这个话题发表你的观点，开始辩论。`
     : `请继续辩论，回应其他辩友的观点。`;
 
@@ -1266,28 +1649,28 @@ export async function callAIDebate(aiId, persona, userMessage, recentMessages, d
   const maxRetries = 3;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      const params = config.params || {};
+      const params = effectiveConfig.params || {};
       const modelConfig = effectivePersona?.modelConfig || {};
       const effectiveTemperature = Math.min((modelConfig.temperature ?? params.temperature ?? 0.7) + 0.1, 1.0);
       const effectiveMaxTokens = modelConfig.maxTokens ?? params.max_tokens ?? 1500;
       const effectiveTopP = modelConfig.topP ?? params.top_p ?? 0.9;
 
       const requestBody = {
-        model: config.model,
+        model: effectiveConfig.model,
         messages,
         max_tokens: effectiveMaxTokens,
         temperature: effectiveTemperature,
         top_p: effectiveTopP
       };
 
-      if (config.note && config.note.includes('不支持temperature')) {
+      if (effectiveConfig.note && effectiveConfig.note.includes('不支持temperature')) {
         delete requestBody.temperature;
         delete requestBody.top_p;
       }
 
-      const response = await axios.post(config.endpoint, requestBody, {
+      const response = await axios.post(effectiveConfig.endpoint, requestBody, {
         headers: {
-          'Authorization': `Bearer ${config.apiKey}`,
+          'Authorization': `Bearer ${effectiveConfig.apiKey}`,
           'Content-Type': 'application/json'
         },
         timeout: 60000
@@ -1313,7 +1696,7 @@ export async function callAIDebate(aiId, persona, userMessage, recentMessages, d
     } catch (error) {
       if (attempt < maxRetries - 1) {
         const delay = 2000 * (attempt + 1);
-        console.warn(`AI ${aiId} 辩论调用失败(第${attempt + 1}次)，${delay}ms后重试:`, error.message);
+        safeLog('warn', `AI ${aiId} 辩论调用失败(第${attempt + 1}次)，${delay}ms后重试`, { error: error.message });
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }

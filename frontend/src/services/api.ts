@@ -15,7 +15,7 @@ export function onAuthExpired(listener: AuthEventListener): () => void {
 
 export function notifyAuthExpired() {
   authEventListeners.forEach(listener => {
-    try { listener(); } catch {}
+    try { listener(); } catch { }
   });
 }
 
@@ -69,7 +69,7 @@ async function ensureCsrfToken(): Promise<string | null> {
           if (token) {
             return token;
           }
-        } catch {}
+        } catch { }
       }
 
       return getCookie('XSRF-TOKEN');
@@ -90,7 +90,7 @@ function rememberBackendOriginFromUrl(url: string | null | undefined) {
   try {
     const resolvedUrl = new URL(url, window.location.origin);
     rememberBackendOrigin(resolvedUrl.origin);
-  } catch {}
+  } catch { }
 }
 
 function getBaseUrlCandidates(): string[] {
@@ -193,15 +193,15 @@ axiosInstance.interceptors.response.use(
       baseUrlCandidates?: string[];
       activeBaseUrlIndex?: number;
     }) | undefined;
-    
+
     if (!config) {
       return Promise.reject(error);
     }
-    
+
     if (typeof config.retryCount !== 'number') {
       config.retryCount = 0;
     }
-    
+
     const isNetworkError = !error.response && (error.code === 'ERR_NETWORK' || error.code === 'ECONNABORTED');
     const isServerError = error.response && (error.response.status === 500 || error.response.status === 502 || error.response.status === 503);
     const isCsrfError = error.response?.status === 403 && error.response?.data?.error === 'CSRF token validation failed';
@@ -232,17 +232,17 @@ axiosInstance.interceptors.response.use(
         return axiosInstance(config);
       }
     }
-    
+
     if ((isNetworkError || isServerError) && config.retryCount < MAX_RETRIES) {
       config.retryCount++;
-      
+
       const delayMs = RETRY_DELAY * Math.pow(2, config.retryCount - 1);
       if (import.meta.env.DEV) {
         console.log(`[API Retry] 第${config.retryCount}次重试，${config.method?.toUpperCase()} ${config.url}，等待 ${delayMs}ms`);
       }
-      
+
       await delay(delayMs);
-      
+
       try {
         return await axiosInstance(config);
       } catch (retryError) {
@@ -254,21 +254,24 @@ axiosInstance.interceptors.response.use(
         return Promise.reject(retryError);
       }
     }
-    
+
     if (import.meta.env.DEV) {
       const isExpected401 = error.response?.status === 401 && error.config?.url?.includes('/auth/token');
       if (!isExpected401) {
         console.error('[API Error]', error.message, error.code);
       }
     }
-    
+
     if (!error.response) {
       const networkError = new Error('网络连接失败，请检查网络后重试');
       return Promise.reject(networkError);
     }
 
-    if (error.response.status === 401 && error.response?.data?.requiresAuth) {
-      notifyAuthExpired();
+    if (error.response?.status === 401) {
+      const isAuthRequest = error.config?.url?.includes('/auth/token');
+      if (!isAuthRequest) {
+        notifyAuthExpired();
+      }
       return Promise.reject(error);
     }
 
@@ -705,11 +708,14 @@ export const api = {
     return response.data;
   },
 
-  globalSearch: async (query: string, options?: { type?: string; groupId?: string; limit?: number }) => {
+  globalSearch: async (query: string, options?: { type?: string; groupId?: string; limit?: number; quickFilter?: string; dateFrom?: string; dateTo?: string }) => {
     const params: Record<string, any> = { q: query };
     if (options?.type) params.type = options.type;
     if (options?.groupId) params.groupId = options.groupId;
     if (options?.limit) params.limit = options.limit;
+    if (options?.quickFilter) params.quickFilter = options.quickFilter;
+    if (options?.dateFrom) params.dateFrom = options.dateFrom;
+    if (options?.dateTo) params.dateTo = options.dateTo;
     const response = await axiosInstance.get('/search', { params });
     return response.data;
   },
@@ -943,6 +949,16 @@ export const api = {
   getAgentSuggestions: async (agentId: string, context?: string) => {
     const params = context ? { context } : {};
     const response = await axiosInstance.get(`/agents/${agentId}/suggestions`, { params });
+    return response.data;
+  },
+
+  getUserApiConfig: async () => {
+    const response = await axiosInstance.get('/user/apiconfig');
+    return response.data;
+  },
+
+  updateUserApiConfig: async (config: Record<string, { apiKey: string; baseUrl: string }>) => {
+    const response = await axiosInstance.put('/user/apiconfig', config);
     return response.data;
   }
 };

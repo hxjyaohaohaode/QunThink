@@ -22,10 +22,12 @@ import ttsRouter from './routes/tts.js';
 import agentsRouter from './routes/agents.js';
 import authRouter from './routes/auth.js';
 import smsRouter from './routes/sms.js';
+import apiConfigRouter from './routes/apiconfig.js';
 import authMiddleware, { isAuthConfigured } from './middleware/auth.js';
 import { injectUserDb } from './middleware/userDb.js';
 import { rateLimiter, messageRateLimiter, fileRateLimiter, aiRateLimiter, queryRateLimiter, authRateLimiter } from './middleware/rateLimiter.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { generateCSRFToken } from './middleware/csrf.js';
 import { getUploadsDir, initDatabase } from './models/db.js';
 import { getAuthDb, initAuthDb } from './models/authDb.js';
 import { closeMongoConnection } from './models/mongoAdapter.js';
@@ -43,10 +45,10 @@ import { initSmsClient } from './services/sms/index.js';
 if (process.platform === 'win32') {
   const origWarn = console.warn;
   const origError = console.error;
-  console.warn = function(...args) {
+  console.warn = function (...args) {
     origWarn.apply(console, args);
   };
-  console.error = function(...args) {
+  console.error = function (...args) {
     origError.apply(console, args);
   };
 }
@@ -62,8 +64,8 @@ server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
 server.timeout = 120000;
 
-const wss = new WebSocketServer({ 
-  server, 
+const wss = new WebSocketServer({
+  server,
   path: '/ws',
   maxPayload: 10 * 1024 * 1024,
   perMessageDeflate: false,
@@ -145,7 +147,7 @@ if (isAuthConfigured()) {
       csrfTokenMap.set(token, { createdAt: Date.now() });
       res.cookie(CSRF_COOKIE_NAME, token, {
         httpOnly: false,
-        sameSite: isProd ? 'none' : 'lax',
+        sameSite: 'strict',
         secure: isProd,
         path: '/'
       });
@@ -175,15 +177,12 @@ if (isAuthConfigured()) {
     next();
   });
 }
-
-
-
 let healthCheckCache = { result: null, timestamp: 0 };
 const HEALTH_CACHE_TTL = 60 * 1000;
 
 app.get('/api/health', async (req, res) => {
   const now = Date.now();
-  
+
   if (healthCheckCache.result && now - healthCheckCache.timestamp < HEALTH_CACHE_TTL) {
     const statusCode = healthCheckCache.result.status === 'ok' ? 200 : 503;
     return res.status(statusCode).json(healthCheckCache.result);
@@ -310,7 +309,8 @@ app.get('/api/bootstrap', async (req, res) => {
       user,
       groups: db.data.groups || [],
       profile: db.data.userProfile || {},
-      personas: buildMergedPersonas(db.data.customPersonas || {})
+      personas: buildMergedPersonas(db.data.customPersonas || {}),
+      apiConfigs: db.data.aiApiConfigs || {}
     });
   } catch (error) {
     safeLog('error', 'bootstrap failed', { userId: req.userId, error: error?.message });
@@ -327,6 +327,7 @@ app.use('/api/social', queryRateLimiter);
 app.use('/api/memory', queryRateLimiter);
 app.use('/api/interaction', queryRateLimiter);
 
+app.use('/api/user', apiConfigRouter);
 app.use('/api', groupsRouter);
 app.use('/api', messagesRouter);
 app.use('/api', filesRouter);
@@ -367,10 +368,10 @@ initDatabase().then(async () => {
     { key: 'MIMO_API_KEY', name: 'MIMO', env: process.env.MIMO_API_KEY },
     { key: 'QWEN_API_KEY', name: '千问(Qwen)', env: process.env.QWEN_API_KEY },
   ];
-  
+
   let configuredCount = 0;
   let misconfiguredCount = 0;
-  
+
   for (const { key, name, env } of requiredKeys) {
     if (!env || env.startsWith('your_') || env.includes('_here')) {
       console.warn(`  ❌ ${name} (${key}): 未配置或使用占位符`);
@@ -380,7 +381,7 @@ initDatabase().then(async () => {
       configuredCount++;
     }
   }
-  
+
   if (misconfiguredCount === requiredKeys.length) {
     console.error('\n⚠️  严重警告：所有AI API密钥均未配置！系统将只能使用模拟回复。');
     console.error('   请在 backend/.env 文件中配置至少一个API密钥。\n');
@@ -397,7 +398,7 @@ initDatabase().then(async () => {
 
   const { listUserDatabases, getUserDb } = await import('./models/db.js');
   const userIds = await listUserDatabases();
-  
+
   // 修复已存在的群组消息预览（解密加密的 content）
   try {
     let totalFixed = 0;
@@ -405,19 +406,19 @@ initDatabase().then(async () => {
       const db = await getUserDb(userId);
       await db.read();
       let userFixed = 0;
-      
+
       for (const group of (db.data.groups || [])) {
         if (group.last_message_preview && group.last_message_preview.includes('"encrypted"')) {
           // 查找该群组的最后一条消息并生成正确的预览
           const groupMessages = (db.data.messages || [])
             .filter(m => m.group_id === group.id)
             .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-          
+
           if (groupMessages.length > 0) {
             const lastMsg = groupMessages[groupMessages.length - 1];
             const prefix = lastMsg.sender_type === 'user' ? '[我] ' : '';
             let content = lastMsg.content || '';
-            
+
             // 如果内容被加密，尝试解密
             if (lastMsg.metadata?.encryption?.encrypted && typeof content === 'string') {
               try {
@@ -427,7 +428,7 @@ initDatabase().then(async () => {
                 content = '[加密消息]';
               }
             }
-            
+
             group.last_message_preview = `${prefix}${content.substring(0, 50)}`;
             userFixed++;
           } else {
@@ -436,7 +437,7 @@ initDatabase().then(async () => {
           }
         }
       }
-      
+
       if (userFixed > 0) {
         await db.write();
         console.log(`🔓 已修复用户 ${userId} 的 ${userFixed} 个群组的消息预览`);
@@ -452,7 +453,7 @@ initDatabase().then(async () => {
     console.warn('⚠️  修复消息预览时出错:', error.message);
   }
   let startedTimers = 0;
-  
+
   // 禁用自动启动自发对话 - AI只在用户发言后才回复
   // for (const userId of userIds) {
   //   const db = await getUserDb(userId);
@@ -465,7 +466,7 @@ initDatabase().then(async () => {
   //     }
   //   }
   // }
-  
+
   console.log(`🤖 AI自发对话已禁用 - AI将只在用户发言后回复`);
 
   startTTSCleanupScheduler();
@@ -493,8 +494,8 @@ initDatabase().then(async () => {
 
 async function closeAllConnections() {
   await Promise.all([
-    closeMongoConnection().catch(() => {}),
-    closeSupabaseConnection().catch(() => {})
+    closeMongoConnection().catch(() => { }),
+    closeSupabaseConnection().catch(() => { })
   ]);
 }
 
@@ -528,4 +529,19 @@ process.on('SIGINT', () => {
       });
     });
   });
+});
+
+// 全局未捕获异常处理，防止单次异常导致进程崩溃
+process.on('uncaughtException', (err) => {
+  safeLog('error', '未捕获的异常', { message: err.message, stack: err.stack?.split('\n').slice(0, 3).join('\n') });
+  if (err.code === 'ECONNRESET' || err.code === 'EPIPE' || err.code === 'ETIMEDOUT') {
+    // 网络相关错误不退出进程
+    return;
+  }
+  console.error('致命未捕获异常，进程即将退出:', err.message);
+  setTimeout(() => process.exit(1), 5000);
+});
+
+process.on('unhandledRejection', (reason) => {
+  safeLog('error', '未处理的Promise拒绝', { message: reason?.message || String(reason) });
 });

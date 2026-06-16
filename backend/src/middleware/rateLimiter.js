@@ -2,6 +2,7 @@ import fs from 'fs/promises';
 import fsSync from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { safeLog } from '../utils/logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,7 +29,7 @@ function loadPersistedStore() {
       }
     }
   } catch (error) {
-    console.warn('限流数据加载失败，使用空存储:', error.message);
+    safeLog('warn', '限流数据加载失败，使用空存储', { error: error.message });
   }
 }
 
@@ -49,7 +50,7 @@ function savePersistedStore() {
     fsSync.writeFileSync(RATE_LIMIT_FILE, JSON.stringify(data), 'utf8');
     dirty = false;
   } catch (error) {
-    console.warn('限流数据持久化失败:', error.message);
+    safeLog('warn', '限流数据持久化失败', { error: error.message });
   }
 }
 
@@ -112,7 +113,9 @@ export function createRateLimiter(options = {}) {
 
   return function rateLimiter(req, res, next) {
     const authMode = process.env.AUTH_MODE || 'session';
-    const key = authMode === 'dev' || !req.userId ? (req.ip || 'unknown') : req.userId;
+    const key = authMode === 'dev' || !req.userId
+      ? (req.headers['x-user-id'] || req.ip || 'unknown')
+      : req.userId;
     const storeKey = `${key}:${windowMs}:${maxRequests}`;
     const now = Date.now();
 

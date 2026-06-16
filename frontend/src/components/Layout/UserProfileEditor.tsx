@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useProfileStore, UserProfile } from '../../stores/profileStore';
+import { useModalAnimation } from '../../hooks/useModalAnimation';
+import { useToast } from '../Common';
 
 interface UserProfileEditorProps {
   isOpen: boolean;
@@ -87,11 +89,29 @@ function TagSelector({
 
 export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
   const { profile, fetchProfile, updateProfile } = useProfileStore();
+  const { isVisible, close: handleClose, overlayClass, contentClass, sheetClass } = useModalAnimation(isOpen, onClose);
+  const { showToast } = useToast();
   const [form, setForm] = useState<UserProfile>(profile);
   const [saving, setSaving] = useState(false);
+  const [isDirty, setIsDirty] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [hobbyCustomInput, setHobbyCustomInput] = useState('');
   const [personalityCustomInput, setPersonalityCustomInput] = useState('');
+
+  // 关闭时脏数据检查
+  const handleCloseWithDirtyCheck = useCallback(() => {
+    if (isDirty) {
+      const confirmed = window.confirm('有未保存的更改，确定离开吗？');
+      if (!confirmed) return;
+    }
+    handleClose();
+  }, [isDirty, handleClose]);
+
+  // 包装 setForm，任何用户编辑都标记为脏数据
+  const updateForm = useCallback((updater: UserProfile | ((prev: UserProfile) => UserProfile)) => {
+    setForm(updater);
+    setIsDirty(true);
+  }, []);
 
   useEffect(() => {
     if (isOpen) {
@@ -106,7 +126,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isOpen) {
-        onClose();
+        handleCloseWithDirtyCheck();
       }
     };
     if (isOpen) {
@@ -131,13 +151,13 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
 
   const handleDragEnd = useCallback(() => {
     if (dragOffsetY > 120) {
-      onClose();
+      handleClose();
     }
     setDragStartY(null);
     setDragOffsetY(0);
   }, [dragOffsetY, onClose]);
 
-  if (!isOpen) return null;
+  if (!isVisible) return null;
 
   const handleSave = async () => {
     setValidationError(null);
@@ -145,24 +165,25 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
       setValidationError('昵称不能为空');
       return;
     }
-    if (form.age !== null && form.age !== undefined && (form.age < 1 || form.age > 150)) {
+    if (form.age !== null && form.age !== undefined && (isNaN(form.age) || form.age < 1 || form.age > 150)) {
       setValidationError('年龄需在1-150之间');
       return;
     }
-    if (form.height !== null && form.height !== undefined && (form.height < 30 || form.height > 300)) {
+    if (form.height !== null && form.height !== undefined && (isNaN(form.height) || form.height < 30 || form.height > 300)) {
       setValidationError('身高需在30-300cm之间');
       return;
     }
-    if (form.weight !== null && form.weight !== undefined && (form.weight < 10 || form.weight > 500)) {
+    if (form.weight !== null && form.weight !== undefined && (isNaN(form.weight) || form.weight < 10 || form.weight > 500)) {
       setValidationError('体重需在10-500kg之间');
       return;
     }
     setSaving(true);
     try {
       await updateProfile(form);
-      onClose();
+      handleClose();
     } catch (error) {
-      console.error('Failed to save profile:', error);
+      const message = error instanceof Error ? error.message : '保存个人资料失败';
+      showToast({ message, type: 'error' });
     } finally {
       setSaving(false);
     }
@@ -171,7 +192,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
   const addHobbyCustomTag = () => {
     const tag = hobbyCustomInput.trim();
     if (tag && !form.hobbies.includes(tag)) {
-      setForm({ ...form, hobbies: [...form.hobbies, tag] });
+      updateForm({ ...form, hobbies: [...form.hobbies, tag] });
     }
     setHobbyCustomInput('');
   };
@@ -179,15 +200,15 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
   const addPersonalityCustomTag = () => {
     const tag = personalityCustomInput.trim();
     if (tag && !form.personality.includes(tag)) {
-      setForm({ ...form, personality: [...form.personality, tag] });
+      updateForm({ ...form, personality: [...form.personality, tag] });
     }
     setPersonalityCustomInput('');
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-end md:items-center justify-center z-50" onClick={onClose}>
+    <div className={`fixed inset-0 bg-black/50 flex items-end md:items-center justify-center z-[70] ${overlayClass}`} onClick={handleCloseWithDirtyCheck}>
       <div
-        className="bg-bg-surface dark:bg-gray-800 w-full md:max-w-[480px] md:rounded-lg rounded-t-2xl shadow-xl max-h-[100dvh] md:max-h-[85vh] flex flex-col overflow-hidden"
+        className={`bg-bg-surface dark:bg-gray-800 w-full md:max-w-[480px] md:rounded-lg rounded-t-2xl shadow-xl max-h-[100dvh] md:max-h-[85vh] flex flex-col overflow-hidden ${sheetClass} md:${contentClass}`}
         style={{ transform: dragOffsetY > 0 ? `translateY(${dragOffsetY}px)` : undefined, transition: dragStartY === null ? 'transform 0.2s ease' : 'none' }}
         onClick={(event) => event.stopPropagation()}
       >
@@ -206,16 +227,73 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
 
         <div className="flex shrink-0 items-center justify-between px-6 py-4 border-b border-border-subtle">
           <h3 className="text-lg font-semibold text-text-primary dark:text-white">编辑用户画像</h3>
-          <button onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-text-secondary hover:bg-bg-surface2 hover:text-text-primary">关闭</button>
+          <button onClick={handleCloseWithDirtyCheck} className="rounded-lg px-3 py-2 text-sm text-text-secondary hover:bg-bg-surface2 hover:text-text-primary">关闭</button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-4" style={{ paddingBottom: 'max(1.5rem, calc(env(safe-area-inset-bottom, 0px) + 60px))' }}>
+          <div className="flex items-center gap-4">
+            <div className="relative group">
+              <div
+                className="w-16 h-16 rounded-full flex items-center justify-center text-white text-xl font-bold overflow-hidden border-2 border-border-subtle"
+                style={{
+                  backgroundColor: form.avatar_url ? 'transparent' : 'var(--accent-color, #4f46e5)',
+                  backgroundImage: form.avatar_url ? `url(${form.avatar_url})` : 'none',
+                  backgroundSize: 'cover',
+                  backgroundPosition: 'center'
+                }}
+              >
+                {!form.avatar_url && (form.nickname?.charAt(0) || 'U')}
+              </div>
+              <label className="absolute inset-0 flex items-center justify-center rounded-full bg-black/0 group-hover:bg-black/40 transition-colors cursor-pointer">
+                <svg className="w-5 h-5 text-white opacity-0 group-hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" />
+                </svg>
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    if (file.size > 2 * 1024 * 1024) {
+                      setValidationError('头像图片不能超过2MB');
+                      return;
+                    }
+                    const reader = new FileReader();
+                    reader.onload = (ev) => {
+                      const result = ev.target?.result as string;
+                      updateForm({ ...form, avatar_url: result });
+                    };
+                    reader.onerror = () => {
+                      showToast({ message: '头像读取失败，请重试', type: 'error' });
+                    };
+                    reader.readAsDataURL(file);
+                  }}
+                />
+              </label>
+            </div>
+            <div className="flex-1">
+              <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">头像</label>
+              <p className="text-[11px] text-text-muted">点击更换头像，支持 JPG/PNG，不超过 2MB</p>
+              {form.avatar_url && (
+                <button
+                  type="button"
+                  onClick={() => updateForm({ ...form, avatar_url: '' })}
+                  className="text-[11px] text-red-400 hover:text-red-500 mt-1"
+                >
+                  移除头像
+                </button>
+              )}
+            </div>
+          </div>
+
           <div>
             <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">昵称</label>
             <input
               type="text"
               value={form.nickname}
-              onChange={(e) => setForm({ ...form, nickname: e.target.value })}
+              onChange={(e) => updateForm({ ...form, nickname: e.target.value })}
               placeholder="输入昵称..."
               className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
             />
@@ -225,7 +303,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
             <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">性别</label>
             <select
               value={form.gender}
-              onChange={(e) => setForm({ ...form, gender: e.target.value })}
+              onChange={(e) => updateForm({ ...form, gender: e.target.value })}
               className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
             >
               <option value="">请选择</option>
@@ -241,7 +319,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
               <input
                 type="number"
                 value={form.age ?? ''}
-                onChange={(e) => setForm({ ...form, age: e.target.value ? Number(e.target.value) : null })}
+                onChange={(e) => updateForm({ ...form, age: e.target.value ? Number(e.target.value) : null })}
                 placeholder="年龄"
                 className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
               />
@@ -251,7 +329,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
               <input
                 type="number"
                 value={form.height ?? ''}
-                onChange={(e) => setForm({ ...form, height: e.target.value ? Number(e.target.value) : null })}
+                onChange={(e) => updateForm({ ...form, height: e.target.value ? Number(e.target.value) : null })}
                 placeholder="身高"
                 className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
               />
@@ -261,7 +339,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
               <input
                 type="number"
                 value={form.weight ?? ''}
-                onChange={(e) => setForm({ ...form, weight: e.target.value ? Number(e.target.value) : null })}
+                onChange={(e) => updateForm({ ...form, weight: e.target.value ? Number(e.target.value) : null })}
                 placeholder="体重"
                 className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
               />
@@ -274,7 +352,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
               <input
                 type="text"
                 value={form.occupation}
-                onChange={(e) => setForm({ ...form, occupation: e.target.value })}
+                onChange={(e) => updateForm({ ...form, occupation: e.target.value })}
                 placeholder="输入职业..."
                 className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
               />
@@ -283,7 +361,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
               <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">学历</label>
               <select
                 value={form.education}
-                onChange={(e) => setForm({ ...form, education: e.target.value })}
+                onChange={(e) => updateForm({ ...form, education: e.target.value })}
                 className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
               >
                 <option value="">请选择</option>
@@ -299,7 +377,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
             <TagSelector
               options={HOBBY_OPTIONS}
               selected={form.hobbies}
-              onChange={(hobbies) => setForm({ ...form, hobbies })}
+              onChange={(hobbies) => updateForm({ ...form, hobbies })}
               customInput={hobbyCustomInput}
               onCustomInputChange={setHobbyCustomInput}
               onCustomInputConfirm={addHobbyCustomTag}
@@ -311,7 +389,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
             <TagSelector
               options={PERSONALITY_OPTIONS}
               selected={form.personality}
-              onChange={(personality) => setForm({ ...form, personality })}
+              onChange={(personality) => updateForm({ ...form, personality })}
               customInput={personalityCustomInput}
               onCustomInputChange={setPersonalityCustomInput}
               onCustomInputConfirm={addPersonalityCustomTag}
@@ -322,7 +400,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
             <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">目标</label>
             <textarea
               value={form.goals}
-              onChange={(e) => setForm({ ...form, goals: e.target.value })}
+              onChange={(e) => updateForm({ ...form, goals: e.target.value })}
               placeholder="描述你的目标..."
               rows={2}
               className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 resize-none bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
@@ -333,7 +411,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
             <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">自我介绍</label>
             <textarea
               value={form.bio}
-              onChange={(e) => setForm({ ...form, bio: e.target.value })}
+              onChange={(e) => updateForm({ ...form, bio: e.target.value })}
               placeholder="介绍一下自己..."
               rows={3}
               className="w-full px-3 py-2 border border-border dark:border-gray-600 rounded-lg focus:outline-none focus:border-user focus:ring-1 focus:ring-user/20 resize-none bg-bg-surface dark:bg-gray-700 text-text-primary dark:text-gray-200"
@@ -348,7 +426,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
             </div>
           )}
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="flex-1 px-4 py-2 border border-border dark:border-gray-600 rounded-lg text-text-secondary dark:text-gray-400 hover:bg-bg-surface2 dark:hover:bg-gray-700 transition-all duration-200"
           >
             取消

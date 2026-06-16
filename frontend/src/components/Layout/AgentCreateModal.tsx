@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useAgentsStore } from '../../stores/agentsStore';
-import { AgentQuestion } from '../../types';
+import { AgentQuestion, Agent } from '../../types';
 import { useToast } from '../Common';
 
 interface AgentCreateModalProps {
@@ -36,6 +36,9 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [loadingQuestions, setLoadingQuestions] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [createdAgent, setCreatedAgent] = useState<Agent | null>(null);
+  const creatingRef = useRef(false);
+  const avatarFileInputRef = useRef<HTMLInputElement>(null);
 
   const isStep1Valid = name.trim() && description.trim() && openingMessage.trim();
 
@@ -63,27 +66,29 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
   };
 
   const handleAvatarClick = () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*';
-    input.onchange = (e) => {
-      const file = (e.target as HTMLInputElement).files?.[0];
-      if (!file) return;
-      if (file.size > 2 * 1024 * 1024) {
-        showToast({ message: '图片大小不能超过2MB', type: 'error' });
-        return;
-      }
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        setAvatarFile(ev.target?.result as string);
-        setAvatarPreview(ev.target?.result as string);
-      };
-      reader.readAsDataURL(file);
+    avatarFileInputRef.current?.click();
+  };
+
+  const handleAvatarFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 2 * 1024 * 1024) {
+      showToast({ message: '图片大小不能超过2MB', type: 'error' });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      setAvatarFile(ev.target?.result as string);
+      setAvatarPreview(ev.target?.result as string);
     };
-    input.click();
+    reader.readAsDataURL(file);
+    // 重置 input 以允许重新选择同一文件
+    e.target.value = '';
   };
 
   const handleCreate = async () => {
+    if (creatingRef.current) return;
+    creatingRef.current = true;
     let capabilities = {
       scheduled_tasks: false,
       web_search: false,
@@ -105,9 +110,10 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
     }
 
     setCreating(true);
+    setCreatedAgent(null);
     setStep(3);
     try {
-      await createAgent({
+      const created = await createAgent({
         name: name.trim(),
         description: description.trim(),
         openingMessage: openingMessage.trim(),
@@ -115,17 +121,21 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
         capabilities,
         avatarUrl: avatarFile || null,
       });
-      showToast({ message: '智能体创建成功', type: 'success' });
-      handleClose();
-    } catch {
-      showToast({ message: '创建智能体失败', type: 'error' });
+      setCreatedAgent(created);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : '创建智能体失败';
+      showToast({ message: msg, type: 'error' });
       setStep(2);
     } finally {
       setCreating(false);
+      creatingRef.current = false;
     }
   };
 
   const handleClose = () => {
+    if (step === 1 && (name || description || openingMessage)) {
+      if (!window.confirm('放弃已填写的内容？')) return;
+    }
     setStep(1);
     setName('');
     setAvatarFile(null);
@@ -137,6 +147,7 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
     setAnswers({});
     setLoadingQuestions(false);
     setCreating(false);
+    setCreatedAgent(null);
     onClose();
   };
 
@@ -144,6 +155,13 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={handleClose}>
+      <input
+        ref={avatarFileInputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleAvatarFileChange}
+        hidden
+      />
       <div
         className="w-full max-w-md bg-bg-surface rounded-2xl shadow-2xl border border-border-subtle overflow-hidden animate-fade-in"
         onClick={(e) => e.stopPropagation()}
@@ -154,7 +172,7 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
               {step}/3
             </span>
             <h2 className="text-base font-semibold text-text-primary">
-              {step === 1 ? '创建智能体' : step === 2 ? 'AI 问答配置' : '正在创建'}
+              {step === 1 ? '创建智能体' : step === 2 ? 'AI 问答配置' : (createdAgent ? '创建成功' : '正在创建')}
             </h2>
           </div>
           <button
@@ -245,14 +263,12 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
                 <button
                   type="button"
                   onClick={() => setEnableSuggestions(!enableSuggestions)}
-                  className={`relative w-11 h-6 rounded-full transition-all duration-200 ${
-                    enableSuggestions ? 'bg-accent' : 'bg-bg-surface2'
-                  }`}
+                  className={`relative w-11 h-6 rounded-full transition-all duration-200 ${enableSuggestions ? 'bg-accent' : 'bg-bg-surface2'
+                    }`}
                 >
                   <span
-                    className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-all duration-200 ${
-                      enableSuggestions ? 'left-[22px]' : 'left-0.5'
-                    }`}
+                    className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-all duration-200 ${enableSuggestions ? 'left-[22px]' : 'left-0.5'
+                      }`}
                   />
                 </button>
               </div>
@@ -271,7 +287,19 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
                 </div>
               ) : questions.length > 0 ? (
                 <>
-                  <p className="text-xs text-text-muted">请回答以下问题，帮助智能体了解自身能力</p>
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-text-muted">请回答以下问题，帮助智能体了解自身能力</p>
+                    <button
+                      onClick={handleNextStep}
+                      disabled={loadingQuestions}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-accent bg-accent/10 rounded-lg hover:bg-accent/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z" />
+                      </svg>
+                      AI生成问答
+                    </button>
+                  </div>
                   {questions.map((q) => (
                     <div key={q.id}>
                       <label className="block text-sm text-text-primary mb-1.5">{q.question}</label>
@@ -294,13 +322,76 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
           )}
 
           {step === 3 && (
-            <div className="flex flex-col items-center justify-center py-8">
-              <svg className="w-12 h-12 text-accent animate-spin" viewBox="0 0 24 24" fill="none">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-              </svg>
-              <p className="text-sm text-text-primary font-medium mt-4">正在创建智能体...</p>
-              <p className="text-xs text-text-muted mt-2 text-center">AI架构师正在为智能体分配模型角色并优化系统提示</p>
+            <div className="space-y-4">
+              {creating && !createdAgent ? (
+                <div className="flex flex-col items-center justify-center py-8">
+                  <svg className="w-12 h-12 text-accent animate-spin" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                  <p className="text-sm text-text-primary font-medium mt-4">正在创建智能体...</p>
+                  <div className="mt-3 space-y-2 w-full max-w-[280px]">
+                    <div className="flex items-center gap-2 text-xs text-text-muted">
+                      <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse flex-shrink-0" />
+                      <span>deepseek-v4-pro 正在分析需求，设计架构...</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-text-muted">
+                      <span className="w-1.5 h-1.5 rounded-full bg-bg-surface2 flex-shrink-0" />
+                      <span>从系统全部AI中筛选最优模型组合...</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-text-muted">
+                      <span className="w-1.5 h-1.5 rounded-full bg-bg-surface2 flex-shrink-0" />
+                      <span>Qwen3.5-Flash 正在评审优化系统提示词...</span>
+                    </div>
+                  </div>
+                </div>
+              ) : createdAgent ? (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3">
+                    <div
+                      className="w-12 h-12 rounded-full flex items-center justify-center text-white text-lg font-semibold shadow-sm overflow-hidden flex-shrink-0"
+                      style={{ backgroundColor: createdAgent.avatar_url ? undefined : '#10b981' }}
+                    >
+                      {createdAgent.avatar_url ? (
+                        <img src={createdAgent.avatar_url} className="w-full h-full rounded-full object-cover" alt={createdAgent.name} />
+                      ) : (
+                        '✓'
+                      )}
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-text-primary">{createdAgent.name}</p>
+                      <p className="text-xs text-text-muted">多AI协同创建完成</p>
+                    </div>
+                  </div>
+                  {createdAgent.model_roles && createdAgent.model_roles.length > 0 && (
+                    <div className="bg-bg-surface2 rounded-xl p-3 space-y-2">
+                      <p className="text-xs font-medium text-text-secondary">多AI协同筛选的模型团队：</p>
+                      {createdAgent.model_roles.map((role, i) => (
+                        <div key={i} className="flex items-center gap-2 text-xs">
+                          <span className="w-1.5 h-1.5 rounded-full bg-accent flex-shrink-0"></span>
+                          <span className="text-text-primary font-medium">{role.modelId}</span>
+                          <span className="text-text-muted">- {role.role}</span>
+                        </div>
+                      ))}
+                      {createdAgent.model_selection_reasoning && (
+                        <p className="text-xs text-text-muted mt-2 pt-2 border-t border-border-subtle">
+                          {createdAgent.model_selection_reasoning}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => { handleClose(); }}
+                    className="w-full py-2.5 text-sm font-medium text-white bg-accent rounded-[10px] hover:bg-accent-hover transition-colors"
+                  >
+                    完成
+                  </button>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-8">
+                  <p className="text-sm text-red-500">创建失败，请重试</p>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -330,12 +421,17 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
             >
               创建智能体
             </button>
-          ) : (
-            <button
-              disabled
-              className="flex-1 py-2.5 text-sm font-medium text-white bg-accent/50 rounded-[10px] cursor-not-allowed"
-            >
+          ) : creating && !createdAgent ? (
+            <button disabled className="flex-1 py-2.5 text-sm font-medium text-white bg-accent/50 rounded-[10px] cursor-not-allowed">
               创建中...
+            </button>
+          ) : createdAgent ? (
+            <button onClick={handleClose} className="flex-1 py-2.5 text-sm font-medium text-text-secondary bg-transparent border border-border rounded-[10px] hover:bg-bg-surface2 transition-colors">
+              关闭
+            </button>
+          ) : (
+            <button onClick={handleCreate} className="flex-1 py-2.5 text-sm font-medium text-white bg-accent rounded-[10px] hover:bg-accent-hover transition-colors">
+              重试
             </button>
           )}
         </div>

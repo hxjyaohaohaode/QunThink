@@ -18,6 +18,8 @@ function escapeHtml(str) {
 function sanitizeString(input, maxLength = 10000) {
   if (typeof input !== 'string') return input;
   let sanitized = input;
+  // 移除零宽字符（Zero Width Characters）
+  sanitized = sanitized.replace(/[\u200B-\u200F\uFEFF]/g, '');
   if (sanitized.length > maxLength) {
     sanitized = sanitized.substring(0, maxLength);
   }
@@ -62,7 +64,9 @@ const GROUP_SANITIZE_CONFIG = {
 };
 
 const MESSAGE_SANITIZE_CONFIG = {
-  maxLengthFields: { content: 10000 }
+  maxLengthFields: { content: 10000 },
+  escapeHtmlFields: ['content'],
+  trimFields: ['content'],
 };
 
 const COMMENT_SANITIZE_CONFIG = {

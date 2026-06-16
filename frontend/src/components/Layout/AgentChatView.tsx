@@ -125,8 +125,19 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sendingRef = useRef(false);
 
   const agent = currentAgent || agents.find((a) => a.id === agentId);
+
+  if (!agent) {
+    return (
+      <div className="h-full flex flex-col bg-bg-primary items-center justify-center">
+        <div className="text-text-muted text-sm">该智能体不存在或已被删除</div>
+        <button onClick={onBack} className="mt-4 px-4 py-2 text-sm text-accent hover:underline">返回</button>
+      </div>
+    );
+  }
+
   const messages = agentMessages.get(agentId) || [];
   const isAgentStreaming = messages.some((m) => m.is_streaming);
 
@@ -186,7 +197,14 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
       let isCancelled = false;
       initialFetchedRef.current = true;
       setLoadingSuggestions(true);
-      fetchAgentSuggestions(agentId).then(suggestions => {
+      const fetchWithRetry = async (retries = 1): Promise<string[]> => {
+        const suggestions = await fetchAgentSuggestions(agentId);
+        if (suggestions.length === 0 && retries > 0) {
+          return fetchWithRetry(retries - 1);
+        }
+        return suggestions;
+      };
+      fetchWithRetry().then(suggestions => {
         if (isCancelled || !mountedRef.current) return;
         if (suggestions.length === 0) {
           suggestions = getLocalSuggestions(true);
@@ -194,10 +212,10 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
         setInitialSuggestions(suggestions);
         setLoadingSuggestions(false);
       }).catch(() => {
-        if (isCancelled && mountedRef.current) {
+        if (!isCancelled && mountedRef.current) {
           setInitialSuggestions(getLocalSuggestions(true));
-          setLoadingSuggestions(false);
         }
+        if (mountedRef.current) setLoadingSuggestions(false);
       });
       return () => { isCancelled = true; };
     }
@@ -208,7 +226,14 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
         historyFetchKeyRef.current = fetchKey;
         let isCancelled = false;
         setLoadingSuggestions(true);
-        fetchAgentSuggestions(agentId).then(suggestions => {
+        const fetchWithRetry2 = async (retries = 1): Promise<string[]> => {
+          const suggestions = await fetchAgentSuggestions(agentId);
+          if (suggestions.length === 0 && retries > 0) {
+            return fetchWithRetry2(retries - 1);
+          }
+          return suggestions;
+        };
+        fetchWithRetry2().then(suggestions => {
           if (isCancelled || !mountedRef.current) return;
           if (suggestions.length === 0) {
             suggestions = getLocalSuggestions(false);
@@ -218,13 +243,13 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
           }
           setLoadingSuggestions(false);
         }).catch(() => {
-          if (isCancelled && mountedRef.current) {
+          if (!isCancelled && mountedRef.current) {
             const fallback = getLocalSuggestions(false);
             if (fallback.length > 0) {
               setActiveSuggestions({ msgId: lastFinishedAgentMsgId, items: fallback });
             }
-            setLoadingSuggestions(false);
           }
+          if (mountedRef.current) setLoadingSuggestions(false);
         });
         return () => { isCancelled = true; };
       }
@@ -285,6 +310,8 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   const handleSend = useCallback(async (overrideMessage?: string) => {
     const content = (overrideMessage || inputValue).trim();
     if ((!content && attachedFiles.length === 0) || isSending || isAgentStreaming) return;
+    if (sendingRef.current) return;
+    sendingRef.current = true;
 
     const messageText = content || (attachedFiles.length > 0 ? `请分析我上传的${attachedFiles.length}个文件` : '');
     const filesToSend = [...attachedFiles];
@@ -298,6 +325,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
     } catch {
     } finally {
       if (mountedRef.current) setIsSending(false);
+      sendingRef.current = false;
     }
   }, [inputValue, attachedFiles, isSending, isAgentStreaming, agentId, clearSuggestions, sendAgentMessage]);
 
@@ -309,22 +337,24 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   }, [handleSend]);
 
   const handleSuggestionClick = useCallback((suggestion: string) => {
+    setInputValue(suggestion);
+    setAttachedFiles([]);
     clearSuggestions();
     setTimeout(() => {
-      if (mountedRef.current) handleSend(suggestion);
-    }, 80);
-  }, [clearSuggestions, handleSend]);
+      inputRef.current?.focus();
+    }, 50);
+  }, [clearSuggestions]);
 
   const displayMessages: AgentChatMessage[] = messages.length > 0
     ? messages
     : agent
       ? [{
-          id: 'opening',
-          agent_id: agentId,
-          sender_type: 'agent',
-          content: agent.opening_message,
-          created_at: agent.created_at,
-        }]
+        id: 'opening',
+        agent_id: agentId,
+        sender_type: 'agent',
+        content: agent.opening_message,
+        created_at: agent.created_at,
+      }]
       : [];
 
   const avatarColor = agent ? getAvatarColor(agent.name) : '#737373';
@@ -385,11 +415,10 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
               )}
               <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} max-w-[75%]`}>
                 <div
-                  className={`px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${
-                    isUser
-                      ? 'bg-accent text-white rounded-tr-sm'
-                      : 'bg-bg-surface text-text-primary rounded-tl-sm border border-border-subtle'
-                  }`}
+                  className={`px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${isUser
+                    ? 'bg-accent text-white rounded-tr-sm'
+                    : 'bg-bg-surface text-text-primary rounded-tl-sm border border-border-subtle'
+                    }`}
                 >
                   {msg.is_streaming && !msg.content ? (
                     <div className="flex items-center gap-1.5 py-1">
@@ -404,11 +433,10 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
                           {msg.attachments.map((att, idx) => (
                             <span
                               key={idx}
-                              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs ${
-                                isUser
-                                  ? 'bg-white/20 text-white/90'
-                                  : 'bg-bg-surface2 text-text-secondary'
-                              }`}
+                              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs ${isUser
+                                ? 'bg-white/20 text-white/90'
+                                : 'bg-bg-surface2 text-text-secondary'
+                                }`}
                             >
                               <span>{att.type === 'image' ? '🖼️' : att.type === 'audio' ? '🎵' : att.type === 'video' ? '🎬' : '📄'}</span>
                               <span className="max-w-[120px] truncate">{att.filename}</span>

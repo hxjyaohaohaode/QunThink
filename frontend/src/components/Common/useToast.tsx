@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { Toast, ToastType } from './Toast';
 
 interface ToastOptions {
@@ -12,22 +12,27 @@ interface ToastState {
   message: string;
   type: ToastType;
   duration: number;
+  toastId: number;
 }
 
 export function useToast() {
+  const toastIdRef = useRef(0);
   const [state, setState] = useState<ToastState>({
     visible: false,
     message: '',
     type: 'info',
     duration: 2500,
+    toastId: 0,
   });
 
   const showToast = useCallback((options: ToastOptions) => {
+    toastIdRef.current += 1;
     setState({
       visible: true,
       message: options.message,
       type: options.type || 'info',
       duration: options.duration || 2500,
+      toastId: toastIdRef.current,
     });
   }, []);
 
@@ -41,6 +46,7 @@ export function useToast() {
       message={state.message}
       type={state.type}
       duration={state.duration}
+      toastId={state.toastId}
       onClose={handleClose}
     />
   );

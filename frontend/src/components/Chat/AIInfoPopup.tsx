@@ -12,12 +12,12 @@ interface AIInfoPopupProps {
 
 const AI_MODEL_INFO: Record<string, { model: string; provider: string; description: string }> = {
   deepseek: {
-    model: 'deepseek-chat',
+    model: 'deepseek-v4-flash',
     provider: 'DeepSeek',
     description: '通用对话模型，兼顾逻辑推理、日常问答与代码协助。',
   },
   deepseek_reasoner: {
-    model: 'deepseek-reasoner',
+    model: 'deepseek-v4-pro',
     provider: 'DeepSeek',
     description: '推理增强模型，适合复杂分析和多步骤思考。',
   },
@@ -37,17 +37,17 @@ const AI_MODEL_INFO: Record<string, { model: string; provider: string; descripti
     description: '增强版快速模型，具备更强的分析和上下文处理能力。',
   },
   mimo_flash: {
-    model: 'mimo-v2.5',
+    model: 'mimo-v2.5-pro',
     provider: 'Mimo',
     description: '最新版 MiMo 模型，速度与质量兼顾，回复简洁直接。',
   },
   mimo_omni: {
-    model: 'mimo-v2-omni',
+    model: 'mimo-v2.5',
     provider: 'Mimo',
     description: '多模态模型，适合理解跨文本与媒体信息。',
   },
   mimo_tts: {
-    model: 'mimo-v2-tts',
+    model: 'mimo-v2.5-tts-voicedesign',
     provider: 'Mimo',
     description: '语音合成模型，可将文本转成自然流畅的语音。',
   },
@@ -113,7 +113,7 @@ export function AIInfoPopup({ aiId, isOpen, onClose, position }: AIInfoPopupProp
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
-        className="fixed z-50 w-80 rounded-2xl border border-border-subtle bg-bg-surface p-4 shadow-2xl"
+        className="fixed z-50 w-80 rounded-2xl border border-border-subtle bg-bg-surface p-4 shadow-2xl popover-content"
         style={{
           left: adjustedPosition ? `${adjustedPosition.x}px` : '50%',
           top: adjustedPosition ? `${adjustedPosition.y}px` : '50%',

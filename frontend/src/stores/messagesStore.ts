@@ -19,7 +19,7 @@ interface MessagesState {
   streamUpdateCounter: number;
   pagination: Record<string, PaginationState>;
   loading: boolean;
-  sending: boolean;
+  sending: Record<string, boolean>;
   error: string | null;
   fetchMessages: (groupId: string) => Promise<void>;
   loadMoreMessages: (groupId: string) => Promise<void>;
@@ -52,9 +52,11 @@ interface MessagesState {
 const persistTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 const pendingSaveMessages: Record<string, Message[]> = {};
 const MAX_CACHED_GROUPS = 15;
+const MAX_COMMENT_DEPTH = 10;
 const MESSAGE_STALE_TIME_MS = 10 * 1000;
 const messageFetchPromises = new Map<string, Promise<void>>();
 const lastMessageFetchAt = new Map<string, number>();
+const streamTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
 function applyLikeState(messages: Message[], messageId: string, userId: string, liked: boolean): Message[] {
   return messages.map(message => {
@@ -151,7 +153,7 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
   streamUpdateCounter: 0,
   pagination: {},
   loading: false,
-  sending: false,
+  sending: {},
   error: null,
 
   fetchMessages: async (groupId: string) => {
@@ -238,30 +240,30 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
   loadMoreMessages: async (groupId: string) => {
     const state = get();
     const pagination = state.pagination[groupId];
-    
+
     if (!pagination || pagination.loadingMore || !pagination.hasMore) {
       return;
     }
-    
+
     const currentMessages = state.messages[groupId] || [];
     if (currentMessages.length === 0) return;
-    
+
     const oldestMessage = currentMessages[0];
     const before = oldestMessage.created_at;
-    
+
     set(state => ({
       pagination: {
         ...state.pagination,
         [groupId]: { ...pagination, loadingMore: true }
       }
     }));
-    
+
     try {
       const response = await api.getMessages(groupId, 50, before);
       const olderMessages = response.messages || [];
       const hasMore = response.hasMore || false;
       const newOldestMessageId = olderMessages.length > 0 ? olderMessages[0].id : pagination.oldestMessageId;
-      
+
       set(state => ({
         messages: {
           ...state.messages,
@@ -278,7 +280,8 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
         pagination: {
           ...state.pagination,
           [groupId]: { ...pagination, loadingMore: false }
-        }
+        },
+        error: error instanceof Error ? error.message : '加载更多消息失败'
       }));
     }
   },
@@ -289,8 +292,8 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
     }
 
     sendingGroups.set(groupId, true);
-    set({ sending: true, error: null });
-    
+    set(state => ({ sending: { ...state.sending, [groupId]: true }, error: null }));
+
     const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     const tempMessage: Message = {
       id: tempId,
@@ -305,9 +308,10 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
       status: 'sending',
       tempId
     };
-    
+
     get().addMessage(groupId, tempMessage);
-    
+    pendingMessages.set(tempId, { tempId, groupId });
+
     try {
       const message = await api.sendMessage(groupId, content, 'text', replyTo, undefined, attachments);
 
@@ -318,17 +322,17 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
             m.tempId === tempId ? { ...message, status: 'sent', tempId } : m
           )
         },
-        sending: false
+        sending: { ...state.sending, [groupId]: false }
       }));
 
       pendingMessages.delete(tempId);
-      
+
       const groupsStore = useGroupsStore.getState();
       const group = groupsStore.groups?.find(g => g.id === groupId);
       if (group?.ai_members && group.ai_members.length > 0) {
         triggerAITypingIndicators(groupId, group.ai_members);
       }
-      
+
       return { success: true, tempId };
     } catch (error) {
       set(state => ({
@@ -339,9 +343,9 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
           )
         },
         error: error instanceof Error ? error.message : String(error),
-        sending: false
+        sending: { ...state.sending, [groupId]: false }
       }));
-      
+
       pendingMessages.delete(tempId);
       return { success: false, tempId, error: error instanceof Error ? error.message : String(error) };
     } finally {
@@ -352,11 +356,11 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
   retryMessage: async (groupId: string, tempId: string) => {
     const state = get();
     const failedMessage = (state.messages[groupId] || []).find(m => m.tempId === tempId);
-    
+
     if (!failedMessage) {
       return { success: false, error: '消息不存在' };
     }
-    
+
     set(state => ({
       messages: {
         ...state.messages,
@@ -364,13 +368,13 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
           m.tempId === tempId ? { ...m, status: 'sending' } : m
         )
       },
-      sending: true,
+      sending: { ...state.sending, [groupId]: true },
       error: null
     }));
-    
+
     try {
-      const message = await api.sendMessage(groupId, failedMessage.content, 'text', failedMessage.reply_to);
-      
+      const message = await api.sendMessage(groupId, failedMessage.content, 'text', failedMessage.reply_to, undefined, failedMessage.attachments);
+
       set(state => ({
         messages: {
           ...state.messages,
@@ -378,9 +382,9 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
             m.tempId === tempId ? { ...message, status: 'sent' } : m
           )
         },
-        sending: false
+        sending: { ...state.sending, [groupId]: false }
       }));
-      
+
       return { success: true };
     } catch (error) {
       set(state => ({
@@ -391,9 +395,9 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
           )
         },
         error: error instanceof Error ? error.message : String(error),
-        sending: false
+        sending: { ...state.sending, [groupId]: false }
       }));
-      
+
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   },
@@ -408,16 +412,15 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
   },
 
   deleteMessage: async (messageId: string, groupId: string) => {
+    const removedMessages = (get().messages[groupId] || []).filter(m => m.id === messageId);
+    set(state => ({
+      messages: {
+        ...state.messages,
+        [groupId]: (state.messages[groupId] || []).filter(m => m.id !== messageId)
+      }
+    }));
     try {
       await api.deleteMessage(messageId);
-
-      set(state => ({
-        messages: {
-          ...state.messages,
-          [groupId]: (state.messages[groupId] || []).filter(m => m.id !== messageId)
-        }
-      }));
-
       for (const [tempId, entry] of pendingMessages.entries()) {
         if (entry.groupId === groupId) {
           pendingMessages.delete(tempId);
@@ -425,46 +428,65 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
       }
     } catch (error) {
       console.error('Failed to delete message:', error);
+      set({ error: error instanceof Error ? error.message : '删除消息失败' });
+      if (removedMessages.length > 0) {
+        set(state => ({
+          messages: {
+            ...state.messages,
+            [groupId]: [...(state.messages[groupId] || []), ...removedMessages]
+          }
+        }));
+      }
     }
   },
 
   editMessage: async (messageId: string, groupId: string, content: string) => {
     try {
       const updatedMessage = await api.editMessage(messageId, content);
-      
+
       set(state => ({
         messages: {
           ...state.messages,
           [groupId]: (state.messages[groupId] || []).map(m =>
-            m.id === messageId 
-              ? { 
-                  ...m, 
-                  content: updatedMessage.content || content,
-                  is_edited: true,
-                  edited_at: updatedMessage.edited_at || new Date().toISOString()
-                } 
+            m.id === messageId
+              ? {
+                ...m,
+                content: updatedMessage.content || content,
+                is_edited: true,
+                edited_at: updatedMessage.edited_at || new Date().toISOString()
+              }
               : m
           )
         }
       }));
     } catch (error) {
       console.error('Failed to edit message:', error);
+      set({ error: error instanceof Error ? error.message : '编辑消息失败' });
       throw error;
     }
   },
 
   batchDeleteMessages: async (messageIds: string[], groupId: string) => {
+    const removedMessages = (get().messages[groupId] || []).filter(m => messageIds.includes(m.id));
+    set(state => ({
+      messages: {
+        ...state.messages,
+        [groupId]: (state.messages[groupId] || []).filter(m => !messageIds.includes(m.id))
+      }
+    }));
     try {
       await api.batchDeleteMessages(messageIds, groupId);
-
-      set(state => ({
-        messages: {
-          ...state.messages,
-          [groupId]: (state.messages[groupId] || []).filter(m => !messageIds.includes(m.id))
-        }
-      }));
     } catch (error) {
       console.error('Failed to batch delete messages:', error);
+      set({ error: error instanceof Error ? error.message : '批量删除消息失败' });
+      if (removedMessages.length > 0) {
+        set(state => ({
+          messages: {
+            ...state.messages,
+            [groupId]: [...(state.messages[groupId] || []), ...removedMessages]
+          }
+        }));
+      }
       throw error;
     }
   },
@@ -482,6 +504,7 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
       clearAllMessagesFromIndexedDB(groupId);
     } catch (error) {
       console.error('Failed to clear all messages:', error);
+      set({ error: error instanceof Error ? error.message : '清空消息失败' });
       throw error;
     }
   },
@@ -517,9 +540,9 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
           : { ...existing, ...message, status: (message.status || existing.status) as Message['status'] };
 
         if (existing.content === updatedMessage.content &&
-            existing.status === updatedMessage.status &&
-            existing.is_streaming === updatedMessage.is_streaming &&
-            existing.reply_to === updatedMessage.reply_to) {
+          existing.status === updatedMessage.status &&
+          existing.is_streaming === updatedMessage.is_streaming &&
+          existing.reply_to === updatedMessage.reply_to) {
           return state;
         }
 
@@ -546,6 +569,7 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
   },
 
   likeMessage: async (messageId: string, groupId: string, _userId: string = 'user') => {
+    get().applyLikeUpdate(messageId, groupId, _userId);
     try {
       const result = await api.likeMessage(messageId);
       set(state => {
@@ -563,10 +587,12 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
       });
     } catch (error) {
       console.error('Failed to like message:', error);
+      get().applyUnlikeUpdate(messageId, groupId, _userId);
     }
   },
 
   unlikeMessage: async (messageId: string, groupId: string, _userId: string = 'user') => {
+    get().applyUnlikeUpdate(messageId, groupId, _userId);
     try {
       const result = await api.unlikeMessage(messageId);
       set(state => {
@@ -584,10 +610,12 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
       });
     } catch (error) {
       console.error('Failed to unlike message:', error);
+      get().applyLikeUpdate(messageId, groupId, _userId);
     }
   },
 
   dislikeMessage: async (messageId: string, groupId: string, _userId: string = 'user') => {
+    get().applyDislikeUpdate(messageId, groupId, _userId);
     try {
       const result = await api.dislikeMessage(messageId);
       set(state => ({
@@ -596,20 +624,22 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
           [groupId]: (state.messages[groupId] || []).map(message =>
             message.id === messageId
               ? {
-                  ...message,
-                  disliked_by: result.disliked_by || [],
-                  dislikes: result.dislikes ?? (result.disliked_by || []).length
-                }
+                ...message,
+                disliked_by: result.disliked_by || [],
+                dislikes: result.dislikes ?? (result.disliked_by || []).length
+              }
               : message
           )
         }
       }));
     } catch (error) {
       console.error('Failed to dislike message:', error);
+      get().applyUndislikeUpdate(messageId, groupId, _userId);
     }
   },
 
   undislikeMessage: async (messageId: string, groupId: string, _userId: string = 'user') => {
+    get().applyUndislikeUpdate(messageId, groupId, _userId);
     try {
       const result = await api.undislikeMessage(messageId);
       set(state => ({
@@ -618,16 +648,17 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
           [groupId]: (state.messages[groupId] || []).map(message =>
             message.id === messageId
               ? {
-                  ...message,
-                  disliked_by: result.disliked_by || [],
-                  dislikes: result.dislikes ?? (result.disliked_by || []).length
-                }
+                ...message,
+                disliked_by: result.disliked_by || [],
+                dislikes: result.dislikes ?? (result.disliked_by || []).length
+              }
               : message
           )
         }
       }));
     } catch (error) {
       console.error('Failed to undislike message:', error);
+      get().applyDislikeUpdate(messageId, groupId, _userId);
     }
   },
 
@@ -676,33 +707,37 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
         const groupMessages = state.messages[groupId] || [];
         const existingComments = groupMessages.find(m => m.id === messageId)?.comments || [];
         const existingCommentIds = new Set(existingComments.map(c => c.id));
-        
+
         if (serverComment.id && existingCommentIds.has(serverComment.id)) {
           return state;
         }
-        
+
         const parentComment = parentId ? existingComments.find(c => c.id === parentId) : null;
         const parentDepth = parentComment?.depth || 0;
-        
+        const effectiveParentId = parentDepth >= MAX_COMMENT_DEPTH ? undefined : parentId;
+        const effectiveReplyTo = parentDepth >= MAX_COMMENT_DEPTH ? undefined : replyTo;
+        const commentDepth = parentDepth >= MAX_COMMENT_DEPTH ? 0 : parentDepth + 1;
+
         const newComment: Comment = serverComment.id ? {
           id: serverComment.id,
           message_id: serverComment.message_id || messageId,
-          parent_id: serverComment.parent_id || parentId,
-          reply_to: serverComment.reply_to,
+          parent_id: serverComment.parent_id || effectiveParentId,
+          reply_to: serverComment.reply_to || effectiveReplyTo,
           sender_type: serverComment.sender_type || senderType,
           sender_id: serverComment.sender_id || senderId,
           content: serverComment.content || content,
           created_at: serverComment.created_at || new Date().toISOString(),
-          depth: serverComment.depth ?? (parentDepth + 1)
+          depth: serverComment.depth ?? commentDepth
         } : {
           id: `comment_${Date.now()}`,
           message_id: messageId,
-          parent_id: parentId,
+          parent_id: effectiveParentId,
+          reply_to: effectiveReplyTo,
           sender_type: senderType,
           sender_id: senderId,
           content,
           created_at: new Date().toISOString(),
-          depth: parentDepth + 1
+          depth: commentDepth
         };
 
         return {
@@ -726,6 +761,7 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
       });
     } catch (error) {
       console.error('Failed to add comment:', error);
+      set({ error: error instanceof Error ? error.message : '添加评论失败' });
     }
   },
 
@@ -734,7 +770,7 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
       const groupMessages = state.messages[groupId] || [];
       const existingMessage = groupMessages.find(m => m.id === messageId);
       if (!existingMessage) return state;
-      
+
       const existingComments = existingMessage.comments || [];
       if (existingComments.some(c => c.id === comment.id)) {
         return state;
@@ -778,9 +814,9 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
     set(state => {
       const groupMessages = state.messages[groupId] || [];
       const exists = groupMessages.some(m => m.id === messageId);
-      
+
       if (exists) return state;
-      
+
       const streamMessage: Message = {
         id: messageId,
         group_id: groupId,
@@ -791,7 +827,7 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
         created_at: new Date().toISOString(),
         is_streaming: true
       };
-      
+
       return {
         messages: {
           ...state.messages,
@@ -799,27 +835,27 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
         }
       };
     });
+
+    if (streamTimeouts.has(messageId)) {
+      clearTimeout(streamTimeouts.get(messageId)!);
+    }
+    streamTimeouts.set(messageId, setTimeout(() => {
+      get().finalizeStreamMessage(groupId, messageId, '[流式传输超时，请重新发送]');
+    }, 120000));
   },
 
   updateStreamMessage: (groupId: string, messageId: string, content: string, isDone: boolean) => {
     set(state => {
       const groupMessages = state.messages[groupId] || [];
-      const newMessages = groupMessages.map(m => {
-        if (m.id === messageId) {
-          return { 
-            ...m, 
-            content,
-            is_streaming: !isDone,
-            updated_at: new Date().toISOString()
-          };
-        }
-        return m;
-      });
-      
+      const index = groupMessages.findIndex(m => m.id === messageId);
+      if (index === -1) return state;
+      const updated = { ...groupMessages[index], content, is_streaming: !isDone, updated_at: new Date().toISOString() };
+      const newMessages = [...groupMessages.slice(0, index), updated, ...groupMessages.slice(index + 1)];
+
       return {
         messages: {
           ...state.messages,
-          [groupId]: [...newMessages]
+          [groupId]: newMessages
         },
         streamUpdateCounter: state.streamUpdateCounter + 1
       };
@@ -827,22 +863,26 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
   },
 
   finalizeStreamMessage: (groupId: string, messageId: string, content: string, replyTo?: string | string[], replyToIds?: string[]) => {
+    if (streamTimeouts.has(messageId)) {
+      clearTimeout(streamTimeouts.get(messageId)!);
+      streamTimeouts.delete(messageId);
+    }
     set(state => {
       const groupMessages = state.messages[groupId] || [];
       const existingIndex = groupMessages.findIndex(m => m.id === messageId);
-      
+
       if (existingIndex === -1) {
         if (import.meta.env.DEV) console.log('[Store] finalizeStreamMessage - message not found, skipping:', messageId);
         return state;
       }
-      
+
       return {
         messages: {
           ...state.messages,
           [groupId]: groupMessages.map(m => {
             if (m.id === messageId) {
-              return { 
-                ...m, 
+              return {
+                ...m,
                 content,
                 reply_to: replyTo,
                 reply_to_ids: replyToIds,
@@ -860,6 +900,10 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
 export function resetMessagesModuleState() {
   sendingGroups.clear();
   pendingMessages.clear();
+  for (const timeout of streamTimeouts.values()) {
+    clearTimeout(timeout);
+  }
+  streamTimeouts.clear();
 }
 
 export function useMessagesStore() {

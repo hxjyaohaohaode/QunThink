@@ -5,6 +5,7 @@ import { callAI, callAIStream, normalizeResponse } from '../ai/index.js';
 import { parseFile } from '../fileParser/index.js';
 import { annotateAndDescribe, generateMediaDescription } from '../fileAnnotation/index.js';
 import { AI_PERSONAS } from '../../config/personas.js';
+import { safeLog } from '../../utils/logger.js';
 import path from 'path';
 
 const AVAILABLE_MODELS = [
@@ -27,26 +28,27 @@ function extractJSON(text) {
   if (jsonBlockMatch) {
     try {
       return JSON.parse(jsonBlockMatch[1].trim());
-    } catch {}
+    } catch (e) { safeLog('warn', 'Agent配置解析失败', { error: e?.message }); }
   }
 
   const braceMatch = normalized.match(/\{[\s\S]*\}/);
   if (braceMatch) {
     try {
       return JSON.parse(braceMatch[0]);
-    } catch {}
+    } catch (e) { safeLog('warn', 'Agent消息历史加载失败', { error: e?.message }); }
   }
 
   const bracketMatch = normalized.match(/\[[\s\S]*\]/);
   if (bracketMatch) {
     try {
       return JSON.parse(bracketMatch[0]);
-    } catch {}
+    } catch (e) { safeLog('warn', 'Agent文件描述加载失败', { error: e?.message }); }
   }
 
   try {
     return JSON.parse(normalized);
-  } catch {
+  } catch (e) {
+    safeLog('warn', 'Agent配置加载失败', { error: e?.message });
     return null;
   }
 }
@@ -60,9 +62,12 @@ export async function createAgent(userId, name, description, openingMessage, ena
 
   const modelList = AVAILABLE_MODELS.map(m => `- ${m.id} (${m.name}): 擅长${m.strength}`).join('\n');
 
-  const systemPrompt = '你是一个顶级AI架构师和智能体编排专家。你的职责是：根据用户提供的智能体需求，设计最优的模型角色分配方案和系统提示词。注意：你不是智能体本身，你是智能体的"设计者"，你需要自主创建功能、调用合适的大模型来组建一个完整的智能体。请严格按照JSON格式返回结果。';
+  // ============================================
+  // 第一阶段：deepseek-v4-pro 主导架构设计（总导演）
+  // ============================================
+  const architectSystemPrompt = `你是一个顶级AI架构师和智能体编排专家。你的职责是：作为"总导演"，根据用户需求，从可用模型库中挑选最合适的模型组合，并设计完整的系统提示词。你会调用其他AI来协助你完成不同维度的分析。请严格按照JSON格式返回结果。`;
 
-  const userPrompt = `请作为AI架构师，为用户描述的智能体需求设计一套完善的AI模型协作方案。
+  const architectPrompt = `请作为AI架构师（总导演），为用户描述的智能体需求设计一套完善的AI模型协作方案。
 
 ## 用户需求
 - 智能体名称：${name}
@@ -70,57 +75,58 @@ export async function createAgent(userId, name, description, openingMessage, ena
 - 开场白：${openingMessage}
 - 已选能力：${capabilitiesDesc.length > 0 ? capabilitiesDesc.join('、') : '基础对话'}
 
-## 可用模型库
+## 可用模型库（全部系统AI，必须从中选择）
 ${modelList}
 
-## 设计要求（你需要自主决定如何组建这个智能体）
-1. **分析需求**：根据用户描述的功能，判断需要哪些核心能力
-2. **模型选型**：从可用模型库中选择最合适的模型组合，每个模型负责不同角色
-3. **角色分配**：
-   - 意图理解层：优先使用 deepseek_reasoner 等深度推理模型理解用户复杂意图
-   - 主回复层：根据智能体专业领域选择最擅长的大模型生成高质量回复
-   - 特殊能力层：如有多模态、搜索等特殊需求，分配专门的模型
-   - 快速响应层：简单任务可使用 glm_flashx 等极速模型保证响应速度
-4. **能力编排**：设计模型间的协作流程，确保智能体功能完善、响应迅速
+## 设计要求（多AI协同筛选）
+你需要模拟一个多AI协同的筛选过程：
+
+1. **需求分析**：深度分析用户描述的功能定位，拆解出核心能力需求
+2. **模型选型**：从可用模型库中挑选2-4个模型，每个模型负责不同角色：
+   - 意图理解层：优先使用 deepseek_reasoner 等深度推理模型
+   - 主回复层：根据智能体专业领域选择最匹配的模型（如编程→deepseek，人文→glm_air，创意→mimo_omni，快速→qwen_flash）
+   - 特殊能力层：多模态需求→mimo_omni，搜索需求→glm_flashx
+   - 快速响应层：简单任务→glm_flash / qwen_turbo
+3. **角色分配**：明确每个模型的具体职责，避免冗余
+4. **协作流程**：设计模型间的调用顺序和协作方式
 
 ## 返回JSON格式
 {
   "model_roles": [
-    {"modelId": "模型ID", "role": "角色名", "description": "该模型在智能体中的具体职责说明"}
+    {"modelId": "模型ID", "role": "角色名", "description": "具体职责说明"}
   ],
-  "system_prompt": "这个智能体的完整系统提示词，必须包括：角色定位、专业领域、行为准则、回复风格、核心功能、主动引导策略"
+  "model_selection_reasoning": "为什么选择这些模型组合的简要说明（50字内）",
+  "system_prompt": "完整的系统提示词（至少300字）"
 }
 
 ## 注意事项
 - model_roles至少分配2个模型，最多4个模型
-- system_prompt必须非常详细，至少300字，完全基于用户需求定制
-- system_prompt 中应明确定义智能体的专业领域和核心功能
-- **重要**：system_prompt 中要求智能体在专业领域内主动提供深入帮助，而不是简单地拒绝用户。如果用户请求略微偏离核心功能但与专业领域相关，应该灵活应对并提供有价值的信息。只有完全无关的请求才礼貌引导
-- system_prompt 中必须包含"主动引导策略"：智能体应该在回复末尾主动提供1-2个相关延伸话题或建议，引导用户深入探索
-- 确保模型分工明确、各尽其职、功能强大`;
+- 必须从可用模型库中选择，不能使用不存在的模型ID
+- system_prompt必须包括：角色定位、专业领域、行为准则、回复风格、核心功能、主动引导策略
+- system_prompt中要求智能体在专业领域内主动提供深入帮助，灵活应对相关请求
+- 必须包含"主动引导策略"：在回复末尾主动提供1-2个延伸话题`;
 
-  const persona = { id: 'deepseek_reasoner', name: 'deepseek-reasoner' };
-
-  let response;
+  let architectResponse;
   try {
-    response = await callAIStream(
+    architectResponse = await callAIStream(
       'deepseek_reasoner',
-      persona,
-      userPrompt,
+      { id: 'deepseek_reasoner', name: 'deepseek-reasoner' },
+      architectPrompt,
       [],
       'free_chat',
       null, [], null, null, false, [],
-      systemPrompt,
+      architectSystemPrompt,
       [], null, null, userId
     );
   } catch (error) {
-    console.error('[Agent创建] deepseek_reasoner调用失败:', error.message);
-    response = null;
+    console.error('[Agent创建] deepseek_reasoner架构师调用失败:', error.message);
+    architectResponse = null;
   }
 
-  const parsed = extractJSON(response);
+  const parsed = extractJSON(architectResponse);
 
   let modelRoles;
+  let modelSelectionReasoning = '';
   let agentSystemPrompt;
 
   if (parsed && parsed.model_roles && Array.isArray(parsed.model_roles) && parsed.model_roles.length > 0) {
@@ -129,8 +135,10 @@ ${modelList}
       role: role.role || '主对话',
       description: role.description || ''
     }));
+    modelSelectionReasoning = parsed.model_selection_reasoning || '';
     agentSystemPrompt = parsed.system_prompt || `你是${name}。${description}。`;
   } else {
+    // 回退：默认模型组合
     modelRoles = [
       { modelId: 'deepseek_reasoner', role: '意图理解', description: '深度分析用户意图，理解复杂需求' },
       { modelId: 'deepseek', role: '主回复', description: '生成高质量专业回复' }
@@ -151,6 +159,56 @@ ${modelList}
 专业、友好、高效，用自然的方式与用户交流，让每次对话都有收获。`;
   }
 
+  // ============================================
+  // 第二阶段：多AI协同评审（各模型从自身角度评审方案）
+  // ============================================
+  // 用第二个AI（如 qwen_flash）从不同角度评审和优化 system_prompt
+  const reviewSystemPrompt = '你是一个智能体系统提示词评审专家。你的任务是检查并优化智能体的系统提示词，确保其完整、专业、实用。请直接输出优化后的完整系统提示词，不要添加其他说明。';
+
+  const reviewPrompt = `请评审并优化以下智能体的系统提示词：
+
+## 智能体信息
+- 名称：${name}
+- 功能定位：${description}
+- 开场白：${openingMessage}
+
+## 当前系统提示词
+${agentSystemPrompt}
+
+## 评审要求
+1. 检查角色定位是否清晰明确
+2. 检查专业领域描述是否准确深入
+3. 检查行为准则是否完整（是否包含主动引导策略）
+4. 检查回复风格描述是否恰当
+5. 如有缺失或不足，请补充优化
+6. 保持原有优秀内容，只做增量改进
+
+请直接输出优化后的完整系统提示词。`;
+
+  try {
+    const reviewResponse = await callAIStream(
+      'qwen_flash',
+      { id: 'qwen_flash', name: 'Qwen3.5-Flash' },
+      reviewPrompt,
+      [],
+      'free_chat',
+      null, [], null, null, false, [],
+      reviewSystemPrompt,
+      [], null, null, userId
+    );
+
+    if (reviewResponse && reviewResponse.trim().length > 100) {
+      const cleaned = normalizeResponse(reviewResponse).trim();
+      // 确保优化后的结果至少包含原有内容的长度
+      if (cleaned.length >= agentSystemPrompt.length * 0.7) {
+        agentSystemPrompt = cleaned;
+        console.log('[Agent创建] 多AI协同评审完成，system_prompt已优化');
+      }
+    }
+  } catch (error) {
+    console.warn('[Agent创建] 评审AI调用失败，使用原始system_prompt:', error.message);
+  }
+
   const agent = {
     id: uuidv4(),
     name,
@@ -161,6 +219,7 @@ ${modelList}
     capabilities,
     model_roles: modelRoles,
     system_prompt: agentSystemPrompt,
+    model_selection_reasoning: modelSelectionReasoning,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString()
   };
@@ -174,7 +233,7 @@ ${modelList}
 }
 
 export async function generateAgentQuestions(name, description, openingMessage) {
-  const systemPrompt = '你是一个贴心的智能体配置助手。你的任务是：根据用户第一步填写的智能体信息，生成2-3个有针对性的追问，帮助明确智能体的更多细节和功能需求。问题必须紧密关联用户描述的内容，不能泛泛而问。';
+  const systemPrompt = '你是一个贴心的智能体配置助手。你的任务是：根据用户第一步填写的智能体信息，深入分析用户真实需求，生成2-3个高度个性化的追问。每个问题必须从用户描述中提取关键信息点，针对性地追问细节。绝不能泛泛而问。';
 
   const userPrompt = `用户正在创建智能体，以下是他们第一步填写的信息：
 
@@ -182,24 +241,26 @@ export async function generateAgentQuestions(name, description, openingMessage) 
 - 功能描述：${description}
 - 开场白：${openingMessage}
 
-请根据以上信息，生成2-3个有针对性的追问，用于明确智能体的更多细节。
+## 核心任务
+请深入分析以上信息，提取关键特征，然后生成2-3个高度个性化的追问。
 
-## 生成问题的要求
-1. **必须基于用户描述**：问题要从用户填写的功能描述和开场白出发，提取关键信息并针对性地追问
-2. **关注细节**：追问应该帮助用户明确以下方向（选择最相关的2-3个）：
-   - 专业领域深度：这个智能体在用户描述的专业领域中，具体擅长哪些方面？
-   - 交互风格：用户期望的对话风格是怎样的？（正式/幽默/专业/亲切等）
-   - 特殊能力：根据功能描述，是否需要某些特殊能力？（数据分析、创意生成、代码编写、文档处理等）
-   - 目标用户：这个智能体主要服务哪类人群？他们的使用场景是什么？
-   - 知识边界：智能体应该专注于哪些话题？避免哪些话题？
-3. **对话式表达**：问题要像朋友间的对话，简洁友好，每个问题不超过50字
-4. **避免泛泛而问**：不要问"需要联网吗"这类通用问题，要基于用户的具体需求来问
+## 生成规则（严格遵守）
+1. **必须基于用户描述的具体内容**：从用户已经描述的功能、领域、场景中提取关键信息，追问相关细节
+2. **每个问题必须独特**：不能重复问同一个方向
+3. **问题类型参考**（从以下选择2-3个最相关的）：
+   - 专业深度：针对用户描述的专业领域，追问具体子领域偏好
+   - 工作流程：追问用户期望的具体工作方式或流程
+   - 输出格式：追问用户期望的回复格式（如报告、列表、对话等）
+   - 目标用户画像：追问服务对象和使用场景的细节
+   - 功能边界：追问哪些话题需要回避或特别处理
+4. **对话式表达**：像朋友间的自然对话，简洁友好，每个问题不超过60字
+5. **绝对禁止**：不要问"需要联网吗""需要多模态吗"等通用问题
 
 ## 返回格式
-请以JSON数组格式返回，每个问题要有id和question字段：
-[{"id": "q1", "question": "问题内容"}]
+请以JSON数组格式返回：
+[{"id": "q1", "question": "问题内容"}, {"id": "q2", "question": "问题内容"}]
 
-只返回JSON数组，不要其他内容。`;
+只返回JSON数组，不要任何其他文字。`;
 
   const persona = { id: 'mimo_flash', name: 'mimo-v2.5' };
 
@@ -264,27 +325,27 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
 
   if (attachments && attachments.length > 0) {
     messageContent += '\n\n【用户上传的附件】\n';
-    
+
     for (const attachment of attachments) {
       try {
         const filePath = attachment.file_path || path.resolve(getUploadsDir(), attachment.filename || attachment.name);
         const mimeType = attachment.mime_type || attachment.type || 'application/octet-stream';
         const fileName = attachment.filename || attachment.name || '未知文件';
         const fileSize = attachment.size || 0;
-        
+
         const parsedContent = await parseFile(filePath, mimeType);
         const textContent = typeof parsedContent === 'string' ? parsedContent : '';
-        
+
         const { annotation, description } = await annotateAndDescribe(
           filePath, mimeType, fileName, fileSize, textContent
         );
-        
+
         const ext = path.extname(fileName).toLowerCase();
         const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'].includes(ext);
         const isAudio = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac'].includes(ext);
         const isVideo = ['.mp4', '.avi', '.mov', '.mkv', '.webm'].includes(ext);
         const mediaType = isImage ? '图片' : isAudio ? '音频' : isVideo ? '视频' : '文件';
-        
+
         messageContent += `\n【用户上传的${mediaType}: ${fileName}】\n`;
         const hasRealContent = textContent && textContent.length > 30
           && !textContent.startsWith('[') && !textContent.startsWith('【');
@@ -303,11 +364,11 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
         } else {
           messageContent += `请根据上下文理解这个${mediaType}。\n`;
         }
-        
+
         if (annotation) {
           messageContent += `标签: ${annotation.tags?.join(', ') || '无'}\n`;
         }
-        
+
         attachmentInfos.push({
           filename: fileName,
           type: isImage ? 'image' : isAudio ? 'audio' : isVideo ? 'video' : 'file',
@@ -432,8 +493,8 @@ function buildAgentSystemPrompt(agent) {
 export async function generateSuggestions(agent, agentResponse, userMessage, userId, chatHistory = [], userProfile = null) {
   const historyContext = chatHistory.length > 0
     ? chatHistory.slice(-6).map(m =>
-        m.sender_type === 'user' ? `用户: ${m.content.substring(0, 200)}` : `智能体: ${m.content.substring(0, 200)}`
-      ).join('\n')
+      m.sender_type === 'user' ? `用户: ${m.content.substring(0, 200)}` : `智能体: ${m.content.substring(0, 200)}`
+    ).join('\n')
     : '（暂无历史对话）';
 
   let userContext = '';
@@ -584,7 +645,7 @@ async function callSuggestionAPI(systemPrompt, userPrompt) {
     if (raceResult && Array.isArray(raceResult) && raceResult.length > 0) {
       return raceResult;
     }
-  } catch {}
+  } catch (e) { safeLog('warn', 'Agent结果处理失败', { error: e?.message }); }
 
   const results = await Promise.allSettled(promises);
   for (const r of results) {

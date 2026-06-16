@@ -135,7 +135,7 @@ export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: 
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-bg-surface rounded-2xl p-5 w-full max-w-md shadow-2xl animate-fade-in border border-border" onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 mb-4">
-          <div className="w-10 h-10 rounded-full bg-gradient-to-r from-purple-500 to-pink-500 flex items-center justify-center">
+          <div className="w-10 h-10 rounded-full bg-accent flex items-center justify-center">
             <span className="text-white text-lg">🔊</span>
           </div>
           <div>
@@ -156,7 +156,7 @@ export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: 
           {isSynthesizing && (
             <div className="mb-4">
               <div className="flex items-center justify-center gap-2 py-3">
-                <svg className="animate-spin w-5 h-5 text-purple-500" fill="none" viewBox="0 0 24 24">
+                <svg className="animate-spin w-5 h-5 text-accent" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                 </svg>
@@ -174,7 +174,7 @@ export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: 
                 disabled={isSynthesizing || isLoadingConfig}
                 className={`flex items-center gap-2 p-2.5 rounded-xl border text-left transition-all ${
                   selectedVoice === voice.id
-                    ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/30'
+                    ? 'border-accent bg-accent/10 dark:bg-accent/15'
                     : 'border-border hover:bg-bg-surface2'
                 } disabled:opacity-50`}
               >
@@ -196,7 +196,7 @@ export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: 
                 disabled={isSynthesizing || isLoadingConfig}
                 className={`px-3 py-1.5 rounded-full text-sm transition-all ${
                   selectedTone === tone.id
-                    ? 'bg-purple-500 text-white'
+                    ? 'bg-accent text-white'
                     : 'bg-bg-surface2 text-text-secondary hover:bg-bg-surface3'
                 } disabled:opacity-50`}
               >
@@ -223,7 +223,7 @@ export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: 
           <button
             onClick={handleSynthesize}
             disabled={isSynthesizing || isLoadingConfig}
-            className="flex-1 px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-xl hover:from-purple-600 hover:to-pink-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all text-sm font-medium shadow-md"
+            className="flex-1 px-4 py-2 bg-accent text-white rounded-xl hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed transition-all text-sm font-medium shadow-md"
           >
             {isLoadingConfig ? <><svg className="w-4 h-4 animate-spin inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg> 加载中...</> : isSynthesizing ? <><svg className="w-4 h-4 animate-spin inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182" /></svg> 合成中...</> : <><svg className="w-4 h-4 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9 9l10.5-3m0 6.553v3.75a2.25 2.25 0 01-1.632 2.163l-1.32.377a1.803 1.803 0 11-.99-3.467l2.31-.66A2.25 2.25 0 0019.5 12.553V2.25L9 5.25v10.303m0 0v3.75a2.25 2.25 0 01-1.632 2.163l-1.32.377a1.803 1.803 0 01-.99-3.467l2.31-.66A2.25 2.25 0 009 15.553z" /></svg> 合成语音</>}
           </button>

@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import { useMessagesStore } from '../../stores/messagesStore';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -39,6 +39,8 @@ export const MessageActions = React.memo(function MessageActions({
   showComments
 }: MessageActionsProps) {
   const [isLikeAnimating, setIsLikeAnimating] = useState(false);
+  const likeProcessingRef = useRef(false);
+  const dislikeProcessingRef = useRef(false);
   const { likeMessage, unlikeMessage, dislikeMessage, undislikeMessage } = useMessagesStore();
   const { currentGroup } = useGroupsStore();
   const { addReplyingTo, replyingTo, removeReplyingTo } = useUIStore();
@@ -52,26 +54,38 @@ export const MessageActions = React.memo(function MessageActions({
 
   const handleLike = useCallback(async () => {
     if (!currentGroup) return;
-    if (hasLiked) {
-      unlikeMessage(messageId, currentGroup.id);
-    } else {
-      setIsLikeAnimating(true);
-      setTimeout(() => setIsLikeAnimating(false), 300);
-      likeMessage(messageId, currentGroup.id);
-      try {
-        await api.performAutoLike(messageId, currentGroup.id);
-      } catch (e) {
-        // Silently fail
+    if (likeProcessingRef.current) return;
+    likeProcessingRef.current = true;
+    try {
+      if (hasLiked) {
+        unlikeMessage(messageId, currentGroup.id);
+      } else {
+        setIsLikeAnimating(true);
+        setTimeout(() => setIsLikeAnimating(false), 300);
+        likeMessage(messageId, currentGroup.id);
+        try {
+          await api.performAutoLike(messageId, currentGroup.id);
+        } catch (e) {
+          // Silently fail
+        }
       }
+    } finally {
+      likeProcessingRef.current = false;
     }
   }, [hasLiked, currentGroup, messageId, likeMessage, unlikeMessage]);
 
   const handleDislike = useCallback(async () => {
     if (!currentGroup) return;
-    if (hasDisliked) {
-      undislikeMessage(messageId, currentGroup.id);
-    } else {
-      dislikeMessage(messageId, currentGroup.id);
+    if (dislikeProcessingRef.current) return;
+    dislikeProcessingRef.current = true;
+    try {
+      if (hasDisliked) {
+        undislikeMessage(messageId, currentGroup.id);
+      } else {
+        dislikeMessage(messageId, currentGroup.id);
+      }
+    } finally {
+      dislikeProcessingRef.current = false;
     }
   }, [hasDisliked, currentGroup, messageId, dislikeMessage, undislikeMessage]);
 
@@ -86,9 +100,24 @@ export const MessageActions = React.memo(function MessageActions({
     }
   }, [onReply, addReplyingTo, removeReplyingTo, messageId, isReplying]);
 
-  const handleCopy = useCallback(() => {
-    navigator.clipboard.writeText(content);
-    showToast({ message: '已复制到剪贴板', type: 'success' });
+  const handleCopy = useCallback(async () => {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(content);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = content;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      showToast({ message: '已复制到剪贴板', type: 'success' });
+    } catch {
+      showToast({ message: '复制失败', type: 'error' });
+    }
   }, [content, showToast]);
 
   return (

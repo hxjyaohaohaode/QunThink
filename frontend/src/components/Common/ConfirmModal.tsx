@@ -9,6 +9,7 @@ interface ConfirmModalProps {
   onConfirm: () => void;
   onCancel: () => void;
   danger?: boolean;
+  loading?: boolean;
 }
 
 export function ConfirmModal({
@@ -20,6 +21,7 @@ export function ConfirmModal({
   onConfirm,
   onCancel,
   danger = false,
+  loading = false,
 }: ConfirmModalProps) {
   const [show, setShow] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
@@ -41,13 +43,14 @@ export function ConfirmModal({
   }, [onCancel]);
 
   const handleConfirm = useCallback(() => {
+    if (isClosing) return; // 防止双击重复触发
     setIsClosing(true);
     setTimeout(() => {
       setShow(false);
       setIsClosing(false);
       onConfirm();
     }, 200);
-  }, [onConfirm]);
+  }, [onConfirm, isClosing]);
 
   if (!show && !visible) return null;
 
@@ -90,12 +93,19 @@ export function ConfirmModal({
           </button>
           <button
             onClick={handleConfirm}
-            className={`flex-1 py-2.5 text-sm font-medium text-white rounded-[10px] transition-colors ${
+            disabled={loading}
+            className={`flex-1 py-2.5 text-sm font-medium text-white rounded-[10px] transition-colors flex items-center justify-center gap-2 ${
               danger
                 ? 'bg-red-500 hover:bg-red-600'
                 : 'bg-accent hover:bg-accent-hover'
-            }`}
+            } disabled:opacity-50 disabled:cursor-not-allowed`}
           >
+            {loading && (
+              <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            )}
             {confirmText}
           </button>
         </div>
