@@ -4,6 +4,7 @@ import fs from 'fs/promises';
 import axios from 'axios';
 import { getDataDir, withWriteLock } from '../models/db.js';
 import { validateBody, ttsSchema } from '../validators/index.js';
+import { getAIConfig, loadAIConfigsFromDB } from '../services/ai/index.js';
 
 const router = express.Router();
 const MIMO_API_BASE_URL = (process.env.MIMO_API_BASE_URL || process.env.MIMO_BASE_URL || 'https://api.xiaomimimo.com/v1').replace(/\/$/, '');
@@ -65,7 +66,7 @@ router.post('/synthesize', validateBody(ttsSchema), async (req, res) => {
     const toneConfig = TTS_TONES.find(entry => entry.id === tone) || TTS_TONES[0];
     const audioId = `tts_${messageId || Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 
-    const audioResult = await callMiMoTTS(speechText, voiceConfig.id, toneConfig);
+    const audioResult = await callMiMoTTS(speechText, voiceConfig.id, toneConfig, req.userId);
 
     if (!audioResult?.buffer?.length) {
       throw new Error('未收到有效的音频数据');
@@ -170,8 +171,16 @@ router.delete('/messages/:messageId', async (req, res) => {
   }
 });
 
-async function callMiMoTTS(text, voice, toneConfig) {
-  if (!process.env.MIMO_API_KEY) {
+async function callMiMoTTS(text, voice, toneConfig, userId) {
+  // 从AI配置中获取API密钥（支持用户数据库覆盖）
+  if (userId) {
+    try { await loadAIConfigsFromDB(userId); } catch { }
+  }
+  const ttsConfig = getAIConfig('mimo_tts');
+  const apiKey = ttsConfig?.apiKey || process.env.MIMO_API_KEY;
+  const baseUrl = (ttsConfig?.endpoint || `${MIMO_API_BASE_URL}/chat/completions`).replace(/\/chat\/completions$/, '');
+
+  if (!apiKey) {
     throw new Error('未配置 MIMO_API_KEY，无法调用 MiMo TTS');
   }
 
@@ -181,7 +190,7 @@ async function callMiMoTTS(text, voice, toneConfig) {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const chatResponse = await axios.post(
-        `${MIMO_API_BASE_URL}/chat/completions`,
+        `${baseUrl}/chat/completions`,
         {
           model: 'mimo-v2.5-tts',
           modalities: ['text', 'audio'],
@@ -203,7 +212,7 @@ async function callMiMoTTS(text, voice, toneConfig) {
         },
         {
           headers: {
-            Authorization: `Bearer ${process.env.MIMO_API_KEY}`,
+            Authorization: `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
             Accept: 'application/json, audio/wav, audio/mpeg, audio/ogg, application/octet-stream'
           },
