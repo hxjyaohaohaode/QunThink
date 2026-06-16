@@ -353,7 +353,7 @@ async function triggerSpontaneousChat(groupId, aiMembers) {
       let accumulatedContent = '';
       let lastBroadcastTime = Date.now();
       let lastBroadcastLength = 0;
-      const broadcastThrottleMs = 50;
+      const broadcastThrottleMs = 30;
 
       broadcastStreamStart(groupId, starterAi, messageId);
 
@@ -1116,7 +1116,7 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
     let accumulatedContent = '';
     let lastBroadcastTime = Date.now();
     let lastBroadcastLength = 0;
-    const broadcastThrottleMs = 50;
+    const broadcastThrottleMs = 30;
 
     broadcastStreamStart(groupId, aiId, messageId);
 
@@ -1797,7 +1797,7 @@ export async function startAutonomousChat(groupId, topic = null) {
       let accumulatedContent = '';
       let lastBroadcastTime = Date.now();
       let lastBroadcastLength = 0;
-      const broadcastThrottleMs = 50;
+      const broadcastThrottleMs = 30;
 
       broadcastStreamStart(groupId, starterAi, messageId);
 
@@ -1976,7 +1976,7 @@ export async function handleUserReaction(groupId, messageId, reactionType, userI
       let accumulatedContent = '';
       let lastBroadcastTime = Date.now();
       let lastBroadcastLength = 0;
-      const broadcastThrottleMs = 50;
+      const broadcastThrottleMs = 30;
 
       broadcastStreamStart(groupId, aiId, newMessageId);
 
@@ -2101,7 +2101,7 @@ export async function handleUserComment(groupId, messageId, comment, commentId) 
       let accumulatedContent = '';
       let lastBroadcastTime = Date.now();
       let lastBroadcastLength = 0;
-      const broadcastThrottleMs = 50;
+      const broadcastThrottleMs = 30;
 
       broadcastStreamStart(groupId, aiId, aiCommentId);
 

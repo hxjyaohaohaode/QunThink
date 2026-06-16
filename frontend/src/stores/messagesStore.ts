@@ -315,12 +315,23 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
     try {
       const message = await api.sendMessage(groupId, content, 'text', replyTo, undefined, attachments);
 
+      // 只更新status和真实ID，不替换整个消息内容，避免与WebSocket new_message广播竞态导致闪烁
       set(state => ({
         messages: {
           ...state.messages,
-          [groupId]: (state.messages[groupId] || []).map(m =>
-            m.tempId === tempId ? { ...message, status: 'sent', tempId } : m
-          )
+          [groupId]: (state.messages[groupId] || []).map(m => {
+            if (m.tempId === tempId) {
+              return {
+                ...m,
+                id: message.id || m.id,
+                status: 'sent' as const,
+                created_at: message.created_at || m.created_at,
+                reply_to: message.reply_to || m.reply_to,
+                attachments: message.attachments || m.attachments
+              };
+            }
+            return m;
+          })
         },
         sending: { ...state.sending, [groupId]: false }
       }));

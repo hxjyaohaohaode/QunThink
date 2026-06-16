@@ -24,7 +24,7 @@ const aiNames = {
   'mimo-v2.5': 'mimo-v2.5-pro',
   'mimo-v2-flash': 'mimo-v2.5-pro',
   'mimo-v2-omni': 'mimo-v2.5',
-  'mimo-v2-tts': 'mimo-v2.5-tts-voicedesign',
+  'mimo-v2-tts': 'mimo-v2.5-tts',
   // 新模型ID
   deepseek: 'deepseek-v4-flash',
   deepseek_reasoner: 'deepseek-v4-pro',
@@ -33,7 +33,7 @@ const aiNames = {
   glm_flashx: 'GLM-4.7-FlashX',
   mimo_flash: 'mimo-v2.5-pro',
   mimo_omni: 'mimo-v2.5',
-  mimo_tts: 'mimo-v2.5-tts-voicedesign',
+  mimo_tts: 'mimo-v2.5-tts',
   qwen_flash: 'Qwen3.5-Flash',
   qwen_turbo: 'qwen-turbo'
 };

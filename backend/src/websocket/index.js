@@ -3,6 +3,7 @@ import { cancelGroupGeneration } from '../services/scheduler/index.js';
 import { getAuthDb } from '../models/authDb.js';
 import { getUserDb } from '../models/db.js';
 import { safeLog } from '../utils/logger.js';
+import crypto from 'crypto';
 
 const clients = new Map();
 const groupSubscriptions = new Map();
@@ -70,7 +71,7 @@ async function verifySessionToken(token) {
     const session = authDb.data.sessions.find(s => {
       if (s.token.length !== token.length) return false;
       try {
-        return require('crypto').timingSafeEqual(Buffer.from(s.token), Buffer.from(token));
+        return crypto.timingSafeEqual(Buffer.from(s.token), Buffer.from(token));
       } catch {
         return false;
       }

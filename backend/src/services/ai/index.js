@@ -126,10 +126,10 @@ const DEFAULT_AI_CONFIGS = {
     note: 'DeepSeek推理模型 - 不支持temperature/top_p/frequency_penalty/presence_penalty参数'
   },
   mimo_tts: {
-    name: 'mimo-v2.5-tts-voicedesign',
+    name: 'mimo-v2.5-tts',
     apiKey: process.env.MIMO_API_KEY || '',
     endpoint: process.env.MIMO_BASE_URL ? `${process.env.MIMO_BASE_URL}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions',
-    model: 'mimo-v2.5-tts-voicedesign',
+    model: 'mimo-v2.5-tts',
     enabled: true,
     priority: 10,
     isTTS: true,
@@ -1383,6 +1383,7 @@ export async function callAIStream(aiId, persona, userMessage, recentMessages, r
 
     let fullContent = '';
     let streamTimedOut = false;
+    let sseBuffer = '';
 
     const streamResult = new Promise((resolve, reject) => {
       const streamTimeout = setTimeout(() => {
@@ -1394,21 +1395,24 @@ export async function callAIStream(aiId, persona, userMessage, recentMessages, r
 
       response.data.on('data', (chunk) => {
         if (streamTimedOut) return;
-        const lines = chunk.toString().split('\n').filter(line => line.trim() !== '');
+        sseBuffer += chunk.toString();
+        const lines = sseBuffer.split('\n');
+        // 保留最后一个可能不完整的行
+        sseBuffer = lines.pop() || '';
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6).trim();
-            if (data === '[DONE]') continue;
-            try {
-              const parsed = JSON.parse(data);
-              const content = parsed.choices?.[0]?.delta?.content || '';
-              if (content) {
-                fullContent += content;
-                if (onChunk) onChunk(content);
-              }
-            } catch (parseError) {
-              safeLog('warn', '流式SSE JSON解析失败', { raw: line ? line.substring(0, 100) : '(empty)' });
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+          const data = trimmed.slice(6).trim();
+          if (data === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(data);
+            const content = parsed.choices?.[0]?.delta?.content || '';
+            if (content) {
+              fullContent += content;
+              if (onChunk) onChunk(content);
             }
+          } catch (parseError) {
+            safeLog('warn', '流式SSE JSON解析失败', { raw: trimmed ? trimmed.substring(0, 100) : '(empty)' });
           }
         }
       });

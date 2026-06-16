@@ -73,11 +73,12 @@ let isReconnecting = false;
 let connectionError: string | null = null;
 let connectionTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let lastMessageReceivedTime = Date.now();
 
 const MAX_RECONNECT_ATTEMPTS = 30;
-const BASE_RECONNECT_DELAY = 500;
+const BASE_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
-const HEARTBEAT_INTERVAL = 25000;
+const HEARTBEAT_INTERVAL = 30000;
 const HEARTBEAT_TIMEOUT = 45000;
 const CONNECTION_TIMEOUT = 20000;
 let isCleanDisconnect = false;
@@ -90,19 +91,16 @@ function getReconnectDelay(attempt: number): number {
 
 function startHeartbeat(wsInstance: WebSocket) {
   stopHeartbeat();
+  // 被动心跳：不再主动发送ping，只监听后端ping并回复pong
+  // 后端每30s发送ping，如果90s内没有收到任何消息（ping/pong/其他），则认为连接断开
   heartbeatTimer = setInterval(() => {
     if (wsInstance.readyState === WebSocket.OPEN) {
-      try {
-        wsInstance.send(JSON.stringify({ type: 'ping' }));
-        heartbeatTimeoutTimer = setTimeout(() => {
-          if (import.meta.env.DEV) console.warn('[WS] 心跳超时，准备重连');
-          if (wsInstance.readyState === WebSocket.OPEN) {
-            wsInstance.close(4002, 'Heartbeat timeout');
-          }
-        }, HEARTBEAT_TIMEOUT);
-      } catch (e) {
-        if (import.meta.env.DEV) console.warn('[WS] Failed to send ping, connection may be closed:', e);
-        stopHeartbeat();
+      const timeSinceLastMessage = Date.now() - lastMessageReceivedTime;
+      if (timeSinceLastMessage > HEARTBEAT_TIMEOUT) {
+        if (import.meta.env.DEV) console.warn('[WS] 被动心跳超时，准备重连');
+        if (wsInstance.readyState === WebSocket.OPEN) {
+          wsInstance.close(4002, 'Heartbeat timeout');
+        }
       }
     } else {
       stopHeartbeat();
@@ -279,6 +277,7 @@ export function connectWebSocket(groupId?: string) {
 
   wsInstance.onopen = () => {
     clearConnectionTimer();
+    lastMessageReceivedTime = Date.now();
     if (import.meta.env.DEV) console.log('[WS] WebSocket connected');
     reconnectAttempts = 0;
     connectionError = null;
@@ -309,6 +308,7 @@ export function connectWebSocket(groupId?: string) {
   };
 
   wsInstance.onmessage = (event) => {
+    lastMessageReceivedTime = Date.now();
     try {
       const message = JSON.parse(event.data);
 
