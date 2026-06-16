@@ -147,7 +147,7 @@ if (isAuthConfigured()) {
       csrfTokenMap.set(token, { createdAt: Date.now() });
       res.cookie(CSRF_COOKIE_NAME, token, {
         httpOnly: false,
-        sameSite: 'strict',
+        sameSite: isProd ? 'none' : 'lax',
         secure: isProd,
         path: '/'
       });
