@@ -13,3 +13,6 @@ Thumbs.db
 *.md
 .trae
 test_results
+backend/data
+.runtime-logs
+tools/shots/node_modules

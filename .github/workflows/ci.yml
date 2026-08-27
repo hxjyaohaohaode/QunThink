@@ -70,7 +70,7 @@ jobs:
             context: ./backend
             file: ./backend/Dockerfile
           - name: qunxiang-frontend
-            context: ./frontend
+            context: .
             file: ./frontend/Dockerfile
     steps:
       - uses: actions/checkout@v4
