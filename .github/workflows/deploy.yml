@@ -16,12 +16,12 @@ jobs:
           RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
         run: |
           if [ -z "$RENDER_API_KEY" ]; then
-            echo "::error::RENDER_API_KEY secret 未配置，无法触发 Render 部署"
-            exit 1
+            echo "::warning::RENDER_API_KEY secret 未配置，跳过 Render 部署（Render 自动部署不受影响）"
+            exit 0
           fi
           if [ -z "$RENDER_SERVICE_ID" ]; then
-            echo "::error::RENDER_SERVICE_ID secret 未配置，无法触发 Render 部署"
-            exit 1
+            echo "::warning::RENDER_SERVICE_ID secret 未配置，跳过 Render 部署（Render 自动部署不受影响）"
+            exit 0
           fi
           echo "Triggering Render deployment..."
           curl --fail --show-error --silent \

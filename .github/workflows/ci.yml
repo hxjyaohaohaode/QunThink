@@ -46,6 +46,19 @@ jobs:
       - name: Frontend type check and production build (tsc + vite)
         run: npm run build
         working-directory: ./frontend
+      - name: Frontend dependency audit (documented SPA exception only)
+        shell: bash
+        run: |
+          set +e
+          npm audit --omit=dev --registry=https://registry.npmjs.org --json > audit.json
+          audit_status=$?
+          set -e
+          node scripts/check-frontend-audit.mjs audit.json
+          if [[ "$audit_status" -gt 1 ]]; then
+            echo "npm audit failed to produce a valid report (exit $audit_status)"
+            exit "$audit_status"
+          fi
+        working-directory: ./frontend
 
   docker:
     runs-on: ubuntu-latest
@@ -68,19 +81,3 @@ jobs:
           file: ${{ matrix.file }}
           push: false
           tags: ${{ matrix.name }}:ci
-      - name: Build frontend
-        run: npm run build
-        working-directory: ./frontend
-      - name: Frontend dependency audit (documented SPA exception only)
-        shell: bash
-        run: |
-          set +e
-          npm audit --omit=dev --registry=https://registry.npmjs.org --json > audit.json
-          audit_status=$?
-          set -e
-          node scripts/check-frontend-audit.mjs audit.json
-          if [[ "$audit_status" -gt 1 ]]; then
-            echo "npm audit failed to produce a valid report (exit $audit_status)"
-            exit "$audit_status"
-          fi
-        working-directory: ./frontend
