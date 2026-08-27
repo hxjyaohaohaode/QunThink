@@ -72,6 +72,7 @@ export class MongoLow {
       }
     } catch (err) {
       console.warn('MongoLow read failed:', err.message);
+      if (process.env.NODE_ENV === 'production') throw err;
       this.data = JSON.parse(JSON.stringify(this.defaultData));
     }
   }

@@ -1,5 +1,5 @@
 import express from 'express';
-import { getAuthDb, hashPassword, verifyPassword, generateSessionToken } from '../models/authDb.js';
+import { getAuthDb, hashPasswordAsync, verifyPasswordAsync, generateSessionToken, findSessionByToken } from '../models/authDb.js';
 import { initUserDatabase, withWriteLock } from '../models/db.js';
 import crypto from 'crypto';
 import { validateBody, smsRegisterSchema, phoneLoginSchema } from '../validators/index.js';
@@ -8,8 +8,102 @@ import { checkSmsVerifyCode, isSmsConfigured } from '../services/sms/index.js';
 
 const router = express.Router();
 const SESSION_MAX_AGE = parseInt(process.env.SESSION_MAX_AGE) || 30 * 24 * 60 * 60 * 1000;
-const SESSION_MAX_AGE_SECONDS = Math.floor(SESSION_MAX_AGE / 1000);
 const isProduction = process.env.NODE_ENV === 'production';
+const MAX_SESSIONS_PER_USER = 5;
+
+function buildSessionCookieOptions() {
+  return {
+    httpOnly: true,
+    domain: isProduction ? undefined : 'localhost',
+    path: '/',
+    sameSite: isProduction ? 'none' : 'lax',
+    maxAge: SESSION_MAX_AGE,
+    secure: isProduction
+  };
+}
+
+function buildClearSessionCookieOptions() {
+  return {
+    domain: isProduction ? undefined : 'localhost',
+    path: '/',
+    sameSite: isProduction ? 'none' : 'lax',
+    secure: isProduction
+  };
+}
+
+function pruneUserSessions(db, userId) {
+  const userSessions = db.data.sessions.filter(s => s.userId === userId);
+  const excess = userSessions.length - (MAX_SESSIONS_PER_USER - 1);
+  if (excess <= 0) return;
+  userSessions.sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at));
+  const tokensToRemove = new Set(userSessions.slice(0, excess).map(s => s.token));
+  db.data.sessions = db.data.sessions.filter(s => !tokensToRemove.has(s.token));
+}
+
+// 仅供本地开发和自动化测试使用；生产注册必须经过短信验证。
+if (!isProduction) {
+  router.post('/auth/register', asyncHandler(async (req, res) => {
+    const username = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const nickname = typeof req.body?.nickname === 'string' ? req.body.nickname.trim() : '';
+    // 可选 phone：填写后即可通过登录页「手机号+密码」表单登录（开发便利，生产仍走短信注册）
+    const phone = typeof req.body?.phone === 'string' ? req.body.phone.trim() : '';
+    if (phone && !/^1[3-9]\d{9}$/.test(phone)) {
+      return res.status(400).json({ error: '手机号格式不正确' });
+    }
+    if (!/^[a-zA-Z0-9_-]{3,64}$/.test(username) || password.length < 8 || password.length > 128) {
+      return res.status(400).json({ error: '用户名或密码格式不正确' });
+    }
+
+    const passwordHash = await hashPasswordAsync(password);
+    const db = getAuthDb();
+    const userId = crypto.randomUUID();
+    const user = {
+      id: userId,
+      username,
+      password: passwordHash,
+      nickname: nickname || username,
+      role: 'user',
+      created_at: new Date().toISOString()
+    };
+    if (phone) {
+      user.phone = phone;
+    }
+    const token = generateSessionToken();
+
+    let duplicate = false;
+    let duplicateField = '';
+    await withWriteLock('auth', async () => {
+      await db.read();
+      duplicate = db.data.users.some(entry => entry.username === username);
+      if (duplicate) { duplicateField = '用户名已存在'; return; }
+      if (phone && db.data.users.some(entry => entry.phone === phone)) {
+        duplicate = true;
+        duplicateField = '手机号已被使用';
+        return;
+      }
+      db.data.users.push(user);
+      db.data.sessions.push({ token, userId, expires_at: new Date(Date.now() + SESSION_MAX_AGE).toISOString() });
+      await db.write();
+    });
+    if (duplicate) return res.status(409).json({ error: duplicateField || '用户名已存在' });
+
+    try {
+      await initUserDatabase(userId);
+    } catch (error) {
+      await withWriteLock('auth', async () => {
+        await db.read();
+        db.data.users = db.data.users.filter(entry => entry.id !== userId);
+        db.data.sessions = db.data.sessions.filter(entry => entry.userId !== userId);
+        await db.write();
+      });
+      throw error;
+    }
+
+    res.cookie('session_token', token, buildSessionCookieOptions());
+    return res.status(201).json({ success: true, user: { id: userId, username, nickname: user.nickname } });
+  }));
+}
 
 router.post('/auth/login-phone', validateBody(phoneLoginSchema), asyncHandler(async (req, res) => {
   const { phone, password } = req.body;
@@ -21,11 +115,13 @@ router.post('/auth/login-phone', validateBody(phoneLoginSchema), asyncHandler(as
     user = db.data.users.find(u => u.phone === phone);
   });
 
-  if (!user) {
-    return res.status(401).json({ error: '该手机号未注册' });
+  let passwordValid = false;
+  if (user) {
+    passwordValid = await verifyPasswordAsync(password, user.password);
+  } else {
+    await hashPasswordAsync(password);
   }
-
-  if (!verifyPassword(password, user.password)) {
+  if (!passwordValid) {
     return res.status(401).json({ error: '手机号或密码错误' });
   }
 
@@ -38,25 +134,12 @@ router.post('/auth/login-phone', validateBody(phoneLoginSchema), asyncHandler(as
 
   await withWriteLock('auth', async () => {
     await db.read();
-    const existingSessions = db.data.sessions.filter(s => s.userId === user.id);
-    if (existingSessions.length >= 5) {
-      existingSessions.sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at));
-      const sessionsToKeep = existingSessions.slice(-4);
-      const sessionIdsToRemove = new Set(existingSessions.slice(0, -4).map(s => s.token));
-      db.data.sessions = db.data.sessions.filter(s => !sessionIdsToRemove.has(s.token));
-    }
+    pruneUserSessions(db, user.id);
     db.data.sessions.push(session);
     await db.write();
   });
 
-  res.cookie('session_token', token, {
-    httpOnly: true,
-    domain: isProduction ? undefined : 'localhost',
-    path: '/',
-    sameSite: isProduction ? 'none' : 'lax',
-    maxAge: SESSION_MAX_AGE_SECONDS,
-    secure: isProduction
-  });
+  res.cookie('session_token', token, buildSessionCookieOptions());
 
   res.json({
     success: true,
@@ -97,12 +180,14 @@ router.post('/auth/register-sms', validateBody(smsRegisterSchema), asyncHandler(
   const userId = crypto.randomUUID();
   const phoneSuffix = phone.substring(phone.length - 4);
   const username = `user_${phoneSuffix}_${Date.now().toString(36)}`;
+  const passwordHash = await hashPasswordAsync(password);
   const user = {
     id: userId,
     username,
-    password: hashPassword(password),
+    password: passwordHash,
     nickname: nickname || `用户${phoneSuffix}`,
     phone,
+    role: 'user',
     created_at: new Date().toISOString()
   };
 
@@ -140,18 +225,12 @@ router.post('/auth/register-sms', validateBody(smsRegisterSchema), asyncHandler(
 
   await withWriteLock('auth', async () => {
     await db.read();
+    pruneUserSessions(db, userId);
     db.data.sessions.push(session);
     await db.write();
   });
 
-  res.cookie('session_token', token, {
-    httpOnly: true,
-    domain: isProduction ? undefined : 'localhost',
-    path: '/',
-    sameSite: isProduction ? 'none' : 'lax',
-    maxAge: SESSION_MAX_AGE_SECONDS,
-    secure: isProduction
-  });
+  res.cookie('session_token', token, buildSessionCookieOptions());
 
   res.status(201).json({
     success: true,
@@ -170,38 +249,27 @@ router.post('/auth/logout', asyncHandler(async (req, res) => {
     });
   }
 
-  res.clearCookie('session_token', {
-    path: '/',
-    sameSite: isProduction ? 'none' : 'lax',
-    secure: isProduction
-  });
+  res.clearCookie('session_token', buildClearSessionCookieOptions());
   res.json({ success: true });
 }));
 
 router.get('/auth/me', asyncHandler(async (req, res) => {
   const token = req.cookies?.session_token;
   if (!token) {
-    return res.json({ user: null });
+    return res.status(401).json({ user: null, requiresAuth: true });
   }
 
   const db = getAuthDb();
   await db.read();
 
-  const session = db.data.sessions.find(s => {
-    if (s.token.length !== token.length) return false;
-    try {
-      return crypto.timingSafeEqual(Buffer.from(s.token), Buffer.from(token));
-    } catch {
-      return false;
-    }
-  });
+  const session = findSessionByToken(db, token);
   if (!session || new Date(session.expires_at) < new Date()) {
-    return res.json({ user: null });
+    return res.status(401).json({ user: null, requiresAuth: true });
   }
 
   const user = db.data.users.find(u => u.id === session.userId);
   if (!user) {
-    return res.json({ user: null });
+    return res.status(401).json({ user: null, requiresAuth: true });
   }
 
   res.json({

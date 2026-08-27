@@ -28,6 +28,7 @@
     --accent-subtle: rgba(108, 92, 231, 0.1);
     --sidebar-hover: rgba(0, 0, 0, 0.04);
     --sidebar-active: rgba(108, 92, 231, 0.1);
+    --sidebar-pinned: 240 243 250;
   }
 
   .dark {
@@ -50,19 +51,32 @@
     --glass-bg: rgba(24, 24, 27, 0.85);
     --glass-border: rgba(255, 255, 255, 0.06);
     --glass-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-    --accent: 147 187 253;
-    --accent-hover: 191 219 254;
-    --accent-subtle: rgba(147, 187, 253, 0.15);
+    --accent: 139 124 246;
+    --accent-hover: 158 145 250;
+    --accent-subtle: rgba(139, 124, 246, 0.18);
     --sidebar-hover: rgba(255, 255, 255, 0.04);
-    --sidebar-active: rgba(147, 187, 253, 0.15);
+    --sidebar-active: rgba(139, 124, 246, 0.16);
+    --sidebar-pinned: 30 34 53;
   }
 
   html {
     font-size: var(--font-size-base, 15px);
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
   }
 
   * {
     box-sizing: border-box;
+  }
+
+  /* 移动端防溢出兜底 + iOS 聚焦缩放防护（主输入面 16px） */
+  @media (max-width: 767px) {
+    html, body {
+      overflow-x: hidden;
+    }
+    textarea, input[type="text"], input[type="search"] {
+      font-size: 16px;
+    }
   }
 
   body {
@@ -106,12 +120,12 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    background-color: #d1d5db;
+    background-color: rgb(var(--border-strong));
     border-radius: 9999px;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    background-color: #9ca3af;
+    background-color: rgb(var(--text-muted));
   }
 }
 
@@ -135,6 +149,25 @@
     position: relative;
     word-break: break-word;
     line-height: 1.5;
+  }
+
+  /* 气泡光韵 hover：AI 消息悬浮时的柔和辉光（尊重 reduced-motion） */
+  .ai-message {
+    transition: box-shadow 0.35s ease, transform 0.35s ease;
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .ai-message:hover {
+      box-shadow:
+        0 0 0 1px rgba(108, 92, 231, 0.18),
+        0 6px 24px -6px rgba(108, 92, 231, 0.28),
+        var(--shadow-sm);
+      transform: translateY(-1px);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ai-message:hover {
+      transform: none;
+    }
   }
 
   .ai-message {
@@ -649,10 +682,7 @@ a:focus-visible {
 }
 
 /* ============ Smooth Scroll & Reduced Motion ============ */
-
-html {
-  scroll-behavior: smooth;
-}
+/* 注：全局scroll-behavior已移除，避免干扰Virtuoso等程序化滚动，需要平滑滚动处单独设置 */
 
 @media (prefers-reduced-motion: reduce) {
 
@@ -1013,6 +1043,31 @@ input[type="range"]::-moz-range-track {
 
 .animate-chat-item-enter {
   animation: chatItemEnter 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Member item animations */
+@keyframes memberItemIn {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-member-item-in {
+  animation: memberItemIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.member-item-hover {
+  transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.member-item-hover:hover {
+  background-color: rgb(var(--sidebar-hover));
 }
 
 /* Enhanced message content transition */

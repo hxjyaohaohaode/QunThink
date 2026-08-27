@@ -166,12 +166,28 @@ export interface GroupSettingsInput {
   background_url?: string;
   announcement?: string;
   notifications_enabled?: boolean;
+  pinned?: boolean;
+  debate_mode?: boolean;
+  debate_level?: number;
+  debate_config?: {
+    mode?: string;
+    topic?: string;
+    roles?: {
+      proponents?: string[];
+      opponents?: string[];
+      judge?: string[];
+      audience?: string[];
+    };
+    memory_enabled?: boolean;
+    time_limit?: number;
+    max_turns?: number;
+  } | null;
 }
 
 export interface MessageCreateInput {
   content: string;
   content_type?: MessageContentType;
-  reply_to?: string | string[];
+  reply_to?: string | null;
   metadata?: Record<string, unknown>;
   attachments?: MessageAttachment[];
 }
@@ -183,37 +199,27 @@ export interface CommentCreateInput {
   reply_to?: string | null;
 }
 
-export interface LoginInput {
-  username: string;
-  password: string;
-}
-
-export interface RegisterInput extends LoginInput {
-  nickname?: string;
-}
-
-export interface ChangePasswordInput {
-  currentPassword: string;
-  newPassword: string;
-}
-
 export interface UploadedFile {
   id: string;
   group_id: string;
-  uploader_id: string;
-  owner_user_id: string;
   filename: string;
-  stored_filename?: string;
-  original_path: string;
-  parsed_content?: string | null;
-  media_description?: string;
+  original_name?: string;
   mime_type: string;
   file_size: number;
   created_at: string;
   url?: string;
-  original_name?: string;
+  parse_status?: string;
+  parse_error?: string | null;
+  search_description?: string | null;
+  search_tags?: string[];
+  media_description?: string | null;
 }
 
-export interface FileUploadResponse extends ApiSuccessEnvelope {
+export interface FileUploadResponse {
+  success?: boolean;
   file: UploadedFile;
+}
+
+export interface FileBatchUploadResponse extends ApiSuccessEnvelope {
+  files: UploadedFile[];
 }

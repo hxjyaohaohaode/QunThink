@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+﻿import React, { useState, useEffect, useRef } from 'react';
 import { useFontSizeStore, type FontSizeLevel, getFontSizeLabel } from '../../stores/fontSizeStore';
 
 const fontSizeOptions: { value: FontSizeLevel; label: string; icon: React.ReactNode }[] = [
@@ -25,7 +25,8 @@ const fontSizeOptions: { value: FontSizeLevel; label: string; icon: React.ReactN
 ];
 
 export function FontSizeToggle() {
-  const { fontSize, setFontSize } = useFontSizeStore();
+  const fontSize = useFontSizeStore((s) => s.fontSize);
+  const setFontSize = useFontSizeStore((s) => s.setFontSize);
   const [isOpen, setIsOpen] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -103,7 +104,8 @@ export function FontSizeToggle() {
 }
 
 export function FontSizeSelector() {
-  const { fontSize, setFontSize } = useFontSizeStore();
+  const fontSize = useFontSizeStore((s) => s.fontSize);
+  const setFontSize = useFontSizeStore((s) => s.setFontSize);
   const [isThemeChanging, setIsThemeChanging] = useState(false);
 
   const handleFontSizeSelect = (size: FontSizeLevel) => {

@@ -1,6 +1,6 @@
-import { create } from 'zustand';
+﻿import { create } from 'zustand';
 import { api } from '../services/api';
-import { loadPersonasCache, savePersonasCache, savePersonasCacheAsync } from '../utils/cacheUtils';
+import { loadPersonasCache, savePersonasCache, getCacheUserId } from '../utils/cacheUtils';
 
 export interface PersonaDebateConfig {
   mode?: string;
@@ -118,6 +118,7 @@ function startAutoRefresh() {
 
   refreshTimer = setInterval(() => {
     if (editLockCount > 0) return;
+    if (!getCacheUserId()) return;
     const state = usePersonasStore.getState();
     if (!state.loading) {
       state.fetchPersonas();
@@ -129,7 +130,7 @@ function startAutoRefresh() {
   }
 }
 
-function stopAutoRefresh() {
+export function stopAutoRefresh() {
   if (refreshTimer) {
     clearInterval(refreshTimer);
     refreshTimer = null;
@@ -197,7 +198,6 @@ export const usePersonasStore = create<PersonasState>((set, get) => ({
       const dedupedPersonas = deduplicatePersonas(mergedPersonas);
       set({ personas: dedupedPersonas, loading: false });
       savePersonasCache(dedupedPersonas);
-      savePersonasCacheAsync(dedupedPersonas).catch(() => { });
     } catch (error) {
       console.error('Failed to fetch personas:', error);
       set({ error: error instanceof Error ? error.message : '获取角色配置失败', loading: false });
@@ -219,7 +219,7 @@ export const usePersonasStore = create<PersonasState>((set, get) => ({
           [aiId]: updated
         };
         const dedupedPersonas = deduplicatePersonas(newPersonas);
-        savePersonasCacheAsync(dedupedPersonas).catch(() => savePersonasCache(dedupedPersonas));
+        savePersonasCache(dedupedPersonas);
         return { personas: dedupedPersonas };
       });
     } catch (error) {
@@ -240,7 +240,7 @@ export const usePersonasStore = create<PersonasState>((set, get) => ({
         [aiId]: persona
       };
       const dedupedPersonas = deduplicatePersonas(newPersonas);
-      savePersonasCacheAsync(dedupedPersonas).catch(() => savePersonasCache(dedupedPersonas));
+      savePersonasCache(dedupedPersonas);
       return { personas: dedupedPersonas };
     });
   },
@@ -254,7 +254,7 @@ export const usePersonasStore = create<PersonasState>((set, get) => ({
           [aiId]: reset
         };
         const dedupedPersonas = deduplicatePersonas(newPersonas);
-        savePersonasCacheAsync(dedupedPersonas).catch(() => savePersonasCache(dedupedPersonas));
+        savePersonasCache(dedupedPersonas);
         return { personas: dedupedPersonas };
       });
     } catch (error) {

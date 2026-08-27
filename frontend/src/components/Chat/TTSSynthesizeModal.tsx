@@ -105,7 +105,7 @@ export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: 
     setError(null);
     try {
       const result = await api.synthesizeSpeech(text, selectedVoice, selectedTone, messageId);
-      
+
       if (result.success) {
         const audio: MessageTTSAudio = {
           id: result.audio_id,
@@ -136,7 +136,9 @@ export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: 
       <div className="bg-bg-surface rounded-2xl p-5 w-full max-w-md shadow-2xl animate-fade-in border border-border" onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 mb-4">
           <div className="w-10 h-10 rounded-full bg-accent flex items-center justify-center">
-            <span className="text-white text-lg">🔊</span>
+            <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
+            </svg>
           </div>
           <div>
             <h3 className="text-base font-semibold text-text-primary">转换为语音</h3>
@@ -172,13 +174,14 @@ export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: 
                 key={voice.id}
                 onClick={() => setSelectedVoice(voice.id)}
                 disabled={isSynthesizing || isLoadingConfig}
-                className={`flex items-center gap-2 p-2.5 rounded-xl border text-left transition-all ${
-                  selectedVoice === voice.id
+                className={`flex items-center gap-2 p-2.5 rounded-xl border text-left transition-all ${selectedVoice === voice.id
                     ? 'border-accent bg-accent/10 dark:bg-accent/15'
                     : 'border-border hover:bg-bg-surface2'
-                } disabled:opacity-50`}
+                  } disabled:opacity-50`}
               >
-                <span className="text-lg">{voice.gender === 'female' ? '👩' : '👨'}</span>
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+                </svg>
                 <div>
                   <div className="text-sm font-medium text-text-primary">{voice.name}</div>
                   <div className="text-xs text-text-muted">{voice.desc}</div>
@@ -194,11 +197,10 @@ export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: 
                 key={tone.id}
                 onClick={() => setSelectedTone(tone.id)}
                 disabled={isSynthesizing || isLoadingConfig}
-                className={`px-3 py-1.5 rounded-full text-sm transition-all ${
-                  selectedTone === tone.id
+                className={`px-3 py-1.5 rounded-full text-sm transition-all ${selectedTone === tone.id
                     ? 'bg-accent text-white'
                     : 'bg-bg-surface2 text-text-secondary hover:bg-bg-surface3'
-                } disabled:opacity-50`}
+                  } disabled:opacity-50`}
               >
                 {tone.name}
               </button>

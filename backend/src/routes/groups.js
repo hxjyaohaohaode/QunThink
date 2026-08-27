@@ -1,5 +1,7 @@
-import express from 'express';
-import { getUploadsDir, withWriteLock, updateGroupActivity } from '../models/db.js';
+﻿import express from 'express';
+import interactionLoggerService from '../services/interactionLogger.js';
+import { getInsightsCache, setInsightsCache } from '../services/insightsCache.js';
+import { getUploadsDir, withWriteLock, updateGroupActivity, sanitizeGroupForClient, sanitizeGroupsForClient } from '../models/db.js';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcastToGroup } from '../websocket/index.js';
 import { startAutonomousChatTimer, stopAutonomousChatTimer } from '../services/scheduler/index.js';
@@ -7,13 +9,18 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import fsPromises from 'fs/promises';
+import { asyncHandler } from '../middleware/errorHandler.js';
 import { requireGroupMembership } from '../middleware/userDb.js';
 import { validateBody, createGroupSchema, updateDebateSchema, pinGroupSchema } from '../validators/index.js';
 import { sanitizeObject, GROUP_SANITIZE_CONFIG } from '../utils/sanitize.js';
 import { safeLog } from '../utils/logger.js';
+import { AI_LIST } from '../config/personas.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const VALID_AI_IDS = new Set(AI_LIST);
 
 const router = express.Router();
 
@@ -67,312 +74,399 @@ const bgStorage = multer.diskStorage({
     cb(null, `bg_${uuidv4()}${ext}`);
   }
 });
+const BACKGROUND_TYPES = new Map([
+  ['image/jpeg', { extensions: new Set(['.jpg', '.jpeg']), signature: [0xFF, 0xD8, 0xFF] }],
+  ['image/png', { extensions: new Set(['.png']), signature: [0x89, 0x50, 0x4E, 0x47] }],
+  ['image/gif', { extensions: new Set(['.gif']), signature: [0x47, 0x49, 0x46] }],
+  ['image/webp', { extensions: new Set(['.webp']), signature: [0x52, 0x49, 0x46, 0x46] }]
+]);
 const bgUpload = multer({
   storage: bgStorage,
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) cb(null, true);
-    else cb(new Error('只支持图片文件'));
+    const rule = BACKGROUND_TYPES.get(file.mimetype);
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (rule?.extensions.has(ext)) cb(null, true);
+    else cb(new Error('背景图仅支持 JPG、PNG、GIF 或 WebP'));
   }
 });
 
-router.post('/groups/:id/upload-background', bgUpload.single('background'), async (req, res) => {
+async function validateBackgroundFile(file) {
+  const rule = BACKGROUND_TYPES.get(file?.mimetype);
+  if (!rule || !file?.path) return false;
+  const handle = await fs.promises.open(file.path, 'r');
   try {
-    const db = await req.getUserDb();
-    await db.read();
-    const { id } = req.params;
-    const group = db.data.groups.find(g => g.id === id);
-    if (!group) return res.status(404).json({ error: '群组不存在' });
-    if (!req.file) return res.status(400).json({ error: '请上传背景图片' });
-
-    const bgUrl = `/uploads/backgrounds/${req.file.filename}`;
-    group.background_url = bgUrl;
-    await withWriteLock(req.userId, async () => { await db.write(); });
-    res.json({ success: true, background_url: bgUrl });
-  } catch (error) {
-    res.status(500).json({ success: false, error: '上传背景失败' });
+    const header = Buffer.alloc(rule.signature.length);
+    await handle.read(header, 0, header.length, 0);
+    return rule.signature.every((byte, index) => header[index] === byte);
+  } finally {
+    await handle.close();
   }
-});
+}
 
-router.get('/groups', async (req, res) => {
-  try {
-    const db = await req.getUserDb();
-    await db.read();
-    const { limit, offset } = req.query;
-    let groups = db.data.groups;
-    if (limit || offset) {
-      const start = parseInt(offset) || 0;
-      const end = limit ? start + parseInt(limit) : undefined;
-      groups = groups.slice(start, end);
-    }
-    res.json(groups);
-  } catch (error) {
-    safeLog('error', '获取群组列表错误', { error: error?.message || error });
-    res.status(500).json({ error: '获取群组列表失败' });
-  }
-});
-
-router.get('/groups/:id', async (req, res) => {
-  try {
-    const db = await req.getUserDb();
-    await db.read();
-    const { id } = req.params;
-    const group = db.data.groups.find(g => g.id === id);
-
-    if (!group) {
-      return res.status(404).json({ error: 'Group not found' });
-    }
-
-    res.json(group);
-  } catch (error) {
-    safeLog('error', '获取群组详情错误', { error: error?.message || error });
-    res.status(500).json({ error: '获取群组详情失败' });
-  }
-});
-
-router.post('/groups', validateBody(createGroupSchema), async (req, res) => {
-  try {
-    const db = await req.getUserDb();
-    await db.read();
-    const sanitizedBody = sanitizeObject(req.body, GROUP_SANITIZE_CONFIG);
-    const { name, description, is_private, ai_member, avatar_url, avatar_color } = sanitizedBody;
-    const aiMembers = sanitizedBody.ai_members || [];
-    const normalizedAiMembers = Array.isArray(aiMembers) ? [...new Set(aiMembers.filter(Boolean))] : [];
-
-    if (is_private) {
-      if (!ai_member) {
-        return res.status(400).json({ error: '私聊需要指定AI成员' });
-      }
-    } else {
-      if (normalizedAiMembers.length > 0 && normalizedAiMembers.length < 2) {
-        return res.status(400).json({ error: '群聊至少需要2个AI成员' });
-      }
-    }
-
-    const groupId = uuidv4();
-    const newGroup = {
-      id: groupId,
-      name,
-      description,
-      type: is_private ? 'private' : 'custom',
-      is_private: is_private || false,
-      avatar_url: avatar_url || null,
-      avatar_color: avatar_color || null,
-      pinned: false,
-      debate_mode: false,
-      debate_level: 1,
-      ai_members: is_private ? [ai_member] : (normalizedAiMembers.length > 0 ? normalizedAiMembers : ['deepseek', 'deepseek_reasoner', 'glm_air', 'mimo_flash', 'qwen_flash']),
-      created_at: new Date().toISOString(),
-      last_message_at: new Date().toISOString(),
-      last_message_preview: null
-    };
-
-    db.data.groups.push(newGroup);
-    await withWriteLock(req.userId, async () => {
-      await db.write();
-    });
-
-    res.status(201).json(newGroup);
-  } catch (error) {
-    safeLog('error', '创建群组错误', { error: error?.message || error });
-    res.status(500).json({ error: '创建群组失败' });
-  }
-});
-
-router.put('/groups/:id/debate', validateBody(updateDebateSchema), async (req, res) => {
-  try {
-    const db = await req.getUserDb();
-    await db.read();
-    const { id } = req.params;
-    const { debate_mode, debate_level } = req.body;
-
-    const groupIndex = db.data.groups.findIndex(g => g.id === id);
-    if (groupIndex === -1) {
-      return res.status(404).json({ error: 'Group not found' });
-    }
-
-    db.data.groups[groupIndex] = {
-      ...db.data.groups[groupIndex],
-      debate_mode: debate_mode !== undefined ? debate_mode : db.data.groups[groupIndex].debate_mode,
-      debate_level: debate_level !== undefined ? debate_level : db.data.groups[groupIndex].debate_level
-    };
-
-    await withWriteLock(req.userId, async () => {
-      await db.write();
-    });
-
-    // 广播群组更新
-    broadcastToGroup(id, {
-      type: 'group_update',
-      group_id: id,
-      group: db.data.groups[groupIndex],
-      timestamp: new Date().toISOString()
-    });
-
-    res.json(db.data.groups[groupIndex]);
-  } catch (error) {
-    safeLog('error', '更新辩论设置错误', { error: error?.message || error });
-    res.status(500).json({ error: '更新辩论设置失败' });
-  }
-});
-
-// 置顶/取消置顶群组
-router.put('/groups/:id/pin', validateBody(pinGroupSchema), async (req, res) => {
+router.post('/groups/:id/upload-background', bgUpload.single('background'), asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   await db.read();
   const { id } = req.params;
-  const { pinned } = req.body;
-
-  const groupIndex = db.data.groups.findIndex(g => g.id === id);
-  if (groupIndex === -1) {
-    return res.status(404).json({ error: 'Group not found' });
+  const group = db.data.groups.find(g => g.id === id);
+  if (!group) {
+    if (req.file?.path) await fs.promises.unlink(req.file.path).catch(() => { });
+    return res.status(404).json({ error: '群组不存在' });
+  }
+  if (!req.file) return res.status(400).json({ error: '请上传背景图片' });
+  if (!await validateBackgroundFile(req.file)) {
+    await fs.promises.unlink(req.file.path).catch(() => { });
+    return res.status(400).json({ error: '背景图内容与声明类型不匹配' });
   }
 
-  db.data.groups[groupIndex].pinned = pinned !== undefined ? pinned : !db.data.groups[groupIndex].pinned;
+  let previousKey = null;
+  const bgUrl = `/api/groups/${encodeURIComponent(id)}/background`;
   await withWriteLock(req.userId, async () => {
+    await db.read();
+    const lockedGroup = db.data.groups.find(g => g.id === id);
+    if (!lockedGroup) {
+      if (req.file?.path) await fs.promises.unlink(req.file.path).catch(() => { });
+      const notFound = new Error('群组不存在');
+      notFound.status = 404;
+      throw notFound;
+    }
+    previousKey = lockedGroup.background_storage_key;
+    lockedGroup.background_url = bgUrl;
+    lockedGroup.background_storage_key = req.file.filename;
     await db.write();
   });
+  if (previousKey && previousKey !== req.file.filename) {
+    const previousPath = path.resolve(uploadDir, path.basename(previousKey));
+    if (previousPath.startsWith(path.resolve(uploadDir) + path.sep)) {
+      await fs.promises.unlink(previousPath).catch(() => { });
+    }
+  }
+  res.json({ success: true, background_url: bgUrl });
+}));
 
-  res.json(db.data.groups[groupIndex]);
-});
+router.get('/groups/:id/background', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  await db.read();
+  const group = db.data.groups.find(item => item.id === req.params.id);
+  if (!group) return res.status(404).json({ error: '群组不存在' });
 
-// 添加AI成员到群聊
-router.post('/groups/:id/members', async (req, res) => {
+  let storageKey = group.background_storage_key;
+  if (!storageKey && typeof group.background_url === 'string' && group.background_url.startsWith('/uploads/backgrounds/')) {
+    storageKey = path.basename(group.background_url);
+  }
+  if (!storageKey || path.basename(storageKey) !== storageKey) {
+    return res.status(404).json({ error: '背景图不存在' });
+  }
+
+  const filePath = path.resolve(uploadDir, storageKey);
+  const uploadRoot = path.resolve(uploadDir);
+  if (!filePath.startsWith(uploadRoot + path.sep) || !fs.existsSync(filePath)) {
+    return res.status(404).json({ error: '背景图不存在' });
+  }
+
+  const mimeByExtension = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp' };
+  const mimeType = mimeByExtension[path.extname(storageKey).toLowerCase()];
+  if (!mimeType) return res.status(415).json({ error: '背景图类型不受支持' });
+  res.setHeader('Content-Type', mimeType);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  return res.sendFile(filePath);
+}));
+
+router.get('/groups', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  await db.read();
+  const { limit, offset } = req.query;
+  let groups = db.data.groups;
+  if (limit || offset) {
+    const start = parseInt(offset, 10) || 0;
+    const parsedLimit = parseInt(limit, 10);
+    const end = Number.isFinite(parsedLimit) && parsedLimit > 0 ? start + parsedLimit : undefined;
+    groups = groups.slice(start, end);
+  }
+  res.json(sanitizeGroupsForClient(groups));
+}));
+
+router.get('/groups/:id', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   await db.read();
   const { id } = req.params;
-  const { aiId } = req.body;
+  const group = db.data.groups.find(g => g.id === id);
 
-  const groupIndex = db.data.groups.findIndex(g => g.id === id);
-  if (groupIndex === -1) {
+  if (!group) {
     return res.status(404).json({ error: 'Group not found' });
   }
 
-  const group = db.data.groups[groupIndex];
+  res.json(sanitizeGroupForClient(group));
+}));
 
-  // 不能添加到私聊
-  if (group.is_private) {
-    return res.status(400).json({ error: '不能向私聊添加成员' });
-  }
-
-  // 检查AI是否已在群聊中
-  if (group.ai_members && group.ai_members.includes(aiId)) {
-    return res.status(400).json({ error: '该AI已在群聊中' });
-  }
-
-  if (!group.ai_members) {
-    group.ai_members = [];
-  }
-  group.ai_members.push(aiId);
-
-  // 创建系统消息：AI加入群聊
-  const messageId = uuidv4();
-  const systemMessage = {
-    id: messageId,
-    group_id: id,
-    sender_type: 'system',
-    sender_id: 'system',
-    content: `邀请了 ${aiNames[aiId] || aiId} 加入群聊`,
-    content_type: 'text',
-    metadata: { type: 'member_joined', newMember: aiId },
-    created_at: new Date().toISOString()
-  };
-
-  db.data.messages.push(systemMessage);
-  updateGroupActivity(group, systemMessage);
-  await withWriteLock(req.userId, async () => {
-    await db.write();
-  });
-
-  // 广播系统消息
-  broadcastToGroup(id, {
-    type: 'system_message',
-    group_id: id,
-    content: systemMessage.content,
-    timestamp: systemMessage.created_at,
-    metadata: systemMessage.metadata
-  });
-
-  res.json({
-    success: true,
-    group: group,
-    systemMessage: systemMessage
-  });
-});
-
-// 获取或创建私聊群组
-router.post('/private-chat/:aiId', async (req, res) => {
+router.post('/groups', validateBody(createGroupSchema), asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
-  await db.read();
-  const { aiId } = req.params;
+  const sanitizedBody = sanitizeObject(req.body, GROUP_SANITIZE_CONFIG);
+  const { name, description, is_private, ai_member, avatar_url, avatar_color } = sanitizedBody;
+  const aiMembers = sanitizedBody.ai_members || [];
+  const normalizedAiMembers = Array.isArray(aiMembers) ? [...new Set(aiMembers.filter(Boolean))] : [];
 
-  // 查找是否已存在与该AI的私聊
-  let privateChat = db.data.groups.find(g =>
-    g.is_private === true &&
-    g.ai_members &&
-    g.ai_members.length === 1 &&
-    g.ai_members[0] === aiId
-  );
-
-  if (privateChat) {
-    return res.json(privateChat);
+  if (is_private) {
+    if (!ai_member || !VALID_AI_IDS.has(ai_member)) {
+      return res.status(400).json({ error: '私聊需要指定有效的AI成员' });
+    }
+  } else {
+    if (normalizedAiMembers.some(id => !VALID_AI_IDS.has(id))) {
+      return res.status(400).json({ error: 'ai_members 包含无效的AI标识' });
+    }
+    if (normalizedAiMembers.length > 0 && normalizedAiMembers.length < 2) {
+      return res.status(400).json({ error: '群聊至少需要2个AI成员' });
+    }
   }
 
-  // 创建新的私聊群组
   const groupId = uuidv4();
-  privateChat = {
+  const newGroup = {
     id: groupId,
-    name: aiNames[aiId] || aiId,
-    description: `与 ${aiNames[aiId] || aiId} 的私聊`,
-    type: 'private',
-    is_private: true,
-    pinned: true, // 私聊默认置顶
+    name,
+    description,
+    type: is_private ? 'private' : 'custom',
+    is_private: is_private || false,
+    avatar_url: avatar_url || null,
+    avatar_color: avatar_color || null,
+    pinned: false,
     debate_mode: false,
     debate_level: 1,
-    ai_members: [aiId],
+    ai_members: is_private ? [ai_member] : (normalizedAiMembers.length > 0 ? normalizedAiMembers : ['deepseek', 'deepseek_reasoner', 'glm_air', 'mimo_flash', 'qwen_flash']),
     created_at: new Date().toISOString(),
     last_message_at: new Date().toISOString(),
     last_message_preview: null
   };
 
-  db.data.groups.push(privateChat);
   await withWriteLock(req.userId, async () => {
+    await db.read();
+    db.data.groups.push(newGroup);
     await db.write();
   });
 
-  res.status(201).json(privateChat);
-});
+  res.status(201).json(newGroup);
+}));
 
-router.delete('/groups/:id', async (req, res) => {
+router.put('/groups/:id/debate', validateBody(updateDebateSchema), asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
-  await db.read();
   const { id } = req.params;
+  const { debate_mode, debate_level } = req.body;
 
-  const groupIndex = db.data.groups.findIndex(g => g.id === id);
-  if (groupIndex === -1) {
-    return res.status(404).json({ error: 'Group not found' });
+  let updatedGroup = null;
+  await withWriteLock(req.userId, async () => {
+    await db.read();
+    const group = db.data.groups.find(g => g.id === id);
+    if (!group) {
+      const notFound = new Error('Group not found');
+      notFound.status = 404;
+      throw notFound;
+    }
+    if (debate_mode !== undefined) group.debate_mode = debate_mode;
+    if (debate_level !== undefined) group.debate_level = debate_level;
+    updatedGroup = { ...group };
+    await db.write();
+  });
+
+  broadcastToGroup(id, {
+    type: 'group_update',
+    group_id: id,
+    group: sanitizeGroupForClient(updatedGroup),
+    timestamp: new Date().toISOString()
+  });
+
+  res.json(updatedGroup);
+}));
+
+// 置顶/取消置顶群组
+router.put('/groups/:id/pin', validateBody(pinGroupSchema), asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  const { id } = req.params;
+  const { pinned } = req.body;
+
+  let updatedGroup = null;
+  await withWriteLock(req.userId, async () => {
+    await db.read();
+    const group = db.data.groups.find(g => g.id === id);
+    if (!group) {
+      const notFound = new Error('Group not found');
+      notFound.status = 404;
+      throw notFound;
+    }
+    group.pinned = pinned !== undefined ? pinned : !group.pinned;
+    updatedGroup = { ...group };
+    await db.write();
+  });
+
+  res.json(updatedGroup);
+}));
+
+// 添加AI成员到群聊
+router.post('/groups/:id/members', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  const { id } = req.params;
+  const { aiId } = req.body || {};
+
+  if (!aiId || typeof aiId !== 'string' || !VALID_AI_IDS.has(aiId)) {
+    return res.status(400).json({ error: 'aiId 无效或不在允许的AI列表中' });
   }
 
-  const initialMessageCount = db.data.messages.length;
-  db.data.messages = db.data.messages.filter(m => m.group_id !== id);
-  const deletedMessageCount = initialMessageCount - db.data.messages.length;
-  const filesToDelete = (db.data.files || []).filter(file => file.group_id === id);
+  let result = null;
+  await withWriteLock(req.userId, async () => {
+    await db.read();
+    const group = db.data.groups.find(g => g.id === id);
+    if (!group) {
+      const notFound = new Error('Group not found');
+      notFound.status = 404;
+      throw notFound;
+    }
+    if (group.is_private) {
+      const bad = new Error('不能向私聊添加成员');
+      bad.status = 400;
+      throw bad;
+    }
+    if (group.ai_members && group.ai_members.includes(aiId)) {
+      const dup = new Error('该AI已在群聊中');
+      dup.status = 400;
+      throw dup;
+    }
+    if (!group.ai_members) {
+      group.ai_members = [];
+    }
+    group.ai_members.push(aiId);
+
+    const messageId = uuidv4();
+    const systemMessage = {
+      id: messageId,
+      group_id: id,
+      sender_type: 'system',
+      sender_id: 'system',
+      content: `邀请了 ${aiNames[aiId] || aiId} 加入群聊`,
+      content_type: 'text',
+      metadata: { type: 'member_joined', newMember: aiId },
+      created_at: new Date().toISOString()
+    };
+
+    db.data.messages.push(systemMessage);
+    updateGroupActivity(group, systemMessage);
+    await db.write();
+    result = { group: sanitizeGroupForClient(group), systemMessage };
+  });
+
+  broadcastToGroup(id, {
+    type: 'system_message',
+    group_id: id,
+    content: result.systemMessage.content,
+    timestamp: result.systemMessage.created_at,
+    metadata: result.systemMessage.metadata
+  });
+
+  res.json({
+    success: true,
+    group: result.group,
+    systemMessage: result.systemMessage
+  });
+}));
+
+// 获取或创建私聊群组
+router.post('/private-chat/:aiId', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  const { aiId } = req.params;
+
+  if (!VALID_AI_IDS.has(aiId)) {
+    return res.status(400).json({ error: 'aiId 无效或不在允许的AI列表中' });
+  }
+
+  let privateChat = null;
+  let created = false;
+  await withWriteLock(req.userId, async () => {
+    await db.read();
+    privateChat = db.data.groups.find(g =>
+      g.is_private === true &&
+      g.ai_members &&
+      g.ai_members.length === 1 &&
+      g.ai_members[0] === aiId
+    );
+
+    if (!privateChat) {
+      const groupId = uuidv4();
+      privateChat = {
+        id: groupId,
+        name: aiNames[aiId] || aiId,
+        description: `与 ${aiNames[aiId] || aiId} 的私聊`,
+        type: 'private',
+        is_private: true,
+        pinned: true, // 私聊默认置顶
+        debate_mode: false,
+        debate_level: 1,
+        ai_members: [aiId],
+        created_at: new Date().toISOString(),
+        last_message_at: new Date().toISOString(),
+        last_message_preview: null
+      };
+      db.data.groups.push(privateChat);
+      await db.write();
+      created = true;
+    }
+  });
+
+  if (!privateChat) {
+    return res.status(500).json({ error: '私聊创建失败' });
+  }
+
+  res.status(created ? 201 : 200).json(sanitizeGroupForClient(privateChat));
+}));
+
+router.delete('/groups/:id', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  const { id } = req.params;
+
+  // 删除前先停掉该群所有后台引擎，防止僵尸定时器继续向已删群写消息
+  try {
+    const { stopAutonomousChatTimer, cancelGroupGeneration, stopAIPrivateChat } = await import('../services/scheduler/index.js');
+    const { stopFormalDebate } = await import('../services/debate/index.js');
+    stopAutonomousChatTimer(id);
+    cancelGroupGeneration(id);
+    try { stopAIPrivateChat(id); } catch {}
+    try { stopFormalDebate(id); } catch {}
+  } catch (err) {
+    safeLog('warn', '停止群组后台任务失败（继续删除）', { groupId: id, error: err?.message });
+  }
+
+  let deletedMessageCount = 0;
+  let filesToDelete = [];
+
+  await withWriteLock(req.userId, async () => {
+    await db.read();
+    const groupIndex = db.data.groups.findIndex(g => g.id === id);
+    if (groupIndex === -1) {
+      const notFound = new Error('Group not found');
+      notFound.status = 404;
+      throw notFound;
+    }
+
+    const initialMessageCount = db.data.messages.length;
+    db.data.messages = db.data.messages.filter(m => m.group_id !== id);
+    deletedMessageCount = initialMessageCount - db.data.messages.length;
+    filesToDelete = (db.data.files || []).filter(file => file.group_id === id);
+    db.data.files = (db.data.files || []).filter(file => file.group_id !== id);
+
+    db.data.groups.splice(groupIndex, 1);
+    await db.write();
+  });
+
+  // 磁盘清理放在锁外异步执行，失败不影响删除结果
   const uploadsRoot = path.resolve(getUploadsDir());
   for (const file of filesToDelete) {
     const ownerId = file.owner_user_id || file.uploader_id || req.userId;
     const storedFilename = path.basename(file.stored_filename || file.original_path || '');
     if (!ownerId || !storedFilename) continue;
     const safeFilePath = path.resolve(path.join(uploadsRoot, ownerId, storedFilename));
-    if (safeFilePath.startsWith(uploadsRoot) && fs.existsSync(safeFilePath)) {
-      fs.unlinkSync(safeFilePath);
+    const withSep = uploadsRoot.endsWith(path.sep) ? uploadsRoot : uploadsRoot + path.sep;
+    if (safeFilePath.startsWith(withSep)) {
+      fsPromises.unlink(safeFilePath).catch(() => {});
     }
   }
-  db.data.files = (db.data.files || []).filter(file => file.group_id !== id);
-
-  db.data.groups.splice(groupIndex, 1);
-  await withWriteLock(req.userId, async () => {
-    await db.write();
-  });
 
   safeLog('info', '删除群聊', { groupId: id, deletedMessageCount });
 
@@ -380,58 +474,63 @@ router.delete('/groups/:id', async (req, res) => {
     success: true,
     deleted_messages: deletedMessageCount
   });
-});
+}));
 
-router.delete('/groups/:id/members/:aiId', async (req, res) => {
+router.delete('/groups/:id/members/:aiId', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
-  await db.read();
   const { id, aiId } = req.params;
 
-  const groupIndex = db.data.groups.findIndex(g => g.id === id);
-  if (groupIndex === -1) {
-    return res.status(404).json({ error: 'Group not found' });
-  }
-
-  const group = db.data.groups[groupIndex];
-
-  if (group.is_private) {
-    return res.status(400).json({ error: '不能从私聊中移除成员' });
-  }
-
-  if (!group.ai_members || !group.ai_members.includes(aiId)) {
-    return res.status(400).json({ error: '该AI不在群聊中' });
-  }
-
-  if (group.ai_members.length <= 2) {
-    return res.status(400).json({ error: '群聊至少需要保留2个AI成员' });
-  }
-
-  group.ai_members = group.ai_members.filter(member => member !== aiId);
-
-  const messageId = uuidv4();
-  const systemMessage = {
-    id: messageId,
-    group_id: id,
-    sender_type: 'system',
-    sender_id: 'system',
-    content: `${aiNames[aiId] || aiId} 已被移出群聊`,
-    content_type: 'text',
-    metadata: { type: 'member_removed', removedMember: aiId },
-    created_at: new Date().toISOString()
-  };
-
-  db.data.messages.push(systemMessage);
-  updateGroupActivity(group, systemMessage);
+  let result = null;
   await withWriteLock(req.userId, async () => {
+    await db.read();
+    const group = db.data.groups.find(g => g.id === id);
+    if (!group) {
+      const notFound = new Error('Group not found');
+      notFound.status = 404;
+      throw notFound;
+    }
+    if (group.is_private) {
+      const bad = new Error('不能从私聊中移除成员');
+      bad.status = 400;
+      throw bad;
+    }
+    if (!group.ai_members || !group.ai_members.includes(aiId)) {
+      const bad = new Error('该AI不在群聊中');
+      bad.status = 400;
+      throw bad;
+    }
+    if (group.ai_members.length <= 2) {
+      const bad = new Error('群聊至少需要保留2个AI成员');
+      bad.status = 400;
+      throw bad;
+    }
+
+    group.ai_members = group.ai_members.filter(member => member !== aiId);
+
+    const messageId = uuidv4();
+    const systemMessage = {
+      id: messageId,
+      group_id: id,
+      sender_type: 'system',
+      sender_id: 'system',
+      content: `${aiNames[aiId] || aiId} 已被移出群聊`,
+      content_type: 'text',
+      metadata: { type: 'member_removed', removedMember: aiId },
+      created_at: new Date().toISOString()
+    };
+
+    db.data.messages.push(systemMessage);
+    updateGroupActivity(group, systemMessage);
     await db.write();
+    result = { group: sanitizeGroupForClient(group), systemMessage };
   });
 
   broadcastToGroup(id, {
     type: 'system_message',
     group_id: id,
-    content: systemMessage.content,
-    timestamp: systemMessage.created_at,
-    metadata: systemMessage.metadata
+    content: result.systemMessage.content,
+    timestamp: result.systemMessage.created_at,
+    metadata: result.systemMessage.metadata
   });
 
   broadcastToGroup(id, {
@@ -443,21 +542,16 @@ router.delete('/groups/:id/members/:aiId', async (req, res) => {
 
   res.json({
     success: true,
-    group: group,
-    systemMessage: systemMessage
+    group: result.group,
+    systemMessage: result.systemMessage
   });
-});
+}));
 
-router.post('/ai-private-chat', async (req, res) => {
-  safeLog('info', '收到AI私聊创建请求', { body: req.body });
+router.post('/ai-private-chat', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
-  await db.read();
-  const { aiMembers, topic, customName } = req.body;
-
-  safeLog('info', 'AI私聊参数', { aiMembers, topic, customName });
+  const { aiMembers, topic, customName } = req.body || {};
 
   if (!aiMembers || !Array.isArray(aiMembers) || aiMembers.length < 2) {
-    safeLog('warn', 'AI成员不足');
     return res.status(400).json({ error: '至少需要选择2个AI成员' });
   }
 
@@ -465,11 +559,17 @@ router.post('/ai-private-chat', async (req, res) => {
     return res.status(400).json({ error: '最多支持5个AI成员' });
   }
 
-  const validAIs = ['deepseek', 'deepseek_reasoner', 'mimo_flash', 'mimo_omni', 'mimo_tts', 'glm_air', 'glm_flash', 'glm_flashx', 'qwen_flash', 'qwen_turbo'];
   for (const aiId of aiMembers) {
-    if (!validAIs.includes(aiId)) {
-      return res.status(400).json({ error: `无效的AI成员: ${aiId}` });
+    if (!VALID_AI_IDS.has(aiId)) {
+      return res.status(400).json({ error: `无效的AI成员: ${String(aiId).slice(0, 64)}` });
     }
+  }
+
+  if (topic !== undefined && (typeof topic !== 'string' || topic.trim().length > 200)) {
+    return res.status(400).json({ error: 'topic 必须是不超过200字符的字符串' });
+  }
+  if (customName !== undefined && (typeof customName !== 'string' || customName.trim().length > 50)) {
+    return res.status(400).json({ error: 'customName 必须是不超过50字符的字符串' });
   }
 
   const uniqueMembers = [...new Set(aiMembers)];
@@ -477,79 +577,98 @@ router.post('/ai-private-chat', async (req, res) => {
     return res.status(400).json({ error: 'AI成员不能重复' });
   }
 
-  const sortedIds = [...uniqueMembers].sort();
-  const existingChat = db.data.groups.find(g =>
-    g.type === 'ai_private' &&
-    g.ai_members &&
-    g.ai_members.length === sortedIds.length &&
-    sortedIds.every(id => g.ai_members.includes(id))
-  );
-
-  if (existingChat) {
-    return res.json(existingChat);
-  }
-
-  const groupId = uuidv4();
-
-  let chatName;
-  if (customName && customName.trim()) {
-    chatName = customName.trim();
-  } else {
-    const shortNames = sortedIds.map(id => aiShortNames[id] || aiNames[id]);
-    chatName = shortNames.join(' & ');
-  }
-
-  const newChat = {
-    id: groupId,
-    name: chatName,
-    description: topic ? `话题: ${topic}` : 'AI私聊（只读）',
-    type: 'ai_private',
-    is_private: true,
-    is_ai_private: true,
-    pinned: true,
-    debate_mode: false,
-    debate_level: 1,
-    ai_members: sortedIds,
-    topic: topic || null,
-    is_active: false,
-    created_at: new Date().toISOString(),
-    last_message_at: new Date().toISOString(),
-    last_message_preview: null
-  };
-
-  db.data.groups.push(newChat);
+  let resultChat = null;
+  let created = false;
   await withWriteLock(req.userId, async () => {
+    await db.read();
+    const sortedIds = [...uniqueMembers].sort();
+    const existingChat = db.data.groups.find(g =>
+      g.type === 'ai_private' &&
+      g.ai_members &&
+      g.ai_members.length === sortedIds.length &&
+      sortedIds.every(id => g.ai_members.includes(id))
+    );
+
+    if (existingChat) {
+      resultChat = existingChat;
+      return;
+    }
+
+    const groupId = uuidv4();
+
+    let chatName;
+    if (customName && customName.trim()) {
+      chatName = customName.trim().slice(0, 50);
+    } else {
+      const shortNames = sortedIds.map(id => aiShortNames[id] || aiNames[id]);
+      chatName = shortNames.join(' & ');
+    }
+
+    const newChat = {
+      id: groupId,
+      name: chatName,
+      description: topic ? `话题: ${topic.trim().slice(0, 200)}` : 'AI私聊（只读）',
+      type: 'ai_private',
+      is_private: true,
+      is_ai_private: true,
+      pinned: true,
+      debate_mode: false,
+      debate_level: 1,
+      ai_members: sortedIds,
+      topic: topic ? topic.trim().slice(0, 200) : null,
+      is_active: false,
+      created_at: new Date().toISOString(),
+      last_message_at: new Date().toISOString(),
+      last_message_preview: null
+    };
+
+    db.data.groups.push(newChat);
     await db.write();
+    resultChat = newChat;
+    created = true;
   });
 
-  res.status(201).json(newChat);
-});
+  res.status(created ? 201 : 200).json(sanitizeGroupForClient(resultChat));
+}));
 
-router.get('/ai-private-chats', async (req, res) => {
+router.get('/ai-private-chats', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   await db.read();
 
   const aiPrivateChats = db.data.groups.filter(g => g.type === 'ai_private' || g.is_ai_private);
 
-  res.json(aiPrivateChats);
-});
+  res.json(sanitizeGroupsForClient(aiPrivateChats));
+}));
 
-router.delete('/ai-private-chats/:id', async (req, res) => {
+router.delete('/ai-private-chats/:id', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
-  await db.read();
   const { id } = req.params;
 
-  const groupIndex = db.data.groups.findIndex(g => g.id === id && (g.type === 'ai_private' || g.is_ai_private));
-  if (groupIndex === -1) {
-    return res.status(404).json({ error: 'AI私聊不存在' });
+  // 删除前停止该群的后台引擎
+  try {
+    const { stopAutonomousChatTimer, cancelGroupGeneration, stopAIPrivateChat } = await import('../services/scheduler/index.js');
+    stopAutonomousChatTimer(id);
+    cancelGroupGeneration(id);
+    try { stopAIPrivateChat(id); } catch {}
+  } catch (err) {
+    safeLog('warn', '停止AI私聊后台任务失败（继续删除）', { groupId: id, error: err?.message });
   }
 
-  const initialMessageCount = db.data.messages.length;
-  db.data.messages = db.data.messages.filter(m => m.group_id !== id);
-  const deletedMessageCount = initialMessageCount - db.data.messages.length;
-
-  db.data.groups.splice(groupIndex, 1);
+  let deletedMessageCount = 0;
   await withWriteLock(req.userId, async () => {
+    await db.read();
+    const groupIndex = db.data.groups.findIndex(g => g.id === id && (g.type === 'ai_private' || g.is_ai_private));
+    if (groupIndex === -1) {
+      const notFound = new Error('AI私聊不存在');
+      notFound.status = 404;
+      throw notFound;
+    }
+
+    const initialMessageCount = db.data.messages.length;
+    db.data.messages = db.data.messages.filter(m => m.group_id !== id);
+    deletedMessageCount = initialMessageCount - db.data.messages.length;
+
+    db.data.groups.splice(groupIndex, 1);
     await db.write();
   });
 
@@ -559,63 +678,65 @@ router.delete('/ai-private-chats/:id', async (req, res) => {
     success: true,
     deleted_messages: deletedMessageCount
   });
-});
+}));
 
-router.post('/ai-private-chats/:id/start', async (req, res) => {
+router.post('/ai-private-chats/:id/start', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   await db.read();
   const { id } = req.params;
-  const { topic } = req.body;
+  const topic = req.body?.topic;
 
   const group = db.data.groups.find(g => g.id === id && (g.type === 'ai_private' || g.is_ai_private));
   if (!group) {
     return res.status(404).json({ error: 'AI私聊不存在' });
   }
 
+  if (topic !== undefined && (typeof topic !== 'string' || topic.trim().length === 0 || topic.trim().length > 200)) {
+    return res.status(400).json({ error: 'topic 必须是1-200字符的字符串' });
+  }
+
   if (topic) {
-    group.topic = topic;
+    group.topic = topic.trim().slice(0, 200);
     await withWriteLock(req.userId, async () => {
       await db.write();
     });
   }
 
-  try {
-    const { startAIPrivateChat, getChatStatus } = await import('../services/scheduler/index.js');
+  const { startAIPrivateChat, getChatStatus } = await import('../services/scheduler/index.js');
 
-    const currentStatus = getChatStatus(id);
-    if (currentStatus.isRunning) {
-      return res.json({ groupId: id, status: 'already_active' });
-    }
-
-    startAIPrivateChat(id, topic || null).catch(error => {
-      safeLog('error', 'AI私聊后台运行错误', { error: error?.message || error });
-    });
-
-    res.json({
-      groupId: id,
-      status: 'started',
-      message: 'AI私聊已在后台启动'
-    });
-  } catch (error) {
-    safeLog('error', '启动AI私聊错误', { error: error?.message || error });
-    res.status(500).json({ error: '启动AI私聊失败', details: error.message });
+  const currentStatus = getChatStatus(id);
+  if (currentStatus.isRunning) {
+    return res.json({ groupId: id, status: 'already_active' });
   }
-});
 
-router.get('/ai-private-chats/:id/status', async (req, res) => {
+  startAIPrivateChat(id, (topic ? topic.trim().slice(0, 200) : null)).catch(error => {
+    safeLog('error', 'AI私聊后台运行错误', { error: error?.message || error });
+  });
+
+  res.json({
+    groupId: id,
+    status: 'started',
+    message: 'AI私聊已在后台启动'
+  });
+}));
+
+router.get('/ai-private-chats/:id/status', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  await db.read();
   const { id } = req.params;
 
-  try {
-    const { getChatStatus } = await import('../services/scheduler/index.js');
-    const status = getChatStatus(id);
-    res.json(status);
-  } catch (error) {
-    safeLog('error', '获取聊天状态错误', { error: error?.message || error });
-    res.status(500).json({ error: '获取聊天状态失败', details: error.message });
+  // 归属校验：只有该群的拥有者才能查询其引擎状态
+  const group = db.data.groups.find(g => g.id === id && (g.type === 'ai_private' || g.is_ai_private));
+  if (!group) {
+    return res.status(404).json({ error: 'AI私聊不存在' });
   }
-});
 
-router.post('/ai-private-chats/:id/continue', async (req, res) => {
+  const { getChatStatus } = await import('../services/scheduler/index.js');
+  const status = getChatStatus(id);
+  res.json(status);
+}));
+
+router.post('/ai-private-chats/:id/continue', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   await db.read();
   const { id } = req.params;
@@ -625,48 +746,57 @@ router.post('/ai-private-chats/:id/continue', async (req, res) => {
     return res.status(404).json({ error: 'AI私聊不存在' });
   }
 
-  try {
-    const { continueAIPrivateChat, getChatStatus } = await import('../services/scheduler/index.js');
+  const { continueAIPrivateChat, getChatStatus } = await import('../services/scheduler/index.js');
 
-    const currentStatus = getChatStatus(id);
-    if (currentStatus.isRunning) {
-      return res.json({ groupId: id, status: 'already_active' });
-    }
-
-    continueAIPrivateChat(id).catch(error => {
-      safeLog('error', 'AI私聊继续运行错误', { error: error?.message || error });
-    });
-
-    res.json({
-      groupId: id,
-      status: 'started',
-      message: 'AI私聊已在后台继续'
-    });
-  } catch (error) {
-    safeLog('error', '继续AI私聊错误', { error: error?.message || error });
-    res.status(500).json({ error: '继续AI私聊失败', details: error.message });
+  const currentStatus = getChatStatus(id);
+  if (currentStatus.isRunning) {
+    return res.json({ groupId: id, status: 'already_active' });
   }
-});
 
-router.post('/ai-private-chats/:id/stop', async (req, res) => {
-  try {
-    const { stopAIPrivateChat } = await import('../services/scheduler/index.js');
-    const result = stopAIPrivateChat(req.params.id);
-    res.json(result);
-  } catch (error) {
-    safeLog('error', '停止AI私聊错误', { error: error?.message || error });
-    res.status(500).json({ error: '停止AI私聊失败', details: error.message });
-  }
-});
+  continueAIPrivateChat(id).catch(error => {
+    safeLog('error', 'AI私聊继续运行错误', { error: error?.message || error });
+  });
 
-router.post('/groups/:id/formal-debate/start', async (req, res) => {
+  res.json({
+    groupId: id,
+    status: 'started',
+    message: 'AI私聊已在后台继续'
+  });
+}));
+
+router.post('/ai-private-chats/:id/stop', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   await db.read();
   const { id } = req.params;
-  const { topic, rolePreferences, debateLevel, selectedParticipants } = req.body;
+
+  // 归属校验
+  const group = db.data.groups.find(g => g.id === id && (g.type === 'ai_private' || g.is_ai_private));
+  if (!group) {
+    return res.status(404).json({ error: 'AI私聊不存在' });
+  }
+
+  const { stopAIPrivateChat } = await import('../services/scheduler/index.js');
+  const result = stopAIPrivateChat(id);
+  res.json(result);
+}));
+
+router.post('/groups/:id/formal-debate/start', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  await db.read();
+  const { id } = req.params;
+  const { topic, rolePreferences, debateLevel, selectedParticipants } = req.body || {};
 
   if (!topic || typeof topic !== 'string' || topic.trim().length === 0) {
     return res.status(400).json({ error: '辩题不能为空' });
+  }
+  if (topic.trim().length > 500) {
+    return res.status(400).json({ error: '辩题长度不能超过500字符' });
+  }
+  if (rolePreferences !== undefined && (typeof rolePreferences !== 'object' || rolePreferences === null || Array.isArray(rolePreferences))) {
+    return res.status(400).json({ error: 'rolePreferences 必须是对象' });
+  }
+  if (debateLevel !== undefined && (!Number.isInteger(debateLevel) || debateLevel < 1 || debateLevel > 3)) {
+    return res.status(400).json({ error: 'debateLevel 必须是 1-3 的整数' });
   }
 
   const group = db.data.groups.find(g => g.id === id);
@@ -681,74 +811,75 @@ router.post('/groups/:id/formal-debate/start', async (req, res) => {
   if (selectedParticipants && Array.isArray(selectedParticipants)) {
     const invalidParticipants = selectedParticipants.filter(p => !group.ai_members.includes(p));
     if (invalidParticipants.length > 0) {
-      return res.status(400).json({ error: `无效的参与者: ${invalidParticipants.join(', ')}` });
+      return res.status(400).json({ error: `无效的参与者: ${invalidParticipants.map(String).join(', ').slice(0, 200)}` });
     }
     if (selectedParticipants.length < 2) {
       return res.status(400).json({ error: '至少需要选择2个AI参与辩论' });
     }
   }
 
-  try {
-    const { startFormalDebate, getDebateStatus } = await import('../services/debate/index.js');
+  const { startFormalDebate, getDebateStatus } = await import('../services/debate/index.js');
 
-    const currentStatus = getDebateStatus(id);
-    if (currentStatus.isRunning) {
-      return res.status(409).json({ error: '辩论已在进行中', status: currentStatus });
-    }
-
-    startFormalDebate(id, topic.trim(), rolePreferences || {}, debateLevel || 2, selectedParticipants || null).catch(error => {
-      safeLog('error', '正规辩论后台运行错误', { error: error?.message || error });
-    });
-
-    res.json({
-      groupId: id,
-      status: 'started',
-      message: '正规辩论已在后台启动',
-      topic: topic.trim(),
-      selectedParticipants: selectedParticipants || null
-    });
-  } catch (error) {
-    safeLog('error', '启动正规辩论错误', { error: error?.message || error });
-    res.status(500).json({ error: '启动正规辩论失败', details: error.message });
+  const currentStatus = getDebateStatus(id);
+  if (currentStatus.isRunning) {
+    return res.status(409).json({ error: '辩论已在进行中', status: currentStatus });
   }
-});
 
-router.post('/groups/:id/formal-debate/stop', async (req, res) => {
-  const { id } = req.params;
+  startFormalDebate(id, topic.trim().slice(0, 500), rolePreferences || {}, debateLevel || 2, selectedParticipants || null).catch(error => {
+    safeLog('error', '正规辩论后台运行错误', { error: error?.message || error });
+  });
 
-  try {
-    const { stopFormalDebate } = await import('../services/debate/index.js');
-    const result = stopFormalDebate(id);
+  res.json({
+    groupId: id,
+    status: 'started',
+    message: '正规辩论已在后台启动',
+    topic: topic.trim().slice(0, 500),
+    selectedParticipants: selectedParticipants || null
+  });
+}));
 
-    if (result.success) {
-      res.json(result);
-    } else {
-      res.status(404).json(result);
-    }
-  } catch (error) {
-    safeLog('error', '停止正规辩论错误', { error: error?.message || error });
-    res.status(500).json({ error: '停止正规辩论失败', details: error.message });
-  }
-});
-
-router.get('/groups/:id/formal-debate/status', async (req, res) => {
-  const { id } = req.params;
-
-  try {
-    const { getDebateStatus } = await import('../services/debate/index.js');
-    const status = getDebateStatus(id);
-    res.json(status);
-  } catch (error) {
-    safeLog('error', '获取辩论状态错误', { error: error?.message || error });
-    res.status(500).json({ error: '获取辩论状态失败', details: error.message });
-  }
-});
-
-router.post('/groups/:id/formal-debate/allocate-roles', async (req, res) => {
+router.post('/groups/:id/formal-debate/stop', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   await db.read();
   const { id } = req.params;
-  const { rolePreferences, selectedParticipants } = req.body;
+
+  // 归属校验
+  const group = db.data.groups.find(g => g.id === id);
+  if (!group) {
+    return res.status(404).json({ error: '群组不存在' });
+  }
+
+  const { stopFormalDebate } = await import('../services/debate/index.js');
+  const result = stopFormalDebate(id);
+
+  if (result.success) {
+    res.json(result);
+  } else {
+    res.status(404).json(result);
+  }
+}));
+
+router.get('/groups/:id/formal-debate/status', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  await db.read();
+  const { id } = req.params;
+
+  // 归属校验
+  const group = db.data.groups.find(g => g.id === id);
+  if (!group) {
+    return res.status(404).json({ error: '群组不存在' });
+  }
+
+  const { getDebateStatus } = await import('../services/debate/index.js');
+  const status = getDebateStatus(id);
+  res.json(status);
+}));
+
+router.post('/groups/:id/formal-debate/allocate-roles', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  await db.read();
+  const { id } = req.params;
+  const { rolePreferences, selectedParticipants } = req.body || {};
 
   const group = db.data.groups.find(g => g.id === id);
   if (!group) {
@@ -762,43 +893,38 @@ router.post('/groups/:id/formal-debate/allocate-roles', async (req, res) => {
   if (selectedParticipants && Array.isArray(selectedParticipants)) {
     const invalidParticipants = selectedParticipants.filter(p => !group.ai_members.includes(p));
     if (invalidParticipants.length > 0) {
-      return res.status(400).json({ error: `无效的参与者: ${invalidParticipants.join(', ')}` });
+      return res.status(400).json({ error: `无效的参与者: ${invalidParticipants.map(String).join(', ').slice(0, 200)}` });
     }
     if (selectedParticipants.length < 2) {
       return res.status(400).json({ error: '至少需要选择2个AI参与辩论' });
     }
   }
 
-  try {
-    const { allocateDebateRoles } = await import('../services/debate/index.js');
-    const roles = allocateDebateRoles(group.ai_members, rolePreferences || {}, selectedParticipants || null);
+  const { allocateDebateRoles } = await import('../services/debate/index.js');
+  const roles = allocateDebateRoles(group.ai_members, rolePreferences || {}, selectedParticipants || null);
 
-    const formattedRoles = {
-      proponents: roles.proponents.map(id => ({ id, name: aiNames[id] || id })),
-      opponents: roles.opponents.map(id => ({ id, name: aiNames[id] || id })),
-      judge: roles.judge ? { id: roles.judge, name: aiNames[roles.judge] || roles.judge } : null,
-      audience: roles.audience.map(id => ({ id, name: aiNames[id] || id })),
-      hasJudge: roles.hasJudge,
-      hasAudience: roles.hasAudience
-    };
+  const formattedRoles = {
+    proponents: roles.proponents.map(id => ({ id, name: aiNames[id] || id })),
+    opponents: roles.opponents.map(id => ({ id, name: aiNames[id] || id })),
+    judge: roles.judge ? { id: roles.judge, name: aiNames[roles.judge] || roles.judge } : null,
+    audience: roles.audience.map(id => ({ id, name: aiNames[id] || id })),
+    hasJudge: roles.hasJudge,
+    hasAudience: roles.hasAudience
+  };
 
-    res.json({
-      success: true,
-      roles: formattedRoles,
-      totalMembers: group.ai_members.length,
-      debateParticipants: selectedParticipants ? selectedParticipants.length : group.ai_members.length
-    });
-  } catch (error) {
-    safeLog('error', '分配辩论角色错误', { error: error?.message || error });
-    res.status(500).json({ error: '分配辩论角色失败', details: error.message });
-  }
-});
+  res.json({
+    success: true,
+    roles: formattedRoles,
+    totalMembers: group.ai_members.length,
+    debateParticipants: selectedParticipants ? selectedParticipants.length : group.ai_members.length
+  });
+}));
 
-router.post('/groups/:id/formal-debate/audience-comment', async (req, res) => {
+router.post('/groups/:id/formal-debate/audience-comment', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   await db.read();
   const { id } = req.params;
-  const { audienceMembers } = req.body;
+  const { audienceMembers } = req.body || {};
 
   const group = db.data.groups.find(g => g.id === id);
   if (!group) {
@@ -809,142 +935,280 @@ router.post('/groups/:id/formal-debate/audience-comment', async (req, res) => {
     return res.status(400).json({ error: '需要指定观众成员' });
   }
 
-  try {
-    const { triggerAudienceComment } = await import('../services/debate/index.js');
-    const result = await triggerAudienceComment(id, audienceMembers);
-    res.json(result);
-  } catch (error) {
-    safeLog('error', '触发观众评论错误', { error: error?.message || error });
-    res.status(500).json({ error: '触发观众评论失败', details: error.message });
+  const invalidAudience = audienceMembers.filter(p => !group.ai_members.includes(p));
+  if (invalidAudience.length > 0) {
+    return res.status(400).json({ error: `无效的观众成员: ${invalidAudience.map(String).join(', ').slice(0, 200)}` });
   }
-});
 
-router.put('/groups/:id/settings', async (req, res) => {
+  const { triggerAudienceComment } = await import('../services/debate/index.js');
+  const result = await triggerAudienceComment(id, audienceMembers);
+  res.json(result);
+}));
+
+router.put('/groups/:id/settings', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
-  await db.read();
   const { id } = req.params;
   const sanitizedBody = sanitizeObject(req.body, GROUP_SANITIZE_CONFIG);
   const { name, avatar_url, avatar_color, background_url, announcement, notifications_enabled, pinned, ...restSettings } = sanitizedBody;
 
-  const groupIndex = db.data.groups.findIndex(g => g.id === id);
-  if (groupIndex === -1) {
-    return res.status(404).json({ error: '群组不存在' });
-  }
+  let updatedGroup = null;
+  await withWriteLock(req.userId, async () => {
+    await db.read();
+    const group = db.data.groups.find(g => g.id === id);
+    if (!group) {
+      const notFound = new Error('群组不存在');
+      notFound.status = 404;
+      throw notFound;
+    }
 
-  const group = db.data.groups[groupIndex];
-
-  if (name !== undefined) {
-    group.name = name;
-  }
-  if (avatar_url !== undefined) {
-    group.avatar_url = avatar_url;
-  }
-  if (avatar_color !== undefined) {
-    group.avatar_color = avatar_color;
-  }
-  if (background_url !== undefined) {
-    group.background_url = background_url;
-  }
-  if (announcement !== undefined) {
-    group.announcement = announcement;
-  }
-  if (notifications_enabled !== undefined) {
-    group.notifications_enabled = notifications_enabled;
-  }
-  if (pinned !== undefined) {
-    group.pinned = pinned;
-  }
-
-  const allowedSettings = ['name', 'description', 'debate_mode', 'debate_level', 'debate_config', 'avatar_url', 'pinned', 'announcement'];
-  for (const key of allowedSettings) {
-    if (key in restSettings && restSettings[key] !== undefined) {
-      if (key === 'debate_config' && typeof restSettings[key] === 'object') {
-        const allowedNested = ['mode', 'topic', 'roles', 'max_rounds', 'time_limit'];
-        group.debate_config = group.debate_config || {};
-        for (const nk of allowedNested) {
-          if (nk in restSettings[key]) {
-            group.debate_config[nk] = restSettings[key][nk];
-          }
-        }
+    if (name !== undefined) {
+      if (typeof name !== 'string' || name.trim().length === 0 || name.length > 100) {
+        const bad = new Error('群组名称必须是1-100字符');
+        bad.status = 400;
+        throw bad;
+      }
+      group.name = name.trim();
+    }
+    if (avatar_url !== undefined) {
+      group.avatar_url = avatar_url;
+    }
+    if (avatar_color !== undefined) {
+      group.avatar_color = avatar_color;
+    }
+    if (background_url !== undefined) {
+      // 仅接受本站背景图 URL 形态，拒绝任意字符串注入
+      if (background_url === null || background_url === '') {
+        group.background_url = null;
+        group.background_storage_key = null;
+      } else if (typeof background_url === 'string' && new RegExp(`^/api/groups/${encodeURIComponent(id)}/background$`).test(background_url)) {
+        group.background_url = background_url;
       } else {
-        group[key] = restSettings[key];
+        const bad = new Error('background_url 仅允许本站 /api/groups/:id/background 形态或置空');
+        bad.status = 400;
+        throw bad;
       }
     }
-  }
+    if (announcement !== undefined) {
+      if (typeof announcement !== 'string' || announcement.length > 2000) {
+        const bad = new Error('公告必须是不超过2000字符的字符串');
+        bad.status = 400;
+        throw bad;
+      }
+      group.announcement = announcement;
+    }
+    if (notifications_enabled !== undefined) {
+      group.notifications_enabled = Boolean(notifications_enabled);
+    }
+    if (pinned !== undefined) {
+      group.pinned = Boolean(pinned);
+    }
 
-  await withWriteLock(req.userId, async () => {
+    const allowedSettings = ['description', 'debate_mode', 'debate_level', 'debate_config'];
+    for (const key of allowedSettings) {
+      if (key in restSettings && restSettings[key] !== undefined) {
+        if (key === 'debate_config' && typeof restSettings[key] === 'object' && restSettings[key] !== null) {
+          const allowedNested = ['mode', 'topic', 'roles', 'max_rounds', 'time_limit'];
+          group.debate_config = group.debate_config || {};
+          for (const nk of allowedNested) {
+            if (nk in restSettings[key]) {
+              group.debate_config[nk] = restSettings[key][nk];
+            }
+          }
+        } else if (key !== 'debate_config') {
+          group[key] = restSettings[key];
+        }
+      }
+    }
+
+    updatedGroup = sanitizeGroupForClient(group);
     await db.write();
   });
 
-  // 广播群组更新
   broadcastToGroup(id, {
     type: 'group_update',
     group_id: id,
-    group,
+    group: updatedGroup,
     timestamp: new Date().toISOString()
   });
 
-  res.json({ success: true, group });
-});
+  res.json({ success: true, group: updatedGroup });
+}));
 
-router.get('/groups/:id/files', async (req, res) => {
-  try {
-    const db = await req.getUserDb();
+router.get('/groups/:id/files', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  await db.read();
+  const group = db.data.groups.find(g => g.id === req.params.id);
+  if (!group) return res.status(404).json({ error: '群组不存在' });
+  const files = (db.data.files || [])
+    .filter(f => f.group_id === req.params.id)
+    .map(f => ({
+      id: f.id,
+      group_id: f.group_id,
+      name: f.filename,
+      url: `/api/files/${f.id}/download?group_id=${encodeURIComponent(f.group_id)}`,
+      size: f.file_size,
+      type: f.mime_type,
+      uploaded_at: f.created_at
+    }))
+    .sort((a, b) => new Date(b.uploaded_at) - new Date(a.uploaded_at));
+  res.json({ success: true, files });
+}));
+
+router.post('/groups/:id/files', asyncHandler(async (req, res) => {
+  res.status(400).json({ success: false, error: '请使用 /api/files/upload 上传群文件' });
+}));
+
+router.delete('/groups/:id/files/:fileId', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+
+  let fileRecord = null;
+  await withWriteLock(req.userId, async () => {
     await db.read();
     const group = db.data.groups.find(g => g.id === req.params.id);
-    if (!group) return res.status(404).json({ error: '群组不存在' });
-    const files = (db.data.files || [])
-      .filter(f => f.group_id === req.params.id)
-      .map(f => ({
-        id: f.id,
-        group_id: f.group_id,
-        name: f.filename,
-        url: `/api/files/${f.id}/download?group_id=${encodeURIComponent(f.group_id)}`,
-        size: f.file_size,
-        type: f.mime_type,
-        uploaded_at: f.created_at
-      }))
-      .sort((a, b) => new Date(b.uploaded_at) - new Date(a.uploaded_at));
-    res.json({ success: true, files });
-  } catch (error) {
-    safeLog('error', '获取群文件错误', { error: error?.message || error });
-    res.status(500).json({ success: false, error: '获取群文件失败' });
-  }
-});
-
-router.post('/groups/:id/files', async (req, res) => {
-  try {
-    res.status(400).json({ success: false, error: '请使用 /api/files/upload 上传群文件' });
-  } catch (error) {
-    safeLog('error', '上传群文件错误', { error: error?.message || error });
-    res.status(500).json({ success: false, error: '上传群文件失败' });
-  }
-});
-
-router.delete('/groups/:id/files/:fileId', async (req, res) => {
-  try {
-    const db = await req.getUserDb();
-    await db.read();
-    const group = db.data.groups.find(g => g.id === req.params.id);
-    if (!group) return res.status(404).json({ error: '群组不存在' });
-    const fileIndex = (db.data.files || []).findIndex(f => f.id === req.params.fileId && f.group_id === req.params.id);
-    if (fileIndex === -1) return res.status(404).json({ error: '文件不存在' });
-    const [fileRecord] = db.data.files.splice(fileIndex, 1);
-    const ownerId = fileRecord?.owner_user_id || fileRecord?.uploader_id || req.userId;
-    const storedFilename = path.basename(fileRecord?.stored_filename || fileRecord?.original_path || '');
-    if (ownerId && storedFilename) {
-      const uploadsRoot = path.resolve(getUploadsDir());
-      const safeFilePath = path.resolve(path.join(uploadsRoot, ownerId, storedFilename));
-      if (safeFilePath.startsWith(uploadsRoot) && fs.existsSync(safeFilePath)) {
-        fs.unlinkSync(safeFilePath);
-      }
+    if (!group) {
+      const notFound = new Error('群组不存在');
+      notFound.status = 404;
+      throw notFound;
     }
-    await withWriteLock(req.userId, async () => { await db.write(); });
-    res.json({ success: true });
-  } catch (error) {
-    safeLog('error', '删除群文件错误', { error: error?.message || error });
-    res.status(500).json({ success: false, error: '删除群文件失败' });
+    const fileIndex = (db.data.files || []).findIndex(f => f.id === req.params.fileId && f.group_id === req.params.id);
+    if (fileIndex === -1) {
+      const notFound = new Error('文件不存在');
+      notFound.status = 404;
+      throw notFound;
+    }
+    [fileRecord] = db.data.files.splice(fileIndex, 1);
+    await db.write();
+  });
+
+  // 磁盘清理在锁外异步执行
+  const ownerId = fileRecord?.owner_user_id || fileRecord?.uploader_id || req.userId;
+  const storedFilename = path.basename(fileRecord?.stored_filename || fileRecord?.original_path || '');
+  if (ownerId && storedFilename) {
+    const uploadsRoot = path.resolve(getUploadsDir());
+    const safeFilePath = path.resolve(path.join(uploadsRoot, ownerId, storedFilename));
+    const withSep = uploadsRoot.endsWith(path.sep) ? uploadsRoot : uploadsRoot + path.sep;
+    if (safeFilePath.startsWith(withSep)) {
+      fsPromises.unlink(safeFilePath).catch(() => {});
+    }
   }
-});
+  res.json({ success: true });
+}));
+
+/**
+ * 群聊洞察中心：聚合发言分布、活跃度、社交互动、情感趋势
+ * GET /api/groups/:id/insights?days=7
+ * 结果按 (userId, groupId, days) 做 60s TTL 缓存
+ */
+router.get('/groups/:id/insights', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  await db.read();
+  const { id } = req.params;
+  const group = db.data.groups.find(g => g.id === id);
+  if (!group) {
+    return res.status(404).json({ error: '群组不存在' });
+  }
+
+  const daysRaw = parseInt(String(req.query.days ?? ''), 10);
+  const days = Number.isFinite(daysRaw) ? Math.min(Math.max(daysRaw, 1), 30) : 7;
+
+  const cached = getInsightsCache(req.userId, id, days);
+  if (cached) {
+    return res.json(cached);
+  }
+
+  const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
+
+  const groupMessages = (db.data.messages || []).filter(m =>
+    m.group_id === id && new Date(m.created_at).getTime() >= sinceMs
+  );
+
+  const perAi = new Map();
+  let userCount = 0;
+  let systemCount = 0;
+  let likesTotal = 0;
+  let dislikesTotal = 0;
+  let commentsTotal = 0;
+  const dailyBuckets = new Map();
+
+  for (const msg of groupMessages) {
+    if (msg.sender_type === 'ai') {
+      const entry = perAi.get(msg.sender_id) || { ai_id: msg.sender_id, name: aiNames[msg.sender_id] || msg.sender_id, count: 0, last_active: null };
+      entry.count += 1;
+      if (!entry.last_active || msg.created_at > entry.last_active) entry.last_active = msg.created_at;
+      perAi.set(msg.sender_id, entry);
+    } else if (msg.sender_type === 'user') {
+      userCount += 1;
+    } else {
+      systemCount += 1;
+    }
+
+    likesTotal += Array.isArray(msg.liked_by) ? msg.liked_by.length : 0;
+    dislikesTotal += Array.isArray(msg.disliked_by) ? msg.disliked_by.length : 0;
+    commentsTotal += Array.isArray(msg.comments) ? msg.comments.length : 0;
+
+    const day = String(msg.created_at).slice(0, 10);
+    dailyBuckets.set(day, (dailyBuckets.get(day) || 0) + 1);
+  }
+
+  const activityDaily = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    activityDaily.push({ date: d, count: dailyBuckets.get(d) || 0 });
+  }
+
+  // 情感趋势（来自互动日志的情感分析，按日聚合均值）
+  let sentimentTrend = [];
+  try {
+    const { logs } = await interactionLoggerService.getUserLogs(req.userId);
+    const sentimentByDay = new Map();
+    for (const log of logs) {
+      const score = log?.metadata?.sentiment?.score;
+      if (typeof score !== 'number') continue;
+      if (log.system_info?.group_id !== id) continue;
+      const ts = new Date(log.timestamp).getTime();
+      if (ts < sinceMs) continue;
+      const day = String(log.timestamp).slice(0, 10);
+      const bucket = sentimentByDay.get(day) || { sum: 0, n: 0 };
+      bucket.sum += score;
+      bucket.n += 1;
+      sentimentByDay.set(day, bucket);
+    }
+    sentimentTrend = [...sentimentByDay.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([date, b]) => ({ date, avg_score: Number((b.sum / b.n).toFixed(3)), samples: b.n }));
+  } catch (err) {
+    safeLog('warn', '洞察情感趋势聚合失败（返回空趋势）', { groupId: id, error: err?.message });
+  }
+
+  const totalAi = [...perAi.values()].reduce((s, e) => s + e.count, 0);
+  const perAiRanked = [...perAi.values()].sort((a, b) => b.count - a.count);
+
+  const payload = {
+    success: true,
+    group_id: id,
+    window_days: days,
+    generated_at: new Date().toISOString(),
+    totals: {
+      messages: groupMessages.length,
+      ai_messages: totalAi,
+      user_messages: userCount,
+      system_messages: systemCount,
+      likes: likesTotal,
+      dislikes: dislikesTotal,
+      comments: commentsTotal,
+      active_ais: perAi.size
+    },
+    per_ai: perAiRanked,
+    activity_daily: activityDaily,
+    sentiment_trend: sentimentTrend,
+    participation_ratio: totalAi + userCount > 0
+      ? Number((totalAi / (totalAi + userCount)).toFixed(3))
+      : 0
+  };
+
+  setInsightsCache(req.userId, id, days, payload);
+
+  res.json(payload);
+}));
 
 export default router;

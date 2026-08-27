@@ -3,14 +3,32 @@
  * 集成长期记忆存储、检索、引用等功能
  */
 
-import { LongTermMemoryManager, longTermMemoryManager } from './longTermMemory.js';
+import { LongTermMemoryManager } from './longTermMemory.js';
 
-const memoryManagers = new Map([
-  ['default', longTermMemoryManager]
-]);
+const MAX_MANAGERS = 20;
+const memoryManagers = new Map();
 
-function getScopedUserId(userId) {
-  return userId || 'default';
+function touchManager(key) {
+  const manager = memoryManagers.get(key);
+  if (manager) {
+    memoryManagers.delete(key);
+    memoryManagers.set(key, manager);
+  }
+}
+
+function evictManagersIfOverLimit() {
+  while (memoryManagers.size > MAX_MANAGERS) {
+    const oldestKey = memoryManagers.keys().next().value;
+    const oldestManager = memoryManagers.get(oldestKey);
+    memoryManagers.delete(oldestKey);
+    if (oldestManager && typeof oldestManager.dispose === 'function') {
+      try {
+        oldestManager.dispose();
+      } catch (error) {
+        console.error('淘汰记忆管理器时清理失败:', error.message);
+      }
+    }
+  }
 }
 
 // 长期记忆服务包装器
@@ -20,13 +38,18 @@ class LongTermMemoryService {
   }
 
   getManager(userId) {
-    const scopedUserId = getScopedUserId(userId);
-
-    if (!this.managers.has(scopedUserId)) {
-      this.managers.set(scopedUserId, new LongTermMemoryManager());
+    if (userId === undefined || userId === null || userId === '') {
+      throw new Error('memory service requires an explicit userId');
     }
 
-    return this.managers.get(scopedUserId);
+    if (!memoryManagers.has(userId)) {
+      memoryManagers.set(userId, new LongTermMemoryManager());
+      evictManagersIfOverLimit();
+      return memoryManagers.get(userId);
+    }
+
+    touchManager(userId);
+    return memoryManagers.get(userId);
   }
 
   /**
@@ -107,6 +130,29 @@ class LongTermMemoryService {
         success: false,
         error: error.message,
         timestamp: new Date().toISOString()
+      };
+    }
+  }
+
+  /**
+   * 记忆回顾摘要（重要度×新鲜度加权Top记忆）
+   */
+  getDigest(userId, limit = 12) {
+    try {
+      const result = this.getManager(userId).getDigestMemories(limit);
+      return {
+        success: true,
+        ...result,
+        generated_at: new Date().toISOString()
+      };
+    } catch (error) {
+      console.error('生成记忆摘要失败:', error);
+      return {
+        success: false,
+        error: error.message,
+        total: 0,
+        memories: [],
+        generated_at: new Date().toISOString()
       };
     }
   }
@@ -237,12 +283,10 @@ const longTermMemoryService = new LongTermMemoryService();
 
 // 导出功能
 export {
-  longTermMemoryService,
-  longTermMemoryManager
+  longTermMemoryService
 };
 
 export default {
-  manager: longTermMemoryManager,
   getManager: (userId) => longTermMemoryService.getManager(userId),
   service: longTermMemoryService,
   
@@ -250,6 +294,7 @@ export default {
   retrieveMemories: (query, options, userId) => longTermMemoryService.retrieveMemories(query, options, userId),
   referenceMemory: (memoryId, context, referenceType, userId) => longTermMemoryService.referenceMemory(memoryId, context, referenceType, userId),
   getStats: (userId) => longTermMemoryService.getMemoryStats(userId),
+  getDigest: (userId, limit) => longTermMemoryService.getDigest(userId, limit),
   clearAll: (userId) => longTermMemoryService.clearAllMemories(userId),
   storeMessagesBatch: (messages, options, userId) => longTermMemoryService.storeMessagesAsMemories(messages, options, userId),
   retrieveForConversation: (conversationHistory, limit, userId) => longTermMemoryService.retrieveRelevantMemoriesForConversation(conversationHistory, limit, userId),

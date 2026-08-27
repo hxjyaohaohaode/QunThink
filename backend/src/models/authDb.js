@@ -27,6 +27,7 @@ export async function initAuthDb() {
       await authDb.read();
     } catch (err) {
       console.warn(`⚠️ Supabase 认证数据库读取失败: ${err.message}`);
+      if (process.env.NODE_ENV === 'production') throw err;
       authDb.data = JSON.parse(JSON.stringify(defaultAuthData));
     }
 
@@ -42,6 +43,7 @@ export async function initAuthDb() {
       return authDb;
     } catch (err) {
       console.error(`❌ Supabase 认证数据库清理失败: ${err.message}`);
+      if (process.env.NODE_ENV === 'production') throw err;
       console.warn('⚠️ Supabase 不可用，回退到本地文件存储');
       authDb = null;
     }
@@ -56,6 +58,7 @@ export async function initAuthDb() {
       await authDb.read();
     } catch (err) {
       console.warn(`⚠️ MongoDB 认证数据库读取失败: ${err.message}`);
+      if (process.env.NODE_ENV === 'production') throw err;
       authDb.data = JSON.parse(JSON.stringify(defaultAuthData));
     }
 
@@ -71,6 +74,7 @@ export async function initAuthDb() {
       return authDb;
     } catch (err) {
       console.error(`❌ MongoDB 认证数据库初始化失败: ${err.message}`);
+      if (process.env.NODE_ENV === 'production') throw err;
       console.warn('⚠️ MongoDB 不可用，回退到本地文件存储');
       authDb = null;
     }
@@ -96,13 +100,22 @@ export async function initAuthDb() {
       const firstObjEnd = raw.indexOf('}{');
       if (firstObjEnd > -1) {
         const clean = raw.substring(0, firstObjEnd + 1);
-        authDb.data = JSON.parse(clean);
+        const recovered = JSON.parse(clean);
+        try {
+          const backupPath = authDbFile + '.corrupted.' + Date.now();
+          await fs.copyFile(authDbFile, backupPath);
+          console.log(`📦 恢复前已备份损坏文件到: ${backupPath}`);
+        } catch {}
+        authDb.data = recovered;
         await authDb.write();
         console.log('✅ 认证数据库已从损坏中恢复');
       } else {
         throw err;
       }
     } catch (recoverErr) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error(`认证数据库损坏且恢复失败: ${recoverErr.message}`);
+      }
       console.error('⚠️ 认证数据库恢复失败，保留磁盘原始数据，使用内存默认数据');
       try {
         const backupPath = authDbFile + '.corrupted.' + Date.now();
@@ -120,7 +133,17 @@ export async function initAuthDb() {
   }
 
   await cleanupExpiredSessions();
-  
+
+  if (!globalThis.__authSessionPruneTimer) {
+    const timer = setInterval(() => {
+      cleanupExpiredSessions().catch(err => {
+        console.warn('[Auth] 周期性会话清理失败:', err?.message);
+      });
+    }, 60 * 60 * 1000);
+    if (typeof timer.unref === 'function') timer.unref();
+    globalThis.__authSessionPruneTimer = timer;
+  }
+
   return authDb;
 }
 
@@ -131,20 +154,70 @@ export function getAuthDb() {
   return authDb;
 }
 
+const pbkdf2Promise = (password, salt, iterations, keylen, digest) =>
+  new Promise((resolve, reject) => {
+    crypto.pbkdf2(password, salt, iterations, keylen, digest, (err, derived) => {
+      if (err) reject(err);
+      else resolve(derived);
+    });
+  });
+
+export async function hashPasswordAsync(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = await pbkdf2Promise(password, salt, 100000, 64, 'sha512');
+  return `${salt}:${hash.toString('hex')}`;
+}
+
 export function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512');
   return `${salt}:${hash.toString('hex')}`;
 }
 
+export async function verifyPasswordAsync(password, storedHash) {
+  const [salt, hash] = String(storedHash || '').split(':');
+  if (!salt || !hash) return false;
+  const verifyHash = await pbkdf2Promise(password, salt, 100000, 64, 'sha512');
+  const verifyHex = verifyHash.toString('hex');
+  const hashBuf = Buffer.from(hash, 'utf-8');
+  const verifyBuf = Buffer.from(verifyHex, 'utf-8');
+  if (hashBuf.length !== verifyBuf.length) {
+    crypto.timingSafeEqual(hashBuf.subarray(0, Math.min(hashBuf.length, verifyBuf.length)), verifyBuf.subarray(0, Math.min(hashBuf.length, verifyBuf.length)));
+    return false;
+  }
+  return crypto.timingSafeEqual(hashBuf, verifyBuf);
+}
+
 export function verifyPassword(password, storedHash) {
-  const [salt, hash] = storedHash.split(':');
+  const [salt, hash] = String(storedHash || '').split(':');
+  if (!salt || !hash) return false;
   const verifyHash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512');
-  return verifyHash.toString('hex') === hash;
+  const hashBuf = Buffer.from(hash, 'utf-8');
+  const verifyBuf = Buffer.from(verifyHash.toString('hex'), 'utf-8');
+  if (hashBuf.length !== verifyBuf.length) return false;
+  return crypto.timingSafeEqual(hashBuf, verifyBuf);
 }
 
 export function generateSessionToken() {
   return crypto.randomBytes(32).toString('hex');
+}
+
+export function findSessionByToken(db, token) {
+  if (!token) return null;
+  return db.data.sessions.find(s => {
+    if (!s?.token || s.token.length !== token.length) return false;
+    try {
+      return crypto.timingSafeEqual(Buffer.from(s.token), Buffer.from(token));
+    } catch {
+      return false;
+    }
+  }) || null;
+}
+
+export function isAdminUserId(userId) {
+  if (!userId) return false;
+  const adminIds = (process.env.ADMIN_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+  return adminIds.includes(userId);
 }
 
 export async function cleanupExpiredSessions() {

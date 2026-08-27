@@ -4,9 +4,49 @@ export type {
   GroupFile,
   Message,
   MessageAttachment,
-  MessageTTSAudio,
-  UploadedFile
+  MessageTTSAudio
 } from '../../../shared/contracts';
+
+import type { MessageAttachment } from '../../../shared/contracts';
+
+export type SenderType = 'user' | 'ai' | 'system';
+export type MessageContentType = 'text' | 'code' | 'file' | 'system';
+
+export interface AuthUser {
+  id: string;
+  username: string;
+  nickname?: string;
+  phone?: string;
+}
+
+export interface UploadedFile {
+  id: string;
+  group_id: string;
+  filename: string;
+  original_name?: string;
+  parsed_content?: string | null;
+  media_description?: string;
+  search_description?: string;
+  search_tags?: string[];
+  parse_status?: string;
+  mime_type: string;
+  file_size: number;
+  created_at: string;
+  url?: string;
+}
+
+export interface FileUploadResponse {
+  success?: boolean;
+  file: UploadedFile;
+}
+
+export interface MessageCreateInput {
+  content: string;
+  content_type?: MessageContentType;
+  reply_to?: string | null;
+  metadata?: Record<string, unknown>;
+  attachments?: MessageAttachment[];
+}
 
 export interface AI {
   id: string;
@@ -171,5 +211,62 @@ export interface AgentQuestion {
   id: string;
   question: string;
   answer?: string;
+}
+
+export interface GroupInsightsTotals {
+  messages: number;
+  ai_messages: number;
+  user_messages: number;
+  system_messages: number;
+  likes: number;
+  dislikes: number;
+  comments: number;
+  active_ais: number;
+}
+
+export interface GroupInsightsPerAI {
+  ai_id: string;
+  name: string;
+  count: number;
+  last_active?: string | null;
+}
+
+export interface GroupInsightsDailyPoint {
+  date: string;
+  count: number;
+}
+
+export interface GroupInsightsSentimentPoint {
+  date: string;
+  avg_score: number | null;
+  samples: number;
+}
+
+export interface GroupInsights {
+  success: boolean;
+  group_id: string;
+  window_days: number;
+  totals: GroupInsightsTotals;
+  per_ai: GroupInsightsPerAI[];
+  activity_daily: GroupInsightsDailyPoint[];
+  sentiment_trend: GroupInsightsSentimentPoint[];
+  participation_ratio: number;
+}
+
+export interface MemoryDigestItem {
+  id: string;
+  content: string;
+  category?: string | null;
+  timestamp: string;
+  importance?: number;
+  access_count?: number;
+  score?: number;
+}
+
+export interface MemoryDigest {
+  success: boolean;
+  total: number;
+  memories: MemoryDigestItem[];
+  generated_at?: string;
 }
 

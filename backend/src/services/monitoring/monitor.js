@@ -5,18 +5,8 @@
  */
 
 import os from 'os';
-import { getUserDb, listUserDatabases, withWriteLock } from '../../models/db.js';
 import { WebSocketPerformanceMonitor } from '../../websocket/performanceMonitor.js';
 import { default as aiLoadBalancer } from '../ai/loadBalancer.js';
-
-async function findFirstUserDb() {
-  const userIds = await listUserDatabases();
-  if (userIds.length === 0) return null;
-  return {
-    userId: userIds[0],
-    db: await getUserDb(userIds[0])
-  };
-}
 
 class SystemMonitor {
   constructor() {
@@ -29,14 +19,20 @@ class SystemMonitor {
     this._timers = [];
     this._wss = null;
     this._requestCounter = { total: 0, lastReset: Date.now() };
+    this._lastCpuSample = null;
+    this.eventLog = [];
+    this.maxEventLogSize = 500;
     
-    this.initializeMonitoring();
-    
-    this._timers.push(setInterval(() => this.collectMetrics(), 30 * 1000));
-    this._timers.push(setInterval(() => this.checkScalingNeeds(), 60 * 1000));
-    this._timers.push(setInterval(() => this.cleanupHistory(), 10 * 60 * 1000));
-    
-    console.log('🔍 系统监控服务已启动');
+    if (process.env.NODE_ENV !== 'test') {
+      this.initializeMonitoring();
+      this._timers.push(setInterval(() => this.collectMetrics(), 30 * 1000));
+      this._timers.push(setInterval(() => this.checkScalingNeeds(), 60 * 1000));
+      this._timers.push(setInterval(() => this.cleanupHistory(), 10 * 60 * 1000));
+      for (const timer of this._timers) {
+        if (typeof timer.unref === 'function') timer.unref();
+      }
+      console.log('🔍 系统监控服务已启动');
+    }
   }
   
   cleanupTimers() {
@@ -69,6 +65,9 @@ class SystemMonitor {
     try {
       const timestamp = new Date().toISOString();
       const cpuUsage = this.getCpuUsage();
+      const effectiveCpuUsage = cpuUsage === null
+        ? (this.metricsHistory.length > 0 ? this.metricsHistory[this.metricsHistory.length - 1].cpu?.usage ?? 0 : 0)
+        : cpuUsage;
       const memoryUsage = this.getMemoryUsage();
       const networkActivity = this.getNetworkActivity();
       const databaseStatus = this.getDatabaseStatus();
@@ -81,7 +80,7 @@ class SystemMonitor {
       const metrics = {
         timestamp,
         cpu: {
-          usage: cpuUsage,
+          usage: effectiveCpuUsage,
           cores: os.cpus().length,
           load: systemLoad
         },
@@ -139,20 +138,29 @@ class SystemMonitor {
    * 获取CPU使用率（简化模拟）
    */
   getCpuUsage() {
-    // 注意：这是一个简化实现，实际应使用更精确的CPU使用率计算
+    // CPU 使用率必须基于两次采样的 tick 差值；os.cpus().times 是开机以来的累计值，
+    // 直接计算会得到近似恒定的错误结果。
     const cpus = os.cpus();
     let totalIdle = 0;
     let totalTick = 0;
-    
+
     cpus.forEach(cpu => {
       for (const type in cpu.times) {
         totalTick += cpu.times[type];
       }
       totalIdle += cpu.times.idle;
     });
-    
-    // 计算百分比
-    const usage = 100 - (totalIdle / totalTick) * 100;
+
+    const last = this._lastCpuSample;
+    this._lastCpuSample = { totalIdle, totalTick };
+
+    if (!last || totalTick <= last.totalTick) {
+      return null; // 首次采样或时钟未推进，暂无有效使用率
+    }
+
+    const idleDelta = totalIdle - last.totalIdle;
+    const tickDelta = totalTick - last.totalTick;
+    const usage = 100 - (idleDelta / tickDelta) * 100;
     return Math.min(100, Math.max(0, usage));
   }
   
@@ -195,43 +203,19 @@ class SystemMonitor {
   }
   
   /**
-   * 获取数据库状态
+   * 获取数据库状态（轻量级：仅报告存储后端与用户数量，不做全库序列化）
    */
   async getDatabaseStatus() {
     try {
-      const dbResult = await findFirstUserDb();
-      if (!dbResult?.db) {
-        return {
-          status: 'unavailable',
-          size: 0,
-          collections: {
-            messages: 0,
-            files: 0,
-            groups: 0,
-            comments: 0,
-            interaction_logs: 0
-          },
-          lastWrite: null
-        };
-      }
-      const { db } = dbResult;
-      await db.read();
-      const size = JSON.stringify(db.data).length;
-      const messages = db.data.messages?.length || 0;
-      const files = db.data.files?.length || 0;
-      const groups = db.data.groups?.length || 0;
-      
+      const { listUserDatabases } = await import('../../models/db.js');
+      const { isCloudDbEnabled } = await import('../../models/supabaseAdapter.js');
+      const userIds = await listUserDatabases();
       return {
-        status: 'healthy',
-        size,
-        collections: {
-          messages,
-          files,
-          groups,
-          comments: db.data.messages?.reduce((sum, m) => sum + (m.comments?.length || 0), 0) || 0,
-          interaction_logs: db.data.interaction_logs?.length || 0
-        },
-        lastWrite: db.writeTimestamp || null
+        status: Array.isArray(userIds) ? 'healthy' : 'unavailable',
+        backend: process.env.SUPABASE_DB_URL ? 'supabase' : (process.env.MONGODB_URI ? 'mongodb' : 'lowdb'),
+        cloudEnabled: !!isCloudDbEnabled(),
+        userCount: Array.isArray(userIds) ? userIds.length : 0,
+        lastWrite: null
       };
     } catch (error) {
       return {
@@ -475,15 +459,13 @@ class SystemMonitor {
    * 执行扩容操作（模拟）
    */
   async executeScalingAction(action) {
-    setTimeout(async () => {
-      console.log(`✅ 扩容操作完成: ${action.type} - ${action.description}`);
-      
-      await this.recordEvent('scaling_action_completed', {
-        action,
-        timestamp: new Date().toISOString(),
-        status: 'success'
-      });
-    }, 2000);
+    // 诚实标注：当前为单进程部署，无真实水平扩容能力。
+    // 此处仅记录建议动作，不伪造“扩容完成”事件。
+    const timer = setTimeout(() => {
+      console.log(`ℹ️ 扩容建议（单进程部署未执行）: ${action.type} - ${action.description}`);
+    }, 0);
+    if (typeof timer.unref === 'function') timer.unref();
+    return { executed: false, reason: 'single-process deployment', action };
   }
   
   /**
@@ -504,7 +486,7 @@ class SystemMonitor {
   }
   
   /**
-   * 记录监控事件
+   * 记录监控事件（进程内环形缓冲，绝不写入任何用户数据库）
    */
   async recordEvent(eventType, data) {
     const event = {
@@ -515,24 +497,14 @@ class SystemMonitor {
 
     console.log(`📝 监控事件: ${eventType}`, data);
 
-    try {
-      const dbResult = await findFirstUserDb();
-      if (!dbResult?.db) return;
-      const { db, userId } = dbResult;
-      await db.read();
-      if (!db.data.monitoring_events) {
-        db.data.monitoring_events = [];
-      }
-      db.data.monitoring_events.push(event);
-      if (db.data.monitoring_events.length > 1000) {
-        db.data.monitoring_events = db.data.monitoring_events.slice(-1000);
-      }
-      await withWriteLock(userId, async () => {
-        await db.write();
-      });
-    } catch (error) {
-      // 忽略数据库错误
+    this.eventLog.push(event);
+    if (this.eventLog.length > this.maxEventLogSize) {
+      this.eventLog.splice(0, this.eventLog.length - this.maxEventLogSize);
     }
+  }
+
+  getRecentEvents(limit = 100) {
+    return this.eventLog.slice(-limit);
   }
   
   /**

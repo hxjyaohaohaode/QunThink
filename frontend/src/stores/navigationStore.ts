@@ -7,6 +7,8 @@ export type MobileTab = 'chats' | 'agents' | 'settings';
 interface NavigationState {
   sidebarOpen: boolean;
   searchPanelOpen: boolean;
+  /** 全局命令面板（Ctrl+K） */
+  commandPaletteOpen: boolean;
   scrollToMessageId: string | null;
   timeFormat: 'relative' | 'full';
   /** 当前桌面端活动视图 */
@@ -19,6 +21,7 @@ interface NavigationState {
   toggleSidebar: () => void;
   setSidebarOpen: (open: boolean) => void;
   setSearchPanelOpen: (open: boolean) => void;
+  setCommandPaletteOpen: (open: boolean) => void;
   setScrollToMessageId: (id: string | null) => void;
   setTimeFormat: (format: 'relative' | 'full') => void;
   setActiveDesktopView: (view: DesktopView) => void;
@@ -31,6 +34,7 @@ export const useNavigationStore = create<NavigationState>()(
     (set, get) => ({
       sidebarOpen: true,
       searchPanelOpen: false,
+      commandPaletteOpen: false,
       scrollToMessageId: null,
       timeFormat: 'relative',
       activeDesktopView: 'chat',
@@ -40,6 +44,7 @@ export const useNavigationStore = create<NavigationState>()(
       toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
       setSearchPanelOpen: (open) => set({ searchPanelOpen: open }),
+      setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
       setScrollToMessageId: (id: string | null) => {
         set({ scrollToMessageId: id });
         if (id) {

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+﻿import React, { useState, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeSanitize from 'rehype-sanitize';
@@ -26,12 +26,31 @@ const sanitizeSchema = {
 };
 
 function preprocessMarkdown(content: string): string {
-  return content
+  // 保护代码块和行内代码，避免内部内容被预处理破坏
+  const codeBlocks: string[] = [];
+  const placeholder = (match: string) => {
+    codeBlocks.push(match);
+    return `\x00CODEBLOCK${codeBlocks.length - 1}\x00`;
+  };
+
+  let result = content
+    // 先提取代码块（```...```）
+    .replace(/```[\s\S]*?```/g, placeholder)
+    // 再提取行内代码（`...`）
+    .replace(/`[^`\n]+`/g, placeholder);
+
+  result = result
     .replace(/\r\n/g, '\n')
     .replace(/\n{2,}/g, '\n\n')
     .replace(/([^\n])\n([^\n])/g, '$1  \n$2')
     .replace(/^「> (.+?)」$/gm, '> $1')
-    .replace(/@([a-zA-Z0-9_.\u4e00-\u9fff\s-]+)/g, '**@$1**');
+    // @提及：只匹配连续非空格字符，避免误匹配邮箱和包含空格的文本
+    .replace(/(^|[^a-zA-Z0-9_.\u4e00-\u9fff-])@([a-zA-Z0-9_.\u4e00-\u9fff-]+)/g, '$1**@$2**');
+
+  // 还原代码块
+  result = result.replace(/\x00CODEBLOCK(\d+)\x00/g, (_, idx) => codeBlocks[Number(idx)]);
+
+  return result;
 }
 
 interface MessageContentProps {
@@ -64,6 +83,12 @@ export const MessageContent = React.memo(function MessageContent({
     ? processedContent.substring(0, collapseThreshold) + '...'
     : processedContent;
 
+  const markdownComponents = useMemo(() => ({
+    a: ({ node: _node, children, href, title, ...rest }: React.AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown; children?: React.ReactNode }) => (
+      <a {...rest} href={href} title={title} target="_blank" rel="noopener noreferrer nofollow">{children}</a>
+    ),
+  }), []);
+
   if (contentType === 'code') {
     return (
       <pre className="whitespace-pre-wrap font-mono select-text" style={{ fontSize: 'var(--chat-message-font-size)' }}>
@@ -85,6 +110,7 @@ export const MessageContent = React.memo(function MessageContent({
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[[rehypeSanitize, sanitizeSchema]]}
+            components={markdownComponents}
           >
             {displayContent}
           </ReactMarkdown>

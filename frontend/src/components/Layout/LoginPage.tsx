@@ -2,10 +2,15 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api } from '../../services/api';
 import { useToast } from '../Common';
+import { Lightfall } from '../Visual/Lightfall';
 
 interface LoginPageProps {
   onLoginSuccess?: () => Promise<void> | void;
 }
+
+// 与主题 accent（#6C5CE7 / 暗色 #93BBFD）及 logo 辅色同源的蓝紫系三色
+const LIGHTFALL_COLORS = ['#93BBFD', '#6C5CE7', '#A29BFE'];
+const LIGHTFALL_BACKGROUND = '#1A1A2E';
 
 const logoVariants = {
   hidden: { scale: 0, opacity: 0 },
@@ -100,6 +105,27 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
   const [sendingCode, setSendingCode] = useState(false);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const { showToast, Toast } = useToast();
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia?.('(max-width: 767px)').matches
+  );
+  const [reducedMotion, setReducedMotion] = useState(
+    () => typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  );
+
+  useEffect(() => {
+    const mobileQuery = window.matchMedia('(max-width: 767px)');
+    const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const handleMobile = () => setIsMobile(mobileQuery.matches);
+    const handleMotion = () => setReducedMotion(motionQuery.matches);
+    handleMobile();
+    handleMotion();
+    mobileQuery.addEventListener('change', handleMobile);
+    motionQuery.addEventListener('change', handleMotion);
+    return () => {
+      mobileQuery.removeEventListener('change', handleMobile);
+      motionQuery.removeEventListener('change', handleMotion);
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -267,23 +293,48 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
   };
 
   return (
-    <div className="min-h-screen bg-bg-primary flex items-center justify-center p-4">
+    <div className="min-h-screen bg-bg-primary flex items-center justify-center p-4 relative overflow-hidden">
+      {!reducedMotion && (
+        <div className="absolute inset-0 z-0 pointer-events-none" aria-hidden="true">
+          <Lightfall
+            className="absolute inset-0"
+            colors={LIGHTFALL_COLORS}
+            backgroundColor={LIGHTFALL_BACKGROUND}
+            speed={isMobile ? 0.35 : 0.5}
+            streakCount={isMobile ? 4 : 6}
+            streakWidth={1}
+            streakLength={1.1}
+            glow={isMobile ? 0.9 : 1}
+            density={0.55}
+            twinkle={0.9}
+            zoom={3}
+            backgroundGlow={0.45}
+            opacity={isMobile ? 0.62 : 0.68}
+            mouseInteraction={!isMobile}
+            mouseStrength={0.5}
+            mouseRadius={1}
+            dpr={isMobile ? 1 : undefined}
+          />
+          {/* 渐变遮罩：保证亮/暗两种主题下登录卡片内容可读 */}
+          <div className="absolute inset-0 bg-gradient-to-b from-bg-primary/70 via-bg-primary/40 to-bg-primary/80" />
+        </div>
+      )}
       {Toast}
-      <div className="w-full max-w-md">
+      <div className="w-full max-w-md relative z-10">
         <motion.div
-          className="bg-bg-surface rounded-2xl shadow-sm overflow-hidden border border-border-subtle"
+          className="bg-bg-surface rounded-2xl shadow-[0_24px_70px_-12px_rgba(0,0,0,0.65)] ring-1 ring-white/[0.07] overflow-hidden"
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5 }}
         >
           <div className="px-8 py-10 text-center border-b border-border-subtle">
             <motion.div
-              className="w-16 h-16 mx-auto mb-4 flex items-center justify-center"
+              className="w-20 h-20 mx-auto mb-4 flex items-center justify-center"
               variants={logoVariants}
               initial="hidden"
               animate="visible"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" className="w-16 h-16">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" className="w-20 h-20 drop-shadow-[0_8px_24px_rgba(108,92,231,0.45)]">
                 <defs>
                   <linearGradient id="main" x1="0%" y1="0%" x2="100%" y2="100%">
                     <stop offset="0%" stopColor="#6C5CE7"/>
@@ -313,7 +364,7 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
             </motion.p>
 
             <motion.p
-              className="text-text-muted mt-2 text-xs tracking-[3px]"
+              className="text-text-secondary mt-2 text-xs tracking-[3px]"
               initial={{ opacity: 0, y: 5 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 1, duration: 0.4 }}

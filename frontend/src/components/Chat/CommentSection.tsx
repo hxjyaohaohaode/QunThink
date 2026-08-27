@@ -26,8 +26,8 @@ export const CommentSection = React.memo(function CommentSection({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [replyTarget, setReplyTarget] = useState<Comment | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const { addComment } = useMessagesStore();
-  const { personas } = usePersonasStore();
+  const addComment = useMessagesStore((s) => s.addComment);
+  const personas = usePersonasStore((s) => s.personas);
   const userProfile = useProfileStore(state => state.profile);
 
   const handleSubmit = useCallback(async () => {
@@ -77,15 +77,14 @@ export const CommentSection = React.memo(function CommentSection({
     return { isUser, color, avatarUrl, name, avatarLetter };
   };
 
-  if (!isOpen) return null;
-
   const MAX_COMMENT_DEPTH = 3;
 
   const orderedComments = [...comments].sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
 
   return (
     <AnimatePresence>
-      <motion.div
+      {isOpen && (
+        <motion.div
           initial={{ opacity: 0, height: 0 }}
           animate={{ opacity: 1, height: 'auto' }}
           exit={{ opacity: 0, height: 0 }}
@@ -196,6 +195,7 @@ export const CommentSection = React.memo(function CommentSection({
             </div>
           </div>
         </motion.div>
+      )}
     </AnimatePresence>
   );
 });

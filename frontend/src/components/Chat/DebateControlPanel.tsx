@@ -1,8 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { usePersonasStore } from '../../stores/personasStore';
 import { AI_AVATAR_LETTERS, AI_COLORS, AI_NAMES, DebateRole } from '../../types';
 import { useToast } from '../Common';
+
+const LazyDebateRadar = lazy(() =>
+  import('../Visual/Radar').then((m) => ({
+    default: () => <m.default {...m.RADAR_INSIGHT_PRESET} className="w-full h-full" />
+  }))
+);
 
 interface DebateControlPanelProps {
   groupId: string;
@@ -17,16 +23,14 @@ function getAiName(aiId: string, personas: Record<string, { name?: string; color
 }
 
 export function DebateControlPanel({ groupId, isOpen, onClose }: DebateControlPanelProps) {
-  const {
-    groups,
-    currentGroup,
-    debateStatus,
-    startFormalDebate,
-    stopFormalDebate,
-    getFormalDebateStatus,
-    updateDebateStatus,
-  } = useGroupsStore();
-  const { personas } = usePersonasStore();
+  const groups = useGroupsStore((s) => s.groups);
+  const currentGroup = useGroupsStore((s) => s.currentGroup);
+  const debateStatus = useGroupsStore((s) => s.debateStatus);
+  const startFormalDebate = useGroupsStore((s) => s.startFormalDebate);
+  const stopFormalDebate = useGroupsStore((s) => s.stopFormalDebate);
+  const getFormalDebateStatus = useGroupsStore((s) => s.getFormalDebateStatus);
+  const updateDebateStatus = useGroupsStore((s) => s.updateDebateStatus);
+  const personas = usePersonasStore((s) => s.personas);
   const { showToast, Toast } = useToast();
 
   const group = groups.find((item) => item.id === groupId) || currentGroup;
@@ -101,17 +105,14 @@ export function DebateControlPanel({ groupId, isOpen, onClose }: DebateControlPa
   };
 
   const toggleParticipant = (participantId: string) => {
-    setSelectedParticipants((prev) => {
-      if (prev.includes(participantId)) {
-        const next = prev.filter((id) => id !== participantId);
-        setManualRoles((current) => {
-          const copy = { ...current };
-          delete copy[participantId];
-          return copy;
-        });
-        return next;
-      }
-      return [...prev, participantId];
+    setSelectedParticipants((prev) => prev.includes(participantId)
+      ? prev.filter((id) => id !== participantId)
+      : [...prev, participantId]);
+    setManualRoles((current) => {
+      if (!(participantId in current)) return current;
+      const copy = { ...current };
+      delete copy[participantId];
+      return copy;
     });
   };
 
@@ -292,8 +293,19 @@ export function DebateControlPanel({ groupId, isOpen, onClose }: DebateControlPa
                 </button>
               </div>
               <div className="space-y-2 text-sm text-text-secondary">
-                <div className="flex justify-between"><span>运行中</span><span>{isRunning ? '是' : '否'}</span></div>
-                <div className="flex justify-between"><span>辩题</span><span className="max-w-[180px] truncate">{currentStatus?.topic || topic || '-'}</span></div>
+                <div className="flex items-center gap-3">
+                  {isRunning && (
+                    <div className="w-14 h-14 rounded-full overflow-hidden flex-shrink-0 ring-1 ring-border-subtle/60 bg-black/85" aria-hidden="true">
+                      <Suspense fallback={<div className="w-full h-full animate-pulse" />}>
+                        <LazyDebateRadar />
+                      </Suspense>
+                    </div>
+                  )}
+                  <div className="flex-1 space-y-2">
+                    <div className="flex justify-between"><span>运行中</span><span>{isRunning ? '是' : '否'}</span></div>
+                    <div className="flex justify-between"><span>辩题</span><span className="max-w-[180px] truncate">{currentStatus?.topic || topic || '-'}</span></div>
+                  </div>
+                </div>
                 <div className="flex justify-between"><span>阶段</span><span>{currentStatus?.phaseName || currentStatus?.currentPhase || '-'}</span></div>
                 <div className="flex justify-between"><span>已选成员</span><span>{selectedParticipants.length}</span></div>
               </div>

@@ -11,9 +11,21 @@ DEEPSEEK_API_KEY=your_key_here     # DeepSeek API密钥
 GLM_API_KEY=your_key_here          # GLM API密钥
 MIMO_API_KEY=your_key_here         # MiMo API密钥
 QWEN_API_KEY=your_key_here         # 通义千问 API密钥
-ENCRYPTION_KEY=32_chars_min        # 数据加密密钥（至少32字符）
-CORS_ORIGINS=http://localhost:5173  # 允许的前端域名，多个域名用逗号分隔
+ENCRYPTION_KEY=<base64编码的32字节随机串>  # 生成方式: openssl rand -base64 32
+CORS_ORIGINS=http://localhost:3010  # 允许的前端域名，多个域名用逗号分隔
 AUTH_MODE=session                  # 认证模式，本地联调与生产默认使用 session
+
+# ---- 可选高级配置（均有内置默认值，按需添加）----
+# ADMIN_USER_IDS=user_id_1,user_id_2  # 管理员用户ID列表，逗号分隔；
+#                                     # /api/memory/clear、/api/social/reset 等
+#                                     # requireAdmin 端点仅允许列表内用户调用
+# TRUST_PROXY=1                       # 反向代理（Nginx/Render/Vercel）后部署时配置：
+#                                     # 支持正整数（信任的代理跳数）、逗号分隔的
+#                                     # IP 列表；设为 false 显式关闭。
+#                                     # 未设置时生产环境默认 trust proxy=1，
+#                                     # Express 才能从 X-Forwarded-For 取真实客户端IP
+# MAX_CONTEXT_TOKENS=80000            # 发送给 AI 的上下文最大 token 预算（默认 80000），
+#                                     # 长对话费用过高或模型报错时可调低
 ```
 
 ### 2. 前端配置文件 (frontend/.env)
@@ -46,14 +58,19 @@ copy frontend\.env.example frontend\.env
 
 ### 步骤 3: 配置加密密钥
 
-生成一个至少32字符的随机字符串作为加密密钥：
+ENCRYPTION_KEY 必须是 **base64 编码的 32 字节随机串**（不要使用自造字符串）：
 
 ```bash
-# Windows PowerShell
-[Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Maximum 256 }))
+# 方式 1: openssl
+openssl rand -base64 32
 
-# 或者使用任意32+字符的字符串
+# 方式 2: Windows PowerShell
+powershell -Command "$b=New-Object byte[] 32;[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b);[Convert]::ToBase64String($b)"
+
+# 方式 3: 直接运行 setup-api-keys.bat，脚本会自动生成并写入
 ```
+
+⚠️ 密钥轮换会使先前加密的数据无法解密；切勿将密钥提交进版本库。
 
 ### 步骤 4: 验证配置
 
@@ -181,7 +198,7 @@ npm install
 
 4. **限制 CORS**
    ```env
-   CORS_ORIGINS=https://你的域名.com
+   CORS_ORIGINS=https://你的域名.com,http://localhost:3010
    ```
 
 5. **使用环境变量**

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useMessagesStore } from '../../stores/messagesStore';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -41,10 +41,25 @@ export const MessageActions = React.memo(function MessageActions({
   const [isLikeAnimating, setIsLikeAnimating] = useState(false);
   const likeProcessingRef = useRef(false);
   const dislikeProcessingRef = useRef(false);
-  const { likeMessage, unlikeMessage, dislikeMessage, undislikeMessage } = useMessagesStore();
-  const { currentGroup } = useGroupsStore();
-  const { addReplyingTo, replyingTo, removeReplyingTo } = useUIStore();
+  const likeAnimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const likeMessage = useMessagesStore((s) => s.likeMessage);
+  const unlikeMessage = useMessagesStore((s) => s.unlikeMessage);
+  const dislikeMessage = useMessagesStore((s) => s.dislikeMessage);
+  const undislikeMessage = useMessagesStore((s) => s.undislikeMessage);
+  const currentGroup = useGroupsStore((s) => s.currentGroup);
+  const replyingTo = useUIStore((s) => s.replyingTo);
+  const addReplyingTo = useUIStore((s) => s.addReplyingTo);
+  const removeReplyingTo = useUIStore((s) => s.removeReplyingTo);
   const { showToast } = useToast();
+
+  useEffect(() => {
+    return () => {
+      if (likeAnimTimerRef.current) {
+        clearTimeout(likeAnimTimerRef.current);
+        likeAnimTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const hasLiked = likedBy.includes('user') || likes.includes('user');
   const hasDisliked = dislikedBy?.includes('user');
@@ -60,8 +75,9 @@ export const MessageActions = React.memo(function MessageActions({
       if (hasLiked) {
         unlikeMessage(messageId, currentGroup.id);
       } else {
+        if (likeAnimTimerRef.current) clearTimeout(likeAnimTimerRef.current);
         setIsLikeAnimating(true);
-        setTimeout(() => setIsLikeAnimating(false), 300);
+        likeAnimTimerRef.current = setTimeout(() => setIsLikeAnimating(false), 300);
         likeMessage(messageId, currentGroup.id);
         try {
           await api.performAutoLike(messageId, currentGroup.id);
@@ -207,6 +223,7 @@ function ActionButton({ onClick, children, active, activeColor, title, danger, i
   return (
     <button
       onClick={onClick}
+      aria-pressed={active === undefined ? undefined : Boolean(active)}
       className={`
         p-2 md:p-1.5 rounded hover:bg-bg-surface2 active:bg-bg-surface3 transition-colors
         touch-manipulation min-w-[44px] min-h-[44px] md:min-w-0 md:min-h-0

@@ -186,8 +186,10 @@ const updateProfileSchema = z.object({
 const ttsSchema = z.object({
   text: z.string().min(1).max(5000),
   voice: z.string().max(50).optional(),
+  tone: z.string().max(50).optional(),
   speed: z.number().min(0.5).max(2).optional(),
-  groupId: z.string().optional()
+  groupId: z.string().optional(),
+  messageId: z.string().uuid().optional()
 });
 
 const smsSendSchema = z.object({

@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react';
+﻿import { useEffect, useCallback } from 'react';
 import { useUIStore } from '../stores/uiStore';
 import { useMessagesStore } from '../stores/messagesStore';
 import { useGroupsStore } from '../stores/groupsStore';
@@ -16,29 +16,24 @@ interface ShortcutConfig {
 }
 
 export function useKeyboardShortcuts() {
-  const { clearReplyingTo } = useUIStore();
-  const { messages } = useMessagesStore();
-  const { currentGroup } = useGroupsStore();
+  const clearReplyingTo = useUIStore((s) => s.clearReplyingTo);
+  const currentGroupId = useGroupsStore((s) => s.currentGroup?.id ?? null);
+  const groupMessages = useMessagesStore((s) =>
+    currentGroupId ? s.messages[currentGroupId] : undefined
+  );
 
   const getShortcuts = useCallback((): ShortcutConfig[] => {
-    const groupMessages = currentGroup ? messages[currentGroup.id] || [] : [];
-    const lastUserMessage = [...groupMessages].reverse().find(m => m.sender_type === 'user');
+    const messages = groupMessages || [];
+    const lastUserMessage = [...messages].reverse().find(m => m.sender_type === 'user');
 
     return [
       {
         key: 'k',
         ctrl: true,
-        description: '打开搜索',
+        description: '打开命令面板',
         action: () => {
-          const { searchPanelOpen, setSearchPanelOpen } = useNavigationStore.getState();
-          if (searchPanelOpen) {
-            // 搜索面板已打开，聚焦搜索输入框
-            const searchInput = document.querySelector('[data-search-input]') as HTMLElement;
-            if (searchInput) searchInput.focus();
-          } else {
-            // 打开搜索面板
-            setSearchPanelOpen(true);
-          }
+          const { commandPaletteOpen, setCommandPaletteOpen } = useNavigationStore.getState();
+          setCommandPaletteOpen(!commandPaletteOpen);
         },
       },
       {
@@ -95,7 +90,7 @@ export function useKeyboardShortcuts() {
           const clearButton = document.querySelector('[data-action="clear-chat"]') as HTMLElement;
           if (clearButton) clearButton.click();
         },
-        condition: () => !!currentGroup,
+        condition: () => !!currentGroupId,
       },
       {
         key: 'n',
@@ -114,7 +109,7 @@ export function useKeyboardShortcuts() {
           const exportButton = document.querySelector('[data-action="export-chat"]') as HTMLElement;
           if (exportButton) exportButton.click();
         },
-        condition: () => !!currentGroup && groupMessages.length > 0,
+        condition: () => !!currentGroupId && (groupMessages?.length ?? 0) > 0,
       },
       {
         key: 'r',
@@ -124,10 +119,10 @@ export function useKeyboardShortcuts() {
           const refreshButton = document.querySelector('[data-action="refresh"]') as HTMLElement;
           if (refreshButton) refreshButton.click();
         },
-        condition: () => !!currentGroup,
+        condition: () => !!currentGroupId,
       },
     ];
-  }, [currentGroup, messages, clearReplyingTo]);
+  }, [currentGroupId, groupMessages, clearReplyingTo]);
 
   useEffect(() => {
     const shortcuts = getShortcuts();

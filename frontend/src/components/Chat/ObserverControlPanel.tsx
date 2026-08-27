@@ -12,7 +12,19 @@ export function ObserverControlPanel({ groupId, topic }: ObserverControlPanelPro
   const [isStarting, setIsStarting] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const startedRef = useRef(false);
+  const activeGroupIdRef = useRef(groupId);
   const { showToast } = useToast();
+
+  useEffect(() => {
+    activeGroupIdRef.current = groupId;
+    return () => {
+      if (startedRef.current && activeGroupIdRef.current === groupId) {
+        api.stopAIPrivateChat(groupId).catch(() => {});
+      }
+      startedRef.current = false;
+    };
+  }, [groupId]);
 
   useEffect(() => {
     if (isRunning) {
@@ -35,16 +47,18 @@ export function ObserverControlPanel({ groupId, topic }: ObserverControlPanelPro
 
   useEffect(() => {
     return () => {
-      if (isRunning) {
-        api.stopAIPrivateChat(groupId).catch(() => {});
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
       }
     };
-  }, [groupId]);
+  }, []);
 
   const handleStart = useCallback(async () => {
     setIsStarting(true);
     try {
       await api.startAIPrivateChat(groupId);
+      startedRef.current = true;
       setIsRunning(true);
       showToast({ message: 'AI 私聊已开始', type: 'success' });
     } catch {
@@ -57,6 +71,7 @@ export function ObserverControlPanel({ groupId, topic }: ObserverControlPanelPro
   const handleStop = useCallback(async () => {
     try {
       await api.stopAIPrivateChat(groupId);
+      startedRef.current = false;
       setIsRunning(false);
       showToast({ message: 'AI 私聊已停止', type: 'info' });
     } catch {

@@ -1,10 +1,11 @@
-import React, { useEffect } from 'react';
+﻿import React, { useEffect } from 'react';
 import { useAgentsStore } from '../../stores/agentsStore';
 import { Agent } from '../../types';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import 'dayjs/locale/zh-cn';
 import { useConfirm, useToast } from '../Common';
+import { avatarBackgroundImageStyle } from '../Common/Avatar';
 
 dayjs.extend(relativeTime);
 dayjs.locale('zh-cn');
@@ -29,7 +30,9 @@ function getAgentColor(name: string): string {
 }
 
 export function AgentsPage({ onBack, onOpenCreate, onSelectAgent }: AgentsPageProps) {
-  const { agents, fetchAgents, deleteAgent } = useAgentsStore();
+  const agents = useAgentsStore((s) => s.agents);
+  const fetchAgents = useAgentsStore((s) => s.fetchAgents);
+  const deleteAgent = useAgentsStore((s) => s.deleteAgent);
   const { confirm, ConfirmModal } = useConfirm();
   const { showToast, Toast } = useToast();
 
@@ -119,7 +122,7 @@ export function AgentsPage({ onBack, onOpenCreate, onSelectAgent }: AgentsPagePr
                         className="w-12 h-12 rounded-full flex items-center justify-center text-white text-lg font-semibold flex-shrink-0 shadow-sm overflow-hidden"
                         style={{
                           backgroundColor: agent.avatar_url ? 'transparent' : color,
-                          backgroundImage: agent.avatar_url ? `url(${agent.avatar_url})` : 'none',
+                          backgroundImage: avatarBackgroundImageStyle(agent.avatar_url),
                           backgroundSize: 'cover',
                           backgroundPosition: 'center',
                         }}

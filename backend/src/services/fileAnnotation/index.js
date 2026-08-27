@@ -1,6 +1,7 @@
 import axios from 'axios';
-import { getAIConfig } from '../ai/index.js';
+import { getAIConfig, normalizeBaseUrl } from '../ai/index.js';
 import { safeLog } from '../../utils/logger.js';
+import { getSafeExternalRequestOptions } from '../../utils/safeExternalUrl.js';
 import path from 'path';
 import fs from 'fs/promises';
 
@@ -135,8 +136,17 @@ function formatFileSize(bytes) {
   return `${bytes}B`;
 }
 
+const MAX_IMAGE_ANNOTATION_BYTES = 20 * 1024 * 1024;
+const VISION_TOTAL_DEADLINE_MS = 45 * 1000;
+
 async function compressImageForAnnotation(filePath, mimeType) {
   const stats = await fs.stat(filePath);
+
+  if (stats.size > MAX_IMAGE_ANNOTATION_BYTES) {
+    safeLog('warn', '图片超过20MB，跳过压缩与视觉标注，走文本描述兜底', { filePath: path.basename(filePath), size: stats.size });
+    return null;
+  }
+
   const maxSize = 512 * 1024;
 
   if (stats.size <= maxSize) {
@@ -165,7 +175,7 @@ async function compressImageForAnnotation(filePath, mimeType) {
 function getFastAnnotationConfigs() {
   const configs = [
     { key: process.env.GLM_API_KEY, endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4-flash' },
-    { key: process.env.MIMO_API_KEY, endpoint: process.env.MIMO_BASE_URL ? `${process.env.MIMO_BASE_URL}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions', model: 'mimo-v2.5' },
+    { key: process.env.MIMO_API_KEY, endpoint: process.env.MIMO_BASE_URL ? `${normalizeBaseUrl(process.env.MIMO_BASE_URL)}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions', model: 'mimo-v2.5' },
     { key: process.env.QWEN_API_KEY, endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen3.5-flash' },
     { key: process.env.DEEPSEEK_API_KEY, endpoint: 'https://api.deepseek.com/chat/completions', model: 'deepseek-chat' }
   ];
@@ -178,6 +188,7 @@ async function callFastAPI(messages, maxTokens = 120, timeout = 8000) {
 
   for (const config of configs) {
     try {
+      const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
       const response = await axios.post(
         config.endpoint,
         {
@@ -192,7 +203,8 @@ async function callFastAPI(messages, maxTokens = 120, timeout = 8000) {
             Authorization: `Bearer ${config.key}`,
             'Content-Type': 'application/json'
           },
-          timeout
+          timeout,
+          ...safeRequestOptions
         }
       );
       const content = response.data?.choices?.[0]?.message?.content;
@@ -209,11 +221,17 @@ async function annotateWithVision(filePath, mimeType, fileName) {
   if (!dataUrl) return null;
 
   const visionModels = ['glm_4v_flash', 'qwen_vl_plus', 'mimo_omni', 'qwen_omni'];
+  const deadline = Date.now() + VISION_TOTAL_DEADLINE_MS;
   for (const modelId of visionModels) {
+    if (Date.now() >= deadline) {
+      safeLog('warn', '视觉标注总耗时超过45s截止时间，提前返回null', { fileName });
+      return null;
+    }
     const config = getAIConfig(modelId);
     if (!config || !config.apiKey) continue;
 
     try {
+      const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
       const requestBody = {
         model: config.model,
         messages: [
@@ -229,12 +247,14 @@ async function annotateWithVision(filePath, mimeType, fileName) {
         temperature: 0.2
       };
 
+      const remainingMs = deadline - Date.now();
       const response = await axios.post(config.endpoint, requestBody, {
         headers: {
           'Authorization': `Bearer ${config.apiKey}`,
           'Content-Type': 'application/json'
         },
-        timeout: 15000
+        timeout: Math.max(1000, Math.min(15000, remainingMs)),
+        ...safeRequestOptions
       });
 
       const content = response.data?.choices?.[0]?.message?.content;
@@ -265,6 +285,7 @@ async function annotateWithMedia(fileName, fileSize, mediaType) {
     if (!config || !config.apiKey) continue;
 
     try {
+      const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
       const prompt = MEDIA_ANNOTATION_PROMPT
         .replace(/\{mediaType\}/g, mediaType)
         .replace('{filename}', fileName)
@@ -283,7 +304,8 @@ async function annotateWithMedia(fileName, fileSize, mediaType) {
           Authorization: `Bearer ${config.apiKey}`,
           'Content-Type': 'application/json'
         },
-        timeout: 8000
+        timeout: 8000,
+        ...safeRequestOptions
       });
 
       const content = response.data?.choices?.[0]?.message?.content;
@@ -401,11 +423,17 @@ async function generateImageDescription(filePath, mimeType, fileName) {
   if (!dataUrl) return null;
 
   const visionModels = ['glm_4v_flash', 'qwen_vl_plus', 'mimo_omni', 'qwen_omni'];
+  const deadline = Date.now() + VISION_TOTAL_DEADLINE_MS;
   for (const modelId of visionModels) {
+    if (Date.now() >= deadline) {
+      safeLog('warn', '图片描述生成总耗时超过45s截止时间，提前返回null', { fileName });
+      return null;
+    }
     const config = getAIConfig(modelId);
     if (!config || !config.apiKey) continue;
 
     try {
+      const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
       const requestBody = {
         model: config.model,
         messages: [
@@ -421,12 +449,14 @@ async function generateImageDescription(filePath, mimeType, fileName) {
         temperature: 0.3
       };
 
+      const remainingMs = deadline - Date.now();
       const response = await axios.post(config.endpoint, requestBody, {
         headers: {
           'Authorization': `Bearer ${config.apiKey}`,
           'Content-Type': 'application/json'
         },
-        timeout: 20000
+        timeout: Math.max(1000, Math.min(20000, remainingMs)),
+        ...safeRequestOptions
       });
 
       const content = response.data?.choices?.[0]?.message?.content;
@@ -455,6 +485,7 @@ async function generateAudioDescription(fileName, fileSize) {
     if (!config || !config.apiKey) continue;
 
     try {
+      const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
       const prompt = AUDIO_DESCRIPTION_PROMPT
         .replace('{filename}', fileName)
         .replace('{fileSize}', formatFileSize(fileSize));
@@ -472,7 +503,8 @@ async function generateAudioDescription(fileName, fileSize) {
           Authorization: `Bearer ${config.apiKey}`,
           'Content-Type': 'application/json'
         },
-        timeout: 8000
+        timeout: 8000,
+        ...safeRequestOptions
       });
 
       const content = response.data?.choices?.[0]?.message?.content;
@@ -501,6 +533,7 @@ async function generateVideoDescription(fileName, fileSize) {
     if (!config || !config.apiKey) continue;
 
     try {
+      const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
       const prompt = VIDEO_DESCRIPTION_PROMPT
         .replace('{filename}', fileName)
         .replace('{fileSize}', formatFileSize(fileSize));
@@ -518,7 +551,8 @@ async function generateVideoDescription(fileName, fileSize) {
           Authorization: `Bearer ${config.apiKey}`,
           'Content-Type': 'application/json'
         },
-        timeout: 8000
+        timeout: 8000,
+        ...safeRequestOptions
       });
 
       const content = response.data?.choices?.[0]?.message?.content;

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { isAxiosError } from 'axios';
 import { api } from '../services/api';
-import { removeCache, loadGroupsCache, saveGroupsCache, saveGroupsCacheAsync, loadMessagesCache, saveMessagesCache, loadMessagesCacheAsync, saveMessagesCacheAsync } from '../utils/cacheUtils';
+import { removeCache, loadGroupsCache, saveGroupsCache, loadMessagesCacheAsync, saveMessagesCache } from '../utils/cacheUtils';
 import { Group } from '../types';
 
 export type { Group };
@@ -131,7 +131,9 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
               avatar_url: existingGroup.avatar_url || g.avatar_url,
               background_url: existingGroup.background_url || g.background_url,
               announcement: existingGroup.announcement || g.announcement,
-              last_message_preview: existingGroup.last_message_preview || g.last_message_preview
+              // 优先使用后端返回的 last_message_preview（更准确），
+              // 仅在后端未返回时回退到本地缓存
+              last_message_preview: g.last_message_preview || existingGroup.last_message_preview
             };
           }
           return g;
@@ -139,7 +141,6 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
 
         lastGroupsFetchAt = Date.now();
         saveGroupsCache(mergedGroups);
-        saveGroupsCacheAsync(mergedGroups).catch(() => { });
 
         const currentGroupId = get().currentGroup?.id;
         const updatedCurrentGroup = currentGroupId
@@ -194,7 +195,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
 
       set(state => {
         const updatedGroups = [...state.groups, newGroup];
-        saveGroupsCacheAsync(updatedGroups).catch(() => saveGroupsCache(updatedGroups));
+        saveGroupsCache(updatedGroups);
         return {
           groups: updatedGroups,
           currentGroup: newGroup
@@ -215,10 +216,10 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
 
       removeCache(`messages_${groupId}`);
 
-      const cachedMessages = await loadMessagesCacheAsync().catch(() => loadMessagesCache());
+      const cachedMessages = await loadMessagesCacheAsync();
       if (cachedMessages && cachedMessages[groupId]) {
         delete cachedMessages[groupId];
-        saveMessagesCacheAsync(cachedMessages).catch(() => saveMessagesCache(cachedMessages));
+        saveMessagesCache(cachedMessages);
       }
 
       set(state => {
@@ -235,7 +236,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
         newDebateStatus.delete(groupId);
 
         // 持久化更新后的groups缓存
-        saveGroupsCacheAsync(newGroups).catch(() => saveGroupsCache(newGroups));
+        saveGroupsCache(newGroups);
 
         return {
           groups: newGroups,
@@ -400,7 +401,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
         newTypingAIs.delete(chatId);
         const newDebateStatus = new Map(state.debateStatus);
         newDebateStatus.delete(chatId);
-        saveGroupsCacheAsync(state.groups.filter(g => g.id !== chatId)).catch(() => { });
+        saveGroupsCache(state.groups.filter(g => g.id !== chatId));
 
         return {
           groups: state.groups.filter(g => g.id !== chatId),
@@ -637,7 +638,7 @@ export const useGroupsStore = create<GroupsState>((set, get) => ({
         avatar_url: g.avatar_url,
         background_url: g.background_url
       }));
-      saveGroupsCacheAsync(groupsToCache).catch(() => saveGroupsCache(groupsToCache));
+      saveGroupsCache(groupsToCache);
 
       return { groups: updatedGroups, currentGroup: updatedCurrentGroup };
     });

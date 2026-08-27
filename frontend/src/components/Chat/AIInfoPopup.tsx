@@ -64,7 +64,7 @@ const AI_MODEL_INFO: Record<string, { model: string; provider: string; descripti
 };
 
 export function AIInfoPopup({ aiId, isOpen, onClose, position }: AIInfoPopupProps) {
-  const { personas } = usePersonasStore();
+  const personas = usePersonasStore((s) => s.personas);
   const [adjustedPosition, setAdjustedPosition] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
@@ -90,17 +90,17 @@ export function AIInfoPopup({ aiId, isOpen, onClose, position }: AIInfoPopupProp
   }, [isOpen, position]);
 
   const persona = personas[aiId];
-  const modelInfo = AI_MODEL_INFO[aiId] || {
+  const modelInfo = useMemo(() => AI_MODEL_INFO[aiId] || {
     model: aiId,
     provider: '未知',
     description: '暂无额外模型说明。',
-  };
+  }, [aiId]);
 
   const displayName = persona?.name || AI_NAMES[aiId] || aiId;
   const avatarColor = persona?.color || AI_COLORS[aiId] || '#6b7280';
   const avatarUrl = persona?.avatar_url;
   const avatarLetter = (AI_AVATAR_LETTERS[aiId] || displayName[0] || '?').toUpperCase();
-  const expertise = persona?.expertise || [];
+  const expertise = useMemo(() => persona?.expertise || [], [persona?.expertise]);
   const summary = useMemo(() => ({
     style: persona?.style || '默认风格',
     personality: persona?.personality || '友好、乐于助人。',

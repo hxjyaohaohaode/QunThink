@@ -1,11 +1,41 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 
 interface SplashScreenProps {
   onComplete: () => void;
 }
 
+interface Star {
+  left: number;
+  top: number;
+  size: number;
+  delay: number;
+  duration: number;
+  opacity: number;
+}
+
+function buildStars(): Star[] {
+  const stars: Star[] = [];
+  let seed = 20260823;
+  const rand = () => {
+    seed = (seed * 9301 + 49297) % 233280;
+    return seed / 233280;
+  };
+  for (let i = 0; i < 42; i++) {
+    stars.push({
+      left: rand() * 100,
+      top: rand() * 100,
+      size: 1.5 + rand() * 2.5,
+      delay: rand() * 3,
+      duration: 2.2 + rand() * 2.6,
+      opacity: 0.25 + rand() * 0.55
+    });
+  }
+  return stars;
+}
+
 export function SplashScreen({ onComplete }: SplashScreenProps) {
   const completedRef = useRef(false);
+  const stars = useMemo(buildStars, []);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -18,8 +48,26 @@ export function SplashScreen({ onComplete }: SplashScreenProps) {
   }, [onComplete]);
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-white select-none overflow-hidden">
-      <div className="flex flex-col items-center">
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center select-none overflow-hidden bg-gradient-to-b from-[#f7f7ff] via-white to-[#eef0ff]">
+      <div className="absolute inset-0 pointer-events-none" aria-hidden="true">
+        {stars.map((star, idx) => (
+          <span
+            key={idx}
+            className="splash-star rounded-full"
+            style={{
+              left: `${star.left}%`,
+              top: `${star.top}%`,
+              width: `${star.size}px`,
+              height: `${star.size}px`,
+              opacity: star.opacity,
+              animationDelay: `${star.delay}s`,
+              animationDuration: `${star.duration}s`
+            }}
+          />
+        ))}
+      </div>
+
+      <div className="flex flex-col items-center relative z-10">
         {/* Logo */}
         <svg width="220" height="160" viewBox="0 0 400 320" className="overflow-visible">
           <defs>
@@ -75,6 +123,18 @@ export function SplashScreen({ onComplete }: SplashScreenProps) {
       </div>
 
       <style>{`
+        .splash-star {
+          position: absolute;
+          background: radial-gradient(circle, #6C5CE7 0%, rgba(108,92,231,0) 70%);
+          animation: splashTwinkle 3s ease-in-out infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .splash-star { animation: none; }
+        }
+        @keyframes splashTwinkle {
+          0%, 100% { transform: scale(1); opacity: 0.25; }
+          50% { transform: scale(1.35); opacity: 0.85; }
+        }
         .sq-dark {
           animation: sqInDark 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both;
         }

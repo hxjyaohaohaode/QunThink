@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import 'dayjs/locale/zh-cn';
@@ -167,10 +167,12 @@ export function SearchPanel() {
   });
 
   const debouncedQuery = useDebounce(query, 250);
-  const { groups, selectGroup } = useGroupsStore();
-  const { setSearchPanelOpen, setScrollToMessageId } = useNavigationStore();
-  const { personas } = usePersonasStore();
-  const { selectAgent } = useAgentsStore();
+  const groups = useGroupsStore((s) => s.groups);
+  const selectGroup = useGroupsStore((s) => s.selectGroup);
+  const setSearchPanelOpen = useNavigationStore((s) => s.setSearchPanelOpen);
+  const setScrollToMessageId = useNavigationStore((s) => s.setScrollToMessageId);
+  const personas = usePersonasStore((s) => s.personas);
+  const selectAgent = useAgentsStore((s) => s.selectAgent);
 
   const close = useCallback(() => setSearchPanelOpen(false), [setSearchPanelOpen]);
 
@@ -192,6 +194,9 @@ export function SearchPanel() {
     });
   }, []);
 
+  // 请求序号，用于取消过期的搜索结果
+  const searchRequestIdRef = useRef(0);
+
   const executeSearch = useCallback(async () => {
     const normalized = debouncedQuery.trim();
     if (!normalized) {
@@ -199,6 +204,9 @@ export function SearchPanel() {
       setError(null);
       return;
     }
+
+    // 递增请求序号，过期的请求结果将被丢弃
+    const currentRequestId = ++searchRequestIdRef.current;
 
     setLoading(true);
     setError(null);
@@ -212,14 +220,21 @@ export function SearchPanel() {
       if (quickFilter !== 'all') params.quickFilter = quickFilter;
 
       const result = await api.globalSearch(normalized, params);
-      setSearchData(result as GlobalSearchResponse);
-      saveHistory(normalized);
+      // 只接受最新请求的结果，避免竞态条件
+      if (currentRequestId === searchRequestIdRef.current) {
+        setSearchData(result as GlobalSearchResponse);
+        saveHistory(normalized);
+      }
     } catch (err) {
-      console.error('Search failed:', err);
-      setError(err instanceof Error ? err.message : '搜索失败。');
-      setSearchData(null);
+      if (currentRequestId === searchRequestIdRef.current) {
+        console.error('Search failed:', err);
+        setError(err instanceof Error ? err.message : '搜索失败。');
+        setSearchData(null);
+      }
     } finally {
-      setLoading(false);
+      if (currentRequestId === searchRequestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [activeTab, debouncedQuery, saveHistory, selectedGroupId, quickFilter, dateFrom, dateTo]);
 
@@ -328,11 +343,11 @@ export function SearchPanel() {
         <div className="flex flex-wrap items-center gap-2 border-b border-border-subtle px-5 py-2">
           <span className="text-[10px] text-text-muted mr-1">筛选：</span>
           {([
-            { key: 'all' as QuickFilter, label: '全部', icon: '🔍' },
-            { key: 'images' as QuickFilter, label: '图片', icon: '🖼️' },
-            { key: 'media' as QuickFilter, label: '媒体', icon: '🎬' },
-            { key: 'files' as QuickFilter, label: '文件', icon: '📄' },
-            { key: 'links' as QuickFilter, label: '链接', icon: '🔗' },
+            { key: 'all' as QuickFilter, label: '全部', icon: (<svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" /></svg>) },
+            { key: 'images' as QuickFilter, label: '图片', icon: (<svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>) },
+            { key: 'media' as QuickFilter, label: '媒体', icon: (<svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" /></svg>) },
+            { key: 'files' as QuickFilter, label: '文件', icon: (<svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>) },
+            { key: 'links' as QuickFilter, label: '链接', icon: (<svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" /></svg>) },
           ]).map((filter) => (
             <button
               key={filter.key}
@@ -342,7 +357,7 @@ export function SearchPanel() {
                 : 'bg-bg-surface2 text-text-secondary hover:text-text-primary'
                 }`}
             >
-              <span className="text-[11px]">{filter.icon}</span>
+              {filter.icon}
               {filter.label}
             </button>
           ))}
@@ -444,7 +459,7 @@ export function SearchPanel() {
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center justify-between gap-3">
                                 <span className="text-sm font-medium text-text-primary">{senderName(result.sender_type, result.sender_id)}</span>
-                                <span className="text-xs text-text-muted">{dayjs(result.created_at).fromNow ? dayjs(result.created_at).fromNow() : dayjs(result.created_at).format('YYYY-MM-DD HH:mm')}</span>
+                                <span className="text-xs text-text-muted">{dayjs(result.created_at).fromNow()}</span>
                               </div>
                               <div className="text-xs text-text-muted">{result.group_name}</div>
                               <p className="mt-2 text-sm text-text-secondary">{highlightText(truncate(result.content, 160), query)}</p>
@@ -581,14 +596,18 @@ export function SearchPanel() {
                     <h5 className="mb-3 text-sm font-semibold text-text-primary">媒体</h5>
                     <div className="space-y-3">
                       {searchData.media.map((result) => {
-                        const mediaIcon = result.media_type === 'image' ? '🖼️' : result.media_type === 'audio' ? '🎵' : '🎬';
+                        const mediaIcon = result.media_type === 'image'
+                          ? (<svg className="w-3.5 h-3.5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>)
+                          : result.media_type === 'audio'
+                            ? (<svg className="w-3.5 h-3.5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" /></svg>)
+                            : (<svg className="w-3.5 h-3.5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" /></svg>);
                         const mediaLabel = result.media_type === 'image' ? '图片' : result.media_type === 'audio' ? '音频' : '视频';
                         return (
                           <button key={result.id} onClick={() => goToGroup(result.group_id)} className="block w-full rounded-xl border border-border-subtle bg-bg-surface2 p-4 text-left hover:border-accent">
                             <div className="flex items-center justify-between gap-3">
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-2">
-                                  <span className="text-[14px]">{mediaIcon}</span>
+                                  {mediaIcon}
                                   <span className="text-sm font-medium text-text-primary">{highlightText(result.filename, query)}</span>
                                   <span className="inline-block rounded-full bg-accent/10 px-2 py-0.5 text-[10px] text-accent">{mediaLabel}</span>
                                 </div>

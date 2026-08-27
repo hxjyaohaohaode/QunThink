@@ -1,6 +1,8 @@
 import axios from 'axios';
 import type { Group, GroupFile, Message } from '../types';
-import type { FileUploadResponse, GroupCreateInput, GroupSettingsInput, MessageCreateInput, PaginatedMessagesResponse } from '../../../shared/contracts';
+import type { FileUploadResponse, MessageCreateInput } from '../types';
+import type { GroupInsights, MemoryDigest } from '../types';
+import type { GroupCreateInput, GroupSettingsInput, PaginatedMessagesResponse } from '../../../shared/contracts';
 import { getApiBaseUrl, getApiBaseUrlCandidates, rememberBackendOrigin } from './runtimeConfig';
 
 const DEFAULT_AUTH_MODE = 'session';
@@ -8,12 +10,22 @@ const DEFAULT_AUTH_MODE = 'session';
 type AuthEventListener = () => void;
 const authEventListeners: Set<AuthEventListener> = new Set();
 
+export const __CLEAR__ = '__CLEAR__';
+
+const AUTH_EXPIRED_COOLDOWN_MS = 5000;
+let authExpiredHandledAt = 0;
+
 export function onAuthExpired(listener: AuthEventListener): () => void {
   authEventListeners.add(listener);
   return () => authEventListeners.delete(listener);
 }
 
 export function notifyAuthExpired() {
+  const now = Date.now();
+  if (authExpiredHandledAt !== 0 && now - authExpiredHandledAt < AUTH_EXPIRED_COOLDOWN_MS) {
+    return;
+  }
+  authExpiredHandledAt = now;
   authEventListeners.forEach(listener => {
     try { listener(); } catch { }
   });
@@ -202,7 +214,8 @@ axiosInstance.interceptors.response.use(
       config.retryCount = 0;
     }
 
-    const isNetworkError = !error.response && (error.code === 'ERR_NETWORK' || error.code === 'ECONNABORTED');
+    const isNetworkError = !error.response && (error.code === 'ERR_NETWORK' || error.code === 'ECONNABORTED' || error.code === 'ERR_ABORTED');
+    const isAbortedError = !error.response && error.code === 'ERR_ABORTED';
     const isServerError = error.response && (error.response.status === 500 || error.response.status === 502 || error.response.status === 503);
     const isCsrfError = error.response?.status === 403 && error.response?.data?.error === 'CSRF token validation failed';
 
@@ -220,7 +233,8 @@ axiosInstance.interceptors.response.use(
       }
     }
 
-    if (isNetworkError && Array.isArray(config.baseUrlCandidates)) {
+    // ERR_ABORTED 是浏览器取消请求（页面导航/刷新），应原地重试而非切换后端地址
+    if (isNetworkError && !isAbortedError && Array.isArray(config.baseUrlCandidates)) {
       const nextBaseUrlIndex = (config.activeBaseUrlIndex ?? 0) + 1;
       if (nextBaseUrlIndex < config.baseUrlCandidates.length) {
         config.activeBaseUrlIndex = nextBaseUrlIndex;
@@ -403,10 +417,13 @@ export const api = {
     metadata?: Record<string, any>,
     attachments?: { id: string; name: string; type: string; size: number; url?: string }[]
   ): Promise<Message> => {
+    const normalizedReplyTo = Array.isArray(replyTo)
+      ? (replyTo.length > 0 ? replyTo[0] : null)
+      : (replyTo ?? null);
     const payload: MessageCreateInput = {
       content,
       content_type: contentType,
-      reply_to: replyTo,
+      reply_to: normalizedReplyTo,
       metadata,
       attachments
     };
@@ -649,6 +666,16 @@ export const api = {
     return response.data?.files || [];
   },
 
+  getGroupInsights: async (groupId: string, days = 7): Promise<GroupInsights> => {
+    const response = await axiosInstance.get(`/groups/${groupId}/insights`, { params: { days } });
+    return response.data;
+  },
+
+  getMemoryDigest: async (limit = 12): Promise<MemoryDigest> => {
+    const response = await axiosInstance.get('/memory/digest', { params: { limit } });
+    return response.data;
+  },
+
   uploadGroupFile: async (groupId: string, file: File): Promise<GroupFile | null> => {
     const response = await api.uploadFile(file, groupId);
     const uploadedFile = response.file;
@@ -727,6 +754,11 @@ export const api = {
 
   markMessageRead: async (groupId: string, messageId: string) => {
     const response = await axiosInstance.post(`/groups/${groupId}/messages/${messageId}/read`);
+    return response.data;
+  },
+
+  markMessagesReadBatch: async (groupId: string, messageIds: string[]) => {
+    const response = await axiosInstance.post(`/groups/${groupId}/messages/read-batch`, { messageIds });
     return response.data;
   },
 
@@ -913,18 +945,19 @@ export const api = {
     return response.data;
   },
 
-  sendAgentMessage: async (agentId: string, message: string) => {
+  sendAgentMessage: async (agentId: string, message: string, signal?: AbortSignal) => {
     const headers = await buildRequestHeaders(true);
-    const response = await fetch(`${axiosInstance.defaults.baseURL}/agents/${agentId}/chat`, {
+    const response = await fetch(`${getApiBaseUrl()}/agents/${agentId}/chat`, {
       method: 'POST',
       headers,
       credentials: 'include',
-      body: JSON.stringify({ message })
+      body: JSON.stringify({ message }),
+      signal
     });
     return response;
   },
 
-  sendAgentMessageWithFiles: async (agentId: string, message: string, files: File[]) => {
+  sendAgentMessageWithFiles: async (agentId: string, message: string, files: File[], signal?: AbortSignal) => {
     const formData = new FormData();
     formData.append('message', message);
     files.forEach(file => {
@@ -932,11 +965,12 @@ export const api = {
     });
 
     const headers = await buildRequestHeaders();
-    const response = await fetch(`${axiosInstance.defaults.baseURL}/agents/${agentId}/chat-with-files`, {
+    const response = await fetch(`${getApiBaseUrl()}/agents/${agentId}/chat-with-files`, {
       method: 'POST',
       headers,
       credentials: 'include',
-      body: formData
+      body: formData,
+      signal
     });
     return response;
   },
@@ -959,6 +993,22 @@ export const api = {
 
   updateUserApiConfig: async (config: Record<string, { apiKey: string; baseUrl: string }>) => {
     const response = await axiosInstance.put('/user/apiconfig', config);
+    return response.data;
+  },
+
+  saveApiConfig: async (payload: unknown) => {
+    const response = await axiosInstance.put('/user/apiconfig', payload);
+    return response.data;
+  },
+
+  /**
+   * 测试用户自定义API配置是否可用
+   * @param vendor 厂商名（deepseek/zhipu/mimo/qwen）
+   * @param apiKey 可选，未提供则使用已保存或系统默认
+   * @param baseUrl 可选，未提供则使用已保存或系统默认
+   */
+  testUserApiConfig: async (vendor: string, apiKey?: string, baseUrl?: string) => {
+    const response = await axiosInstance.post('/user/apiconfig/test', { vendor, apiKey, baseUrl });
     return response.data;
   }
 };

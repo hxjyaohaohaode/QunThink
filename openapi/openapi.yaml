@@ -1,72 +1,247 @@
+# =============================================================================
+# 群想（AI 群聊 · 大模型辩论场）OpenAPI 3.1 契约
+#
+# 本文档以 backend/src/routes/*.js 的真实路由为准生成/维护。
+# 运行 `node scripts/validate-openapi.mjs` 可交叉校验文档与实现是否漂移。
+#
+# 认证模型：
+#   - 会话 Cookie: session_token（httpOnly，登录端点下发）
+#   - CSRF: 所有非安全方法需携带 x-csrf-token 头（先 GET /api/csrf-token 获取）
+#   - 开发模式（AUTH_MODE=dev）下可用 x-user-id 头代替会话
+# =============================================================================
 openapi: 3.1.0
 info:
-  title: AI聊天群 API
+  title: 群想 AI 群聊 API
   version: 1.0.0
-  description: 最小但真实对齐的接口契约，覆盖认证、群组、消息与文件主链路。
+  description: |
+    以 backend/src 真实路由为准的接口契约。覆盖认证、短信、群组、消息、文件、
+    TTS、社交互动、记忆、Agent、互动分析、监控、画像、人设与用户 API 配置等域。
+    部分复杂查询端点（搜索、互动分析、监控指标等）的响应体为宽松对象，
+    字段以实现为准，后续逐步收紧。
 servers:
   - url: http://localhost:3002
-    description: Local backend
+    description: 本地后端
+  - url: https://{YOUR_BACKEND_HOST}
+    description: 生产后端（占位符，替换为真实 Render/自有域名）
+    variables:
+      YOUR_BACKEND_HOST:
+        default: your-backend-host.example.com
 tags:
+  - name: System
+    description: 健康检查 / CSRF / 启动聚合
   - name: Auth
+    description: 会话认证（登录/注册/登出/会话查询）
+  - name: Sms
+    description: 短信验证码
   - name: Groups
+    description: 群组 CRUD / 成员 / 置顶 / 设置 / 背景 / 辩论
+  - name: PrivateChat
+    description: 用户-AI 私聊与 AI-AI 私聊
   - name: Messages
+    description: 消息 / 评论 / 点赞点踩 / 搜索 / 自主对话
   - name: Files
+    description: 文件上传 / 下载 / 解析 / 检索索引
+  - name: Tts
+    description: 语音合成
+  - name: Social
+    description: 智能点赞 / 热门消息 / 评论分析
+  - name: Memory
+    description: 长期记忆
+  - name: Agents
+    description: 自定义智能体
+  - name: Interaction
+    description: 互动日志与分析
+  - name: Monitoring
+    description: 运行指标与客户端错误上报
+  - name: Profile
+    description: 用户画像
+  - name: Personas
+    description: AI 人设
+  - name: ApiConfig
+    description: 用户自定义 API 配置
+  - name: Ai
+    description: AI 模型运行时管理
+
+security:
+  - cookieAuth: []
+  - csrfHeader: []
+
 paths:
-  /api/auth/register:
+  # ------------------------------------------------------------------ System
+  /api/health:
+    get:
+      tags: [System]
+      operationId: getHealth
+      summary: 健康检查（含存储层连通性，60s 缓存）
+      security: []
+      responses:
+        '200':
+          description: 服务健康
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: 服务降级
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/csrf-token:
+    get:
+      tags: [System]
+      operationId: getCsrfToken
+      summary: 获取 CSRF 令牌
+      security: []
+      responses:
+        '200':
+          description: CSRF 令牌（认证未启用时仅返回 enabled:false）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CsrfTokenResponse'
+  /api/bootstrap:
+    get:
+      tags: [System]
+      operationId: getBootstrap
+      summary: 首屏启动数据聚合（用户/群组/画像/人设/API配置）
+      responses:
+        '200':
+          description: 启动数据
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BootstrapResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  # -------------------------------------------------------------------- Auth
+  /api/auth/token:
+    get:
+      tags: [Auth]
+      operationId: getAuthTokenStatus
+      summary: 查询会话状态
+      security: []
+      responses:
+        '200':
+          description: 会话状态
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatusResponse'
+  /api/auth/login-phone:
     post:
       tags: [Auth]
-      summary: 注册用户
+      operationId: loginWithPhone
+      summary: 手机号 + 密码登录（生产认证链路）
+      security: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/RegisterInput'
+              $ref: '#/components/schemas/PhoneLoginInput'
       responses:
-        '201':
-          description: 注册成功
+        '200':
+          description: 登录成功，下发 session_token Cookie
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/AuthResponse'
         '400':
-          description: 参数不合法
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: 手机号或密码错误
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-        '409':
-          description: 用户名冲突
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
-  /api/auth/login:
+  /api/auth/register-sms:
     post:
       tags: [Auth]
-      summary: 登录
+      operationId: registerBySms
+      summary: 短信验证码注册（生产注册链路）
+      description: |
+        需先调用 POST /api/sms/send 获取验证码。密码必须包含大小写字母与数字。
+        注册成功自动建立会话并初始化用户数据库。
+      security: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/LoginInput'
+              $ref: '#/components/schemas/SmsRegisterInput'
       responses:
-        '200':
-          description: 登录成功
+        '201':
+          description: 注册成功，下发 session_token Cookie
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/AuthResponse'
-        '401':
-          description: 用户名或密码错误
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: 该手机号已注册
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '503':
+          description: 短信服务未配置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      operationId: devRegisterUser
+      summary: '[dev-only] 用户名密码注册'
+      x-dev-only: true
+      deprecated: false
+      description: |
+        ⚠️ 仅在 NODE_ENV != production 时注册该路由，生产环境 404。
+        仅供本地开发与自动化测试使用；生产注册必须走 /api/auth/register-sms。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DevRegisterInput'
+      responses:
+        '201':
+          description: 注册成功，下发 session_token Cookie
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: 用户名已存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: 登出并清除会话 Cookie
+      responses:
+        '200':
+          description: 已登出
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
   /api/auth/me:
     get:
       tags: [Auth]
+      operationId: getCurrentUser
       summary: 获取当前登录用户
       responses:
         '200':
@@ -80,15 +255,101 @@ paths:
                   user:
                     $ref: '#/components/schemas/AuthUser'
         '401':
-          description: 未登录
+          description: 未登录（user:null + requiresAuth:true）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, requiresAuth]
+                properties:
+                  user:
+                    nullable: true
+                  requiresAuth:
+                    type: boolean
+
+  # --------------------------------------------------------------------- Sms
+  /api/sms/send:
+    post:
+      tags: [Sms]
+      operationId: sendSmsCode
+      summary: 发送短信验证码
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PhoneInput'
+      responses:
+        '200':
+          description: 发送结果（阿里云返回体透传）
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          description: 发送过于频繁
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '503':
+          description: 短信服务未配置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+  /api/sms/verify:
+    post:
+      tags: [Sms]
+      operationId: verifySmsCode
+      summary: 校验短信验证码（不注册）
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SmsVerifyInput'
+      responses:
+        '200':
+          description: 校验结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          description: 验证码尝试次数过多
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        '503':
+          description: 短信服务未配置
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  # ------------------------------------------------------------------ Groups
   /api/groups:
     get:
       tags: [Groups]
+      operationId: listGroups
       summary: 获取群组列表
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0 }
       responses:
         '200':
           description: 群组数组
@@ -98,8 +359,11 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Group'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
     post:
       tags: [Groups]
+      operationId: createGroup
       summary: 创建群组
       requestBody:
         required: true
@@ -115,17 +379,20 @@ paths:
               schema:
                 $ref: '#/components/schemas/Group'
         '400':
-          description: 参数不合法
+          description: 参数不合法（私聊需有效 ai_member；群聊至少 2 个 AI 成员）
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
   /api/groups/{id}:
     get:
       tags: [Groups]
+      operationId: getGroup
       summary: 获取群组详情
       parameters:
-        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/GroupIdAsId'
       responses:
         '200':
           description: 群组详情
@@ -134,30 +401,644 @@ paths:
               schema:
                 $ref: '#/components/schemas/Group'
         '404':
-          description: 群组不存在
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Groups]
+      operationId: deleteGroup
+      summary: 删除群组
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/groups/{id}/settings:
+    put:
+      tags: [Groups]
+      operationId: updateGroupSettings
+      summary: 更新群组设置（名称/头像/背景/公告/置顶/辩论配置等）
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GroupSettingsInput'
+      responses:
+        '200':
+          description: 更新成功（返回 {success, group}）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, group]
+                properties:
+                  success: { type: boolean, const: true }
+                  group:
+                    $ref: '#/components/schemas/Group'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/groups/{id}/debate:
+    put:
+      tags: [Groups]
+      operationId: updateDebateMode
+      summary: 开关辩论模式并设置辩论强度
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DebateUpdateInput'
+      responses:
+        '200':
+          description: 更新后的群组
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Group'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/groups/{id}/pin:
+    put:
+      tags: [Groups]
+      operationId: pinGroup
+      summary: 置顶/取消置顶
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PinInput'
+      responses:
+        '200':
+          description: 更新后的群组
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Group'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/groups/{id}/members:
+    post:
+      tags: [Groups]
+      operationId: addGroupMember
+      summary: 添加 AI 成员
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemberAddInput'
+      responses:
+        '200':
+          description: 添加成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/groups/{id}/members/{aiId}:
+    delete:
+      tags: [Groups]
+      operationId: removeGroupMember
+      summary: 移除 AI 成员
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+        - in: path
+          name: aiId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 移除成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/groups/{id}/upload-background:
+    post:
+      tags: [Groups]
+      operationId: uploadGroupBackground
+      summary: 上传群背景图（multipart，字段名 background）
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [background]
+              properties:
+                background:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: 上传成功（返回 background_url 等）
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/groups/{id}/background:
+    get:
+      tags: [Groups]
+      operationId: getGroupBackground
+      summary: 获取群背景图
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      responses:
+        '200':
+          description: 图片流
+          content:
+            image/*:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/groups/{id}/files:
+    get:
+      tags: [Groups]
+      operationId: listGroupFiles
+      summary: 获取群文件列表
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      responses:
+        '200':
+          description: 群文件数组（{success, files}）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, files]
+                properties:
+                  success: { type: boolean, const: true }
+                  files:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/GroupFile'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Groups]
+      operationId: legacyCreateGroupFile
+      summary: '[已废弃守卫] 群文件上传入口（固定返回 400 引导）'
+      deprecated: true
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      responses:
+        '400':
+          description: 请使用 /api/files/upload
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /api/groups/{id}/files/{fileId}:
+    delete:
+      tags: [Groups]
+      operationId: deleteGroupFile
+      summary: 从群组移除文件记录
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+        - in: path
+          name: fileId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 移除成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/groups/{id}/insights:
+    get:
+      tags: [Groups]
+      operationId: getGroupInsights
+      summary: 群聊洞察中心（发言分布/活跃度/社交互动/情感趋势）
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+        - name: days
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 30, default: 7 }
+      responses:
+        '200':
+          description: 聚合洞察数据
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, group_id, window_days, totals, per_ai, activity_daily, sentiment_trend, participation_ratio]
+                properties:
+                  success: { type: boolean }
+                  group_id: { type: string }
+                  window_days: { type: integer }
+                  generated_at: { type: string, format: date-time }
+                  totals:
+                    type: object
+                    properties:
+                      messages: { type: integer }
+                      ai_messages: { type: integer }
+                      user_messages: { type: integer }
+                      system_messages: { type: integer }
+                      likes: { type: integer }
+                      dislikes: { type: integer }
+                      comments: { type: integer }
+                      active_ais: { type: integer }
+                  per_ai:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        ai_id: { type: string }
+                        name: { type: string }
+                        count: { type: integer }
+                        last_active: { type: [string, 'null'], format: date-time }
+                  activity_daily:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        date: { type: string, format: date }
+                        count: { type: integer }
+                  sentiment_trend:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        date: { type: string, format: date }
+                        avg_score: { type: number }
+                        samples: { type: integer }
+                  participation_ratio: { type: number }
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/groups/{groupId}/messages/read-batch:
+    post:
+      tags: [Messages]
+      operationId: markMessagesReadBatch
+      summary: 批量标记消息已读
+      parameters:
+        - name: groupId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [messageIds]
+              properties:
+                messageIds:
+                  type: array
+                  maxItems: 200
+                  items: { type: string }
+      responses:
+        '200':
+          description: 标记结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  requested: { type: integer }
+                  updated: { type: integer }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ------------------------------------------------------- Formal Debate
+  /api/groups/{id}/formal-debate/start:
+    post:
+      tags: [Groups]
+      operationId: startFormalDebate
+      summary: 启动正式辩论
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: |
+                可选字段（宽松对象）：topic、rolePreferences、debateLevel、
+                selectedParticipants 等，以实现为准。
+      responses:
+        '200':
+          description: 辩论已启动
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/groups/{id}/formal-debate/stop:
+    post:
+      tags: [Groups]
+      operationId: stopFormalDebate
+      summary: 停止正式辩论
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      responses:
+        '200':
+          description: 辩论已停止
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/groups/{id}/formal-debate/status:
+    get:
+      tags: [Groups]
+      operationId: getFormalDebateStatus
+      summary: 查询正式辩论状态
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      responses:
+        '200':
+          description: 辩论状态
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/groups/{id}/formal-debate/allocate-roles:
+    post:
+      tags: [Groups]
+      operationId: allocateFormalDebateRoles
+      summary: 分配辩论角色
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: 可选 rolePreferences / selectedParticipants
+      responses:
+        '200':
+          description: 角色分配结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/groups/{id}/formal-debate/audience-comment:
+    post:
+      tags: [Groups]
+      operationId: triggerAudienceComment
+      summary: 触发观众席点评
+      parameters:
+        - $ref: '#/components/parameters/GroupIdAsId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                audienceMembers:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: 观众点评结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ------------------------------------------------------------ PrivateChat
+  /api/private-chat/{aiId}:
+    post:
+      tags: [PrivateChat]
+      operationId: openUserPrivateChat
+      summary: 打开（或创建）与指定 AI 的一对一私聊
+      parameters:
+        - in: path
+          name: aiId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 私聊已存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Group'
+        '201':
+          description: 私聊已创建
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Group'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/ai-private-chat:
+    post:
+      tags: [PrivateChat]
+      operationId: createAiPrivateChat
+      summary: 创建 AI-AI 私聊会话
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: |
+                字段以实现为准：aiMembers（AI 标识数组）、topic、customName。
+      responses:
+        '200':
+          description: 会话创建结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/ai-private-chats:
+    get:
+      tags: [PrivateChat]
+      operationId: listAiPrivateChats
+      summary: 获取 AI-AI 私聊会话列表
+      responses:
+        '200':
+          description: 会话数组
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+  /api/ai-private-chats/{id}:
+    delete:
+      tags: [PrivateChat]
+      operationId: deleteAiPrivateChat
+      summary: 删除 AI-AI 私聊会话
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 删除结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/ai-private-chats/{id}/start:
+    post:
+      tags: [PrivateChat]
+      operationId: startAiPrivateChat
+      summary: 启动 AI-AI 私聊对话
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                topic: { type: string }
+      responses:
+        '200':
+          description: 启动结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/ai-private-chats/{id}/status:
+    get:
+      tags: [PrivateChat]
+      operationId: getAiPrivateChatStatus
+      summary: 查询 AI-AI 私聊状态
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 状态对象
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/ai-private-chats/{id}/continue:
+    post:
+      tags: [PrivateChat]
+      operationId: continueAiPrivateChat
+      summary: 继续 AI-AI 私聊对话
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 继续结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/ai-private-chats/{id}/stop:
+    post:
+      tags: [PrivateChat]
+      operationId: stopAiPrivateChat
+      summary: 停止 AI-AI 私聊对话
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 停止结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  # ---------------------------------------------------------------- Messages
   /api/groups/{groupId}/messages:
     get:
       tags: [Messages]
-      summary: 获取群消息
+      operationId: listMessages
+      summary: 分页获取群消息
       parameters:
-        - $ref: '#/components/parameters/GroupIdAsGroupId'
+        - $ref: '#/components/parameters/GroupIdParam'
         - in: query
           name: limit
-          schema:
-            type: integer
-            minimum: 1
+          schema: { type: integer, minimum: 1 }
         - in: query
           name: before
-          schema:
-            type: string
+          schema: { type: string }
         - in: query
           name: after
-          schema:
-            type: string
+          schema: { type: string }
       responses:
         '200':
           description: 消息分页结果
@@ -165,11 +1046,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PaginatedMessagesResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
     post:
       tags: [Messages]
-      summary: 发送消息
+      operationId: sendMessage
+      summary: 发送消息（触发 AI 回复链路）
       parameters:
-        - $ref: '#/components/parameters/GroupIdAsGroupId'
+        - $ref: '#/components/parameters/GroupIdParam'
       requestBody:
         required: true
         content:
@@ -184,71 +1068,179 @@ paths:
               schema:
                 $ref: '#/components/schemas/Message'
         '400':
-          description: 参数错误
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiError'
+          $ref: '#/components/responses/BadRequest'
         '404':
-          description: 群组不存在
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Messages]
+      operationId: clearGroupMessages
+      summary: 清空群消息
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+      responses:
+        '200':
+          description: 清空结果
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApiError'
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/groups/{groupId}/messages/{messageId}/read:
+    post:
+      tags: [Messages]
+      operationId: markMessageRead
+      summary: 标记消息已读
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+        - in: path
+          name: messageId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 已读回执
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, messageId, read]
+                properties:
+                  success: { type: boolean, const: true }
+                  messageId: { type: string }
+                  read: { type: boolean, const: true }
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/messages/{id}:
+    put:
+      tags: [Messages]
+      operationId: editMessage
+      summary: 编辑消息内容
+      parameters:
+        - $ref: '#/components/parameters/MessageIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EditMessageInput'
+      responses:
+        '200':
+          description: 编辑后的消息
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Messages]
+      operationId: deleteMessage
+      summary: 删除单条消息
+      parameters:
+        - $ref: '#/components/parameters/MessageIdParam'
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/messages/batch-delete:
+    post:
+      tags: [Messages]
+      operationId: batchDeleteMessages
+      summary: 批量删除消息
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchDeleteInput'
+      responses:
+        '200':
+          description: 批量删除结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
   /api/messages/{id}/like:
     post:
       tags: [Messages]
+      operationId: likeMessage
       summary: 点赞消息
       parameters:
-        - $ref: '#/components/parameters/MessageId'
+        - $ref: '#/components/parameters/MessageIdParam'
       responses:
         '200':
           description: 点赞结果
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ReactionResponse'
+                $ref: '#/components/schemas/LikeStateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
     delete:
       tags: [Messages]
+      operationId: unlikeMessage
       summary: 取消点赞
       parameters:
-        - $ref: '#/components/parameters/MessageId'
+        - $ref: '#/components/parameters/MessageIdParam'
       responses:
         '200':
           description: 取消点赞结果
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ReactionResponse'
+                $ref: '#/components/schemas/LikeStateResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/messages/{id}/dislike:
     post:
       tags: [Messages]
+      operationId: dislikeMessage
       summary: 点踩消息
       parameters:
-        - $ref: '#/components/parameters/MessageId'
+        - $ref: '#/components/parameters/MessageIdParam'
       responses:
         '200':
           description: 点踩结果
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DislikeResponse'
+                $ref: '#/components/schemas/DislikeStateResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
     delete:
       tags: [Messages]
+      operationId: undislikeMessage
       summary: 取消点踩
       parameters:
-        - $ref: '#/components/parameters/MessageId'
+        - $ref: '#/components/parameters/MessageIdParam'
       responses:
         '200':
           description: 取消点踩结果
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/DislikeResponse'
+                $ref: '#/components/schemas/DislikeStateResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/comments:
     post:
       tags: [Messages]
-      summary: 创建评论
+      operationId: createComment
+      summary: 创建评论（支持嵌套回复）
       requestBody:
         required: true
         content:
@@ -261,17 +1253,179 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Comment'
+                type: object
+                required: [comment]
+                properties:
+                  comment:
+                    $ref: '#/components/schemas/Comment'
         '400':
-          description: 评论目标不合法
+          $ref: '#/components/responses/BadRequest'
+  /api/search:
+    get:
+      tags: [Messages]
+      operationId: searchAll
+      summary: 全域搜索（群组/消息/文件/Agent/人设/评论/成员/媒体）
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema: { type: string, minLength: 1 }
+        - in: query
+          name: type
+          schema:
+            type: string
+            description: 逗号分隔的搜索域，默认全部
+        - in: query
+          name: groupId
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20, maximum: 50 }
+        - in: query
+          name: quickFilter
+          schema: { type: string, enum: [images, files, links, media] }
+        - in: query
+          name: dateFrom
+          schema: { type: string, format: date }
+        - in: query
+          name: dateTo
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: 搜索结果
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApiError'
+                $ref: '#/components/schemas/SearchResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/groups/{groupId}/autonomous-chat/start:
+    post:
+      tags: [Messages]
+      operationId: startAutonomousChat
+      summary: 启动群自主对话（AI 自发讨论）
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                topic: { type: string }
+      responses:
+        '200':
+          description: 启动结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          description: 启动失败（result.success=false 时返回 400）
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/groups/{groupId}/autonomous-chat/stop:
+    post:
+      tags: [Messages]
+      operationId: stopAutonomousChat
+      summary: 停止群自主对话
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+      responses:
+        '200':
+          description: 停止结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/groups/{groupId}/autonomous-chat/status:
+    get:
+      tags: [Messages]
+      operationId: getAutonomousChatStatus
+      summary: 查询群自主对话状态
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+      responses:
+        '200':
+          description: 状态对象
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/groups/{groupId}/private-chat/start:
+    post:
+      tags: [Messages]
+      operationId: startGroupAiPrivateChat
+      summary: 在群内启动 AI 私聊支线
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                topic: { type: string }
+      responses:
+        '200':
+          description: 启动成功
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '409':
+          description: 已有活跃会话（already_active）
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/groups/{groupId}/private-chat/stop:
+    post:
+      tags: [Messages]
+      operationId: stopGroupAiPrivateChat
+      summary: 停止群内 AI 私聊支线
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+      responses:
+        '200':
+          description: 停止结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/groups/{groupId}/private-chat/status:
+    get:
+      tags: [Messages]
+      operationId: getGroupAiPrivateChatStatus
+      summary: 查询群内 AI 私聊支线状态
+      parameters:
+        - $ref: '#/components/parameters/GroupIdParam'
+      responses:
+        '200':
+          description: 状态对象
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  # ------------------------------------------------------------------- Files
   /api/files/upload:
     post:
       tags: [Files]
-      summary: 上传文件
+      operationId: uploadFiles
+      summary: 上传文件（单文件返回 {file}，多文件返回 {files}）
       requestBody:
         required: true
         content:
@@ -284,6 +1438,7 @@ paths:
                   type: string
                 files:
                   type: array
+                  maxItems: 10
                   items:
                     type: string
                     format: binary
@@ -293,58 +1448,1697 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/FileUploadResponse'
+                oneOf:
+                  - $ref: '#/components/schemas/FileUploadResponse'
+                  - $ref: '#/components/schemas/FileBatchUploadResponse'
         '400':
-          description: 上传失败
+          description: 上传校验失败（大小/数量/魔数/扩展名等）
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
         '401':
-          description: 未认证
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/files/{id}:
+    get:
+      tags: [Files]
+      operationId: getFileRecord
+      summary: 获取文件元数据
+      parameters:
+        - $ref: '#/components/parameters/FileIdParam'
+        - in: query
+          name: group_id
+          schema: { type: string }
+      responses:
+        '200':
+          description: 文件元数据
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApiError'
+                $ref: '#/components/schemas/UploadedFile'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Files]
+      operationId: deleteFile
+      summary: 删除文件
+      parameters:
+        - $ref: '#/components/parameters/FileIdParam'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                group_id: { type: string }
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/files/{id}/content:
+    get:
+      tags: [Files]
+      operationId: getFileContent
+      summary: 获取文件解析后的文本内容
+      parameters:
+        - $ref: '#/components/parameters/FileIdParam'
+        - in: query
+          name: group_id
+          schema: { type: string }
+      responses:
+        '200':
+          description: 解析内容
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/files/{id}/media-description:
+    get:
+      tags: [Files]
+      operationId: getFileMediaDescription
+      summary: 获取文件媒体描述
+      parameters:
+        - $ref: '#/components/parameters/FileIdParam'
+        - in: query
+          name: group_id
+          schema: { type: string }
+      responses:
+        '200':
+          description: 媒体描述
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/files/{id}/analyze:
+    post:
+      tags: [Files]
+      operationId: analyzeFile
+      summary: 触发文件深度分析
+      parameters:
+        - $ref: '#/components/parameters/FileIdParam'
+      responses:
+        '200':
+          description: 分析结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/files/{id}/download:
     get:
       tags: [Files]
-      summary: 下载文件
+      operationId: downloadFile
+      summary: 下载文件（带签名 token 校验）
       parameters:
-        - in: path
-          name: id
-          required: true
-          schema:
-            type: string
+        - $ref: '#/components/parameters/FileIdParam'
+        - in: query
+          name: token
+          schema: { type: string }
+          description: 上传响应 url 中携带的签名下载令牌
+        - in: query
+          name: group_id
+          schema: { type: string }
       responses:
         '200':
           description: 文件流
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
-          description: 文件不存在
+          $ref: '#/components/responses/NotFound'
+  /api/files/public/{id}:
+    get:
+      tags: [Files]
+      operationId: downloadFilePublic
+      summary: 公开签名下载（免会话，token 内编码属主，10分钟时效）
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/FileIdParam'
+        - in: query
+          name: token
+          required: true
+          schema: { type: string }
+          description: 上传响应 url 中携带的签名下载令牌
+      responses:
+        '200':
+          description: 文件流
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          description: 下载链接无效或已过期
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/files/reindex:
+    post:
+      tags: [Files]
+      operationId: reindexFiles
+      summary: 为缺失检索标注的文件补建索引
+      responses:
+        '200':
+          description: 重索引结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [reindexed, total]
+                properties:
+                  reindexed: { type: integer }
+                  total: { type: integer }
+
+  # --------------------------------------------------------------------- Tts
+  /api/tts/voices:
+    get:
+      tags: [Tts]
+      operationId: getTtsVoices
+      summary: 获取可用音色与语气列表
+      responses:
+        '200':
+          description: 音色/语气清单
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TtsVoicesResponse'
+  /api/tts/synthesize:
+    post:
+      tags: [Tts]
+      operationId: synthesizeSpeech
+      summary: 文本转语音（每日配额限制）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TtsSynthesizeInput'
+      responses:
+        '200':
+          description: 合成结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TtsSynthesizeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          description: 今日合成次数已达上限
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /api/tts/messages/{messageId}:
+    get:
+      tags: [Tts]
+      operationId: getMessageTtsAudio
+      summary: 获取消息已持久化的语音元数据
+      parameters:
+        - $ref: '#/components/parameters/TtsMessageIdParam'
+      responses:
+        '200':
+          description: 语音元数据（{success, audio}）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TtsAudioEnvelope'
+        '404':
+          description: 未找到语音数据
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+    delete:
+      tags: [Tts]
+      operationId: deleteMessageTtsAudio
+      summary: 删除消息语音及音频文件
+      parameters:
+        - $ref: '#/components/parameters/TtsMessageIdParam'
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/tts/audio/{filename}:
+    get:
+      tags: [Tts]
+      operationId: getTtsAudioFile
+      summary: 获取音频文件（需签名 token）
+      parameters:
+        - in: path
+          name: filename
+          required: true
+          schema: { type: string }
+        - in: query
+          name: token
+          schema: { type: string }
+          description: 签名音频令牌
+      responses:
+        '200':
+          description: 音频流
+          content:
+            audio/*:
+              schema:
+                type: string
+                format: binary
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ------------------------------------------------------------------ Social
+  /api/social/evaluate-like:
+    post:
+      tags: [Social]
+      operationId: evaluateLike
+      summary: 智能点赞评估（单条）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SmartLikeInput'
+      responses:
+        '200':
+          description: 评估结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/social/auto-like:
+    post:
+      tags: [Social]
+      operationId: autoLike
+      summary: 对指定消息执行自动点赞
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AutoLikeInput'
+      responses:
+        '200':
+          description: 点赞执行结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/social/batch-evaluate:
+    post:
+      tags: [Social]
+      operationId: batchEvaluate
+      summary: 批量评估消息并给出推荐
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 批量评估结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/social/stats:
+    get:
+      tags: [Social]
+      operationId: getSocialStats
+      summary: 社交互动统计
+      parameters:
+        - in: query
+          name: timeRange
+          schema: { type: string }
+      responses:
+        '200':
+          description: 统计数据
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/social/top-messages:
+    get:
+      tags: [Social]
+      operationId: getTopMessages
+      summary: 热门消息榜
+      parameters:
+        - in: query
+          name: metric
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer }
+      responses:
+        '200':
+          description: 热门消息
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/social/active-participants:
+    get:
+      tags: [Social]
+      operationId: getActiveParticipants
+      summary: 活跃参与者
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer }
+      responses:
+        '200':
+          description: 活跃参与者列表
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/social/smart-like-config:
+    get:
+      tags: [Social]
+      operationId: getSmartLikeConfig
+      summary: 获取智能点赞配置
+      responses:
+        '200':
+          description: 当前配置
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    put:
+      tags: [Social]
+      operationId: updateSmartLikeConfig
+      summary: 更新智能点赞配置
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 配置更新结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/social/reset:
+    post:
+      tags: [Social]
+      operationId: resetSocialData
+      summary: 重置社交数据（管理员）
+      responses:
+        '200':
+          description: 重置结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/social/comments/analyze:
+    post:
+      tags: [Social]
+      operationId: analyzeComments
+      summary: 评论语义分析
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 分析结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/social/comments/suggestions:
+    get:
+      tags: [Social]
+      operationId: getSuggestedReplies
+      summary: 获取评论回复建议
+      parameters:
+        - in: query
+          name: messageId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 建议列表
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/social/comments/tree:
+    get:
+      tags: [Social]
+      operationId: getCommentTree
+      summary: 获取消息评论树（含深度校验）
+      parameters:
+        - in: query
+          name: messageId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 评论树
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ------------------------------------------------------------------ Memory
+  /api/memory/store:
+    post:
+      tags: [Memory]
+      operationId: storeMemory
+      summary: 存储单条记忆
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryStoreInput'
+      responses:
+        '200':
+          description: 存储结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/memory/store-messages:
+    post:
+      tags: [Memory]
+      operationId: storeConversationMemory
+      summary: 从消息列表批量提取记忆
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 存储结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/memory/retrieve:
+    post:
+      tags: [Memory]
+      operationId: retrieveMemory
+      summary: 按查询检索记忆
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryRetrieveInput'
+      responses:
+        '200':
+          description: 检索结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/memory/retrieve-for-conversation:
+    post:
+      tags: [Memory]
+      operationId: retrieveForConversation
+      summary: 为会话上下文检索相关记忆
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 检索结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/memory/reference:
+    post:
+      tags: [Memory]
+      operationId: referenceMemory
+      summary: 标记记忆被引用
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 引用结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/memory/stats:
+    get:
+      tags: [Memory]
+      operationId: getMemoryStats
+      summary: 记忆库统计
+      responses:
+        '200':
+          description: 统计数据
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/memory/digest:
+    get:
+      tags: [Memory]
+      operationId: getMemoryDigest
+      summary: 记忆回顾摘要（重要度×新鲜度加权Top记忆）
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 30, default: 12 }
+      responses:
+        '200':
+          description: 摘要列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, total, memories]
+                properties:
+                  success: { type: boolean }
+                  total: { type: integer }
+                  generated_at: { type: string, format: date-time }
+                  memories:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        content: { type: string }
+                        category: { type: string }
+                        timestamp: { type: string, format: date-time }
+                        importance: { type: number }
+                        access_count: { type: integer }
+                        score: { type: number }
+  /api/memory/performance:
+    get:
+      tags: [Memory]
+      operationId: getMemoryPerformance
+      summary: 记忆系统性能指标
+      responses:
+        '200':
+          description: 性能数据
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/memory/clear:
+    post:
+      tags: [Memory]
+      operationId: clearMemory
+      summary: 清空记忆（管理员）
+      responses:
+        '200':
+          description: 清空结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/memory/config:
+    get:
+      tags: [Memory]
+      operationId: getMemoryConfig
+      summary: 获取记忆系统配置
+      responses:
+        '200':
+          description: 当前配置
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+    put:
+      tags: [Memory]
+      operationId: updateMemoryConfig
+      summary: 更新记忆系统配置
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 配置更新结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/memory/auto-store-important:
+    post:
+      tags: [Memory]
+      operationId: autoStoreImportantMemories
+      summary: 从群消息中自动存储重要记忆
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: 字段以实现为准（groupId 等）
+      responses:
+        '200':
+          description: 存储结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  # ------------------------------------------------------------- Interaction
+  /api/interaction/logs:
+    get:
+      tags: [Interaction]
+      operationId: listInteractionLogs
+      summary: 分页获取互动日志
+      parameters:
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0 }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: 日志分页
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/interaction/stats:
+    get:
+      tags: [Interaction]
+      operationId: getInteractionStats
+      summary: 互动统计
+      responses:
+        '200':
+          description: 统计数据
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/interaction/participation:
+    get:
+      tags: [Interaction]
+      operationId: getParticipationAnalysis
+      summary: 话题参与度分析
+      responses:
+        '200':
+          description: 参与度分析
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/interaction/quality:
+    get:
+      tags: [Interaction]
+      operationId: getInteractionQuality
+      summary: 互动质量评估
+      responses:
+        '200':
+          description: 质量评估
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/interaction/export:
+    get:
+      tags: [Interaction]
+      operationId: exportInteractionLogs
+      summary: 导出互动日志
+      parameters:
+        - in: query
+          name: format
+          schema: { type: string }
+      responses:
+        '200':
+          description: 导出结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/interaction/status:
+    get:
+      tags: [Interaction]
+      operationId: getInteractionStatus
+      summary: 互动记录器状态
+      responses:
+        '200':
+          description: 状态对象
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/interaction/log:
+    post:
+      tags: [Interaction]
+      operationId: logInteraction
+      summary: 记录一条互动事件
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [eventType, participantType]
+              properties:
+                eventType:
+                  type: string
+                  enum: [like, comment, reply, message, topic_change, file_share, custom]
+                participantType:
+                  type: string
+                  enum: [ai, user, system]
+              additionalProperties: true
+      responses:
+        '200':
+          description: 记录结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # -------------------------------------------------------------- Monitoring
+  /api/monitoring/errors:
+    post:
+      tags: [Monitoring]
+      operationId: reportClientError
+      summary: 上报前端错误
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type]
+              properties:
+                type: { type: string }
+                message: { type: string }
+              additionalProperties: true
+      responses:
+        '200':
+          description: 上报成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/client-errors:
+    get:
+      tags: [Monitoring]
+      operationId: getClientErrors
+      summary: 拉取当前用户客户端错误
+      responses:
+        '200':
+          description: 错误列表
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, errors, count]
+                properties:
+                  success: { type: boolean, const: true }
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  count: { type: integer }
+  /api/metrics:
+    get:
+      tags: [Monitoring]
+      operationId: getServerMetrics
+      summary: 服务器运行指标
+      responses:
+        '200':
+          description: 指标数据
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/status:
+    get:
+      tags: [Monitoring]
+      operationId: getSystemStatus
+      summary: 系统状态报告
+      responses:
+        '200':
+          description: 状态报告
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/scaling/history:
+    get:
+      tags: [Monitoring]
+      operationId: getScalingHistory
+      summary: 扩容历史
+      responses:
+        '200':
+          description: 历史记录
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/scaling/trigger:
+    post:
+      tags: [Monitoring]
+      operationId: triggerAutoScaling
+      summary: 触发自动扩容评估
+      responses:
+        '200':
+          description: 触发结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/scaling/manual:
+    post:
+      tags: [Monitoring]
+      operationId: manualScalingRequest
+      summary: 提交手动扩容建议（单进程部署仅记录）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, target]
+              properties:
+                action: { type: string }
+                target: { type: string }
+                amount: { type: number }
+      responses:
+        '200':
+          description: 记录结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ----------------------------------------------------------------- Profile
+  /api/profile:
+    get:
+      tags: [Profile]
+      operationId: getUserProfile
+      summary: 获取用户画像
+      responses:
+        '200':
+          description: 用户画像
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, profile]
+                properties:
+                  success: { type: boolean, const: true }
+                  profile:
+                    type: object
+                    additionalProperties: true
+    put:
+      tags: [Profile]
+      operationId: updateUserProfile
+      summary: 更新用户画像
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: |
+                字段以实现为准：displayName、avatar、settings 等。
+      responses:
+        '200':
+          description: 更新后的画像
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, profile]
+                properties:
+                  success: { type: boolean, const: true }
+                  profile:
+                    type: object
+                    additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # --------------------------------------------------------------- Personas
+  /api/personas:
+    get:
+      tags: [Personas]
+      operationId: getPersonas
+      summary: 获取合并后的全部 AI 人设
+      responses:
+        '200':
+          description: 人设映射（{success, personas, _timestamp}）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, personas]
+                properties:
+                  success: { type: boolean, const: true }
+                  personas:
+                    type: object
+                    additionalProperties: true
+                  _timestamp: { type: integer }
+  /api/personas/{aiId}:
+    put:
+      tags: [Personas]
+      operationId: updatePersonaPut
+      summary: 全量更新 AI 人设
+      parameters:
+        - $ref: '#/components/parameters/AiIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PersonaUpdateInput'
+      responses:
+        '200':
+          description: 更新后的人设
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, persona]
+                properties:
+                  success: { type: boolean, const: true }
+                  persona:
+                    type: object
+                    additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    patch:
+      tags: [Personas]
+      operationId: updatePersonaPatch
+      summary: 局部更新 AI 人设（轻量级，快速生效）
+      parameters:
+        - $ref: '#/components/parameters/AiIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PersonaUpdateInput'
+      responses:
+        '200':
+          description: 更新后的人设
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, persona]
+                properties:
+                  success: { type: boolean, const: true }
+                  persona:
+                    type: object
+                    additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/personas/{aiId}/reset:
+    put:
+      tags: [Personas]
+      operationId: resetPersona
+      summary: 重置 AI 人设为默认
+      parameters:
+        - $ref: '#/components/parameters/AiIdParam'
+      responses:
+        '200':
+          description: 重置后的人设
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, persona]
+                properties:
+                  success: { type: boolean, const: true }
+                  persona:
+                    type: object
+                    additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ------------------------------------------------------------------ Agents
+  /api/agents:
+    get:
+      tags: [Agents]
+      operationId: listAgents
+      summary: 获取智能体列表
+      responses:
+        '200':
+          description: 智能体数组
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Agent'
+    post:
+      tags: [Agents]
+      operationId: createAgent
+      summary: 创建智能体
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentCreateInput'
+      responses:
+        '200':
+          description: 创建后的智能体
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/agents/generate-questions:
+    post:
+      tags: [Agents]
+      operationId: generateAgentQuestions
+      summary: 为智能体配置生成引导问题
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentCreateInput'
+      responses:
+        '200':
+          description: 问题列表
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/agents/{agentId}:
+    get:
+      tags: [Agents]
+      operationId: getAgent
+      summary: 获取智能体详情
+      parameters:
+        - $ref: '#/components/parameters/AgentIdParam'
+      responses:
+        '200':
+          description: 智能体详情
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Agents]
+      operationId: updateAgent
+      summary: 更新智能体（capabilities 变更会重建模型角色）
+      parameters:
+        - $ref: '#/components/parameters/AgentIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 100 }
+                description: { type: string, maxLength: 2000 }
+                openingMessage: { type: string, maxLength: 2000 }
+                enableSuggestions: { type: boolean }
+                capabilities:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: 更新后的智能体
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Agents]
+      operationId: deleteAgent
+      summary: 删除智能体及其会话
+      parameters:
+        - $ref: '#/components/parameters/AgentIdParam'
+      responses:
+        '200':
+          description: 删除结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success]
+                properties:
+                  success: { type: boolean }
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/agents/{agentId}/messages:
+    get:
+      tags: [Agents]
+      operationId: listAgentMessages
+      summary: 分页获取智能体会话消息
+      parameters:
+        - $ref: '#/components/parameters/AgentIdParam'
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50 }
+        - in: query
+          name: before
+          schema: { type: string }
+      responses:
+        '200':
+          description: 消息列表
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/agents/{agentId}/chat:
+    post:
+      tags: [Agents]
+      operationId: chatWithAgent
+      summary: 与智能体对话
+      parameters:
+        - $ref: '#/components/parameters/AgentIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string }
+              additionalProperties: true
+      responses:
+        '200':
+          description: 智能体回复
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/agents/{agentId}/chat-with-files:
+    post:
+      tags: [Agents]
+      operationId: chatWithAgentAndFiles
+      summary: 携带文件与智能体对话（multipart）
+      parameters:
+        - $ref: '#/components/parameters/AgentIdParam'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: { type: string }
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+              additionalProperties: true
+      responses:
+        '200':
+          description: 智能体回复
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/agents/{agentId}/suggestions:
+    get:
+      tags: [Agents]
+      operationId: getAgentSuggestions
+      summary: 获取智能体建议问题
+      parameters:
+        - $ref: '#/components/parameters/AgentIdParam'
+      responses:
+        '200':
+          description: 建议列表
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/agents/{agentId}/invoke:
+    post:
+      tags: [Agents]
+      operationId: invokeAgent
+      summary: 以结构化输入调用智能体
+      parameters:
+        - $ref: '#/components/parameters/AgentIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 调用结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # --------------------------------------------------------------- ApiConfig
+  /api/user/apiconfig:
+    get:
+      tags: [ApiConfig]
+      operationId: getUserApiConfig
+      summary: 获取用户自定义 API 配置（密钥脱敏）
+      responses:
+        '200':
+          description: 配置映射
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, config]
+                properties:
+                  success: { type: boolean, const: true }
+                  config:
+                    type: object
+                    additionalProperties: true
+    put:
+      tags: [ApiConfig]
+      operationId: updateUserApiConfig
+      summary: |
+        保存用户自定义 API 配置。apiKey 为 write-only：
+        空值/缺省=保留现有值；'__CLEAR__'=清除；非空字符串=更新并加密存储
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: |
+                字段以实现为准：vendor（deepseek|zhipu|mimo|qwen）、apiKey、baseUrl 等。
+      responses:
+        '200':
+          description: 保存后的配置
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, config]
+                properties:
+                  success: { type: boolean, const: true }
+                  config:
+                    type: object
+                    additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/user/apiconfig/test:
+    post:
+      tags: [ApiConfig]
+      operationId: testUserApiConfig
+      summary: 测试用户自定义 API 配置可用性
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                vendor:
+                  type: string
+                  enum: [deepseek, zhipu, mimo, qwen]
+                apiKey: { type: string }
+                baseUrl: { type: string }
+      responses:
+        '200':
+          description: 健康检查结果（healthy/vendor/endpoint/model/responseTime 等）
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  # ---------------------------------------------------------------------- Ai
+  /api/ai/models:
+    get:
+      tags: [Ai]
+      operationId: listAiModels
+      summary: 获取 AI 模型运行状态
+      responses:
+        '200':
+          description: 模型状态映射
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/ai/performance:
+    get:
+      tags: [Ai]
+      operationId: getAiPerformance
+      summary: AI 调用性能报告
+      responses:
+        '200':
+          description: 性能报告
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/ai/models/{modelId}:
+    get:
+      tags: [Ai]
+      operationId: getAiModelStats
+      summary: 获取单个模型统计
+      parameters:
+        - $ref: '#/components/parameters/ModelIdParam'
+      responses:
+        '200':
+          description: 模型统计
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/ai/models/{modelId}/enabled:
+    put:
+      tags: [Ai]
+      operationId: setModelEnabled
+      summary: 启用/禁用模型
+      parameters:
+        - $ref: '#/components/parameters/ModelIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200':
+          description: 操作结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/ai/models/{modelId}/config:
+    put:
+      tags: [Ai]
+      operationId: updateModelConfig
+      summary: 更新模型运行配置
+      parameters:
+        - $ref: '#/components/parameters/ModelIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: 操作结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/ai/health-check:
+    post:
+      tags: [Ai]
+      operationId: runAiHealthCheck
+      summary: 触发全量模型健康检查
+      responses:
+        '200':
+          description: 健康检查汇总
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+  /api/ai/models/{modelId}/reset-circuit-breaker:
+    post:
+      tags: [Ai]
+      operationId: resetModelCircuitBreaker
+      summary: 重置模型熔断器
+      parameters:
+        - $ref: '#/components/parameters/ModelIdParam'
+      responses:
+        '200':
+          description: 重置结果
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/ai/requirements:
+    get:
+      tags: [Ai]
+      operationId: getAiRequirements
+      summary: 获取 AI 性能要求声明
+      responses:
+        '200':
+          description: 性能要求
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
 components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: session_token
+      description: 登录端点下发的 httpOnly 会话 Cookie
+    csrfHeader:
+      type: apiKey
+      in: header
+      name: x-csrf-token
+      description: |
+        所有非安全方法（POST/PUT/PATCH/DELETE）必须携带，
+        令牌通过 GET /api/csrf-token 获取，且须与 Cookie 中的
+        CSRF 值一致（double-submit 模式）
   parameters:
-    GroupId:
+    GroupIdAsId:
       in: path
       name: id
       required: true
-      schema:
-        type: string
-    GroupIdAsGroupId:
+      schema: { type: string }
+      description: 群组 ID（groups 路由使用 :id）
+    GroupIdParam:
       in: path
       name: groupId
       required: true
-      schema:
-        type: string
-    MessageId:
+      schema: { type: string }
+      description: 群组 ID（messages 路由使用 :groupId）
+    MessageIdParam:
       in: path
       name: id
       required: true
-      schema:
-        type: string
+      schema: { type: string }
+    TtsMessageIdParam:
+      in: path
+      name: messageId
+      required: true
+      schema: { type: string }
+    FileIdParam:
+      in: path
+      name: id
+      required: true
+      schema: { type: string }
+    AiIdParam:
+      in: path
+      name: aiId
+      required: true
+      schema: { type: string }
+    AgentIdParam:
+      in: path
+      name: agentId
+      required: true
+      schema: { type: string }
+    ModelIdParam:
+      in: path
+      name: modelId
+      required: true
+      schema: { type: string }
+  responses:
+    BadRequest:
+      description: 请求参数不合法
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    Unauthorized:
+      description: 未认证或会话失效
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    Forbidden:
+      description: 无权访问（CSRF 校验失败/权限不足）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    ServerError:
+      description: 服务器内部错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
   schemas:
     ApiError:
       type: object
@@ -352,16 +3146,52 @@ components:
       properties:
         error:
           type: string
+    SuccessEnvelope:
+      type: object
+      required: [success]
+      properties:
+        success:
+          type: boolean
+          const: true
+    HealthResponse:
+      type: object
+      required: [status, timestamp]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        timestamp:
+          type: string
+          format: date-time
+        database:
+          type: string
+          enum: [connected, error]
+    CsrfTokenResponse:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+        csrfToken:
+          type: string
+          nullable: true
+    SessionStatusResponse:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean }
+        valid: { type: boolean }
+        mode:
+          type: string
+          enum: [session, token]
+        message: { type: string }
     AuthUser:
       type: object
       required: [id, username]
       properties:
-        id:
-          type: string
-        username:
-          type: string
-        nickname:
-          type: string
+        id: { type: string }
+        username: { type: string }
+        nickname: { type: string }
+        phone: { type: string }
     AuthResponse:
       type: object
       required: [success, user]
@@ -371,21 +3201,105 @@ components:
           const: true
         user:
           $ref: '#/components/schemas/AuthUser'
-    LoginInput:
+    PhoneInput:
+      type: object
+      required: [phone]
+      additionalProperties: false
+      properties:
+        phone:
+          type: string
+          pattern: '^1[3-9][0-9]{9}$'
+    PhoneLoginInput:
+      type: object
+      required: [phone, password]
+      additionalProperties: false
+      properties:
+        phone:
+          type: string
+          pattern: '^1[3-9][0-9]{9}$'
+        password: { type: string }
+    SmsVerifyInput:
+      type: object
+      required: [phone, code]
+      additionalProperties: false
+      properties:
+        phone:
+          type: string
+          pattern: '^1[3-9][0-9]{9}$'
+        code:
+          type: string
+          pattern: '^[0-9]{4,8}$'
+    SmsRegisterInput:
+      type: object
+      required: [phone, password, code]
+      additionalProperties: false
+      properties:
+        phone:
+          type: string
+          pattern: '^1[3-9][0-9]{9}$'
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: 必须包含大写字母、小写字母和数字
+        code:
+          type: string
+          pattern: '^[0-9]{4,8}$'
+        nickname:
+          type: string
+          maxLength: 50
+    DevRegisterInput:
       type: object
       required: [username, password]
       properties:
         username:
           type: string
+          pattern: '^[a-zA-Z0-9_-]{3,64}$'
         password:
           type: string
-    RegisterInput:
-      allOf:
-        - $ref: '#/components/schemas/LoginInput'
-        - type: object
+          minLength: 8
+          maxLength: 128
+        nickname: { type: string }
+    BootstrapResponse:
+      type: object
+      required: [success, user, groups]
+      properties:
+        success:
+          type: boolean
+          const: true
+        user:
+          type: object
+          required: [id]
           properties:
-            nickname:
-              type: string
+            id: { type: string }
+            username: { type: string }
+            nickname: { type: string }
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/Group'
+        profile:
+          type: object
+          additionalProperties: true
+        personas:
+          type: object
+          additionalProperties: true
+        apiConfigs:
+          type: object
+          additionalProperties: true
+    GroupFile:
+      type: object
+      required: [id, group_id, name, url, size, type, uploaded_at]
+      properties:
+        id: { type: string }
+        group_id: { type: string }
+        name: { type: string }
+        url: { type: string }
+        size: { type: number }
+        type: { type: string }
+        uploaded_at:
+          type: string
+          format: date-time
     Group:
       type: object
       required:
@@ -398,47 +3312,65 @@ components:
         - ai_members
         - created_at
       properties:
-        id:
-          type: string
-        name:
-          type: string
-        description:
-          type: string
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
         type:
           type: string
           enum: [preset, custom, private, ai_private]
-        is_private:
-          type: boolean
-        avatar_url:
-          type: string
-          nullable: true
-        avatar_color:
-          type: string
-          nullable: true
-        background_url:
-          type: string
-          nullable: true
-        announcement:
-          type: string
-        pinned:
-          type: boolean
-        debate_mode:
-          type: boolean
-        debate_level:
-          type: integer
+        is_private: { type: boolean }
+        is_ai_private: { type: boolean }
+        pinned: { type: boolean }
+        avatar_url: { type: [string, 'null'] }
+        avatar_color: { type: [string, 'null'] }
+        background_url: { type: [string, 'null'] }
+        announcement: { type: string }
+        notifications_enabled: { type: boolean }
+        debate_mode: { type: boolean }
+        debate_level: { type: integer }
+        debate_config:
+          $ref: '#/components/schemas/DebateConfig'
         ai_members:
           type: array
-          items:
-            type: string
+          items: { type: string }
         created_at:
           type: string
           format: date-time
         last_message_at:
           type: string
           format: date-time
-        last_message_preview:
-          type: string
-          nullable: true
+        last_message_preview: { type: [string, 'null'] }
+        topic: { type: string }
+        is_active: { type: boolean }
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/GroupFile'
+    DebateConfig:
+      type: object
+      additionalProperties: true
+      properties:
+        mode: { type: string }
+        topic: { type: string }
+        roles:
+          type: object
+          properties:
+            proponents:
+              type: array
+              items: { type: string }
+            opponents:
+              type: array
+              items: { type: string }
+            judge:
+              type: array
+              items: { type: string }
+            audience:
+              type: array
+              items: { type: string }
+        memory_enabled: { type: boolean }
+        time_limit: { type: number }
+        max_turns: { type: integer }
+        max_rounds: { type: integer }
     GroupCreateInput:
       type: object
       required: [name]
@@ -446,37 +3378,76 @@ components:
       properties:
         name:
           type: string
+          minLength: 1
+          maxLength: 100
         description:
           type: string
+          maxLength: 500
         ai_members:
           type: array
-          items:
-            type: string
-        is_private:
-          type: boolean
-        ai_member:
-          type: string
-        avatar_url:
-          type: string
+          items: { type: string }
+        is_private: { type: boolean }
+        ai_member: { type: string }
+        avatar_url: { type: string, minLength: 1 }
         avatar_color:
+          type: [string, 'null']
+          maxLength: 32
+    GroupSettingsInput:
+      type: object
+      additionalProperties: true
+      properties:
+        name:
           type: string
-          nullable: true
+          minLength: 1
+          maxLength: 100
+        description: { type: string }
+        avatar_url: { type: [string, 'null'] }
+        avatar_color: { type: [string, 'null'] }
+        background_url:
+          type: [string, 'null']
+          description: 仅允许本站 /api/groups/{id}/background 形态或置空
+        announcement:
+          type: string
+          maxLength: 2000
+        notifications_enabled: { type: boolean }
+        pinned: { type: boolean }
+        debate_mode: { type: boolean }
+        debate_level: { type: integer, minimum: 0, maximum: 3 }
+        debate_config:
+          type: object
+          additionalProperties: true
+          description: 允许嵌套键 mode/topic/roles/max_rounds/time_limit
+    DebateUpdateInput:
+      type: object
+      required: [debate_mode]
+      additionalProperties: false
+      properties:
+        debate_mode: { type: boolean }
+        debate_level:
+          type: integer
+          minimum: 0
+          maximum: 3
+    PinInput:
+      type: object
+      required: [pinned]
+      additionalProperties: false
+      properties:
+        pinned: { type: boolean }
+    MemberAddInput:
+      type: object
+      required: [aiId]
+      properties:
+        aiId: { type: string }
     MessageAttachment:
       type: object
       required: [id, name, type, size]
       properties:
-        id:
-          type: string
-        name:
-          type: string
-        type:
-          type: string
-        size:
-          type: number
-        url:
-          type: string
-        media_description:
-          type: string
+        id: { type: string }
+        name: { type: string, maxLength: 256 }
+        type: { type: string }
+        size: { type: number, minimum: 0 }
+        url: { type: string }
+        media_description: { type: string }
     Message:
       type: object
       required:
@@ -487,22 +3458,17 @@ components:
         - content_type
         - created_at
       properties:
-        id:
-          type: string
-        group_id:
-          type: string
+        id: { type: string }
+        group_id: { type: string }
         sender_type:
           type: string
           enum: [user, ai, system]
-        sender_id:
-          type: string
-        content:
-          type: string
+        sender_id: { type: string }
+        content: { type: string }
         content_type:
           type: string
           enum: [text, code, file, system]
-        reply_to:
-          type: string
+        reply_to: { type: [string, 'null'] }
         attachments:
           type: array
           items:
@@ -512,20 +3478,18 @@ components:
           additionalProperties: true
         liked_by:
           type: array
-          items:
-            type: string
+          items: { type: string }
         likes:
           type: array
-          items:
-            type: string
-        likes_count:
-          type: integer
+          items: { type: string }
+        likes_count: { type: integer }
         disliked_by:
           type: array
-          items:
-            type: string
-        dislikes:
-          type: integer
+          items: { type: string }
+        dislikes: { type: integer }
+        read_by:
+          type: array
+          items: { type: string }
         created_at:
           type: string
           format: date-time
@@ -536,18 +3500,41 @@ components:
       properties:
         content:
           type: string
+          minLength: 1
+          maxLength: 10000
         content_type:
           type: string
           enum: [text, code, file, system]
         reply_to:
-          type: string
+          type: [string, 'null']
+          description: 被回复消息 ID，不可为空字符串
         metadata:
           type: object
           additionalProperties: true
         attachments:
           type: array
+          maxItems: 10
           items:
             $ref: '#/components/schemas/MessageAttachment'
+    EditMessageInput:
+      type: object
+      required: [content]
+      additionalProperties: false
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 10000
+    BatchDeleteInput:
+      type: object
+      required: [message_ids, group_id]
+      additionalProperties: false
+      properties:
+        message_ids:
+          type: array
+          minItems: 1
+          items: { type: string }
+        group_id: { type: string }
     PaginatedMessagesResponse:
       type: object
       required: [messages, hasMore]
@@ -556,120 +3543,320 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Message'
-        hasMore:
-          type: boolean
-    CommentCreateInput:
-      type: object
-      required: [message_id, content]
-      additionalProperties: false
-      properties:
-        message_id:
-          type: string
-        content:
-          type: string
-        parent_id:
-          type: string
-          nullable: true
-        reply_to:
-          type: string
-          nullable: true
-    Comment:
-      type: object
-      required: [id, message_id, sender_type, content, created_at]
-      properties:
-        id:
-          type: string
-        message_id:
-          type: string
-        parent_id:
-          type: string
-        reply_to:
-          type: string
-        sender_type:
-          type: string
-          enum: [user, ai, system]
-        sender_id:
-          type: string
-        content:
-          type: string
-        created_at:
-          type: string
-          format: date-time
-        depth:
-          type: integer
-    UploadedFile:
-      type: object
-      required:
-        - id
-        - group_id
-        - uploader_id
-        - owner_user_id
-        - filename
-        - original_path
-        - mime_type
-        - file_size
-        - created_at
-      properties:
-        id:
-          type: string
-        group_id:
-          type: string
-        uploader_id:
-          type: string
-        owner_user_id:
-          type: string
-        filename:
-          type: string
-        stored_filename:
-          type: string
-        original_path:
-          type: string
-        parsed_content:
-          type: string
-          nullable: true
-        media_description:
-          type: string
-        mime_type:
-          type: string
-        file_size:
-          type: integer
-        created_at:
-          type: string
-          format: date-time
-        url:
-          type: string
-        original_name:
-          type: string
-    FileUploadResponse:
-      type: object
-      required: [success, file]
-      properties:
-        success:
-          type: boolean
-          const: true
-        file:
-          $ref: '#/components/schemas/UploadedFile'
-    ReactionResponse:
+        hasMore: { type: boolean }
+    LikeStateResponse:
       type: object
       required: [likes, liked_by, likes_count]
       properties:
         likes:
           type: array
-          items:
-            type: string
+          items: { type: string }
         liked_by:
           type: array
-          items:
-            type: string
-        likes_count:
-          type: integer
-    DislikeResponse:
+          items: { type: string }
+        likes_count: { type: integer }
+    DislikeStateResponse:
       type: object
       required: [disliked_by, dislikes]
       properties:
         disliked_by:
           type: array
+          items: { type: string }
+        dislikes: { type: integer }
+    CommentCreateInput:
+      type: object
+      required: [message_id, content]
+      additionalProperties: false
+      properties:
+        message_id: { type: string }
+        content:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        parent_id: { type: [string, 'null'] }
+        reply_to: { type: [string, 'null'] }
+    Comment:
+      type: object
+      required: [id, message_id, sender_type, content, created_at]
+      properties:
+        id: { type: string }
+        message_id: { type: string }
+        parent_id: { type: string }
+        reply_to: { type: string }
+        sender_type:
+          type: string
+          enum: [user, ai, system]
+        sender_id: { type: string }
+        content: { type: string }
+        created_at:
+          type: string
+          format: date-time
+        depth: { type: integer }
+    SearchResult:
+      type: object
+      required: [total, query]
+      additionalProperties: true
+      properties:
+        groups:
+          type: array
           items:
-            type: string
-        dislikes:
+            type: object
+            additionalProperties: true
+        messages:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        files:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        agents:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        personas:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        comments:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        members:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        media:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        total: { type: integer }
+        query: { type: string }
+    UploadedFile:
+      type: object
+      required:
+        - id
+        - group_id
+        - filename
+        - original_name
+        - mime_type
+        - file_size
+        - created_at
+        - url
+      properties:
+        id: { type: string }
+        group_id: { type: string }
+        filename: { type: string }
+        original_name: { type: string }
+        mime_type: { type: string }
+        file_size: { type: integer }
+        created_at:
+          type: string
+          format: date-time
+        parse_status:
+          type: string
+          enum: [success, error]
+        parse_error: { type: [string, 'null'] }
+        annotate_error: { type: [string, 'null'] }
+        search_description: { type: string }
+        search_tags:
+          type: array
+          items: { type: string }
+        media_description: { type: string }
+        url:
+          type: string
+          description: 带签名下载令牌的下载地址
+    FileUploadResponse:
+      type: object
+      required: [file]
+      properties:
+        success: { type: boolean }
+        file:
+          $ref: '#/components/schemas/UploadedFile'
+    FileBatchUploadResponse:
+      type: object
+      required: [files]
+      properties:
+        success: { type: boolean }
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/UploadedFile'
+    TtsVoicesResponse:
+      type: object
+      required: [voices, tones]
+      properties:
+        voices:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tones:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    TtsSynthesizeInput:
+      type: object
+      required: [text]
+      additionalProperties: false
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 5000
+        voice:
+          type: string
+          maxLength: 50
+        tone:
+          type: string
+          maxLength: 50
+        speed:
+          type: number
+          minimum: 0.5
+          maximum: 2
+        groupId: { type: string }
+        messageId:
+          type: string
+          format: uuid
+    TtsSynthesizeResponse:
+      type: object
+      required: [success, audio_id, audio_url, duration]
+      properties:
+        success:
+          type: boolean
+          const: true
+        audio_id: { type: string }
+        audio_url: { type: string }
+        duration: { type: number }
+        voice:
+          type: object
+          additionalProperties: true
+        tone:
+          type: object
+          additionalProperties: true
+        transcript: { type: string }
+        format: { type: string }
+        audio_token: { type: string }
+    TtsAudioEnvelope:
+      type: object
+      required: [success, audio]
+      properties:
+        success:
+          type: boolean
+          const: true
+        audio:
+          type: object
+          additionalProperties: true
+          description: MessageTTSAudio 元数据（id/audioUrl/duration/voiceId 等）
+    SmartLikeInput:
+      type: object
+      required: [message, contextMessages, senderInfo]
+      properties:
+        message:
+          type: object
+          additionalProperties: true
+        contextMessages:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        senderInfo:
+          type: object
+          additionalProperties: true
+    AutoLikeInput:
+      type: object
+      required: [messageId, groupId]
+      additionalProperties: false
+      properties:
+        messageId: { type: string }
+        groupId: { type: string }
+    MemoryStoreInput:
+      type: object
+      required: [content]
+      additionalProperties: false
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 5000
+        category: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+    MemoryRetrieveInput:
+      type: object
+      required: [query]
+      additionalProperties: false
+      properties:
+        query:
+          type: string
+          minLength: 1
+        category: { type: string }
+        senderId: { type: string }
+        dateRange:
+          type: object
+          properties:
+            start: { type: string }
+            end: { type: string }
+        limit:
           type: integer
+          minimum: 1
+          maximum: 100
+    PersonaUpdateInput:
+      type: object
+      additionalProperties: true
+      description: |
+        TODO 字段宽松对象。完整可更新字段见 backend/src/validators/index.js
+        的 updatePersonaSchema（name/systemPrompt/style/personality/
+        responseConfig/socialConfig/modelConfig/debateConfig 等）。
+    Agent:
+      type: object
+      required: [id, name, description]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        opening_message: { type: string }
+        enable_suggestions: { type: boolean }
+        capabilities:
+          type: array
+          items: { type: string }
+        model_roles:
+          type: object
+          additionalProperties: true
+        system_prompt: { type: string }
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AgentCreateInput:
+      type: object
+      required: [name, description, openingMessage]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        openingMessage:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        enableSuggestions: { type: boolean }
+        capabilities:
+          type: array
+          items: { type: string }
+        avatarUrl: { type: string }

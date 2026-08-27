@@ -304,12 +304,12 @@ class ContextAwareCommentAnalyzer {
     // 根据AI个性调整建议
     if (aiPersonality === 'logical') {
       suggestions.forEach(s => {
-        s.content = s.content.replace('我', '从逻辑角度分析，');
-        s.relevance *= 1.1;
+        s.content = s.content.replaceAll('我', '从逻辑角度分析，');
+        s.relevance = Math.min(1, s.relevance * 1.1);
       });
     } else if (aiPersonality === 'friendly') {
       suggestions.forEach(s => {
-        s.content = s.content.replace('我', '我觉得');
+        s.content = s.content.replaceAll('我', '我觉得');
         if (!s.content.includes('！')) s.content += '！';
       });
     }
@@ -342,17 +342,22 @@ class ContextAwareCommentAnalyzer {
   }
   
   /**
-   * 生成同意延伸
+   * 生成同意延伸（拼接前检查原因片段非空，避免"特别因为。"这类残句）
    */
   generateAgreementExtension(text) {
-    const extensions = [
+    const reason = typeof text === 'string' ? text.trim() : '';
+    const extensionsWithReason = [
+      `我完全同意，特别是因为其中关于${reason.substring(0, 20)}的部分很有说服力。`,
+      '我完全同意，这个观点让我联想到了相关的话题。'
+    ];
+    const extensionsWithoutReason = [
       '并且我还想补充一点。',
       '这个观点让我联想到相关的话题。',
-      '我完全同意，特别是因为。',
       '你说的对，这让我想到了另一个相关的问题。'
     ];
-    
-    return extensions[Math.floor(Math.random() * extensions.length)];
+
+    const pool = reason.length > 0 ? extensionsWithReason : extensionsWithoutReason;
+    return pool[Math.floor(Math.random() * pool.length)];
   }
   
   /**

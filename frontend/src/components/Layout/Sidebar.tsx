@@ -1,14 +1,17 @@
-import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+﻿import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { usePersonasStore } from '../../stores/personasStore';
 import { useNavigationStore } from '../../stores/navigationStore';
-import { useMessagesStoreInternal } from '../../stores/messagesStore';
+import { useMessagesStore } from '../../stores/messagesStore';
 import { useAgentsStore } from '../../stores/agentsStore';
 import { AI_NAMES, AI_COLORS, AI_AVATAR_LETTERS, AI_LIST } from '../../types';
+import { ErrorBoundary } from '../Common/ErrorBoundary';
 import { AIPersonaEditor } from './AIPersonaEditor';
 import { NewChatModal } from './NewChatModal';
 import { UserProfileEditor } from './UserProfileEditor';
 import { DesktopSettingsModal } from './DesktopSettingsModal';
+import { Avatar } from '../Common/Avatar';
 import { useProfileStore } from '../../stores/profileStore';
 import { SearchPanel } from '../Chat/SearchPanel';
 import { joinGroup } from '../../services/websocket';
@@ -25,27 +28,29 @@ const NON_CHATTABLE_AI = ['mimo_tts', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni
 const EDITABLE_AI_LIST: string[] = AI_LIST.filter(id => !NON_CHATTABLE_AI.includes(id));
 const CHATTABLE_AI_LIST: string[] = AI_LIST.filter(id => !NON_CHATTABLE_AI.includes(id));
 
+const GROUP_COLOR_PALETTE = ['#6C5CE7', '#00B894', '#E17055', '#0984E3', '#E84393', '#D63031', '#00CEC9', '#E8A33D'];
+
+function groupBrandColor(groupId: string): string {
+  let h = 0;
+  const s = groupId || '';
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return GROUP_COLOR_PALETTE[h % GROUP_COLOR_PALETTE.length];
+}
+
 function GroupAvatar({ group, personas, size = 'md' }: { group: any; personas: any; size?: 'sm' | 'md' }) {
-  const sizeClass = size === 'sm' ? 'w-9 h-9' : 'w-11 h-11';
-  const textSize = size === 'sm' ? 'text-[14px]' : 'text-base';
+  const avatarSize = size === 'sm' ? 36 : 44;
   const borderRadius = size === 'sm' ? 'rounded' : 'rounded-xl';
 
   if (group.avatar_url) {
     return (
-      <div className={`${sizeClass} ${borderRadius} overflow-hidden flex-shrink-0`}>
-        <img src={group.avatar_url} alt={group.name} className="w-full h-full object-cover" />
-      </div>
-    );
-  }
-
-  if (group.avatar_color) {
-    return (
-      <div
-        className={`${sizeClass} ${borderRadius} flex items-center justify-center text-white ${textSize} font-semibold overflow-hidden flex-shrink-0`}
-        style={{ backgroundColor: group.avatar_color }}
-      >
-        {group.name?.[0]?.toUpperCase() || '群'}
-      </div>
+      <Avatar
+        src={group.avatar_url}
+        letter={group.name?.[0]?.toUpperCase() || '群'}
+        color={groupBrandColor(group.id)}
+        size={avatarSize}
+        className={borderRadius}
+        alt={group.name}
+      />
     );
   }
 
@@ -53,8 +58,19 @@ function GroupAvatar({ group, personas, size = 'md' }: { group: any; personas: a
   const memberCount = aiMembers.length;
 
   if (memberCount === 0) {
+    if (group.avatar_color) {
+      return (
+        <Avatar
+          src={null}
+          color={group.avatar_color}
+          letter={group.name?.[0]?.toUpperCase() || '群'}
+          size={avatarSize}
+          className={borderRadius}
+        />
+      );
+    }
     return (
-      <div className={`${sizeClass} ${borderRadius} bg-gradient-to-br from-bg-surface3 to-bg-surface4 flex items-center justify-center flex-shrink-0`}>
+      <div className={`${size === 'sm' ? 'w-9 h-9' : 'w-11 h-11'} ${borderRadius} bg-gradient-to-br from-bg-surface3 to-bg-surface4 flex items-center justify-center flex-shrink-0`}>
         <svg className={size === 'sm' ? 'w-3.5 h-3.5 text-text-muted' : 'w-5 h-5 text-text-muted'} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
         </svg>
@@ -65,40 +81,32 @@ function GroupAvatar({ group, personas, size = 'md' }: { group: any; personas: a
   if (memberCount === 1) {
     const aiId = aiMembers[0];
     const persona = personas[aiId];
-    const avatarColor = persona?.color || AI_COLORS[aiId];
-    const avatarUrl = persona?.avatar_url;
-    const avatarLetter = AI_AVATAR_LETTERS[aiId] || AI_NAMES[aiId]?.[0] || aiId[0];
-
     return (
-      <div
-        className={`${sizeClass} ${borderRadius} flex items-center justify-center text-white ${textSize} font-semibold overflow-hidden flex-shrink-0`}
-        style={{
-          backgroundColor: avatarUrl ? 'transparent' : avatarColor,
-          backgroundImage: avatarUrl ? `url(${avatarUrl})` : 'none',
-          backgroundSize: 'cover',
-          backgroundPosition: 'center'
-        }}
-      >
-        {!avatarUrl && avatarLetter.toUpperCase()}
-      </div>
+      <Avatar
+        src={persona?.avatar_url || null}
+        color={persona?.color || AI_COLORS[aiId]}
+        letter={(AI_AVATAR_LETTERS[aiId] || AI_NAMES[aiId]?.[0] || aiId[0]).toUpperCase()}
+        size={avatarSize}
+        className={borderRadius}
+      />
     );
   }
 
-  const firstLetter = (group.name || '群')[0].toUpperCase();
-
   return (
-    <div
-      className={`${sizeClass} ${borderRadius} flex items-center justify-center text-white ${textSize} font-semibold overflow-hidden flex-shrink-0 bg-[#95B1D4]`}
-    >
-      {firstLetter}
-    </div>
+    <Avatar
+      src={null}
+      color={groupBrandColor(group.id)}
+      letter={(group.name || '群')[0].toUpperCase()}
+      size={avatarSize}
+      className={borderRadius}
+    />
   );
 }
 
 function formatLastMessageTime(timestamp: string, showFullDate: boolean): string {
   const time = dayjs(timestamp);
   const now = dayjs();
-  const diffDays = now.diff(time, 'day');
+  const diffDays = now.endOf('day').diff(time.endOf('day'), 'day');
 
   if (showFullDate) {
     return time.format('YYYY年M月D日 HH:mm');
@@ -116,28 +124,45 @@ function formatLastMessageTime(timestamp: string, showFullDate: boolean): string
   }
 }
 
-function GroupItem({ group, isActive, onSelect, onDelete, onPin, showPinButton, messages, personas }: {
+const GroupItem = React.memo(function GroupItem({ group, isActive, onSelect, onDelete, onPin, showPinButton, personas }: {
   group: any;
   isActive: boolean;
   onSelect: () => void;
   onDelete?: () => void;
   onPin?: (e: React.MouseEvent) => void;
   showPinButton?: boolean;
-  messages: any[];
   personas: any;
 }) {
-  const lastMessage = messages && messages.length > 0 ? messages[messages.length - 1] : null;
-  const lastMessageContent = lastMessage?.content || group.description || '暂无消息';
-  const lastMessageTime = lastMessage?.created_at;
+  // 只订阅本群最后一条消息（单群切片），避免整表 messages map 变化触发全列表重渲染
+  const lastMessage = useMessagesStore(
+    useCallback((s: ReturnType<typeof useMessagesStore.getState>) => {
+      const arr = s.messages[group.id] as any[] | undefined;
+      return arr && arr.length > 0 ? arr[arr.length - 1] : null;
+    }, [group.id])
+  );
 
-  let displayContent = lastMessageContent;
+  // 优先使用 messagesStore 中的实时消息（已打开过的群组），
+  // 回退到 group.last_message_preview / group.last_message_at（后端返回的预览，覆盖所有群组）
+  // 这样未打开过的群组也能正确显示最后一条消息预览和时间
+
+  let displayContent: string;
+  let lastMessageTime: string | undefined;
+
   if (lastMessage) {
+    // 实时消息：从 messagesStore 获取
+    lastMessageTime = lastMessage.created_at;
     if (lastMessage.sender_type === 'user') {
-      displayContent = `我: ${lastMessageContent}`;
+      displayContent = `我: ${lastMessage.content}`;
     } else if (lastMessage.sender_type === 'ai') {
       const senderName = personas[lastMessage.sender_id]?.name || AI_NAMES[lastMessage.sender_id] || lastMessage.sender_id;
-      displayContent = `${senderName}: ${lastMessageContent}`;
+      displayContent = `${senderName}: ${lastMessage.content}`;
+    } else {
+      displayContent = lastMessage.content;
     }
+  } else {
+    // 回退：使用 group 字段（后端返回的预览）
+    displayContent = group.last_message_preview || group.description || '暂无消息';
+    lastMessageTime = group.last_message_at || group.created_at;
   }
 
   const truncatedContent = displayContent.length > 40 ? displayContent.substring(0, 40) + '...' : displayContent;
@@ -196,7 +221,7 @@ function GroupItem({ group, isActive, onSelect, onDelete, onPin, showPinButton, 
       </div>
     </div>
   );
-}
+});
 
 interface MemberItemProps {
   aiId: string;
@@ -246,17 +271,13 @@ function MemberItem({ aiId, personas, onPrivateChat, onEdit, reducedMotion }: Me
       }
     >
       <div className="relative flex-shrink-0">
-        <div
-          className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-semibold overflow-hidden"
-          style={{
-            backgroundColor: avatarUrl ? 'transparent' : avatarColor,
-            backgroundImage: avatarUrl ? `url(${avatarUrl})` : 'none',
-            backgroundSize: 'cover',
-            backgroundPosition: 'center'
-          }}
-        >
-          {!avatarUrl && avatarLetter.toUpperCase()}
-        </div>
+        <Avatar
+          src={avatarUrl || null}
+          color={avatarColor}
+          letter={avatarLetter.toUpperCase()}
+          size={24}
+          className="rounded-full"
+        />
         <span
           className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-accent"
           style={{ boxShadow: '0 0 0 2px var(--bg-surface)' }}
@@ -297,11 +318,18 @@ interface SidebarProps {
 }
 
 export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onNavigateToChat }: SidebarProps) {
-  const { groups, currentGroup, selectGroup, deleteGroup, pinGroup, getOrCreatePrivateChat } = useGroupsStore();
-  const { personas } = usePersonasStore();
-  const { setSidebarOpen, searchPanelOpen } = useNavigationStore();
+  const groups = useGroupsStore((s) => s.groups);
+  const currentGroup = useGroupsStore((s) => s.currentGroup);
+  const selectGroup = useGroupsStore((s) => s.selectGroup);
+  const deleteGroup = useGroupsStore((s) => s.deleteGroup);
+  const pinGroup = useGroupsStore((s) => s.pinGroup);
+  const getOrCreatePrivateChat = useGroupsStore((s) => s.getOrCreatePrivateChat);
+  const personas = usePersonasStore((s) => s.personas);
+  const { setSidebarOpen, searchPanelOpen } = useNavigationStore(useShallow((s) => ({
+    setSidebarOpen: s.setSidebarOpen,
+    searchPanelOpen: s.searchPanelOpen,
+  })));
   const userProfile = useProfileStore(state => state.profile);
-  const messages = useMessagesStoreInternal((state) => state.messages);
   const [activeView, setActiveView] = useState<SidebarView>('chats');
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
@@ -311,8 +339,8 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
   const [searchQuery, setSearchQuery] = useState('');
   const reducedMotion = useMemo(() => prefersReducedMotion(), []);
   const globalSearch = useGlobalSearch();
-  const { selectAgent } = useAgentsStore();
-  const { setScrollToMessageId } = useNavigationStore();
+  const selectAgent = useAgentsStore((s) => s.selectAgent);
+  const setScrollToMessageId = useNavigationStore((s) => s.setScrollToMessageId);
   const [deleteModalVisible, setDeleteModalVisible] = useState(false);
   const [deleteModalClosing, setDeleteModalClosing] = useState(false);
 
@@ -323,14 +351,15 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
 
-  // 窗口大小变化时同步宽度（防抖）
+  // 窗口大小变化时同步宽度（防抖）——仅钳制到边界，不重置用户自定义宽度
   useEffect(() => {
     let debounceTimer: ReturnType<typeof setTimeout>;
     const handleResize = () => {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         if (sidebarRef.current && !collapsed) {
-          setSidebarWidth(Math.round(Math.min(Math.max(window.innerWidth * 0.22, SIDEBAR_MIN), window.innerWidth * 0.60)));
+          // 仅在当前宽度超出新边界时才调整，保留用户自定义宽度
+          setSidebarWidth(prev => Math.round(Math.min(Math.max(prev, SIDEBAR_MIN), window.innerWidth * 0.60)));
         }
       }, 100);
     };
@@ -341,23 +370,51 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
     };
   }, [collapsed]);
 
+  const sidebarWidthRef = useRef(sidebarWidth);
+  sidebarWidthRef.current = sidebarWidth;
+
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     const startX = e.clientX;
-    const startWidth = sidebarWidth;
+    const startWidth = sidebarWidthRef.current;
     setIsResizing(true);
+
+    let rafId: number | null = null;
+    let pendingWidth: number | null = null;
+
+    const applyWidth = () => {
+      rafId = null;
+      if (pendingWidth !== null) {
+        setSidebarWidth(pendingWidth);
+        pendingWidth = null;
+      }
+    };
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
       const delta = moveEvent.clientX - startX;
       const newWidth = Math.min(Math.max(startWidth + delta, SIDEBAR_MIN), window.innerWidth * 0.60);
-      setSidebarWidth(Math.round(newWidth));
+      pendingWidth = Math.round(newWidth);
+      // 使用requestAnimationFrame节流，避免高频setState导致卡顿
+      if (rafId === null) {
+        rafId = requestAnimationFrame(applyWidth);
+      }
     };
 
     const handleMouseUp = () => {
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      // 确保最终宽度被应用
+      if (pendingWidth !== null) {
+        setSidebarWidth(pendingWidth);
+        pendingWidth = null;
+      }
       setIsResizing(false);
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('blur', handleMouseUp);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
@@ -366,7 +423,9 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
     document.body.style.userSelect = 'none';
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
-  }, [sidebarWidth]);
+    // 兜底：窗口失焦时也触发mouseup，避免多显示器场景下光标卡住
+    window.addEventListener('blur', handleMouseUp);
+  }, []);
 
   React.useEffect(() => {
     if (showDeleteConfirm) {
@@ -382,22 +441,23 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
     setDeleteModalClosing(true);
     setTimeout(() => {
       setShowDeleteConfirm(null);
-    }, 200);
+    }, 250);
   };
 
-  const handleSelectGroup = (groupId: string) => {
+  const handleSelectGroup = useCallback((groupId: string) => {
     selectGroup(groupId);
     joinGroup(groupId);
     if (window.innerWidth < 768) {
       setSidebarOpen(false);
     }
     onNavigateToChat?.();
-  };
+  }, [selectGroup, onNavigateToChat]);
 
-  const pinnedGroups = groups.filter(g => g.pinned && !g.is_ai_private && g.type !== 'ai_private');
-  const unpinnedGroups = groups.filter(g => !g.pinned && !g.is_private && g.type !== 'ai_private');
-  const aiPrivateChats = groups.filter(g => g.is_ai_private || g.type === 'ai_private');
-  const privateChats = groups.filter(g => g.is_private && !g.is_ai_private && g.type !== 'ai_private');
+  // 使用 useMemo 包裹群组过滤，避免每次重渲染都创建新数组导致下游 useMemo 失效
+  const pinnedGroups = useMemo(() => groups.filter(g => g.pinned && !g.is_ai_private && !g.is_private && g.type !== 'ai_private'), [groups]);
+  const unpinnedGroups = useMemo(() => groups.filter(g => !g.pinned && !g.is_private && g.type !== 'ai_private'), [groups]);
+  const aiPrivateChats = useMemo(() => groups.filter(g => g.is_ai_private || g.type === 'ai_private'), [groups]);
+  const privateChats = useMemo(() => groups.filter(g => g.is_private && !g.is_ai_private && g.type !== 'ai_private' && !g.pinned), [groups]);
 
   const filteredPinnedGroups = useMemo(() => {
     if (!searchQuery) return pinnedGroups;
@@ -432,14 +492,14 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
     }
   };
 
-  const handlePinGroup = async (groupId: string, pinned: boolean, e: React.MouseEvent) => {
+  const handlePinGroup = useCallback(async (groupId: string, pinned: boolean, e: React.MouseEvent) => {
     e.stopPropagation();
     try {
       await pinGroup(groupId, pinned);
     } catch (error) {
       console.error('置顶操作失败:', error);
     }
-  };
+  }, [pinGroup]);
 
   const handleStartPrivateChat = async (aiId: string) => {
     try {
@@ -450,7 +510,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
     }
   };
 
-  const renderChatList = () => {
+  const renderChatList = useCallback(() => {
     const allItems = [
       ...filteredPinnedGroups.map(g => ({ ...g, _isPinned: true as const })),
       ...filteredUnpinnedGroups.map(g => ({ ...g, _isPinned: false as const })),
@@ -468,13 +528,12 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
             onDelete={(group.type === 'custom' || group.type === 'private' || group.type === 'ai_private') ? () => setShowDeleteConfirm(group.id) : undefined}
             onPin={(group._isPinned !== undefined) ? (e: any) => handlePinGroup(group.id, !group.pinned, e) : undefined}
             showPinButton={group._isPinned !== undefined}
-            messages={messages[group.id] || []}
             personas={personas}
           />
         ))}
       </div>
     );
-  };
+  }, [filteredPinnedGroups, filteredUnpinnedGroups, filteredAiPrivateChats, filteredPrivateChats, currentGroup?.id, personas, handleSelectGroup, handlePinGroup]);
 
   const renderMembersList = () => (
     <div className="flex-1 overflow-y-auto p-4">
@@ -513,7 +572,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
       className="h-full flex flex-col bg-bg-surface border-r border-border-subtle overflow-hidden flex-shrink-0 relative"
       style={{
         width: collapsed ? 64 : sidebarWidth,
-        transition: isResizing ? 'none' : `width ${reducedMotion ? '0ms' : '300ms'} cubic-bezier(0.4, 0, 0.2, 1)`,
+        transition: isResizing ? 'none' : `width ${reducedMotion ? '0ms' : '180ms'} cubic-bezier(0.4, 0, 0.2, 1)`,
       }}
     >
       {/* 拖拽调整宽度把手 */}
@@ -831,7 +890,19 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
                     </div>
                   ))}
                   {(globalSearch.activeTab === 'all' || globalSearch.activeTab === 'media') && (globalSearch.searchData.media || []).map(r => {
-                    const mediaIcon = r.media_type === 'image' ? '🖼️' : r.media_type === 'audio' ? '🎵' : '🎬';
+                    const mediaIcon: React.ReactNode = r.media_type === 'image' ? (
+                      <svg className="w-3 h-3 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+                        <path d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" />
+                      </svg>
+                    ) : r.media_type === 'audio' ? (
+                      <svg className="w-3 h-3 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-3 h-3 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+                        <path d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" />
+                      </svg>
+                    );
                     return (
                       <div key={r.id} onClick={() => { selectGroup(r.group_id); joinGroup(r.group_id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                         <div className="flex items-center gap-1.5">
@@ -861,29 +932,36 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
 
       {/* Bottom Section */}
       {!collapsed ? (
-        <div className="border-t border-border-subtle flex-shrink-0 px-4 py-2.5 flex items-center justify-between">
+        <div className="border-t border-border-subtle flex-shrink-0 px-3 py-2.5 flex items-center gap-2">
+          <button
+            onClick={() => setShowProfileEditor(true)}
+            className="flex items-center gap-2.5 flex-1 min-w-0 rounded-lg px-1.5 py-1 hover:bg-sidebar-hover transition-colors text-left"
+            title="个人资料"
+          >
+            <Avatar
+              src={userProfile?.avatar_url || null}
+              color="#6C5CE7"
+              letter={userProfile?.nickname?.charAt(0) || 'U'}
+              size={32}
+              alt="个人资料"
+              className="rounded-full flex-shrink-0"
+            />
+            <span className="min-w-0">
+              <span className="block text-[13px] font-medium text-text-primary truncate">
+                {userProfile?.nickname || '未命名用户'}
+              </span>
+              <span className="block text-[10px] text-text-muted">个人资料</span>
+            </span>
+          </button>
           <button
             onClick={() => setShowDesktopSettings(true)}
-            className="w-8 h-8 rounded flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-sidebar-hover transition-all duration-150"
+            className="w-8 h-8 rounded flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-sidebar-hover transition-all duration-150 flex-shrink-0"
             title="设置"
           >
             <svg className="w-[18px] h-[18px]" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
-          </button>
-          <button
-            onClick={() => setShowProfileEditor(true)}
-            className="w-8 h-8 rounded flex items-center justify-center text-white text-[12px] font-semibold flex-shrink-0 hover:opacity-90 transition-opacity overflow-hidden"
-            style={{
-              backgroundColor: userProfile?.avatar_url ? 'transparent' : undefined,
-              backgroundImage: userProfile?.avatar_url ? `url(${userProfile.avatar_url})` : undefined,
-              backgroundSize: 'cover',
-              backgroundPosition: 'center'
-            }}
-            title="个人资料"
-          >
-            {!userProfile?.avatar_url && (userProfile?.nickname?.charAt(0) || 'U')}
           </button>
         </div>
       ) : (
@@ -941,30 +1019,38 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
       )}
 
       {editingAiId && (
-        <AIPersonaEditor
-          aiId={editingAiId}
-          isOpen={true}
-          onClose={() => setEditingAiId(null)}
-        />
+        <ErrorBoundary fallback={null}>
+          <AIPersonaEditor
+            aiId={editingAiId}
+            isOpen={true}
+            onClose={() => setEditingAiId(null)}
+          />
+        </ErrorBoundary>
       )}
 
-      <NewChatModal
-        isOpen={showNewChatModal}
-        onClose={() => setShowNewChatModal(false)}
-        onSelectGroup={(groupId) => { handleSelectGroup(groupId); }}
-      />
+      <ErrorBoundary fallback={null}>
+        <NewChatModal
+          isOpen={showNewChatModal}
+          onClose={() => setShowNewChatModal(false)}
+          onSelectGroup={(groupId) => { handleSelectGroup(groupId); }}
+        />
+      </ErrorBoundary>
 
-      <UserProfileEditor
-        isOpen={showProfileEditor}
-        onClose={() => setShowProfileEditor(false)}
-      />
+      <ErrorBoundary fallback={null}>
+        <UserProfileEditor
+          isOpen={showProfileEditor}
+          onClose={() => setShowProfileEditor(false)}
+        />
+      </ErrorBoundary>
 
       {searchPanelOpen && <SearchPanel />}
 
-      <DesktopSettingsModal
-        isOpen={showDesktopSettings}
-        onClose={() => setShowDesktopSettings(false)}
-      />
+      <ErrorBoundary fallback={null}>
+        <DesktopSettingsModal
+          isOpen={showDesktopSettings}
+          onClose={() => setShowDesktopSettings(false)}
+        />
+      </ErrorBoundary>
     </div>
   );
 }

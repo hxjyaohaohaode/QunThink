@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
+﻿import { useState, useEffect, useRef } from 'react';
+import { useFocusTrap } from '../Common/useFocusTrap';
 import { useThemeStore } from '../../stores/themeStore';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { usePersonasStore } from '../../stores/personasStore';
@@ -6,13 +7,16 @@ import { useProfileStore } from '../../stores/profileStore';
 import { AIPersonaEditor } from './AIPersonaEditor';
 import { UserProfileEditor } from './UserProfileEditor';
 import { FontSizeSelector } from './FontSizeToggle';
-import { useConfirm, useToast } from '../Common';
+import { useConfirm, useToast, ErrorBoundary } from '../Common';
 import { AI_LIST } from '../../types';
 import { api } from '../../services/api';
 import { useModalAnimation } from '../../hooks/useModalAnimation';
+import { avatarBackgroundImageStyle } from '../Common/Avatar';
 
 interface ApiProviderConfig {
   apiKey: string;
+  apiKeyConfigured?: boolean;
+  apiKeyMasked?: string;
   baseUrl: string;
 }
 
@@ -32,9 +36,12 @@ interface DesktopSettingsModalProps {
 
 export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalProps) {
   const APP_VERSION = import.meta.env.VITE_APP_VERSION || '2.8.9';
-  const { theme, setTheme } = useThemeStore();
-  const { groups } = useGroupsStore();
-  const { personas, fetchPersonas, loading: personasLoading } = usePersonasStore();
+  const theme = useThemeStore((s) => s.theme);
+  const setTheme = useThemeStore((s) => s.setTheme);
+  const groups = useGroupsStore((s) => s.groups);
+  const personas = usePersonasStore((s) => s.personas);
+  const fetchPersonas = usePersonasStore((s) => s.fetchPersonas);
+  const personasLoading = usePersonasStore((s) => s.loading);
   const userProfile = useProfileStore(state => state.profile);
   const fetchProfile = useProfileStore(state => state.fetchProfile);
   const { confirm, ConfirmModal } = useConfirm();
@@ -50,9 +57,13 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
   const [apiConfigLoaded, setApiConfigLoaded] = useState(false);
   const [apiConfigSaveError, setApiConfigSaveError] = useState(false);
   const apiConfigOriginalRef = useRef<Record<string, ApiProviderConfig>>({});
+  // API配置测试状态
+  const [testingVendor, setTestingVendor] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<Record<string, { healthy: boolean; message: string; responseTime?: number } | undefined>>({});
 
   const [expandedPersona, setExpandedPersona] = useState<string | null>(null);
   const { isVisible, close: handleClose, overlayClass, contentClass } = useModalAnimation(isOpen, onClose);
+  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isVisible);
 
   const NON_CHATTABLE_AI = ['mimo_tts', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'];
   const aiMembers = Array.from(new Set(groups.flatMap(g => g.ai_members || [])));
@@ -109,14 +120,45 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
     setSavingApiConfig(true);
     setApiConfigSaveError(false);
     try {
-      await api.updateUserApiConfig(apiConfig);
-      apiConfigOriginalRef.current = JSON.parse(JSON.stringify(apiConfig));
+      const saved = await api.updateUserApiConfig(apiConfig);
+      const publicConfig = saved?.config || apiConfig;
+      setApiConfig(publicConfig);
+      apiConfigOriginalRef.current = JSON.parse(JSON.stringify(publicConfig));
       showToast({ message: 'API配置已保存', type: 'success' });
     } catch {
       setApiConfigSaveError(true);
       showToast({ message: '保存失败，请重试', type: 'error' });
     } finally {
       setSavingApiConfig(false);
+    }
+  };
+
+  const handleTestApiConfig = async (vendor: string) => {
+    const cfg = apiConfig[vendor] || { apiKey: '', baseUrl: '' };
+    setTestingVendor(vendor);
+    // 清除该厂商之前的测试结果
+    setTestResult(prev => ({ ...prev, [vendor]: undefined }));
+    try {
+      const result = await api.testUserApiConfig(vendor, cfg.apiKey, cfg.baseUrl);
+      if (result.healthy) {
+        setTestResult(prev => ({
+          ...prev,
+          [vendor]: { healthy: true, message: result.message || '连接成功', responseTime: result.responseTime }
+        }));
+        showToast({ message: `${vendor} 连接成功`, type: 'success' });
+      } else {
+        setTestResult(prev => ({
+          ...prev,
+          [vendor]: { healthy: false, message: result.error || '连接失败', responseTime: result.responseTime }
+        }));
+        showToast({ message: `${vendor} 连接失败：${result.error || '未知错误'}`, type: 'error' });
+      }
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || err?.message || '测试失败';
+      setTestResult(prev => ({ ...prev, [vendor]: { healthy: false, message: msg } }));
+      showToast({ message: `${vendor} 测试失败：${msg}`, type: 'error' });
+    } finally {
+      setTestingVendor(null);
     }
   };
 
@@ -218,7 +260,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
           const cfg = apiConfig[vendor.key] || { apiKey: '', baseUrl: '' };
           const showPw = apiConfigVisible[vendor.key] || false;
           const isExpanded = expandedVendors[vendor.key] || false;
-          const isConfigured = !!(cfg.apiKey && cfg.apiKey.trim());
+          const isConfigured = Boolean(cfg.apiKeyConfigured || (cfg.apiKey && cfg.apiKey.trim()));
 
           return (
             <div
@@ -262,7 +304,8 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
                         type={showPw ? 'text' : 'password'}
                         value={cfg.apiKey}
                         onChange={(e) => handleApiConfigChange(vendor.key, 'apiKey', e.target.value)}
-                        placeholder="输入 API Key"
+                        placeholder={cfg.apiKeyMasked || (cfg.apiKeyConfigured ? '已配置（输入新值可覆盖）' : '输入 API Key')}
+                        autoComplete="off"
                         className="w-full px-3 py-2 pr-10 bg-bg-surface border border-border-subtle rounded-lg text-xs outline-none text-text-primary placeholder-text-muted focus:border-accent focus:ring-1 focus:ring-accent/20 transition-all"
                       />
                       <button
@@ -277,6 +320,25 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
                         )}
                       </button>
                     </div>
+                    {cfg.apiKeyConfigured && !cfg.apiKey && (
+                      <button
+                        onClick={async () => {
+                          try {
+                            const saved = await api.updateUserApiConfig({ [vendor.key]: { apiKey: '__CLEAR__', baseUrl: cfg.baseUrl } });
+                            const publicConfig = saved?.config;
+                            if (publicConfig) {
+                              setApiConfig(prev => ({ ...prev, ...publicConfig }));
+                            }
+                            showToast({ message: '已清除该厂商的 API Key', type: 'success' });
+                          } catch {
+                            showToast({ message: '清除失败，请重试', type: 'error' });
+                          }
+                        }}
+                        className="mt-1 text-[10px] text-red-400 hover:text-red-300 transition-colors"
+                      >
+                        清除已保存的 API Key
+                      </button>
+                    )}
                   </div>
                   <div>
                     <label className="text-[11px] font-medium text-text-secondary mb-1 block">Base URL</label>
@@ -284,9 +346,40 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
                       type="text"
                       value={cfg.baseUrl}
                       onChange={(e) => handleApiConfigChange(vendor.key, 'baseUrl', e.target.value)}
-                      placeholder="自定义地址（可选，留空使用默认）"
+                      placeholder="留空使用默认，如 https://api.example.com/v1（无需 /chat/completions）"
                       className="w-full px-3 py-2 bg-bg-surface border border-border-subtle rounded-lg text-xs outline-none text-text-primary placeholder-text-muted focus:border-accent focus:ring-1 focus:ring-accent/20 transition-all"
                     />
+                  </div>
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      onClick={() => handleTestApiConfig(vendor.key)}
+                      disabled={testingVendor === vendor.key}
+                      className="px-3 py-1.5 text-[11px] font-medium text-text-secondary border border-border-subtle rounded-lg hover:bg-bg-surface3 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
+                    >
+                      {testingVendor === vendor.key ? (
+                        <>
+                          <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v3m0 12v3m9-9h-3M6 12H3m15.364-6.364l-2.121 2.121M7.757 16.243l-2.121 2.121m12.728 0l-2.121-2.121M7.757 7.757L5.636 5.636" />
+                          </svg>
+                          测试中...
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                          </svg>
+                          测试连接
+                        </>
+                      )}
+                    </button>
+                    {testResult[vendor.key] && (
+                      <span className={`text-[11px] flex items-center gap-1 ${testResult[vendor.key]!.healthy ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${testResult[vendor.key]!.healthy ? 'bg-green-500' : 'bg-red-500'}`} />
+                        {testResult[vendor.key]!.healthy
+                          ? `${testResult[vendor.key]!.message}${testResult[vendor.key]!.responseTime ? ` (${testResult[vendor.key]!.responseTime}ms)` : ''}`
+                          : testResult[vendor.key]!.message}
+                      </span>
+                    )}
                   </div>
                 </div>
               )}
@@ -385,7 +478,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
                   className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-semibold flex-shrink-0 overflow-hidden"
                   style={{
                     backgroundColor: personaTyped.avatar_url ? 'transparent' : (personaTyped.color || '#888'),
-                    backgroundImage: personaTyped.avatar_url ? `url(${personaTyped.avatar_url})` : 'none',
+                    backgroundImage: avatarBackgroundImageStyle(personaTyped.avatar_url),
                     backgroundSize: 'cover',
                     backgroundPosition: 'center'
                   }}
@@ -472,7 +565,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
           className="w-12 h-12 rounded-lg flex items-center justify-center text-white text-sm font-semibold flex-shrink-0 overflow-hidden"
           style={{
             backgroundColor: hasAvatar ? 'transparent' : 'var(--accent-color, #4f46e5)',
-            backgroundImage: hasAvatar ? `url(${userProfile.avatar_url})` : 'none',
+            backgroundImage: avatarBackgroundImageStyle(userProfile.avatar_url),
             backgroundSize: 'cover',
             backgroundPosition: 'center'
           }}
@@ -597,7 +690,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
   return (
     <>
       <div
-        className={`fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm ${overlayClass}`}
+        ref={overlayTrapRef} role="dialog" aria-modal="true" className={`fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm ${overlayClass}`}
         onClick={handleClose}
       >
         <div
@@ -644,17 +737,21 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
       </div>
 
       {editingPersonaId && (
-        <AIPersonaEditor
-          aiId={editingPersonaId}
-          isOpen={!!editingPersonaId}
-          onClose={() => setEditingPersonaId(null)}
-        />
+        <ErrorBoundary fallback={null}>
+          <AIPersonaEditor
+            aiId={editingPersonaId}
+            isOpen={!!editingPersonaId}
+            onClose={() => setEditingPersonaId(null)}
+          />
+        </ErrorBoundary>
       )}
 
-      <UserProfileEditor
-        isOpen={showProfileEditor}
-        onClose={() => setShowProfileEditor(false)}
-      />
+      <ErrorBoundary fallback={null}>
+        <UserProfileEditor
+          isOpen={showProfileEditor}
+          onClose={() => setShowProfileEditor(false)}
+        />
+      </ErrorBoundary>
 
       {ConfirmModal}
     </>

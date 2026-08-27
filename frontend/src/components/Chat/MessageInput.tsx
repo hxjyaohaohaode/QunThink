@@ -15,6 +15,24 @@ const AI_LIST_DETAIL = AI_LIST.map(id => ({
   color: AI_COLORS[id] || '#6b7280'
 }));
 
+interface LastMessageMeta {
+  id: string;
+  senderType: string;
+  senderId: string;
+}
+
+function buildQuickReplyChips(meta: LastMessageMeta | null, aiMembers: string[] | undefined): string[] {
+  if (!meta || meta.senderType !== 'ai') return [];
+  const candidates = (aiMembers || []).filter(id => id && id !== meta.senderId);
+  const chips = ['展开说说', '换个角度'];
+  if (candidates.length > 0) {
+    const picked = candidates[Math.floor(Math.random() * candidates.length)];
+    chips.push(`@${AI_NAMES[picked] || picked} 你怎么看`);
+  }
+  chips.push('问个问题');
+  return chips;
+}
+
 type ComposerAttachmentStatus = 'uploading' | 'ready';
 
 interface ComposerAttachment {
@@ -96,10 +114,39 @@ export function MessageInput() {
     });
   }, []);
 
-  const { currentGroup, chatStatus } = useGroupsStore();
-  const { sendMessage, messages, sending } = useMessagesStore();
-  const { replyingTo, clearReplyingTo, removeReplyingTo, typingIndicators, connectionStatus } = useUIStore();
-  const isSending = currentGroup ? (sending[currentGroup.id] || false) : false;
+  const currentGroup = useGroupsStore((s) => s.currentGroup);
+  const chatStatus = useGroupsStore((s) => s.chatStatus);
+  const sendMessage = useMessagesStore((s) => s.sendMessage);
+  const replyingTo = useUIStore((s) => s.replyingTo);
+  const connectionStatus = useUIStore((s) => s.connectionStatus);
+  const clearReplyingTo = useUIStore((s) => s.clearReplyingTo);
+  const removeReplyingTo = useUIStore((s) => s.removeReplyingTo);
+  const rawGroupTyping = useUIStore((s) => (currentGroup ? s.typingIndicators[currentGroup.id] : undefined));
+  const groupMessages = useMessagesStore((s) => (currentGroup ? s.messages[currentGroup.id] : undefined));
+  const isSending = useMessagesStore((s) => (currentGroup ? (s.sending[currentGroup.id] ?? false) : false));
+
+  const composingRef = useRef(false);
+  const sendErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mentionContextRef = useRef<{ cursorPos: number; value: string }>({ cursorPos: 0, value: '' });
+  const currentGroupIdRef = useRef<string | null>(currentGroup?.id ?? null);
+
+  useEffect(() => {
+    currentGroupIdRef.current = currentGroup?.id ?? null;
+  }, [currentGroup?.id]);
+
+  // 切换群组时清空草稿、附件与引用状态，避免上一群组内容带入新会话
+  useEffect(() => {
+    setInput('');
+    setAttachments([]);
+    setUploading(false);
+    setSendError(null);
+    setLastFailedContent(null);
+    setShowMentions(false);
+    setIsClosing(false);
+    setMentionFilter('');
+    composingRef.current = false;
+    clearReplyingTo();
+  }, [currentGroup?.id, clearReplyingTo]);
 
   const currentGroupAIs = useMemo(() => {
     if (!currentGroup?.ai_members || currentGroup.ai_members.length === 0) {
@@ -109,10 +156,10 @@ export function MessageInput() {
   }, [currentGroup?.ai_members]);
 
   const isAnyAITyping = currentGroup
-    ? Object.values(typingIndicators[currentGroup.id] || {}).some(v => v === true)
+    ? Object.values(rawGroupTyping || {}).some(v => v === true)
     : false;
   const hasStreamingMessages = currentGroup
-    ? (messages[currentGroup.id] || []).some(m => m.is_streaming)
+    ? (groupMessages || []).some(m => m.is_streaming)
     : false;
   const isAutoChatRunning = currentGroup
     ? chatStatus.get(currentGroup.id)?.isRunning === true
@@ -144,8 +191,32 @@ export function MessageInput() {
   const isAIPrivateChat = currentGroup?.is_ai_private === true || currentGroup?.type === 'ai_private';
   const isUserPrivateChat = currentGroup?.is_private === true && !isAIPrivateChat && currentGroup?.ai_members?.length === 1;
 
+  // 最后一条非流式消息的元信息；流式更新不会改变其 id，配合下方 ref 缓存保证 chips 仅在消息 id 变化时重算
+  const lastNonStreamingMeta = useMemo<LastMessageMeta | null>(() => {
+    const list = groupMessages || [];
+    for (let i = list.length - 1; i >= 0; i--) {
+      const msg = list[i];
+      if (!msg.is_streaming) {
+        return { id: msg.id, senderType: msg.sender_type, senderId: msg.sender_id || '' };
+      }
+    }
+    return null;
+  }, [groupMessages]);
+
+  const quickReplyCacheRef = useRef<{ key: string; chips: string[] }>({ key: '', chips: [] });
+  const quickReplyKey = `${currentGroup?.id || ''}|${lastNonStreamingMeta?.id || ''}`;
+  if (quickReplyCacheRef.current.key !== quickReplyKey) {
+    quickReplyCacheRef.current = {
+      key: quickReplyKey,
+      chips: lastNonStreamingMeta
+        ? buildQuickReplyChips(lastNonStreamingMeta, currentGroup?.ai_members)
+        : []
+    };
+  }
+  const quickReplyChips = quickReplyCacheRef.current.chips;
+
   const replyToMessages = replyingTo.length > 0 && currentGroup
-    ? replyingTo.map(id => messages[currentGroup.id]?.find(m => m.id === id)).filter(Boolean)
+    ? replyingTo.map(id => (groupMessages || []).find(m => m.id === id)).filter(Boolean)
     : [];
 
   useEffect(() => {
@@ -227,7 +298,22 @@ export function MessageInput() {
       if (mentionDebounceRef.current) {
         clearTimeout(mentionDebounceRef.current);
       }
+      if (successTimeoutRef.current) {
+        clearTimeout(successTimeoutRef.current);
+      }
+      if (sendErrorTimerRef.current) {
+        clearTimeout(sendErrorTimerRef.current);
+      }
     };
+  }, []);
+
+  const flashSendError = useCallback((message: string) => {
+    setSendError(message);
+    if (sendErrorTimerRef.current) clearTimeout(sendErrorTimerRef.current);
+    sendErrorTimerRef.current = setTimeout(() => {
+      setSendError(null);
+      sendErrorTimerRef.current = null;
+    }, 3000);
   }, []);
 
   const closeMentions = useCallback(() => {
@@ -262,12 +348,32 @@ export function MessageInput() {
     }
   }, [replyingTo]);
 
+  const handleQuickReply = useCallback((text: string) => {
+    setInput(text);
+    setMentionFilter('');
+    closeMentions();
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+  }, [closeMentions]);
+
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
+    // 同步捕获光标上下文，debounce 回调只读已捕获值，避免读陈旧的 selectionStart
+    mentionContextRef.current = {
+      cursorPos: e.target.selectionStart ?? value.length,
+      value,
+    };
+
+    // IME 组合期间不做截断，先保存原值，compositionend 时统一裁剪
+    if (composingRef.current) {
+      setInput(value);
+      return;
+    }
+
     if (value.length > MAX_CHARS) {
       setInput(value.substring(0, MAX_CHARS));
-      setSendError(`已超出${MAX_CHARS}字符限制，内容已截断`);
-      setTimeout(() => setSendError(null), 3000);
+      flashSendError(`已超出${MAX_CHARS}字符限制，内容已截断`);
       return;
     }
     setInput(value);
@@ -276,8 +382,9 @@ export function MessageInput() {
     // 使用 debounce 检测 @ 提及，避免每次按键都触发
     if (mentionDebounceRef.current) clearTimeout(mentionDebounceRef.current);
     mentionDebounceRef.current = setTimeout(() => {
-      const cursorPos = e.target.selectionStart || value.length;
-      const textBeforeCursor = value.slice(0, cursorPos);
+      // 只使用 onChange 时同步捕获的上下文
+      const { cursorPos, value: capturedValue } = mentionContextRef.current;
+      const textBeforeCursor = capturedValue.slice(0, cursorPos);
       const atIndex = textBeforeCursor.lastIndexOf('@');
 
       if (atIndex !== -1) {
@@ -293,6 +400,21 @@ export function MessageInput() {
         closeMentions();
       }
     }, 80);
+  };
+
+  const handleCompositionStart = () => {
+    composingRef.current = true;
+  };
+
+  const handleCompositionEnd = (e: React.CompositionEvent<HTMLTextAreaElement>) => {
+    composingRef.current = false;
+    const value = e.currentTarget?.value ?? '';
+    if (value.length > MAX_CHARS) {
+      setInput(value.slice(0, MAX_CHARS));
+      flashSendError(`已超出${MAX_CHARS}字符限制，内容已截断`);
+    } else {
+      setInput(value);
+    }
   };
 
   const uploadSelectedFiles = useCallback(async (selectedFiles: File[]) => {
@@ -313,6 +435,8 @@ export function MessageInput() {
       setSendError(null);
     }
 
+    const uploadGroupId = currentGroup.id;
+
     const placeholders = nextFiles.map(file => ({
       localId: createLocalAttachmentId(),
       fileName: file.name,
@@ -327,7 +451,7 @@ export function MessageInput() {
     const uploadPromises = nextFiles.map(async (file, index) => {
       const placeholder = placeholders[index];
       try {
-        const uploadResult = await api.uploadFile(file, currentGroup.id);
+        const uploadResult = await api.uploadFile(file, uploadGroupId);
         const uploadedFile = getUploadedFile(uploadResult);
         if (!uploadedFile) {
           throw new Error('附件上传成功，但未返回可用的附件数据');
@@ -341,6 +465,12 @@ export function MessageInput() {
     });
 
     const results = await Promise.all(uploadPromises);
+
+    // 上传期间已切换群组：丢弃本次结果，避免把附件入库到错误会话
+    if (currentGroupIdRef.current !== uploadGroupId) {
+      setUploading(false);
+      return;
+    }
 
     setAttachments(prev => {
       const failedLocalIds = new Set<string>();
@@ -394,8 +524,7 @@ export function MessageInput() {
     const newInput = textBeforeAt + `@${displayName} ` + textAfterCursor;
     if (newInput.length > MAX_CHARS) {
       setInput(newInput.substring(0, MAX_CHARS));
-      setSendError(`已超出${MAX_CHARS}字符限制，内容已截断`);
-      setTimeout(() => setSendError(null), 3000);
+      flashSendError(`已超出${MAX_CHARS}字符限制，内容已截断`);
     } else {
       setInput(newInput);
     }
@@ -453,16 +582,14 @@ export function MessageInput() {
 
     const contentToSend = input.trim();
     try {
-      const SEND_TIMEOUT_MS = 30000;
-      const result = await Promise.race([
-        sendMessage(
-          currentGroup.id,
-          contentToSend,
-          replyingTo.length > 0 ? replyingTo : undefined,
-          readyAttachments.length > 0 ? readyAttachments : undefined
-        ),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('发送超时，请检查网络连接')), SEND_TIMEOUT_MS))
-      ]);
+      // 不再使用 Promise.race 超时：超时后原 promise 仍会完成并造成二次清空/双发风险。
+      // 防重复发送以 store 的 sending 状态为准（按钮禁用 + sendingRef 兜底）。
+      const result = await sendMessage(
+        currentGroup.id,
+        contentToSend,
+        replyingTo.length > 0 ? replyingTo : undefined,
+        readyAttachments.length > 0 ? readyAttachments : undefined
+      );
       if (result.success) {
         setInput('');
         setAttachments([]);
@@ -516,8 +643,7 @@ export function MessageInput() {
     const newInput = textBeforeAt + '@所有人 ' + textAfterCursor;
     if (newInput.length > MAX_CHARS) {
       setInput(newInput.substring(0, MAX_CHARS));
-      setSendError(`已超出${MAX_CHARS}字符限制，内容已截断`);
-      setTimeout(() => setSendError(null), 3000);
+      flashSendError(`已超出${MAX_CHARS}字符限制，内容已截断`);
     } else {
       setInput(newInput);
     }
@@ -634,6 +760,21 @@ export function MessageInput() {
             </div>
           )}
 
+          {quickReplyChips.length > 0 && (
+            <div className="mb-2 -mx-1 px-1 flex gap-2 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              {quickReplyChips.map(chip => (
+                <button
+                  key={chip}
+                  onClick={() => handleQuickReply(chip)}
+                  title="点击填入输入框"
+                  className="flex-shrink-0 px-3 py-1.5 rounded-full text-xs whitespace-nowrap bg-bg-surface2 border border-border-subtle text-text-secondary hover:text-accent hover:border-accent/40 active:scale-95 transition-all"
+                >
+                  {chip}
+                </button>
+              ))}
+            </div>
+          )}
+
           <div className="relative flex items-end gap-2 md:gap-3">
             <div className={`relative flex-1 ${connectionStatus === 'disconnected' ? 'border-red-500 ring-2 ring-red-200 rounded-2xl' : ''}`}>
               <textarea
@@ -642,6 +783,8 @@ export function MessageInput() {
                 onChange={handleInputChange}
                 onPaste={handlePaste}
                 onKeyDown={handleKeyDown}
+                onCompositionStart={handleCompositionStart}
+                onCompositionEnd={handleCompositionEnd}
                 onFocus={() => {
                   setIsInputFocused(true);
                 }}
@@ -651,8 +794,8 @@ export function MessageInput() {
                 placeholder={isAIPrivateChat ? "输入旁白内容，引导AI对话方向..." : (isUserPrivateChat ? "输入消息..." : (currentGroup ? "输入消息，@提及 AI 成员..." : "选择一个群组开始聊天"))}
                 disabled={!currentGroup || isSending}
                 className={`w-full bg-bg-surface2 border rounded-2xl px-4 py-3 text-body text-text-primary placeholder:text-text-muted resize-none focus:outline-none disabled:opacity-50 transition-all duration-200 ${isInputFocused
-                    ? 'border-accent ring-2 ring-accent/20'
-                    : 'border-border-subtle'
+                  ? 'border-accent ring-2 ring-accent/20'
+                  : 'border-border-subtle'
                   }`}
                 rows={1}
                 maxLength={MAX_CHARS}
@@ -662,8 +805,8 @@ export function MessageInput() {
                 <div
                   ref={mentionMenuRef}
                   className={`absolute left-0 right-0 bg-bg-surface border border-border rounded-xl shadow-2xl z-50 overflow-hidden ${isMobile
-                      ? 'bottom-full mb-2 max-h-[40vh]'
-                      : 'bottom-full mb-2 max-h-60'
+                    ? 'bottom-full mb-2 max-h-[40vh]'
+                    : 'bottom-full mb-2 max-h-60'
                     } ${isClosing ? 'animate-mention-menu-close' : 'animate-mention-menu-open'}`}
                 >
                   <div className="px-3 py-2 text-xs text-text-muted border-b border-border bg-bg-surface2">
@@ -748,7 +891,7 @@ export function MessageInput() {
               size="md"
               onClick={handleSend}
               disabled={!currentGroup || (!input.trim() && readyAttachments.length === 0) || isSending || uploading || hasPendingUploads || connectionStatus === 'disconnected'}
-              className={`w-10 h-10 rounded-full !min-w-0 !md:min-w-0 flex items-center justify-center ${(!currentGroup || (!input.trim() && readyAttachments.length === 0) || isSending || uploading || hasPendingUploads) ? 'opacity-50' : ''} ${showSendSuccess ? 'animate-send-success' : ''}`}
+              className={`w-10 h-10 rounded-full !min-w-0 !md:min-w-0 flex items-center justify-center ${(!currentGroup || (!input.trim() && readyAttachments.length === 0) || isSending || uploading || hasPendingUploads || connectionStatus === 'disconnected') ? 'opacity-50' : ''} ${showSendSuccess ? 'animate-send-success' : ''}`}
             >
               {isSending || uploading || hasPendingUploads ? (
                 <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">

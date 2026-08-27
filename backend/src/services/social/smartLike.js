@@ -49,25 +49,26 @@ function preprocessText(text) {
   return tokens.join(' ');
 }
 
-// 计算TF-IDF相似度（简化版）
+// 计算词频相似度（简化版）
 function calculateSimilarity(text1, text2) {
-  const words1 = preprocessText(text1).split(' ');
-  const words2 = preprocessText(text2).split(' ');
-  
+  const words1 = preprocessText(text1).split(' ').filter(Boolean);
+  const words2 = preprocessText(text2).split(' ').filter(Boolean);
+
   if (words1.length === 0 || words2.length === 0) return 0;
-  
-  // 计算词频
+
+  // 中文分词产物是二元组（长度恰为2），过滤阈值必须是 >=2 而非 >2，
+  // 否则所有中文 token 被丢弃、中文文本相似度恒为 0。
   const freq1 = {};
   const freq2 = {};
-  
+
   words1.forEach(word => {
-    if (word.length > 2) { // 忽略短词
+    if (word.length >= 2) {
       freq1[word] = (freq1[word] || 0) + 1;
     }
   });
-  
+
   words2.forEach(word => {
-    if (word.length > 2) {
+    if (word.length >= 2) {
       freq2[word] = (freq2[word] || 0) + 1;
     }
   });
@@ -91,35 +92,52 @@ function calculateSimilarity(text1, text2) {
   return dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2));
 }
 
+// 中文整词边界判断：命中位置前后不能是汉字，避免子串误报（如"操作"误报"操"）
+function containsStandaloneWord(text, word) {
+  if (!word) return false;
+  const isHanChar = (ch) => ch !== undefined && /[\u4e00-\u9fff]/.test(ch);
+  let idx = text.indexOf(word);
+  while (idx !== -1) {
+    const before = idx > 0 ? text[idx - 1] : undefined;
+    const afterIdx = idx + word.length;
+    const after = afterIdx < text.length ? text[afterIdx] : undefined;
+    if (!isHanChar(before) && !isHanChar(after)) {
+      return true;
+    }
+    idx = text.indexOf(word, idx + 1);
+  }
+  return false;
+}
+
 // 简单的情感分析函数
 function analyzeSentiment(text) {
   if (!text || typeof text !== 'string') return { score: 0, positive: 0, negative: 0, magnitude: 0 };
-  
+
   const positiveWords = [
     '好', '优秀', '很棒', '厉害', '精彩', '有趣', '有用', '帮助', '感谢',
     '谢谢', '支持', '同意', '正确', '准确', '清晰', '明白', '理解',
     '喜欢', '爱', '开心', '高兴', '愉快', '满意', '成功', '胜利', '赢'
   ];
-  
+
   const negativeWords = [
     '不好', '糟糕', '差', '错误', '不对', '问题', '困难', '难',
     '麻烦', '复杂', '混乱', '不清楚', '不明白', '不理解',
     '讨厌', '恨', '生气', '愤怒', '失望', '失败', '输', '错'
   ];
-  
+
   const textLower = text.toLowerCase();
   let positiveScore = 0;
   let negativeScore = 0;
   let totalScore = 0;
-  
+
   positiveWords.forEach(word => {
-    if (textLower.includes(word)) {
+    if (containsStandaloneWord(textLower, word)) {
       positiveScore++;
     }
   });
-  
+
   negativeWords.forEach(word => {
-    if (textLower.includes(word)) {
+    if (containsStandaloneWord(textLower, word)) {
       negativeScore++;
     }
   });
@@ -370,9 +388,9 @@ class SmartLikeEngine {
       timestamp: new Date().toISOString()
     });
     
-    // 保持历史记录不超过1000条
-    if (this.history.length > 1000) {
-      this.history = this.history.slice(-1000);
+    // 保持历史记录不超过500条（FIFO）
+    if (this.history.length > 500) {
+      this.history = this.history.slice(-500);
     }
   }
   

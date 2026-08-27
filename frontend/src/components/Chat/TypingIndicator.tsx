@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useState, useEffect } from 'react';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 import { AI_COLORS, AI_NAMES } from '../../types';
 
@@ -10,6 +10,19 @@ export const TypingIndicator = memo(function TypingIndicator({ aiId }: TypingInd
   const color = AI_COLORS[aiId] || AI_COLORS.system;
   const name = AI_NAMES[aiId] || aiId;
   const reducedMotion = useReducedMotion();
+  const [elapsed, setElapsed] = useState(0);
+
+  // 显示思考时间，超过5秒显示"深度思考中"；降频至 2s 并在 reducedMotion 时停用计时
+  useEffect(() => {
+    if (reducedMotion) return;
+    const startTime = Date.now();
+    const timer = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startTime) / 1000));
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [reducedMotion]);
+
+  const thinkingText = elapsed < 5 ? '正在输入' : elapsed < 15 ? '正在思考' : '深度思考中';
 
   return (
     <div className="typing-indicator-wrapper visible">
@@ -28,13 +41,18 @@ export const TypingIndicator = memo(function TypingIndicator({ aiId }: TypingInd
           <div className="bg-bg-surface2 rounded-2xl rounded-tl-sm px-4 py-3">
             {reducedMotion ? (
               <div className="flex items-center gap-1">
-                <span className="text-sm text-text-muted">正在输入</span>
+                <span className="text-sm text-text-muted">{thinkingText}</span>
               </div>
             ) : (
-              <div className="typing-indicator">
-                <span className="typing-dot" />
-                <span className="typing-dot" />
-                <span className="typing-dot" />
+              <div className="flex items-center gap-2">
+                <div className="typing-indicator">
+                  <span className="typing-dot" />
+                  <span className="typing-dot" />
+                  <span className="typing-dot" />
+                </div>
+                {elapsed >= 5 && (
+                  <span className="text-xs text-text-muted ml-1">{thinkingText}{elapsed >= 15 ? ` ${elapsed}s` : ''}</span>
+                )}
               </div>
             )}
           </div>

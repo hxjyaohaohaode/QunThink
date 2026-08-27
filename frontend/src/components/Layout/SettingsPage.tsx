@@ -1,17 +1,20 @@
-import { useState, useEffect, useRef } from 'react';
+﻿import { useState, useEffect, useRef } from 'react';
 import { useThemeStore } from '../../stores/themeStore';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { usePersonasStore } from '../../stores/personasStore';
 import { AIPersonaEditor } from './AIPersonaEditor';
 import { UserProfileEditor } from './UserProfileEditor';
 import { FontSizeSelector } from './FontSizeToggle';
-import { useConfirm, useToast } from '../Common';
+import { useConfirm, useToast, ErrorBoundary } from '../Common';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
 import { AI_LIST, AI_NAMES } from '../../types';
 import { api } from '../../services/api';
+import { avatarBackgroundImageStyle } from '../Common/Avatar';
 
 interface ApiProviderConfig {
   apiKey: string;
+  apiKeyConfigured?: boolean;
+  apiKeyMasked?: string;
   baseUrl: string;
 }
 
@@ -24,9 +27,12 @@ const API_VENDORS: { key: string; label: string; desc: string; color: string }[]
 
 export function SettingsPage() {
   const APP_VERSION = import.meta.env.VITE_APP_VERSION || '2.8.9';
-  const { theme, setTheme } = useThemeStore();
-  const { groups } = useGroupsStore();
-  const { personas, fetchPersonas, loading: personasLoading } = usePersonasStore();
+  const theme = useThemeStore((s) => s.theme);
+  const setTheme = useThemeStore((s) => s.setTheme);
+  const groups = useGroupsStore((s) => s.groups);
+  const personas = usePersonasStore((s) => s.personas);
+  const fetchPersonas = usePersonasStore((s) => s.fetchPersonas);
+  const personasLoading = usePersonasStore((s) => s.loading);
   const { confirm, ConfirmModal } = useConfirm();
   const { showToast, Toast } = useToast();
   const [expandedPersona, setExpandedPersona] = useState<string | null>(null);
@@ -48,6 +54,9 @@ export function SettingsPage() {
   const [apiConfigLoaded, setApiConfigLoaded] = useState(false);
   const [apiConfigSaveError, setApiConfigSaveError] = useState(false);
   const apiConfigOriginalRef = useRef<Record<string, ApiProviderConfig>>({});
+  // API配置测试状态
+  const [testingVendor, setTestingVendor] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<Record<string, { healthy: boolean; message: string; responseTime?: number } | undefined>>({});
 
   const aiMembers = Array.from(new Set(groups.flatMap(g => g.ai_members || [])));
   const totalAIModels = AI_LIST.length;
@@ -177,14 +186,44 @@ export function SettingsPage() {
     setSavingApiConfig(true);
     setApiConfigSaveError(false);
     try {
-      await api.updateUserApiConfig(apiConfig);
-      apiConfigOriginalRef.current = JSON.parse(JSON.stringify(apiConfig));
+      const saved = await api.updateUserApiConfig(apiConfig);
+      const publicConfig = saved?.config || apiConfig;
+      setApiConfig(publicConfig);
+      apiConfigOriginalRef.current = JSON.parse(JSON.stringify(publicConfig));
       showToast({ message: 'API配置已保存', type: 'success' });
     } catch {
       setApiConfigSaveError(true);
       showToast({ message: '保存失败，请重试', type: 'error' });
     } finally {
       setSavingApiConfig(false);
+    }
+  };
+
+  const handleTestApiConfig = async (vendor: string) => {
+    const cfg = apiConfig[vendor] || { apiKey: '', baseUrl: '' };
+    setTestingVendor(vendor);
+    setTestResult(prev => ({ ...prev, [vendor]: undefined }));
+    try {
+      const result = await api.testUserApiConfig(vendor, cfg.apiKey, cfg.baseUrl);
+      if (result.healthy) {
+        setTestResult(prev => ({
+          ...prev,
+          [vendor]: { healthy: true, message: result.message || '连接成功', responseTime: result.responseTime }
+        }));
+        showToast({ message: `${vendor} 连接成功`, type: 'success' });
+      } else {
+        setTestResult(prev => ({
+          ...prev,
+          [vendor]: { healthy: false, message: result.error || '连接失败', responseTime: result.responseTime }
+        }));
+        showToast({ message: `${vendor} 连接失败：${result.error || '未知错误'}`, type: 'error' });
+      }
+    } catch (err: any) {
+      const msg = err?.response?.data?.error || err?.message || '测试失败';
+      setTestResult(prev => ({ ...prev, [vendor]: { healthy: false, message: msg } }));
+      showToast({ message: `${vendor} 测试失败：${msg}`, type: 'error' });
+    } finally {
+      setTestingVendor(null);
     }
   };
 
@@ -408,7 +447,7 @@ export function SettingsPage() {
                   const cfg = apiConfig[vendor.key] || { apiKey: '', baseUrl: '' };
                   const showPw = apiConfigVisible[vendor.key] || false;
                   const isExpanded = expandedVendors[vendor.key] || false;
-                  const isConfigured = !!(cfg.apiKey && cfg.apiKey.trim());
+                  const isConfigured = Boolean(cfg.apiKeyConfigured || (cfg.apiKey && cfg.apiKey.trim()));
 
                   return (
                     <div key={vendor.key} className="bg-bg-surface border border-border-subtle rounded-xl overflow-hidden settings-theme-transition settings-card">
@@ -446,7 +485,8 @@ export function SettingsPage() {
                               type={showPw ? 'text' : 'password'}
                               value={cfg.apiKey}
                               onChange={(e) => handleApiConfigChange(vendor.key, 'apiKey', e.target.value)}
-                              placeholder="API Key"
+                              placeholder={cfg.apiKeyMasked || (cfg.apiKeyConfigured ? '已配置（输入新值可覆盖）' : 'API Key')}
+                              autoComplete="off"
                               className="w-full px-3 py-2 pr-10 bg-bg-surface2 border border-border-subtle rounded-[10px] text-xs outline-none text-text-primary placeholder-text-muted focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all settings-theme-transition"
                             />
                             <button
@@ -461,13 +501,64 @@ export function SettingsPage() {
                               )}
                             </button>
                           </div>
+                          {cfg.apiKeyConfigured && !cfg.apiKey && (
+                            <button
+                              onClick={async () => {
+                                try {
+                                  const saved = await api.updateUserApiConfig({ [vendor.key]: { apiKey: '__CLEAR__', baseUrl: cfg.baseUrl } });
+                                  const publicConfig = saved?.config;
+                                  if (publicConfig) {
+                                    setApiConfig(prev => ({ ...prev, ...publicConfig }));
+                                    apiConfigOriginalRef.current = JSON.parse(JSON.stringify({ ...apiConfigOriginalRef.current, ...publicConfig }));
+                                  }
+                                  showToast({ message: '已清除该厂商的 API Key', type: 'success' });
+                                } catch {
+                                  showToast({ message: '清除失败，请重试', type: 'error' });
+                                }
+                              }}
+                              className="text-[10px] text-red-400 hover:text-red-300 transition-colors"
+                            >
+                              清除已保存的 API Key
+                            </button>
+                          )}
                           <input
                             type="text"
                             value={cfg.baseUrl}
                             onChange={(e) => handleApiConfigChange(vendor.key, 'baseUrl', e.target.value)}
-                            placeholder="Base URL（可选自定义地址）"
+                            placeholder="留空使用默认，如 https://api.example.com/v1（无需 /chat/completions）"
                             className="w-full px-3 py-2 bg-bg-surface2 border border-border-subtle rounded-[10px] text-xs outline-none text-text-primary placeholder-text-muted focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all settings-theme-transition"
                           />
+                          <div className="flex items-center gap-2 pt-1">
+                            <button
+                              onClick={() => handleTestApiConfig(vendor.key)}
+                              disabled={testingVendor === vendor.key}
+                              className="px-3 py-1.5 text-[11px] font-medium text-text-secondary border border-border-subtle rounded-[8px] hover:bg-bg-surface3 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 settings-theme-transition"
+                            >
+                              {testingVendor === vendor.key ? (
+                                <>
+                                  <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v3m0 12v3m9-9h-3M6 12H3m15.364-6.364l-2.121 2.121M7.757 16.243l-2.121 2.121m12.728 0l-2.121-2.121M7.757 7.757L5.636 5.636" />
+                                  </svg>
+                                  测试中...
+                                </>
+                              ) : (
+                                <>
+                                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                  </svg>
+                                  测试连接
+                                </>
+                              )}
+                            </button>
+                            {testResult[vendor.key] && (
+                              <span className={`text-[11px] flex items-center gap-1 ${testResult[vendor.key]!.healthy ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                                <span className={`w-1.5 h-1.5 rounded-full ${testResult[vendor.key]!.healthy ? 'bg-green-500' : 'bg-red-500'}`} />
+                                {testResult[vendor.key]!.healthy
+                                  ? `${testResult[vendor.key]!.message}${testResult[vendor.key]!.responseTime ? ` (${testResult[vendor.key]!.responseTime}ms)` : ''}`
+                                  : testResult[vendor.key]!.message}
+                              </span>
+                            )}
+                          </div>
                         </div>
                       )}
                     </div>
@@ -516,7 +607,7 @@ export function SettingsPage() {
                           className="w-10 h-10 rounded-full flex items-center justify-center text-white text-sm font-semibold flex-shrink-0 overflow-hidden shadow-sm settings-theme-transition"
                           style={{
                             backgroundColor: personaTyped.avatar_url ? 'transparent' : (personaTyped.color || '#888'),
-                            backgroundImage: personaTyped.avatar_url ? `url(${personaTyped.avatar_url})` : 'none',
+                            backgroundImage: avatarBackgroundImageStyle(personaTyped.avatar_url),
                             backgroundSize: 'cover',
                             backgroundPosition: 'center'
                           }}
@@ -825,17 +916,21 @@ export function SettingsPage() {
       </div>
 
       {editingPersonaId && (
-        <AIPersonaEditor
-          aiId={editingPersonaId}
-          isOpen={!!editingPersonaId}
-          onClose={() => setEditingPersonaId(null)}
-        />
+        <ErrorBoundary fallback={null}>
+          <AIPersonaEditor
+            aiId={editingPersonaId}
+            isOpen={!!editingPersonaId}
+            onClose={() => setEditingPersonaId(null)}
+          />
+        </ErrorBoundary>
       )}
 
-      <UserProfileEditor
-        isOpen={showProfileEditor}
-        onClose={() => setShowProfileEditor(false)}
-      />
+      <ErrorBoundary fallback={null}>
+        <UserProfileEditor
+          isOpen={showProfileEditor}
+          onClose={() => setShowProfileEditor(false)}
+        />
+      </ErrorBoundary>
     </>
   );
 }

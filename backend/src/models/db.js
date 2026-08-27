@@ -1,4 +1,4 @@
-import { Low } from 'lowdb';
+﻿import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -6,9 +6,37 @@ import fs from 'fs/promises';
 import { Mutex } from 'async-mutex';
 import { isMongoEnabled, getMongoDb, MongoLow } from './mongoAdapter.js';
 import { isSupabaseEnabled, PgLow, listAllKeys, getPool } from './supabaseAdapter.js';
+import { encryptText, decryptText } from '../utils/encryption.js';
 
 const _writeTimestamps = new WeakMap();
 const _lastReadTimestamps = new WeakMap();
+
+function isEncryptedEnvelope(value) {
+  return typeof value === 'string'
+    && value.startsWith('{')
+    && value.includes('"encrypted"');
+}
+
+function coerceToPlaintext(content) {
+  if (!isEncryptedEnvelope(content)) {
+    return typeof content === 'string' ? content : '';
+  }
+  try {
+    const decrypted = decryptText(content);
+    return typeof decrypted === 'string' ? decrypted : '';
+  } catch {
+    return '';
+  }
+}
+
+function encryptStoredValue(plaintext) {
+  if (!plaintext) return null;
+  try {
+    return encryptText(plaintext);
+  } catch {
+    return null;
+  }
+}
 
 class CustomLow extends Low {
   async write() {
@@ -30,8 +58,10 @@ class CustomLow extends Low {
         if (filePath) {
           try {
             const dir = path.dirname(filePath);
+            const tmpFallback = path.join(dir, `.${path.basename(filePath)}.fb-${Date.now()}.tmp`);
             await fs.mkdir(dir, { recursive: true });
-            await fs.writeFile(filePath, JSON.stringify(this.data, null, 2), 'utf-8');
+            await fs.writeFile(tmpFallback, JSON.stringify(this.data, null, 2), 'utf-8');
+            await fs.rename(tmpFallback, filePath);
             _writeTimestamps.set(this, Date.now());
             return;
           } catch (writeErr) {
@@ -95,10 +125,10 @@ async function createBackup(dbPath) {
   }
 }
 
-setInterval(async () => {
+const backupTimer = setInterval(async () => {
   try {
     for (const [userId] of userDbs) {
-      const dbFile = path.join(usersDataDir, userId, 'db.json');
+      const dbFile = getUserDbPath(userId);
       try {
         await fs.access(dbFile);
         await createBackup(dbFile);
@@ -106,6 +136,7 @@ setInterval(async () => {
     }
   } catch {}
 }, BACKUP_INTERVAL_MS);
+if (typeof backupTimer.unref === 'function') backupTimer.unref();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -121,16 +152,22 @@ const MAX_DB_CACHE_SIZE = 50;
 
 function evictLeastRecentlyUsed() {
   if (userDbs.size <= MAX_DB_CACHE_SIZE) return;
-  
+
   const entries = [...userDbs.entries()];
   entries.sort((a, b) => (a[1]._lastAccess || 0) - (b[1]._lastAccess || 0));
-  
-  const toEvict = entries.slice(0, userDbs.size - MAX_DB_CACHE_SIZE);
+
+  const excess = userDbs.size - MAX_DB_CACHE_SIZE;
+  const toEvict = [];
+  for (const entry of entries) {
+    if (toEvict.length >= excess) break;
+    const mutex = userMutexes.get(entry[0]);
+    if (mutex?.isLocked()) continue;
+    toEvict.push(entry);
+  }
   for (const [userId] of toEvict) {
     userDbs.delete(userId);
-    userMutexes.delete(userId);
   }
-  
+
   if (toEvict.length > 0) {
     console.log(`🗑️ LRU缓存淘汰: 移除了 ${toEvict.length} 个用户数据库缓存`);
   }
@@ -184,23 +221,19 @@ const defaultUserData = {
   },
   customPersonas: {},
   agents: [],
-  agent_messages: [],
-  _indexes: {
-    messagesByGroup: {}
-  }
+  agent_messages: []
 };
 
 function buildMessagePreview(message) {
   if (!message) return null;
-  const rawContent = typeof message.content === 'string' ? message.content : '';
   const prefix = message.sender_type === 'user' ? '[我] ' : '';
-  return `${prefix}${rawContent.substring(0, 50)}`;
+  return `${prefix}${coerceToPlaintext(message.content).substring(0, 50)}`;
 }
 
 export function updateGroupActivity(group, message) {
   if (!group) return;
   group.last_message_at = message?.created_at || group.created_at;
-  group.last_message_preview = buildMessagePreview(message);
+  group.last_message_preview = encryptStoredValue(buildMessagePreview(message));
 }
 
 export function updateGroupActivityById(db, groupId, message) {
@@ -222,6 +255,30 @@ export function resetGroupActivity(db, groupId) {
 
   group.last_message_at = group.created_at;
   group.last_message_preview = null;
+}
+
+export function decryptGroupPreview(preview) {
+  if (!preview) return null;
+  if (!isEncryptedEnvelope(preview)) {
+    return typeof preview === 'string' ? preview : null;
+  }
+  try {
+    return decryptText(preview);
+  } catch {
+    return '[消息]';
+  }
+}
+
+export function sanitizeGroupForClient(group) {
+  if (!group || typeof group !== 'object') return group;
+  const copy = { ...group };
+  copy.last_message_preview = decryptGroupPreview(copy.last_message_preview);
+  return copy;
+}
+
+export function sanitizeGroupsForClient(groups) {
+  if (!Array.isArray(groups)) return [];
+  return groups.map(sanitizeGroupForClient);
 }
 
 function getUserDbPath(userId) {
@@ -294,10 +351,12 @@ export async function initUserDatabase(userId) {
       await pgLow.read();
     } catch (err) {
       console.warn(`⚠️ Supabase 用户 ${userId} 数据读取失败: ${err.message}`);
+      if (process.env.NODE_ENV === 'production') throw err;
       pgLow.data = JSON.parse(JSON.stringify(defaultUserData));
+      pgLow._degradedRead = true;
     }
 
-    if (pgLow.data.groups.length === 0) {
+    if (!pgLow._degradedRead && pgLow.data.groups.length === 0) {
       pgLow.data.groups = createDefaultGroups();
       try {
         await pgLow.write();
@@ -393,9 +452,12 @@ export async function getUserDb(userId) {
 
     try {
       await db.read();
+      db._degradedRead = false;
     } catch (err) {
       console.warn(`⚠️ Supabase 用户 ${userId} 数据读取失败: ${err.message}`);
+      if (process.env.NODE_ENV === 'production') throw err;
       db.data = JSON.parse(JSON.stringify(defaultUserData));
+      db._degradedRead = true;
     }
 
     let needsWrite = false;
@@ -406,15 +468,11 @@ export async function getUserDb(userId) {
       }
     }
 
-    if (db.data.groups.length === 0) {
+    if (!db._degradedRead && db.data.groups.length === 0) {
       db.data.groups = createDefaultGroups();
       needsWrite = true;
     }
 
-    if (!db.data._indexes) {
-      db.data._indexes = { messagesByGroup: {} };
-      needsWrite = true;
-    }
 
     for (const group of db.data.groups) {
       if (group.last_message_at === undefined || group.last_message_preview === undefined) {
@@ -423,8 +481,10 @@ export async function getUserDb(userId) {
       }
     }
 
-    if (needsWrite) {
+    if (needsWrite && !db._degradedRead) {
       await db.write();
+    } else if (needsWrite && db._degradedRead) {
+      console.warn(`⚠️ [Supabase] 用户 ${userId} 处于降级读取状态，跳过初始化写入以保护远端数据`);
     }
 
     userDbs.set(userId, db);
@@ -442,9 +502,12 @@ export async function getUserDb(userId) {
 
     try {
       await db.read();
+      db._degradedRead = false;
     } catch (err) {
       console.warn(`⚠️ MongoDB 用户 ${userId} 数据读取失败: ${err.message}`);
+      if (process.env.NODE_ENV === 'production') throw err;
       db.data = JSON.parse(JSON.stringify(defaultUserData));
+      db._degradedRead = true;
     }
 
     let needsWrite = false;
@@ -455,15 +518,11 @@ export async function getUserDb(userId) {
       }
     }
 
-    if (db.data.groups.length === 0) {
+    if (!db._degradedRead && db.data.groups.length === 0) {
       db.data.groups = createDefaultGroups();
       needsWrite = true;
     }
 
-    if (!db.data._indexes) {
-      db.data._indexes = { messagesByGroup: {} };
-      needsWrite = true;
-    }
 
     for (const group of db.data.groups) {
       if (group.last_message_at === undefined || group.last_message_preview === undefined) {
@@ -472,8 +531,10 @@ export async function getUserDb(userId) {
       }
     }
 
-    if (needsWrite) {
+    if (needsWrite && !db._degradedRead) {
       await db.write();
+    } else if (needsWrite && db._degradedRead) {
+      console.warn(`⚠️ [MongoDB] 用户 ${userId} 处于降级读取状态，跳过初始化写入以保护远端数据`);
     }
 
     userDbs.set(userId, db);
@@ -490,6 +551,7 @@ export async function getUserDb(userId) {
   
   try {
     await db.read();
+    db._degradedRead = false;
   } catch (err) {
     console.warn(`⚠️ 用户 ${userId} 数据库读取失败，尝试恢复: ${err.message}`);
     try {
@@ -497,20 +559,31 @@ export async function getUserDb(userId) {
       const firstObjEnd = raw.indexOf('}{');
       if (firstObjEnd > -1) {
         const clean = raw.substring(0, firstObjEnd + 1);
-        db.data = JSON.parse(clean);
+        const recovered = JSON.parse(clean);
+        try {
+          const backupPath = dbPath + '.corrupted.' + Date.now();
+          await fs.copyFile(dbPath, backupPath);
+          console.log(`📦 恢复前已备份损坏文件到: ${backupPath}`);
+        } catch {}
+        db.data = recovered;
         await db.write();
+        db._degradedRead = false;
         console.log(`✅ 用户 ${userId} 数据库已从损坏中恢复`);
       } else {
         throw err;
       }
     } catch (recoverErr) {
-      console.warn(`⚠️ 用户 ${userId} 数据库恢复失败，使用默认数据`);
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error(`用户 ${userId} 数据库损坏且恢复失败: ${recoverErr.message}`);
+      }
+      console.warn(`⚠️ 用户 ${userId} 数据库恢复失败，使用默认数据（不回写）`);
       try {
         const backupPath = dbPath + '.corrupted.' + Date.now();
         await fs.copyFile(dbPath, backupPath);
         console.log(`📦 损坏的用户数据库已备份到: ${backupPath}`);
       } catch {}
       db.data = JSON.parse(JSON.stringify(defaultUserData));
+      db._degradedRead = true;
     }
   }
   
@@ -523,16 +596,12 @@ export async function getUserDb(userId) {
     }
   }
 
-  if (db.data.groups.length === 0) {
+  if (!db._degradedRead && db.data.groups.length === 0) {
     console.log(`🏗️ 为用户 ${userId} 创建默认群组`);
     db.data.groups = createDefaultGroups();
     needsWrite = true;
   }
 
-  if (!db.data._indexes) {
-    db.data._indexes = { messagesByGroup: {} };
-    needsWrite = true;
-  }
 
   for (const group of db.data.groups) {
     if (group.last_message_at === undefined || group.last_message_preview === undefined) {
@@ -541,8 +610,10 @@ export async function getUserDb(userId) {
     }
   }
 
-  if (needsWrite) {
+  if (needsWrite && !db._degradedRead) {
     await db.write();
+  } else if (needsWrite && db._degradedRead) {
+    console.warn(`⚠️ 用户 ${userId} 处于降级读取状态，跳过初始化写入以保护本地数据`);
   }
 
   userDbs.set(userId, db);
@@ -589,7 +660,8 @@ export async function initDatabase() {
     try {
       supabasePool = await getPool();
     } catch (err) {
-      console.error('❌ Supabase 连接失败，将回退到本地存储:', err.message);
+      console.error('❌ Supabase 连接失败:', err.message);
+      if (process.env.NODE_ENV === 'production') throw err;
     }
     if (supabasePool) {
       try {
@@ -598,7 +670,8 @@ export async function initDatabase() {
         console.log('✅ Supabase/PostgreSQL 数据库系统初始化完成');
         return;
       } catch (err) {
-        console.error('❌ Supabase 初始化失败，将回退到本地存储:', err.message);
+        console.error('❌ Supabase 初始化失败:', err.message);
+        if (process.env.NODE_ENV === 'production') throw err;
       }
     }
     console.warn('⚠️ Supabase 不可用，回退到本地文件存储');
@@ -606,7 +679,7 @@ export async function initDatabase() {
 
   if (isMongoEnabled()) {
     console.log('🍃 使用 MongoDB 作为数据存储后端');
-    await getMongoClient();
+    await getMongoDb();
     await initUserDatabase('default');
     defaultDb = userDbs.get('default');
     console.log('✅ MongoDB 数据库系统初始化完成');
@@ -671,6 +744,7 @@ export async function listUserDatabases() {
     try {
       return await listAllKeys('user:');
     } catch (error) {
+      if (process.env.NODE_ENV === 'production') throw error;
       console.warn('Supabase listUserDatabases failed:', error.message);
       return [];
     }
@@ -682,6 +756,7 @@ export async function listUserDatabases() {
       const docs = await mongoDb.collection('users_data').find({}, { projection: { userId: 1 } }).toArray();
       return docs.map(d => d.userId);
     } catch (error) {
+      if (process.env.NODE_ENV === 'production') throw error;
       console.warn('MongoDB listUserDatabases failed:', error.message);
       return [];
     }

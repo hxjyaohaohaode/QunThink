@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
+﻿import { v4 as uuidv4 } from 'uuid';
 import { getUserDb, listUserDatabases, updateGroupActivityById, withWriteLock } from '../../models/db.js';
 import { callAI, callAIStream, cancelStream, normalizeResponse, applyMessageLengthLimit } from '../ai/index.js';
 import { broadcastToGroup, broadcastStreamChunk, broadcastStreamStart, broadcastStreamEnd, broadcastTypingStatus } from '../../websocket/index.js';
@@ -139,7 +139,17 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function getRecentMessages(groupId, limit = 50) {
+async function getRecentMessages(groupId, limit = 50, scopedUserId = null) {
+  if (scopedUserId) {
+    const db = await getUserDb(scopedUserId);
+    await db.read();
+    const messages = db.data.messages
+      .filter(m => m.group_id === groupId)
+      .slice(-limit);
+    if (messages.length > 0) return decryptMessages(messages);
+    return [];
+  }
+
   const cachedUserId = groupToUserMap.get(groupId);
   if (cachedUserId) {
     const db = await getUserDb(cachedUserId);
@@ -161,6 +171,18 @@ async function getRecentMessages(groupId, limit = 50) {
     if (messages.length > 0) return decryptMessages(messages);
   }
   return [];
+}
+
+// 用户作用域解析：预置群使用固定 ID（如 group-presidential），跨用户必然碰撞。
+// 凡是携带调用者身份的链路必须用此函数，严禁回退到全库扫描。
+async function findGroupAndMessagesForUser(userId, groupId) {
+  const db = await getUserDb(userId);
+  await db.read();
+  const group = db.data.groups.find(g => g.id === groupId);
+  if (!group) return null;
+  const messages = db.data.messages.filter(m => m.group_id === groupId);
+  groupToUserMap.set(groupId, userId);
+  return { db, userId, group, messages };
 }
 
 function decryptMessages(messages) {
@@ -228,32 +250,47 @@ export function startAutonomousChatTimer(groupId) {
   }
 
   const checkAndStartChat = async () => {
-    const result = await findGroupInAnyUserDb(groupId);
-    if (!result) return;
+    try {
+      // 跨引擎互斥：任何会话引擎仍在该群工作时，本轮跳过
+      if (activeGroups.has(`group:${groupId}`) || activeGroups.has(`autonomous:${groupId}`)) {
+        return;
+      }
 
-    const { group } = result;
-    if (!group || !group.ai_members || group.ai_members.length < 2) {
-      return;
-    }
+      const result = await findGroupInAnyUserDb(groupId);
+      if (!result) {
+        // 群组已被删除：自毁定时器，避免僵尸扫描
+        console.log(`[AI自发对话] 群组 ${groupId} 已不存在，自动停止定时器`);
+        stopAutonomousChatTimer(groupId);
+        return;
+      }
 
-    const recentMessages = await getRecentMessages(groupId, 10);
+      const { group } = result;
+      if (!group || !group.ai_members || group.ai_members.length < 2) {
+        return;
+      }
 
-    if (recentMessages.length === 0) {
-      console.log(`[AI自发对话] 群组 ${groupId} 没有消息，开始自发对话`);
-      await triggerSpontaneousChat(groupId, group.ai_members);
-      return;
-    }
+      const recentMessages = await getRecentMessages(groupId, 10);
 
-    const lastMessage = recentMessages[recentMessages.length - 1];
-    const timeSinceLastMessage = Date.now() - new Date(lastMessage.created_at).getTime();
+      if (recentMessages.length === 0) {
+        console.log(`[AI自发对话] 群组 ${groupId} 没有消息，开始自发对话`);
+        await triggerSpontaneousChat(groupId, group.ai_members);
+        return;
+      }
 
-    if (timeSinceLastMessage > 60000 && Math.random() < 0.3) {
-      console.log(`[AI自发对话] 群组 ${groupId} 空闲超过1分钟，开始自发对话`);
-      await triggerSpontaneousChat(groupId, group.ai_members);
+      const lastMessage = recentMessages[recentMessages.length - 1];
+      const timeSinceLastMessage = Date.now() - new Date(lastMessage.created_at).getTime();
+
+      if (timeSinceLastMessage > 60000 && Math.random() < 0.3) {
+        console.log(`[AI自发对话] 群组 ${groupId} 空闲超过1分钟，开始自发对话`);
+        await triggerSpontaneousChat(groupId, group.ai_members);
+      }
+    } catch (err) {
+      console.warn(`[AI自发对话] 群组 ${groupId} 定时检查失败:`, err.message);
     }
   };
 
   const timer = setInterval(checkAndStartChat, 30000);
+  if (typeof timer.unref === 'function') timer.unref();
   autonomousTimers.set(groupId, timer);
 
   console.log(`[AI自发对话] 群组 ${groupId} 启动自发对话定时器`);
@@ -268,10 +305,23 @@ export function stopAutonomousChatTimer(groupId) {
   }
 }
 
+export function stopAllAutonomousTimers() {
+  for (const [groupId, timer] of autonomousTimers.entries()) {
+    clearInterval(timer);
+    console.log(`[AI自发对话] 群组 ${groupId} 定时器已停止（全量清理）`);
+  }
+  autonomousTimers.clear();
+}
+
+export function getActiveAutonomousTimerCount() {
+  return autonomousTimers.size;
+}
+
 async function triggerSpontaneousChat(groupId, aiMembers) {
   const chatKey = `autonomous:${groupId}`;
 
-  if (activeGroups.has(chatKey)) {
+  // 跨引擎互斥：常规消息处理引擎工作时不得叠加自发对话
+  if (activeGroups.has(chatKey) || activeGroups.has(`group:${groupId}`)) {
     return;
   }
 
@@ -411,7 +461,9 @@ async function triggerSpontaneousChat(groupId, aiMembers) {
   } catch (error) {
     console.error(`[AI自发对话] 错误:`, error);
   } finally {
-    activeGroups.delete(chatKey);
+    if (activeGroups.get(chatKey) === context) {
+      activeGroups.delete(chatKey);
+    }
   }
 }
 
@@ -493,8 +545,10 @@ function parseReplyReference(content, recentMessages = []) {
   return { replyToId, replyToIds, cleanedContent, socialActions };
 }
 
-async function processSocialActions(groupId, targetMessageId, aiId, socialActions) {
-  const result = await findGroupAndMessagesInAnyUserDb(groupId);
+async function processSocialActions(groupId, targetMessageId, aiId, socialActions, scopedUserId = null) {
+  const result = scopedUserId
+    ? await findGroupAndMessagesForUser(scopedUserId, groupId)
+    : await findGroupAndMessagesInAnyUserDb(groupId);
   if (!result) return;
 
   const { db: userDb, userId: ownerUserId } = result;
@@ -628,7 +682,7 @@ export function cancelGroupGeneration(groupId) {
   return cancelled;
 }
 
-function buildWeChatStylePrompt(persona, userMessage, recentMessages, groupMembers, isMentioned = false, userAgents = null, isPrivateChat = false, userProfile = null, mentionedByName = null, attachmentDescriptions = null) {
+function buildWeChatStylePrompt(persona, userMessage, recentMessages, groupMembers, isMentioned = false, userAgents = null, isPrivateChat = false, userProfile = null, mentionedByName = null, attachmentDescriptions = null, userId = null) {
   let parts = [];
 
   if (isPrivateChat) {
@@ -963,7 +1017,8 @@ function calculateReplyProbability(aiId, recentMessages, persona, context, userI
     }
   }
 
-  // 钳制到合理区间
+  // 钳制到合理区间：responseFrequency=0 时尊重用户意图返回0，完全禁用AI回复
+  if (prob <= 0) return 0;
   return Math.max(0.02, Math.min(prob, 0.98));
 }
 
@@ -1110,7 +1165,8 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
       isPrivateChat,
       userProfile,
       mentionedByName,
-      attachmentDescriptions
+      attachmentDescriptions,
+      userId
     );
 
     let accumulatedContent = '';
@@ -1168,7 +1224,10 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
 
     if (!content || content.trim().length === 0) {
       broadcastTypingStatus(groupId, aiId, false);
-      broadcastStreamEnd(groupId, aiId, messageId, '', null, null);
+      // 使用已流式推送的累积内容作为最终内容，避免前端显示空白消息
+      // 如果连流式内容都为空，发送一个有意义的错误提示
+      const fallbackContent = accumulatedContent.trim() || `[${persona?.name || aiId}] 暂时无法生成回复，请稍后再试。`;
+      broadcastStreamEnd(groupId, aiId, messageId, fallbackContent, null, null);
       return null;
     }
 
@@ -1244,10 +1303,13 @@ async function collectAttachmentDescriptions(groupId, userId) {
   return descriptions;
 }
 
-export async function queueAIMessages(groupId, userMessage, replyTo = null) {
+export async function queueAIMessages(groupId, userMessage, replyTo = null, scopedUserId = null) {
   console.log(`[AI消息队列] 开始处理群组 ${groupId} 的消息: "${userMessage?.substring(0, 50)}..."`);
 
-  const result = await findGroupAndMessagesInAnyUserDb(groupId);
+  // 携带调用者身份时严格限定在该用户的库内解析（预置群 ID 跨用户重复，全库扫描必然串号）
+  const result = scopedUserId
+    ? await findGroupAndMessagesForUser(scopedUserId, groupId)
+    : await findGroupAndMessagesInAnyUserDb(groupId);
   if (!result || !result.group || !result.group.ai_members || result.group.ai_members.length === 0) {
     console.log(`[AI消息队列] 群组 ${groupId} 没有 AI 成员，跳过`);
     return;
@@ -1277,15 +1339,27 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null) {
   console.log(`[AI消息队列] 群组 ${groupId} 有 ${group.ai_members.length} 个 AI 成员: ${group.ai_members.join(', ')}${isPrivateChat ? ' (私聊模式)' : ''}`);
 
   const chatKey = `group:${groupId}`;
-  if (activeGroups.has(chatKey)) {
-    const existingContext = activeGroups.get(chatKey);
+  const cancelEngineContext = (key, label) => {
+    const existingContext = activeGroups.get(key);
+    if (!existingContext) return;
     existingContext.cancel = true;
-
-    if (existingContext.streamId) {
-      cancelStream(existingContext.streamId);
+    if (existingContext.streamIds && existingContext.streamIds.size > 0) {
+      for (const sid of existingContext.streamIds.values()) {
+        try { cancelStream(sid); } catch (e) { }
+      }
+      existingContext.streamIds.clear();
     }
-
-    activeGroups.delete(chatKey);
+    if (existingContext.streamId) {
+      try { cancelStream(existingContext.streamId); } catch (e) { }
+    }
+    activeGroups.delete(key);
+    console.log(`[AI消息队列] 群组 ${groupId} 已取消${label}引擎的活跃对话`);
+  };
+  // 用户发来新消息：取消该群所有其他引擎的进行中工作，避免多引擎并行输出交叉
+  cancelEngineContext(`autonomous:${groupId}`, '自发对话');
+  cancelEngineContext(`ai_private:${groupId}`, 'AI私聊');
+  if (activeGroups.has(chatKey)) {
+    cancelEngineContext(chatKey, '消息处理');
     console.log(`[AI消息队列] 群组 ${groupId} 已有活跃对话，已取消旧对话`);
   }
 
@@ -1355,7 +1429,7 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null) {
   };
   activeGroups.set(chatKey, context);
 
-  const recentMessages = await getRecentMessages(groupId);
+  const recentMessages = await getRecentMessages(groupId, 50, userId);
 
   let attachmentDescriptions = [];
   try {
@@ -1405,6 +1479,10 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null) {
 
     if (!cleanedContent || cleanedContent.trim().length === 0) {
       console.warn(`[AI消息] ${resultAiId} 的内容在清理后为空，跳过保存`);
+      // 若该 AI 已开始流式输出，必须显式结束流，否则前端气泡永远停留在“输入中”
+      if (messageId) {
+        broadcastStreamEnd(groupId, resultAiId, messageId, '', null, null);
+      }
       return null;
     }
 
@@ -1463,7 +1541,7 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null) {
     console.log(`[AI消息] ${resultAiId} 消息已广播，messageId: ${finalMessageId}, content_len: ${cleanedContent.length}`);
 
     if (socialActions && socialActions.length > 0 && effectiveReplyTo) {
-      await processSocialActions(groupId, effectiveReplyTo, resultAiId, socialActions);
+      await processSocialActions(groupId, effectiveReplyTo, resultAiId, socialActions, userId);
     }
 
     context.lastSpeakerId = resultAiId;
@@ -1480,7 +1558,10 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null) {
     await continueAIConversation(groupId, context, group.ai_members, userAgents, userProfile, userId);
   }
 
-  activeGroups.delete(chatKey);
+  // 仅在当前上下文仍持有该 key 时删除，避免误删后继对话的上下文
+  if (activeGroups.get(chatKey) === context) {
+    activeGroups.delete(chatKey);
+  }
 
   if (!isPrivateChat) {
     startAutonomousChatTimer(groupId);
@@ -1488,7 +1569,9 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null) {
 }
 
 async function continueAIConversation(groupId, context, aiMembers, userAgents = null, userProfile = null, userId = null) {
-  let dbResult = await findGroupAndMessagesInAnyUserDb(groupId);
+  const dbResult = userId
+    ? await findGroupAndMessagesForUser(userId, groupId)
+    : await findGroupAndMessagesInAnyUserDb(groupId);
   if (!dbResult) return;
 
   // 提取"上一条 AI 消息里 @了谁"(并发模型下所有候选 AI 共用这份解析)
@@ -1688,12 +1771,10 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
       });
       return Math.max(...cooldowns);
     })();
-    const delay = cooldownMs + Math.random() * 1200;
-    await sleep(delay);
 
     if (context.cancel) break;
 
-    const recentMessages = await getRecentMessages(groupId, 50);
+    const recentMessages = await getRecentMessages(groupId, 50, userId);
     const lastAiMessage = [...recentMessages].reverse().find(m => m.sender_type === 'ai');
     if (!lastAiMessage) {
       console.log(`[AI对话] 没有找到AI消息，退出对话`);
@@ -1852,7 +1933,9 @@ export async function startAutonomousChat(groupId, topic = null) {
 
     await continueAIConversation(groupId, context, group.ai_members, autonomousUserAgents, null, autonomousUserId);
 
-    activeGroups.delete(chatKey);
+    if (activeGroups.get(chatKey) === context) {
+      activeGroups.delete(chatKey);
+    }
 
     broadcastToGroup(groupId, {
       type: 'autonomous_chat_stopped',
@@ -1869,7 +1952,9 @@ export async function startAutonomousChat(groupId, topic = null) {
   } catch (error) {
     console.error(`[AI自主对话] 错误:`, error);
 
-    activeGroups.delete(chatKey);
+    if (activeGroups.get(chatKey) === context) {
+      activeGroups.delete(chatKey);
+    }
 
     broadcastToGroup(groupId, {
       type: 'autonomous_chat_error',
@@ -1930,8 +2015,10 @@ export function getAutonomousChatStatus(groupId) {
   };
 }
 
-export async function handleUserReaction(groupId, messageId, reactionType, userId = 'user') {
-  const result = await findGroupAndMessagesInAnyUserDb(groupId);
+export async function handleUserReaction(groupId, messageId, reactionType, userId = 'user', ownerId = null) {
+  const result = ownerId
+    ? await findGroupAndMessagesForUser(ownerId, groupId)
+    : await findGroupAndMessagesInAnyUserDb(groupId);
   if (!result || !result.group || !result.group.ai_members || result.group.ai_members.length === 0) {
     return;
   }
@@ -1943,7 +2030,7 @@ export async function handleUserReaction(groupId, messageId, reactionType, userI
   const message = messages.find(m => m.id === messageId);
   if (!message) return;
 
-  const recentMessages = await getRecentMessages(groupId, 50);
+  const recentMessages = await getRecentMessages(groupId, 50, result.userId);
 
   const reactionPromises = group.ai_members.map(async aiId => {
     const persona = getEffectivePersona(aiId, result.userId);
@@ -2049,8 +2136,10 @@ export async function handleUserReaction(groupId, messageId, reactionType, userI
   await Promise.allSettled(reactionPromises);
 }
 
-export async function handleUserComment(groupId, messageId, comment, commentId) {
-  const result = await findGroupAndMessagesInAnyUserDb(groupId);
+export async function handleUserComment(groupId, messageId, comment, commentId, ownerId = null) {
+  const result = ownerId
+    ? await findGroupAndMessagesForUser(ownerId, groupId)
+    : await findGroupAndMessagesInAnyUserDb(groupId);
   if (!result || !result.group || !result.group.ai_members || result.group.ai_members.length === 0) {
     return;
   }
@@ -2062,7 +2151,7 @@ export async function handleUserComment(groupId, messageId, comment, commentId) 
   const message = messages.find(m => m.id === messageId);
   if (!message) return;
 
-  const recentMessages = await getRecentMessages(groupId, 50);
+  const recentMessages = await getRecentMessages(groupId, 50, result.userId);
 
   const commentSenderName = comment.sender_type === 'user'
     ? '用户'
@@ -2247,6 +2336,11 @@ export async function startAIPrivateChat(groupId, topic = null) {
     }
   }
 
+  // 跨引擎互斥：常规消息处理或自发对话进行中时，不允许再启动AI私聊长跑
+  if (activeGroups.has(`group:${groupId}`) || activeGroups.has(`autonomous:${groupId}`)) {
+    return { groupId, status: 'engine_busy' };
+  }
+
   const context = {
     cancel: false,
     isRunning: true,
@@ -2280,7 +2374,13 @@ export async function startAIPrivateChat(groupId, topic = null) {
 
         const { replyToId, replyToIds, cleanedContent, socialActions } = parseReplyReference(content, recentMessages);
 
-        if (!cleanedContent || cleanedContent.trim().length === 0) continue;
+        if (!cleanedContent || cleanedContent.trim().length === 0) {
+          // 流已开始则必须结束，防止前端气泡悬挂在“输入中”
+          if (streamMessageId) {
+            broadcastStreamEnd(groupId, aiId, streamMessageId, '', null, null);
+          }
+          continue;
+        }
 
         const effectiveReplyTo = replyToId || suggestedReplyTo || null;
         const finalReplyToIds = replyToIds && replyToIds.length > 0 ? replyToIds : null;
@@ -2326,7 +2426,9 @@ export async function startAIPrivateChat(groupId, topic = null) {
       await sleep(2000 + Math.random() * 3000);
     }
 
-    activeGroups.delete(chatKey);
+    if (activeGroups.get(chatKey) === context) {
+      activeGroups.delete(chatKey);
+    }
     broadcastToGroup(groupId, {
       type: 'chat_status',
       group_id: groupId,
@@ -2344,7 +2446,9 @@ export async function startAIPrivateChat(groupId, topic = null) {
   } catch (error) {
     console.error(`AI私聊错误:`, error);
 
-    activeGroups.delete(chatKey);
+    if (activeGroups.get(chatKey) === context) {
+      activeGroups.delete(chatKey);
+    }
     broadcastToGroup(groupId, {
       type: 'chat_status',
       group_id: groupId,

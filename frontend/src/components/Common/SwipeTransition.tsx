@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import { durations, cubicBezier, prefersReducedMotion } from '../../utils/animations';
 
 interface SwipeTransitionProps {
@@ -20,6 +20,15 @@ interface TouchState {
   direction: 'left' | 'right' | 'none';
 }
 
+const INITIAL_TOUCH_STATE: TouchState = {
+  startX: 0,
+  startY: 0,
+  currentX: 0,
+  currentY: 0,
+  isDragging: false,
+  direction: 'none',
+};
+
 export function SwipeTransition({
   children,
   onBack,
@@ -29,21 +38,62 @@ export function SwipeTransition({
   threshold = 50,
   className = '',
 }: SwipeTransitionProps) {
-  const [touchState, setTouchState] = useState<TouchState>({
-    startX: 0,
-    startY: 0,
-    currentX: 0,
-    currentY: 0,
-    isDragging: false,
-    direction: 'none',
-  });
+  const [touchState, setTouchState] = useState<TouchState>(INITIAL_TOUCH_STATE);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const transitionTimerRef = useRef<number | null>(null);
   const reducedMotion = useMemo(() => prefersReducedMotion(), []);
 
+  const touchStateRef = useRef(touchState);
+  touchStateRef.current = touchState;
+  const isTransitioningRef = useRef(isTransitioning);
+  isTransitioningRef.current = isTransitioning;
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    // 原生监听并以 { passive: false } 注册，确保 preventDefault 生效
+    const handleNativeTouchMove = (e: TouchEvent) => {
+      const state = touchStateRef.current;
+      if (!state.isDragging || reducedMotion || isTransitioningRef.current) return;
+
+      const touch = e.touches[0];
+      const deltaX = touch.clientX - state.startX;
+      const deltaY = touch.clientY - state.startY;
+
+      if (Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > 10) {
+        e.preventDefault();
+
+        let direction: 'left' | 'right' | 'none' = 'none';
+        if (deltaX > 0) {
+          direction = 'right';
+        } else if (deltaX < 0) {
+          direction = 'left';
+        }
+
+        setTouchState(prev => ({
+          ...prev,
+          currentX: touch.clientX,
+          currentY: touch.clientY,
+          direction,
+        }));
+      }
+    };
+
+    el.addEventListener('touchmove', handleNativeTouchMove, { passive: false });
+    return () => el.removeEventListener('touchmove', handleNativeTouchMove);
+  }, [reducedMotion]);
+
+  useEffect(() => {
+    return () => {
+      if (transitionTimerRef.current !== null) clearTimeout(transitionTimerRef.current);
+    };
+  }, []);
+
   const handleTouchStart = useCallback((e: React.TouchEvent) => {
-    if (reducedMotion || isTransitioning) return;
-    
+    if (reducedMotion || isTransitioningRef.current) return;
+
     const touch = e.touches[0];
     setTouchState({
       startX: touch.clientX,
@@ -53,40 +103,18 @@ export function SwipeTransition({
       isDragging: true,
       direction: 'none',
     });
-  }, [reducedMotion, isTransitioning]);
-
-  const handleTouchMove = useCallback((e: React.TouchEvent) => {
-    if (!touchState.isDragging || reducedMotion || isTransitioning) return;
-    
-    const touch = e.touches[0];
-    const deltaX = touch.clientX - touchState.startX;
-    const deltaY = touch.clientY - touchState.startY;
-    
-    if (Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > 10) {
-      e.preventDefault();
-      
-      let direction: 'left' | 'right' | 'none' = 'none';
-      if (deltaX > 0) {
-        direction = 'right';
-      } else if (deltaX < 0) {
-        direction = 'left';
-      }
-      
-      setTouchState(prev => ({
-        ...prev,
-        currentX: touch.clientX,
-        currentY: touch.clientY,
-        direction,
-      }));
-    }
-  }, [touchState, reducedMotion, isTransitioning]);
+  }, [reducedMotion]);
 
   const handleTouchEnd = useCallback(() => {
-    if (!touchState.isDragging || reducedMotion || isTransitioning) return;
-    
-    const deltaX = touchState.currentX - touchState.startX;
+    const state = touchStateRef.current;
+    if (!state.isDragging || reducedMotion || isTransitioningRef.current) {
+      setTouchState(prev => ({ ...prev, isDragging: false, direction: 'none' }));
+      return;
+    }
+
+    const deltaX = state.currentX - state.startX;
     const absDeltaX = Math.abs(deltaX);
-    
+
     if (absDeltaX > threshold) {
       if (deltaX > 0 && canGoBack && onBack) {
         setIsTransitioning(true);
@@ -96,27 +124,29 @@ export function SwipeTransition({
         onForward();
       }
     }
-    
+
     setTouchState(prev => ({
       ...prev,
       isDragging: false,
       direction: 'none',
     }));
-    
-    setTimeout(() => {
+
+    if (transitionTimerRef.current !== null) clearTimeout(transitionTimerRef.current);
+    transitionTimerRef.current = window.setTimeout(() => {
+      transitionTimerRef.current = null;
       setIsTransitioning(false);
     }, durations.normal);
-  }, [touchState, threshold, canGoBack, canGoForward, onBack, onForward, reducedMotion, isTransitioning]);
+  }, [threshold, canGoBack, canGoForward, onBack, onForward, reducedMotion]);
 
   const transformStyle = useMemo(() => {
     if (reducedMotion || !touchState.isDragging) {
       return {};
     }
-    
+
     const deltaX = touchState.currentX - touchState.startX;
     const resistance = 0.3;
     const translateX = deltaX * resistance;
-    
+
     return {
       transform: `translateX(${translateX}px)`,
       transition: 'none',
@@ -128,7 +158,6 @@ export function SwipeTransition({
       ref={containerRef}
       className={`swipe-transition ${className}`}
       onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
       style={{
         ...transformStyle,
@@ -174,7 +203,7 @@ export function useSwipeBack(
       },
       onTouchMove: (e: React.TouchEvent) => {
         if (!isSwipingRef.current) return;
-        
+
         const touch = e.touches[0];
         const deltaX = touch.clientX - startXRef.current;
         const deltaY = touch.clientY - startYRef.current;
@@ -195,7 +224,7 @@ export function useSwipeBack(
           }
           return;
         }
-        
+
         if (deltaX > 0) {
           const progress = Math.min(deltaX / threshold, 1);
           setSwipeProgress(progress);

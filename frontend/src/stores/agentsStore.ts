@@ -176,20 +176,22 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       return { agentMessages: newAgentMessages };
     });
 
+    let abortController: AbortController | null = null;
+
     try {
       // 中断同一 agent 的旧流请求
       const oldController = activeStreamControllers.get(agentId);
       if (oldController) {
         oldController.abort();
       }
-      const abortController = new AbortController();
+      abortController = new AbortController();
       activeStreamControllers.set(agentId, abortController);
 
       let response;
       if (files && files.length > 0) {
-        response = await api.sendAgentMessageWithFiles(agentId, message, files);
+        response = await api.sendAgentMessageWithFiles(agentId, message, files, abortController.signal);
       } else {
-        response = await api.sendAgentMessage(agentId, message);
+        response = await api.sendAgentMessage(agentId, message, abortController.signal);
       }
 
       if (!response.ok) {
@@ -201,6 +203,44 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       let fullContent = '';
 
       if (reader) {
+        let sseBuffer = '';
+        const processSseLine = (line: string) => {
+          if (!line.startsWith('data: ')) return;
+          const data = line.slice(6);
+          if (data.trim() === '[DONE]') return;
+
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.content) {
+              fullContent += parsed.content;
+              set(state => {
+                const newAgentMessages = new Map(state.agentMessages);
+                const messages = newAgentMessages.get(agentId) || [];
+                const updatedMessages = messages.map(m =>
+                  m.id === agentMessageId
+                    ? { ...m, content: fullContent }
+                    : m
+                );
+                newAgentMessages.set(agentId, updatedMessages);
+                return { agentMessages: newAgentMessages };
+              });
+            }
+          } catch {
+            fullContent += data;
+            set(state => {
+              const newAgentMessages = new Map(state.agentMessages);
+              const messages = newAgentMessages.get(agentId) || [];
+              const updatedMessages = messages.map(m =>
+                m.id === agentMessageId
+                  ? { ...m, content: fullContent }
+                  : m
+              );
+              newAgentMessages.set(agentId, updatedMessages);
+              return { agentMessages: newAgentMessages };
+            });
+          }
+        };
+
         try {
           while (true) {
             // 30秒超时读取
@@ -213,52 +253,30 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
             const { done, value } = readResult;
             if (done) break;
 
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split('\n');
+            sseBuffer += decoder.decode(value, { stream: true });
 
-            for (const line of lines) {
-              if (line.startsWith('data: ')) {
-                const data = line.slice(6);
-                if (data.trim() === '[DONE]') continue;
+            const lastNewlineIndex = sseBuffer.lastIndexOf('\n');
+            if (lastNewlineIndex === -1) continue;
 
-                try {
-                  const parsed = JSON.parse(data);
-                  if (parsed.content) {
-                    fullContent += parsed.content;
-                    set(state => {
-                      const newAgentMessages = new Map(state.agentMessages);
-                      const messages = newAgentMessages.get(agentId) || [];
-                      const updatedMessages = messages.map(m =>
-                        m.id === agentMessageId
-                          ? { ...m, content: fullContent }
-                          : m
-                      );
-                      newAgentMessages.set(agentId, updatedMessages);
-                      return { agentMessages: newAgentMessages };
-                    });
-                  }
-                } catch {
-                  fullContent += data;
-                  set(state => {
-                    const newAgentMessages = new Map(state.agentMessages);
-                    const messages = newAgentMessages.get(agentId) || [];
-                    const updatedMessages = messages.map(m =>
-                      m.id === agentMessageId
-                        ? { ...m, content: fullContent }
-                        : m
-                    );
-                    newAgentMessages.set(agentId, updatedMessages);
-                    return { agentMessages: newAgentMessages };
-                  });
-                }
-              }
+            const completeLines = sseBuffer.slice(0, lastNewlineIndex);
+            sseBuffer = sseBuffer.slice(lastNewlineIndex + 1);
+
+            for (const line of completeLines.split('\n')) {
+              processSseLine(line);
             }
+          }
+
+          if (sseBuffer.trim().length > 0) {
+            processSseLine(sseBuffer);
+            sseBuffer = '';
           }
         } catch (readError) {
           console.error('SSE流读取错误:', readError);
         } finally {
           reader.releaseLock();
-          activeStreamControllers.delete(agentId);
+          if (abortController && activeStreamControllers.get(agentId) === abortController) {
+            activeStreamControllers.delete(agentId);
+          }
         }
       }
 
@@ -287,7 +305,9 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
         }
       } catch { /* 静默失败，前端临时消息仍然可用 */ }
     } catch (error) {
-      activeStreamControllers.delete(agentId);
+      if (abortController && activeStreamControllers.get(agentId) === abortController) {
+        activeStreamControllers.delete(agentId);
+      }
       set(state => {
         const newAgentMessages = new Map(state.agentMessages);
         const messages = newAgentMessages.get(agentId) || [];

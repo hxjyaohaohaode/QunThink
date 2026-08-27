@@ -1,4 +1,5 @@
-import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useFocusTrap } from '../Common/useFocusTrap';
 import {
   ModelConfig,
   PersonaConfig,
@@ -158,7 +159,11 @@ function mergePersona(persona?: PersonaConfig): PersonaConfig {
 
 export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps) {
   const { isVisible, close: handleClose, overlayClass, contentClass, sheetClass } = useModalAnimation(isOpen, onClose);
-  const { personas, fetchPersonas, updatePersona, resetPersona } = usePersonasStore();
+  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isVisible);
+  const personas = usePersonasStore((s) => s.personas);
+  const fetchPersonas = usePersonasStore((s) => s.fetchPersonas);
+  const updatePersona = usePersonasStore((s) => s.updatePersona);
+  const resetPersona = usePersonasStore((s) => s.resetPersona);
   const { showToast, Toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -230,11 +235,24 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
 
   const handleDragEnd = useCallback(() => {
     if (dragOffsetY > 120) {
-      handleClose();
+      handleCloseWithDirtyCheck();
     }
     setDragStartY(null);
     setDragOffsetY(0);
-  }, [dragOffsetY, handleClose]);
+  }, [dragOffsetY, handleCloseWithDirtyCheck]);
+
+  // ESC键关闭
+  useEffect(() => {
+    if (!isVisible) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !saving) {
+        e.preventDefault();
+        handleCloseWithDirtyCheck();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isVisible, saving, handleCloseWithDirtyCheck]);
 
   if (!isVisible) return null;
 
@@ -348,7 +366,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
   );
 
   return (
-    <div className={`fixed inset-0 z-[70] flex items-end md:items-center justify-center bg-black/50 md:p-4 ${overlayClass}`} onClick={handleCloseWithDirtyCheck}>
+    <div ref={overlayTrapRef} role="dialog" aria-modal="true" className={`fixed inset-0 z-[70] flex items-end md:items-center justify-center bg-black/50 md:p-4 ${overlayClass}`} onClick={handleCloseWithDirtyCheck}>
       <div
         className={`flex max-h-[100dvh] md:max-h-[92vh] w-full md:max-w-3xl flex-col overflow-hidden rounded-t-2xl md:rounded-2xl border border-border-subtle bg-bg-surface shadow-2xl ${sheetClass} md:${contentClass}`}
         style={{ transform: dragOffsetY > 0 ? `translateY(${dragOffsetY}px)` : undefined, transition: dragStartY === null ? 'transform 0.2s ease' : 'none' }}
@@ -505,14 +523,12 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
                 <button
                   type="button"
                   onClick={() => setSocialConfig('enableQuoting', !form.socialConfig?.enableQuoting)}
-                  className={`relative w-11 h-6 rounded-full transition-all duration-200 ${
-                    form.socialConfig?.enableQuoting ? 'bg-accent' : 'bg-bg-surface'
-                  }`}
+                  className={`relative w-11 h-6 rounded-full transition-all duration-200 ${form.socialConfig?.enableQuoting ? 'bg-accent' : 'bg-bg-surface'
+                    }`}
                 >
                   <span
-                    className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-all duration-200 ${
-                      form.socialConfig?.enableQuoting ? 'left-[22px]' : 'left-0.5'
-                    }`}
+                    className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-all duration-200 ${form.socialConfig?.enableQuoting ? 'left-[22px]' : 'left-0.5'
+                      }`}
                   />
                 </button>
               </div>
@@ -524,14 +540,12 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
                 <button
                   type="button"
                   onClick={() => setSocialConfig('enableSocialFeedback', !form.socialConfig?.enableSocialFeedback)}
-                  className={`relative w-11 h-6 rounded-full transition-all duration-200 ${
-                    form.socialConfig?.enableSocialFeedback ? 'bg-accent' : 'bg-bg-surface'
-                  }`}
+                  className={`relative w-11 h-6 rounded-full transition-all duration-200 ${form.socialConfig?.enableSocialFeedback ? 'bg-accent' : 'bg-bg-surface'
+                    }`}
                 >
                   <span
-                    className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-all duration-200 ${
-                      form.socialConfig?.enableSocialFeedback ? 'left-[22px]' : 'left-0.5'
-                    }`}
+                    className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-all duration-200 ${form.socialConfig?.enableSocialFeedback ? 'left-[22px]' : 'left-0.5'
+                      }`}
                   />
                 </button>
               </div>

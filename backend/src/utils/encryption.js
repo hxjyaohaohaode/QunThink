@@ -8,17 +8,6 @@ const ENCRYPTION_CONFIG = {
   authTagLength: 16
 };
 
-function ensureKeyLength(key) {
-  if (key.length >= 32) {
-    return Buffer.from(key).slice(0, 32);
-  }
-  
-  const hash = crypto.createHash('sha256');
-  hash.update(key);
-  const derivedKey = Buffer.from(hash.digest('hex'), 'hex');
-  return derivedKey.slice(0, 32);
-}
-
 function getEncryptionKeyBuffer() {
   return getKey();
 }
@@ -26,8 +15,9 @@ function getEncryptionKeyBuffer() {
 export function encryptData(data, options = {}) {
   try {
     const dataBuffer = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
-    
-    const iv = options.iv || crypto.randomBytes(ENCRYPTION_CONFIG.ivLength);
+
+    // GCM 下 IV 绝不允许由调用方指定（IV 复用会灾难性破坏加密安全性），始终随机生成。
+    const iv = crypto.randomBytes(ENCRYPTION_CONFIG.ivLength);
     
     const keyBuffer = getEncryptionKeyBuffer();
     const metadata = getKeyMetadata();
@@ -58,10 +48,6 @@ export function encryptData(data, options = {}) {
       keyVersion: metadata.version,
       timestamp: new Date().toISOString()
     };
-    
-    if (options.additionalData) {
-      result.additionalData = options.additionalData;
-    }
     
     return result;
     
@@ -160,14 +146,26 @@ export function decryptText(encryptedJson) {
   if (!encryptedJson || typeof encryptedJson !== 'string') {
     return encryptedJson;
   }
+  let parsed;
   try {
-    const parsed = JSON.parse(encryptedJson);
-    if (!parsed.encrypted || !parsed.iv || !parsed.authTag || !parsed.algorithm) {
-      return encryptedJson;
-    }
-    return decryptData(parsed);
+    parsed = JSON.parse(encryptedJson);
   } catch {
+    // 非 JSON 输入：按历史明文数据处理（兼容未加密的存量数据）
     return encryptedJson;
+  }
+  if (!parsed || !parsed.encrypted || !parsed.iv || !parsed.authTag || !parsed.algorithm) {
+    return encryptedJson;
+  }
+  try {
+    const result = decryptData(parsed);
+    if (typeof result !== 'string') {
+      throw new Error('解密结果不是字符串');
+    }
+    return result;
+  } catch (err) {
+    // 密文存在但解密失败：密钥不匹配或数据被篡改，绝不把密文当明文返回
+    console.error('解密文本失败（密钥不匹配或数据被篡改）:', err.message);
+    return '[无法解密]';
   }
 }
 
@@ -202,51 +200,6 @@ export function verifyEncryptionIntegrity(encryptedData) {
   }
 }
 
-export function encryptDatabaseFields(data, fieldsToEncrypt = ['content', 'message', 'password', 'token', 'secret']) {
-  try {
-    const encryptedData = { ...data };
-    
-    for (const field of fieldsToEncrypt) {
-      if (encryptedData[field] && typeof encryptedData[field] === 'string') {
-        encryptedData[field] = encryptText(encryptedData[field]);
-        encryptedData[`${field}_encrypted`] = true;
-        encryptedData[`${field}_encryption_version`] = 'aes-256-gcm-v1';
-      }
-    }
-    
-    return encryptedData;
-  } catch (error) {
-    console.error('加密数据库字段失败:', error);
-    throw new Error(`数据库字段加密失败: ${error.message}`);
-  }
-}
-
-export function decryptDatabaseFields(data, fieldsToDecrypt = ['content', 'message', 'password', 'token', 'secret']) {
-  try {
-    const decryptedData = { ...data };
-    
-    for (const field of fieldsToDecrypt) {
-      const encryptedField = decryptedData[field];
-      const isEncrypted = decryptedData[`${field}_encrypted`];
-      
-      if (isEncrypted && encryptedField && typeof encryptedField === 'string') {
-        try {
-          decryptedData[field] = decryptText(encryptedField);
-          delete decryptedData[`${field}_encrypted`];
-          delete decryptedData[`${field}_encryption_version`];
-        } catch (decryptError) {
-          console.warn(`字段 ${field} 解密失败，保留原始数据:`, decryptError.message);
-        }
-      }
-    }
-    
-    return decryptedData;
-  } catch (error) {
-    console.error('解密数据库字段失败:', error);
-    throw new Error(`数据库字段解密失败: ${error.message}`);
-  }
-}
-
 export function getEncryptionConfig() {
   const metadata = getKeyMetadata();
   
@@ -273,8 +226,6 @@ export default {
   generateRandomKey,
   computeHash,
   verifyEncryptionIntegrity,
-  encryptDatabaseFields,
-  decryptDatabaseFields,
   getEncryptionConfig,
   getKey,
   generateNewKey,

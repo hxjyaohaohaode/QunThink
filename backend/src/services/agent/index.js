@@ -28,27 +28,27 @@ function extractJSON(text) {
   if (jsonBlockMatch) {
     try {
       return JSON.parse(jsonBlockMatch[1].trim());
-    } catch (e) { safeLog('warn', 'Agent配置解析失败', { error: e?.message }); }
+    } catch (e) { safeLog('warn', 'JSON 解析失败（代码块阶段）', { error: e?.message }); }
   }
 
   const braceMatch = normalized.match(/\{[\s\S]*\}/);
   if (braceMatch) {
     try {
       return JSON.parse(braceMatch[0]);
-    } catch (e) { safeLog('warn', 'Agent消息历史加载失败', { error: e?.message }); }
+    } catch (e) { safeLog('warn', 'JSON 解析失败（花括号块阶段）', { error: e?.message }); }
   }
 
   const bracketMatch = normalized.match(/\[[\s\S]*\]/);
   if (bracketMatch) {
     try {
       return JSON.parse(bracketMatch[0]);
-    } catch (e) { safeLog('warn', 'Agent文件描述加载失败', { error: e?.message }); }
+    } catch (e) { safeLog('warn', 'JSON 解析失败（方括号块阶段）', { error: e?.message }); }
   }
 
   try {
     return JSON.parse(normalized);
   } catch (e) {
-    safeLog('warn', 'Agent配置加载失败', { error: e?.message });
+    safeLog('warn', 'JSON 解析失败（全文阶段）', { error: e?.message });
     return null;
   }
 }
@@ -119,7 +119,7 @@ ${modelList}
       [], null, null, userId
     );
   } catch (error) {
-    console.error('[Agent创建] deepseek_reasoner架构师调用失败:', error.message);
+    safeLog('error', '[Agent创建] deepseek_reasoner架构师调用失败', { error: error.message });
     architectResponse = null;
   }
 
@@ -202,11 +202,11 @@ ${agentSystemPrompt}
       // 确保优化后的结果至少包含原有内容的长度
       if (cleaned.length >= agentSystemPrompt.length * 0.7) {
         agentSystemPrompt = cleaned;
-        console.log('[Agent创建] 多AI协同评审完成，system_prompt已优化');
+        safeLog('info', '[Agent创建] 多AI协同评审完成，system_prompt已优化');
       }
     }
   } catch (error) {
-    console.warn('[Agent创建] 评审AI调用失败，使用原始system_prompt:', error.message);
+    safeLog('warn', '[Agent创建] 评审AI调用失败，使用原始system_prompt', { error: error.message });
   }
 
   const agent = {
@@ -225,9 +225,11 @@ ${agentSystemPrompt}
   };
 
   const db = await getUserDb(userId);
-  await db.read();
-  db.data.agents.push(agent);
-  await withWriteLock(userId, async () => { await db.write(); });
+  await withWriteLock(userId, async () => {
+    await db.read();
+    db.data.agents.push(agent);
+    await db.write();
+  });
 
   return agent;
 }
@@ -277,12 +279,12 @@ export async function generateAgentQuestions(name, description, openingMessage) 
       [], null, null, null
     );
   } catch (error) {
-    console.error('[Agent问题生成] mimo_flash调用失败:', error.message);
+    safeLog('error', '[Agent问题生成] mimo_flash调用失败', { error: error.message });
     response = null;
   }
 
   if (!response) {
-    console.warn('[Agent问题生成] AI返回为空，使用默认问题');
+    safeLog('warn', '[Agent问题生成] AI返回为空，使用默认问题');
     return [
       { id: 'q1', question: `针对"${name}"的核心功能，你希望它在${description.substring(0, 30)}方面有什么特别的处理方式吗？` },
       { id: 'q2', question: '这个智能体主要服务哪类人群？你期望他们用怎样的场景和频率使用？' },
@@ -303,12 +305,24 @@ export async function generateAgentQuestions(name, description, openingMessage) 
     }
   }
 
-  console.warn('[Agent问题生成] AI返回格式不正确，使用默认问题');
+  safeLog('warn', '[Agent问题生成] AI返回格式不正确，使用默认问题');
   return [
     { id: 'q1', question: `针对"${name}"的核心功能，你希望它在${description.substring(0, 30)}方面有什么特别的处理方式吗？` },
     { id: 'q2', question: '这个智能体主要服务哪类人群？你期望他们用怎样的场景和频率使用？' },
     { id: 'q3', question: '你希望它的回复风格是怎样的？比如专业严谨、轻松幽默、还是亲切友好？' }
   ];
+}
+
+function trimAgentMessages(db, agentId, max = 200) {
+  const messages = db.data.agent_messages;
+  if (!Array.isArray(messages)) return;
+  const indexes = [];
+  messages.forEach((m, i) => {
+    if (m.agent_id === agentId) indexes.push(i);
+  });
+  if (indexes.length <= max) return;
+  const removeSet = new Set(indexes.slice(0, indexes.length - max));
+  db.data.agent_messages = messages.filter((_, i) => !removeSet.has(i));
 }
 
 export async function chatWithAgent(userId, agentId, userMessage, onChunk, attachments = []) {
@@ -332,6 +346,21 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
         const mimeType = attachment.mime_type || attachment.type || 'application/octet-stream';
         const fileName = attachment.filename || attachment.name || '未知文件';
         const fileSize = attachment.size || 0;
+
+        if (attachment.owner_user_id !== undefined && attachment.owner_user_id !== userId) {
+          safeLog('warn', '[Agent对话] 拒绝属主不匹配的附件', { fileName, owner_user_id: attachment.owner_user_id, userId });
+          messageContent += `\n[附件被拒绝: ${fileName}（附件属主校验失败）]\n`;
+          continue;
+        }
+
+        const userUploadDir = path.resolve(getUploadsDir(), String(userId));
+        const resolvedFilePath = path.resolve(filePath);
+        const relativeToUserDir = path.relative(userUploadDir, resolvedFilePath);
+        if (!relativeToUserDir || relativeToUserDir.startsWith('..') || path.isAbsolute(relativeToUserDir)) {
+          safeLog('warn', '[Agent对话] 拒绝越权路径的附件', { fileName, userId });
+          messageContent += `\n[附件被拒绝: ${fileName}（附件路径属主校验失败）]\n`;
+          continue;
+        }
 
         const parsedContent = await parseFile(filePath, mimeType);
         const textContent = typeof parsedContent === 'string' ? parsedContent : '';
@@ -376,7 +405,7 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
           content_preview: (description || textContent).substring(0, 100)
         });
       } catch (error) {
-        console.error(`[Agent对话] 附件解析失败:`, error.message);
+        safeLog('error', '[Agent对话] 附件解析失败', { error: error.message });
         messageContent += `\n[文件解析失败: ${attachment.filename || attachment.name || '未知文件'}]\n`;
       }
     }
@@ -392,7 +421,9 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
   };
 
   await withWriteLock(userId, async () => {
+    await db.read();
     db.data.agent_messages.push(userMsg);
+    trimAgentMessages(db, agentId);
     await db.write();
   });
 
@@ -444,7 +475,7 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
         intentContext = `\n\n【意图分析】${intentResult.trim()}`;
       }
     } catch (error) {
-      console.warn('[Agent对话] 意图分析失败，跳过:', error.message);
+      safeLog('warn', '[Agent对话] 意图分析失败，跳过', { error: error.message });
     }
   }
 
@@ -470,7 +501,9 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
   };
 
   await withWriteLock(userId, async () => {
+    await db.read();
     db.data.agent_messages.push(agentMsg);
+    trimAgentMessages(db, agentId);
     await db.write();
   });
 
@@ -582,7 +615,7 @@ ${historyContext}
       return suggestions;
     }
   } catch (error) {
-    console.error('[建议回复] API调用失败:', error.message);
+    safeLog('error', '[建议回复] API调用失败', { error: error.message });
   }
 
   return getDefaultSuggestions(agent, isInitial, userProfile);
@@ -636,21 +669,14 @@ async function callSuggestionAPI(systemPrompt, userPrompt) {
     return null;
   };
 
-  const promises = availableConfigs.map(config =>
-    callOne(config).catch(() => null)
-  );
-
-  try {
-    const raceResult = await Promise.any(promises);
-    if (raceResult && Array.isArray(raceResult) && raceResult.length > 0) {
-      return raceResult;
-    }
-  } catch (e) { safeLog('warn', 'Agent结果处理失败', { error: e?.message }); }
-
-  const results = await Promise.allSettled(promises);
-  for (const r of results) {
-    if (r.status === 'fulfilled' && r.value && Array.isArray(r.value) && r.value.length > 0) {
-      return r.value;
+  for (const config of availableConfigs) {
+    try {
+      const result = await callOne(config);
+      if (result && Array.isArray(result) && result.length > 0) {
+        return result;
+      }
+    } catch {
+      // 当前供应商不可用，顺序回退到下一个
     }
   }
 

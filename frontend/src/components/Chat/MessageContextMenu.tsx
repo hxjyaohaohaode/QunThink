@@ -1,4 +1,4 @@
-import React, { useState, useLayoutEffect, useRef, useCallback } from 'react';
+import React, { useState, useLayoutEffect, useEffect, useRef, useCallback } from 'react';
 
 interface ContextMenuAction {
   label: string;
@@ -98,6 +98,23 @@ export function useMessageContextMenu() {
     y: number;
     messageId: string;
   } | null>(null);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (longPressTimerRef.current) {
+        clearTimeout(longPressTimerRef.current);
+        longPressTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const clearLongPressTimer = useCallback(() => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }, []);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, messageId: string) => {
     e.preventDefault();
@@ -105,7 +122,6 @@ export function useMessageContextMenu() {
   }, []);
 
   const handleLongPress = useCallback((messageId: string) => {
-    let timer: ReturnType<typeof setTimeout> | null = null;
     let startX = 0;
     let startY = 0;
     const isTriggeredRef = { current: false };
@@ -117,40 +133,39 @@ export function useMessageContextMenu() {
         startY = touch.clientY;
         isTriggeredRef.current = false;
 
-        // 触发触觉反馈
-        if (typeof navigator !== 'undefined' && navigator.vibrate) {
-          navigator.vibrate(50);
-        }
-
-        timer = setTimeout(() => {
+        clearLongPressTimer();
+        longPressTimerRef.current = setTimeout(() => {
+          longPressTimerRef.current = null;
           isTriggeredRef.current = true;
+
+          // 触发触觉反馈：仅在长按成立时震动
+          if (typeof navigator !== 'undefined' && navigator.vibrate) {
+            navigator.vibrate(50);
+          }
+
           setContextMenu({ x: touch.clientX, y: touch.clientY, messageId });
         }, 400);
       },
       onTouchMove: (e: React.TouchEvent) => {
-        if (!timer || isTriggeredRef.current) return;
+        if (!longPressTimerRef.current || isTriggeredRef.current) return;
         const touch = e.touches[0];
         const diffX = Math.abs(touch.clientX - startX);
         const diffY = Math.abs(touch.clientY - startY);
 
         // 增加容错距离到 20px，减少误触
         if (diffX > 20 || diffY > 20) {
-          clearTimeout(timer);
-          timer = null;
+          clearLongPressTimer();
         }
       },
       onTouchEnd: () => {
-        if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
+        clearLongPressTimer();
         // 如果菜单已触发，阻止后续点击事件
         if (isTriggeredRef.current) {
           setTimeout(() => { isTriggeredRef.current = false; }, 100);
         }
       },
     };
-  }, []);
+  }, [clearLongPressTimer]);
 
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);

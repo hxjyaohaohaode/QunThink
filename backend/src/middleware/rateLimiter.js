@@ -37,9 +37,12 @@ function savePersistedStore() {
   if (!dirty) return;
   try {
     const now = Date.now();
+    const entries = [...MEMORY_STORE.entries()]
+      .map(([key, entry]) => ({ key, entry, lastTime: entry.timestamps.length ? Math.max(...entry.timestamps) : 0 }))
+      .sort((a, b) => b.lastTime - a.lastTime);
     const data = {};
     let count = 0;
-    for (const [key, entry] of MEMORY_STORE.entries()) {
+    for (const { key, entry } of entries) {
       if (count >= MAX_ENTRIES) break;
       const recent = entry.timestamps.filter(t => now - t < entry.windowMs);
       if (recent.length > 0) {
@@ -47,7 +50,9 @@ function savePersistedStore() {
         count++;
       }
     }
-    fsSync.writeFileSync(RATE_LIMIT_FILE, JSON.stringify(data), 'utf8');
+    const tmpPath = `${RATE_LIMIT_FILE}.tmp-${process.pid}-${Date.now()}`;
+    fsSync.writeFileSync(tmpPath, JSON.stringify(data), 'utf8');
+    fsSync.renameSync(tmpPath, RATE_LIMIT_FILE);
     dirty = false;
   } catch (error) {
     safeLog('warn', '限流数据持久化失败', { error: error.message });
@@ -90,16 +95,7 @@ function pruneExpiredEntries() {
 loadPersistedStore();
 startPersistTimer();
 
-const _cleanupTimer = setInterval(() => {
-  pruneExpiredEntries();
-}, 5 * 60 * 1000);
-
-if (typeof _cleanupTimer.unref === 'function') {
-  _cleanupTimer.unref();
-}
-
 export function cleanup() {
-  clearInterval(_cleanupTimer);
   if (persistTimer) {
     clearInterval(persistTimer);
     persistTimer = null;
@@ -112,11 +108,9 @@ export function createRateLimiter(options = {}) {
   const maxRequests = options.maxRequests || 30;
 
   return function rateLimiter(req, res, next) {
-    const authMode = process.env.AUTH_MODE || 'session';
-    const key = authMode === 'dev' || !req.userId
-      ? (req.headers['x-user-id'] || req.ip || 'unknown')
-      : req.userId;
-    const storeKey = `${key}:${windowMs}:${maxRequests}`;
+    // 身份中间件验证后才可信任 req.userId。任何请求头都不能直接改变限流桶。
+    const identity = req.userId ? `u:${req.userId}` : `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`;
+    const storeKey = `${identity}:${windowMs}:${maxRequests}`;
     const now = Date.now();
 
     if (!MEMORY_STORE.has(storeKey)) {

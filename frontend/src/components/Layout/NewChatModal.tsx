@@ -1,10 +1,13 @@
-import { useState, useEffect, useRef } from 'react';
+﻿import { useState, useEffect, useRef } from 'react';
+import { useFocusTrap } from '../Common/useFocusTrap';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { usePersonasStore } from '../../stores/personasStore';
 import { AI_COLORS, AI_NAMES, AI_AVATAR_LETTERS, AI_LIST } from '../../types';
 import { useToast } from '../Common';
+import { avatarBackgroundImageStyle } from '../Common/Avatar';
 
-const CHATTABLE_AI_LIST: string[] = AI_LIST.filter(id => id !== 'mimo_tts');
+const NON_CHATTABLE_AI = ['mimo_tts', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'];
+const CHATTABLE_AI_LIST: string[] = AI_LIST.filter(id => !NON_CHATTABLE_AI.includes(id));
 
 const GROUP_AVATAR_COLORS = [
   '#ef4444', '#f97316', '#f59e0b', '#84cc16', '#10b981',
@@ -21,8 +24,10 @@ interface NewChatModalProps {
 type ChatTab = 'private' | 'aiPrivate' | 'group';
 
 export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalProps) {
-  const { createGroup, getOrCreatePrivateChat, createAIPrivateChat } = useGroupsStore();
-  const { personas } = usePersonasStore();
+  const createGroup = useGroupsStore((s) => s.createGroup);
+  const getOrCreatePrivateChat = useGroupsStore((s) => s.getOrCreatePrivateChat);
+  const createAIPrivateChat = useGroupsStore((s) => s.createAIPrivateChat);
+  const personas = usePersonasStore((s) => s.personas);
   const { showToast, Toast } = useToast();
 
   const [activeTab, setActiveTab] = useState<ChatTab>('private');
@@ -41,6 +46,7 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [modalVisible, setModalVisible] = useState(false);
+  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isOpen);
   const [modalClosing, setModalClosing] = useState(false);
   const [isCreatingPrivate, setIsCreatingPrivate] = useState(false);
 
@@ -72,6 +78,20 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
       onClose();
     }, 250);
   };
+
+  // ESC键关闭弹窗
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        handleClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   const resetForm = () => {
     setNewGroupName('');
@@ -174,7 +194,7 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
           className="w-full h-full flex items-center justify-center text-white text-lg font-bold"
           style={{
             backgroundColor: avatarUrl ? 'transparent' : avatarColor,
-            backgroundImage: avatarUrl ? `url(${avatarUrl})` : 'none',
+            backgroundImage: avatarBackgroundImageStyle(avatarUrl),
             backgroundSize: 'cover',
             backgroundPosition: 'center'
           }}
@@ -206,7 +226,7 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
               className="flex items-center justify-center text-white text-[8px] font-bold overflow-hidden"
               style={{
                 backgroundColor: avatarUrl ? 'transparent' : avatarColor,
-                backgroundImage: avatarUrl ? `url(${avatarUrl})` : 'none',
+                backgroundImage: avatarBackgroundImageStyle(avatarUrl),
                 backgroundSize: 'cover',
                 backgroundPosition: 'center'
               }}
@@ -284,7 +304,7 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
         className={`${size} rounded-full flex items-center justify-center text-white ${textSize} font-semibold flex-shrink-0 overflow-hidden`}
         style={{
           backgroundColor: persona?.avatar_url ? 'transparent' : (persona?.color || AI_COLORS[aiId] || AI_COLORS[aiId] || '#888'),
-          backgroundImage: persona?.avatar_url ? `url(${persona?.avatar_url})` : 'none',
+          backgroundImage: avatarBackgroundImageStyle(persona?.avatar_url),
           backgroundSize: 'cover',
           backgroundPosition: 'center'
         }}
@@ -301,15 +321,16 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
 
   return (
     <div
-      className={`fixed inset-0 flex items-center justify-center z-50 p-4 transition-opacity duration-200 ${
-        modalVisible && !modalClosing ? 'opacity-100' : 'opacity-0'
-      } bg-black/50 backdrop-blur-sm`}
+      ref={overlayTrapRef}
+      role="dialog"
+      aria-modal="true"
+      className={`fixed inset-0 flex items-center justify-center z-50 p-4 transition-opacity duration-200 ${modalVisible && !modalClosing ? 'opacity-100' : 'opacity-0'
+        } bg-black/50 backdrop-blur-sm`}
       onClick={handleClose}
     >
       <div
-        className={`bg-bg-surface rounded-lg p-6 w-full max-w-[520px] shadow-xl animate-fade-in max-h-[90vh] overflow-y-auto transition-all duration-[250ms] ${
-          modalVisible && !modalClosing ? 'opacity-100 scale-100' : 'opacity-0 scale-95'
-        }`}
+        className={`bg-bg-surface rounded-lg p-6 w-full max-w-[520px] shadow-xl animate-fade-in max-h-[90vh] overflow-y-auto transition-all duration-[250ms] ${modalVisible && !modalClosing ? 'opacity-100 scale-100' : 'opacity-0 scale-95'
+          }`}
         style={{
           transitionTimingFunction: modalVisible && !modalClosing
             ? 'cubic-bezier(0.175, 0.885, 0.32, 1.275)'
@@ -317,36 +338,45 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
         }}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="text-lg font-semibold text-text-primary mb-4">新建聊天</h3>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-semibold text-text-primary">新建聊天</h3>
+          <button
+            onClick={onClose}
+            className="w-8 h-8 rounded-lg flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-surface2 transition-colors"
+            title="关闭"
+            aria-label="关闭"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
 
-        <div className="flex gap-1 mb-4 border-b border-border-subtle overflow-x-auto">
+        <div className="flex gap-1 mb-4 p-1 rounded-xl bg-bg-surface2">
           <button
             onClick={() => setActiveTab('private')}
-            className={`px-3 py-2 text-sm font-medium transition-colors whitespace-nowrap ${
-              activeTab === 'private'
-                ? 'text-user border-b-2 border-user'
-                : 'text-text-muted hover:text-text-secondary'
-            }`}
+            className={`flex-1 px-3 py-2 text-sm font-medium rounded-lg transition-all whitespace-nowrap ${activeTab === 'private'
+              ? 'bg-accent text-white shadow-sm'
+              : 'text-text-muted hover:text-text-secondary'
+              }`}
           >
             AI 私聊
           </button>
           <button
             onClick={() => setActiveTab('aiPrivate')}
-            className={`px-3 py-2 text-sm font-medium transition-colors whitespace-nowrap ${
-              activeTab === 'aiPrivate'
-                ? 'text-user border-b-2 border-user'
-                : 'text-text-muted hover:text-text-secondary'
-            }`}
+            className={`flex-1 px-3 py-2 text-sm font-medium rounded-lg transition-all whitespace-nowrap ${activeTab === 'aiPrivate'
+              ? 'bg-accent text-white shadow-sm'
+              : 'text-text-muted hover:text-text-secondary'
+              }`}
           >
             AI 与 AI 私聊
           </button>
           <button
             onClick={() => setActiveTab('group')}
-            className={`px-3 py-2 text-sm font-medium transition-colors whitespace-nowrap ${
-              activeTab === 'group'
-                ? 'text-user border-b-2 border-user'
-                : 'text-text-muted hover:text-text-secondary'
-            }`}
+            className={`flex-1 px-3 py-2 text-sm font-medium rounded-lg transition-all whitespace-nowrap ${activeTab === 'group'
+              ? 'bg-accent text-white shadow-sm'
+              : 'text-text-muted hover:text-text-secondary'
+              }`}
           >
             创建群聊
           </button>
@@ -410,15 +440,14 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
                     <button
                       key={aiId}
                       onClick={() => toggleAiPrivateMember(aiId)}
-                      className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-all ${
-                        isSelected
-                          ? 'border-accent ring-2 ring-accent/20 bg-accent-subtle'
-                          : 'border-border-subtle bg-bg-surface2'
-                      }`}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-all ${isSelected
+                        ? 'border-accent ring-2 ring-accent/20 bg-accent-subtle'
+                        : 'border-border-subtle bg-bg-surface2'
+                        }`}
                     >
                       {renderAiAvatar(aiId, 'w-6 h-6', 'text-[10px]')}
                       <span className="text-xs">{getAiName(aiId)}</span>
-                      {isSelected && <span className="text-accent">✓</span>}
+                      {isSelected && <svg className="w-4 h-4 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
                     </button>
                   );
                 })}
@@ -451,31 +480,28 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
                 <div className="flex gap-1.5">
                   <button
                     onClick={() => setAvatarMode('auto')}
-                    className={`px-2.5 py-1 text-[11px] rounded-md border transition-all ${
-                      avatarMode === 'auto'
-                        ? 'border-accent bg-accent-subtle text-accent'
-                        : 'border-border-subtle text-text-muted hover:text-text-secondary'
-                    }`}
+                    className={`px-2.5 py-1 text-[11px] rounded-md border transition-all ${avatarMode === 'auto'
+                      ? 'border-accent bg-accent-subtle text-accent'
+                      : 'border-border-subtle text-text-muted hover:text-text-secondary'
+                      }`}
                   >
                     AI 拼接
                   </button>
                   <button
                     onClick={() => setAvatarMode('color')}
-                    className={`px-2.5 py-1 text-[11px] rounded-md border transition-all ${
-                      avatarMode === 'color'
-                        ? 'border-accent bg-accent-subtle text-accent'
-                        : 'border-border-subtle text-text-muted hover:text-text-secondary'
-                    }`}
+                    className={`px-2.5 py-1 text-[11px] rounded-md border transition-all ${avatarMode === 'color'
+                      ? 'border-accent bg-accent-subtle text-accent'
+                      : 'border-border-subtle text-text-muted hover:text-text-secondary'
+                      }`}
                   >
                     纯色
                   </button>
                   <button
                     onClick={() => fileInputRef.current?.click()}
-                    className={`px-2.5 py-1 text-[11px] rounded-md border transition-all ${
-                      avatarMode === 'upload'
-                        ? 'border-accent bg-accent-subtle text-accent'
-                        : 'border-border-subtle text-text-muted hover:text-text-secondary'
-                    }`}
+                    className={`px-2.5 py-1 text-[11px] rounded-md border transition-all ${avatarMode === 'upload'
+                      ? 'border-accent bg-accent-subtle text-accent'
+                      : 'border-border-subtle text-text-muted hover:text-text-secondary'
+                      }`}
                   >
                     上传图片
                   </button>
@@ -493,9 +519,8 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
                       <button
                         key={color}
                         onClick={() => handleSelectColor(color)}
-                        className={`w-6 h-6 rounded-full border-2 transition-all ${
-                          groupAvatarColor === color ? 'border-text-primary scale-110' : 'border-transparent hover:scale-105'
-                        }`}
+                        className={`w-6 h-6 rounded-full border-2 transition-all ${groupAvatarColor === color ? 'border-text-primary scale-110' : 'border-transparent hover:scale-105'
+                          }`}
                         style={{ backgroundColor: color }}
                       />
                     ))}
@@ -539,15 +564,14 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
                     <button
                       key={aiId}
                       onClick={() => toggleAiMember(aiId)}
-                      className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-all ${
-                        isSelected
-                          ? 'border-accent ring-2 ring-accent/20 bg-accent-subtle'
-                          : 'border-border-subtle bg-bg-surface2'
-                      }`}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-lg border transition-all ${isSelected
+                        ? 'border-accent ring-2 ring-accent/20 bg-accent-subtle'
+                        : 'border-border-subtle bg-bg-surface2'
+                        }`}
                     >
                       {renderAiAvatar(aiId, 'w-6 h-6', 'text-[10px]')}
                       <span className="text-xs">{getAiName(aiId)}</span>
-                      {isSelected && <span className="text-accent">✓</span>}
+                      {isSelected && <svg className="w-4 h-4 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
                     </button>
                   );
                 })}

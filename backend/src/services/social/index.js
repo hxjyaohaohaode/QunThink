@@ -5,7 +5,7 @@
 
 import smartLikeEngine, { calculateSimilarity, analyzeSentiment } from './smartLike.js';
 import contextAwareCommentAnalyzer from './contextAwareComments.js';
-import socialBehaviorModel from './socialBehaviorModel.js';
+import { getSocialBehaviorModel } from './socialBehaviorModel.js';
 import encryptionUtils from '../../utils/encryption.js';
 
 // 社交互动分析器
@@ -319,14 +319,14 @@ export {
   socialAnalyzer,
   smartLikeEngine,
   contextAwareCommentAnalyzer,
-  socialBehaviorModel
+  getSocialBehaviorModel
 };
 
 export default {
   smartLike: smartLikeEngine,
   analyzer: socialAnalyzer,
   commentAnalyzer: contextAwareCommentAnalyzer,
-  behaviorModel: socialBehaviorModel,
+  behaviorModel: getSocialBehaviorModel,
   
   // 便捷方法
   evaluateMessageForLike: (message, contextMessages, senderInfo) => {
@@ -367,25 +367,25 @@ export default {
     return socialAnalyzer.getActiveParticipants(limit);
   },
   
-  // 社交行为规范方法
-  evaluateSocialBehavior: (interaction, context) => {
-    return socialBehaviorModel.evaluateSocialBehavior(interaction, context);
+  // 社交行为规范方法（按 userId 分桶）
+  evaluateSocialBehavior: (userId, interaction, context) => {
+    return getSocialBehaviorModel(userId).evaluateSocialBehavior(interaction, context);
   },
-  
-  getBehaviorStats: () => {
-    return socialBehaviorModel.getCurrentStats();
+
+  getBehaviorStats: (userId) => {
+    return getSocialBehaviorModel(userId).getCurrentStats();
   },
-  
-  getBehaviorConfig: () => {
-    return socialBehaviorModel.getConfig();
+
+  getBehaviorConfig: (userId) => {
+    return getSocialBehaviorModel(userId).getConfig();
   },
-  
-  updateBehaviorConfig: (newConfig) => {
-    return socialBehaviorModel.updateConfig(newConfig);
+
+  updateBehaviorConfig: (userId, newConfig) => {
+    return getSocialBehaviorModel(userId).updateConfig(newConfig);
   },
-  
-  resetBehaviorModel: () => {
-    socialBehaviorModel.reset();
+
+  resetBehaviorModel: (userId) => {
+    getSocialBehaviorModel(userId).reset();
     return { success: true, message: '社交行为模型已重置' };
   }
 };

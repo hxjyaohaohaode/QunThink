@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react';
+﻿import { useState, useEffect, useRef, useCallback, useMemo, memo, type ReactNode } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { useMessagesStore } from '../../stores/messagesStore';
@@ -7,7 +7,7 @@ import { useAgentsStore } from '../../stores/agentsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 import { AI_NAMES, AI_COLORS, AI_AVATAR_LETTERS, type Group } from '../../types';
-import { ChatListSkeleton } from '../Common';
+import { Avatar, ChatListSkeleton, ErrorBoundary, useToast } from '../Common';
 import { useGlobalSearch, type SearchFilterTab } from '../../hooks/useGlobalSearch';
 import { replaceOldModelNames } from '../../utils/modelNames';
 import dayjs from 'dayjs';
@@ -74,16 +74,31 @@ function formatFileSize(bytes: number) {
 }
 
 function highlightText(text: string, searchRegex: RegExp | null) {
-  if (!searchRegex) return text;
-  const parts = text.split(searchRegex);
-  const testRegex = new RegExp(searchRegex.source, 'i');
-  return parts.map((part, index) =>
-    testRegex.test(part) ? (
-      <mark key={index} className="bg-yellow-200 dark:bg-yellow-800/60 text-inherit rounded px-0.5">{part}</mark>
-    ) : (
-      part
-    )
-  );
+  if (!searchRegex || !text) return text;
+  // 使用matchAll构建分段，避免split+test的逻辑错误
+  const matches = [...text.matchAll(searchRegex)];
+  if (matches.length === 0) return text;
+
+  const result: React.ReactNode[] = [];
+  let lastIndex = 0;
+  matches.forEach((match, i) => {
+    const matchStart = match.index ?? 0;
+    const matchEnd = matchStart + match[0].length;
+    // 添加匹配前的普通文本
+    if (matchStart > lastIndex) {
+      result.push(text.slice(lastIndex, matchStart));
+    }
+    // 添加高亮匹配
+    result.push(
+      <mark key={i} className="bg-yellow-200 dark:bg-yellow-800/60 text-inherit rounded px-0.5">{match[0]}</mark>
+    );
+    lastIndex = matchEnd;
+  });
+  // 添加最后一段普通文本
+  if (lastIndex < text.length) {
+    result.push(text.slice(lastIndex));
+  }
+  return result;
 }
 
 function getFileIcon(mimeType: string): ReactNode {
@@ -93,16 +108,171 @@ function getFileIcon(mimeType: string): ReactNode {
   return <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>;
 }
 
-export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
-  const { groups, currentGroup, selectGroup, loading, deleteGroup, fetchGroups } = useGroupsStore();
-  const { messages } = useMessagesStore();
-  const { personas } = usePersonasStore();
-  const { selectAgent } = useAgentsStore();
-  const { setScrollToMessageId } = useNavigationStore();
+function selectLastGroupMessage(groupId: string) {
+  return (s: { messages: Record<string, import('../../types').Message[]> }) => {
+    const arr = s.messages[groupId];
+    return arr && arr.length > 0 ? arr[arr.length - 1] : null;
+  };
+}
+
+function formatRowTime(dateStr: string): string {
+  const time = dayjs(dateStr);
+  const diffDays = dayjs().endOf('day').diff(time.endOf('day'), 'day');
+
+  if (diffDays <= 0) {
+    return time.fromNow();
+  } else if (diffDays === 1) {
+    return '昨天';
+  } else if (diffDays < 7) {
+    return time.format('ddd');
+  }
+  return time.format('MM-DD');
+}
+
+function buildGroupAvatarInfo(group: Group, personas: Record<string, { color?: string; name?: string; avatar_url?: string | null }>) {
+  if (group.avatar_url) {
+    return { src: group.avatar_url, color: undefined as string | undefined, letter: '' };
+  }
+  if (group.ai_members && group.ai_members.length === 1) {
+    const aiId = group.ai_members[0];
+    const persona = personas[aiId];
+    return {
+      src: persona?.avatar_url || null,
+      color: persona?.color || AI_COLORS[aiId] || '#888',
+      letter: persona?.name?.charAt(0) || AI_AVATAR_LETTERS[aiId] || 'A',
+    };
+  }
+  return {
+    src: null,
+    color: group.avatar_color || groupBrandColorFromId(group.id),
+    letter: (group.name || '群')[0].toUpperCase(),
+  };
+}
+
+// 与 Sidebar 的群品牌色保持一致：按群 ID 稳定哈希取色
+const GROUP_COLOR_PALETTE = ['#6C5CE7', '#00B894', '#E17055', '#0984E3', '#E84393', '#D63031', '#00CEC9', '#E8A33D'];
+function groupBrandColorFromId(groupId: string): string {
+  let h = 0;
+  const s = groupId || '';
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return GROUP_COLOR_PALETTE[h % GROUP_COLOR_PALETTE.length];
+}
+
+const ChatItemRow = memo(function ChatItemRow({ group, isActive, personas, onSelect, onDelete, onUnpin }: {
+  group: Group;
+  isActive: boolean;
+  tick: number;
+  personas: Record<string, { color?: string; name?: string; avatar_url?: string | null }>;
+  onSelect: () => void;
+  onDelete: (groupId: string) => void;
+  onUnpin: (groupId: string) => void;
+}) {
   const reducedMotion = useReducedMotion();
+  const selectLastMessage = useMemo(() => selectLastGroupMessage(group.id), [group.id]);
+  const lastMsg = useMessagesStore(selectLastMessage);
+
+  const avatarInfo = buildGroupAvatarInfo(group, personas);
+  const displayTime = lastMsg
+    ? formatRowTime(lastMsg.created_at)
+    : (group.last_message_at ? formatRowTime(group.last_message_at) : dayjs(group.created_at).fromNow());
+  const displayPreview = replaceOldModelNames(lastMsg
+    ? (lastMsg.sender_type === 'user' ? '[我] ' : '') + lastMsg.content.substring(0, 40) + (lastMsg.content.length > 40 ? '...' : '')
+    : (group.last_message_preview || group.description || '暂无消息'));
+
+  return (
+    <motion.div
+      initial={reducedMotion ? { opacity: 1 } : { opacity: 0, x: -8 }}
+      animate={{ opacity: 1, x: 0 }}
+      exit={reducedMotion ? { opacity: 1 } : { opacity: 0 }}
+      transition={reducedMotion ? { duration: 0.1 } : { duration: 0.2, ease: [0.0, 0.0, 0.2, 1] }}
+      onClick={onSelect}
+      className={`
+        chat-item group ${isActive ? 'active' : ''}
+        overflow-hidden
+      `}
+    >
+      <div className={`flex items-center gap-3 px-3 py-2.5 ${group.pinned ? 'bg-[rgb(var(--sidebar-pinned))]' : ''
+        }`}>
+        <div className="relative flex-shrink-0 transition-transform duration-150 group-hover:scale-[1.02]">
+          <Avatar
+            src={avatarInfo.src}
+            color={avatarInfo.color}
+            letter={avatarInfo.letter}
+            size={36}
+            className="rounded"
+          />
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="font-medium text-text-primary text-sm truncate transition-colors duration-150">
+                {replaceOldModelNames(group.name)}
+              </span>
+              {group.pinned && (
+                <svg className="w-3 h-3 text-text-muted flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
+                </svg>
+              )}
+            </div>
+            <span className="text-xs text-text-muted ml-2 flex-shrink-0 select-none">
+              {displayTime}
+            </span>
+          </div>
+          <div className="mt-0.5">
+            <p className="text-xs text-text-secondary truncate">
+              {lastMsg ? (
+                <>{displayPreview}</>
+              ) : (
+                <span className="text-text-muted">{displayPreview}</span>
+              )}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 max-md:hidden transition-opacity duration-150 flex-shrink-0">
+          {group.pinned && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onUnpin(group.id);
+              }}
+              className="w-5 h-5 rounded flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-sidebar-hover"
+              title="取消置顶"
+            >
+              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" /></svg>
+            </button>
+          )}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(group.id);
+            }}
+            className="w-5 h-5 rounded flex items-center justify-center text-text-muted hover:text-red-400 hover:bg-red-500/10"
+            title="删除聊天"
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+          </button>
+        </div>
+      </div>
+    </motion.div>
+  );
+});
+
+export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
+  const groups = useGroupsStore((s) => s.groups);
+  const currentGroupId = useGroupsStore((s) => s.currentGroup?.id);
+  const selectGroupAction = useGroupsStore((s) => s.selectGroup);
+  const loading = useGroupsStore((s) => s.loading);
+  const deleteGroup = useGroupsStore((s) => s.deleteGroup);
+  const fetchGroups = useGroupsStore((s) => s.fetchGroups);
+  const pinGroup = useGroupsStore((s) => s.pinGroup);
+  const personas = usePersonasStore((s) => s.personas);
+  const selectAgent = useAgentsStore((s) => s.selectAgent);
+  const setScrollToMessageId = useNavigationStore((s) => s.setScrollToMessageId);
+  const { showToast, Toast } = useToast();
   const [showSearch, setShowSearch] = useState(false);
   const [timeUpdateKey, setTimeUpdateKey] = useState(0);
-  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set(['pinned', 'today', 'yesterday', 'thisWeek', 'earlier']));
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -142,57 +312,12 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
     return () => document.removeEventListener('visibilitychange', handleVisibility);
   }, [fetchGroups]);
 
-  const getGroupLastMessage = useCallback((group: Group) => {
-    const groupMessages = messages[group.id] || [];
-    if (groupMessages.length === 0) return null;
-    return groupMessages[groupMessages.length - 1];
-  }, [messages]);
-
   const getGroupLastMessageTime = useCallback((group: Group): number => {
     if (group.last_message_at) {
       return new Date(group.last_message_at).getTime();
     }
-    const lastMsg = getGroupLastMessage(group);
-    if (lastMsg) {
-      return new Date(lastMsg.created_at).getTime();
-    }
     return new Date(group.created_at).getTime();
-  }, [getGroupLastMessage]);
-
-  const getGroupAvatarInfo = useCallback((group: Group) => {
-    if (group.avatar_url) {
-      return { color: 'transparent', letter: '', avatarUrl: group.avatar_url, name: null, isGroup: false };
-    }
-    if (group.ai_members && group.ai_members.length === 1) {
-      const aiId = group.ai_members[0];
-      const persona = personas[aiId];
-      return {
-        color: persona?.color || AI_COLORS[aiId] || '#888',
-        letter: persona?.name?.charAt(0) || AI_AVATAR_LETTERS[aiId] || 'A',
-        avatarUrl: persona?.avatar_url || null,
-        name: persona?.name || AI_NAMES[aiId] || aiId,
-        isGroup: false
-      };
-    }
-    const letter = (group.name || '群')[0].toUpperCase();
-    return { color: '#95B1D4', letter, avatarUrl: null, name: null, isGroup: false };
-  }, [personas]);
-
-  const formatTime = useCallback((dateStr: string) => {
-    const time = dayjs(dateStr);
-    const now = dayjs();
-    const diffDays = now.diff(time, 'day');
-
-    if (diffDays === 0) {
-      return time.fromNow();
-    } else if (diffDays === 1) {
-      return '昨天';
-    } else if (diffDays < 7) {
-      return time.format('ddd');
-    } else {
-      return time.format('MM-DD');
-    }
-  }, [timeUpdateKey]);
+  }, []);
 
   const sortedGroups = useMemo(() => {
     return [...groups].sort((a, b) => {
@@ -207,17 +332,30 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
   }, [sortedGroups, getGroupLastMessageTime]);
 
   const handleSelectGroup = (groupId: string) => {
-    selectGroup(groupId);
+    selectGroupAction(groupId);
     if (onSelectGroup) {
       onSelectGroup(groupId);
     }
   };
 
-  const handleDeleteGroup = async (e: React.MouseEvent, groupId: string) => {
-    e.stopPropagation();
+  const handleDeleteGroup = async (_e: unknown, groupId: string) => {
     const confirmed = window.confirm('确定要删除该聊天吗？所有聊天记录将被清除。');
     if (!confirmed) return;
-    await deleteGroup(groupId);
+    try {
+      await deleteGroup(groupId);
+    } catch (error) {
+      console.error('删除聊天失败:', error);
+      showToast({ message: '删除失败，请稍后重试', type: 'error' });
+    }
+  };
+
+  const handleUnpinGroup = async (groupId: string, currentPinned: boolean) => {
+    try {
+      await pinGroup(groupId, !currentPinned);
+    } catch (error) {
+      console.error('取消置顶失败:', error);
+      showToast({ message: '操作失败，请稍后重试', type: 'error' });
+    }
   };
 
   const toggleGroup = (groupKey: string, e?: React.MouseEvent) => {
@@ -261,113 +399,11 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
     return AI_AVATAR_LETTERS[senderId || ''] || senderId?.[0]?.toUpperCase() || '?';
   };
 
-  const renderChatItem = (group: Group, _index: number, _groupKey: string) => {
-    const lastMsg = getGroupLastMessage(group);
-    const avatarInfo = getGroupAvatarInfo(group);
-    const isHovered = hoveredId === group.id;
-    const displayTime = lastMsg ? formatTime(lastMsg.created_at) : (group.last_message_at ? formatTime(group.last_message_at) : dayjs(group.created_at).fromNow());
-    const displayPreview = replaceOldModelNames(lastMsg
-      ? (lastMsg.sender_type === 'user' ? '[我] ' : '') + lastMsg.content.substring(0, 40) + (lastMsg.content.length > 40 ? '...' : '')
-      : (group.last_message_preview || group.description || '暂无消息'));
-
-    return (
-      <motion.div
-        key={group.id}
-        initial={reducedMotion ? { opacity: 1 } : { opacity: 0, x: -8 }}
-        animate={{ opacity: 1, x: 0 }}
-        exit={reducedMotion ? { opacity: 1 } : { opacity: 0 }}
-        transition={reducedMotion ? { duration: 0.1 } : { duration: 0.2, ease: [0.0, 0.0, 0.2, 1] }}
-        onClick={() => handleSelectGroup(group.id)}
-        onMouseEnter={() => setHoveredId(group.id)}
-        onMouseLeave={() => setHoveredId(null)}
-        className={`
-          chat-item group ${currentGroup?.id === group.id ? 'active' : ''}
-          overflow-hidden
-        `}
-      >
-        <div className={`flex items-center gap-3 px-3 py-2.5 ${group.pinned ? 'bg-[rgb(var(--sidebar-pinned))]' : ''
-          }`}>
-          <div className="relative flex-shrink-0">
-            <div
-              className="w-9 h-9 rounded flex items-center justify-center text-white text-sm font-semibold overflow-hidden transition-transform duration-150"
-              style={{
-                backgroundColor: avatarInfo.color,
-                transform: isHovered ? 'scale(1.02)' : 'scale(1)',
-              }}
-            >
-              {avatarInfo.letter && (
-                <span className="absolute inset-0 flex items-center justify-center">{avatarInfo.letter}</span>
-              )}
-              {avatarInfo.avatarUrl && (
-                <img
-                  src={avatarInfo.avatarUrl}
-                  alt=""
-                  className="w-full h-full object-cover relative z-10"
-                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                />
-              )}
-            </div>
-          </div>
-
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 min-w-0">
-                <span className="font-medium text-text-primary text-sm truncate transition-colors duration-150">
-                  {replaceOldModelNames(group.name)}
-                </span>
-                {group.pinned && (
-                  <svg className="w-3 h-3 text-text-muted flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
-                  </svg>
-                )}
-              </div>
-              <span className="text-xs text-text-muted ml-2 flex-shrink-0 select-none">
-                {displayTime}
-              </span>
-            </div>
-            <div className="mt-0.5">
-              <p className="text-xs text-text-secondary truncate">
-                {lastMsg ? (
-                  <>{displayPreview}</>
-                ) : (
-                  <span className="text-text-muted">{displayPreview}</span>
-                )}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity duration-150 flex-shrink-0">
-            {group.pinned && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  useGroupsStore.getState().updateGroupSettings(group.id, { pinned: !group.pinned } as Partial<Group>);
-                }}
-                className="w-5 h-5 rounded flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-sidebar-hover"
-                title="取消置顶"
-              >
-                <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" /></svg>
-              </button>
-            )}
-            <button
-              onClick={(e) => handleDeleteGroup(e, group.id)}
-              className="w-5 h-5 rounded flex items-center justify-center text-text-muted hover:text-red-400 hover:bg-red-500/10"
-              title="删除聊天"
-            >
-              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-            </button>
-          </div>
-        </div>
-      </motion.div>
-    );
-  };
-
-  const renderGroupSection = (groupKey: keyof GroupedGroups, groups: Group[]) => {
-    if (groups.length === 0) return null;
+  const renderGroupSection = (groupKey: keyof GroupedGroups, sectionGroups: Group[]) => {
+    if (sectionGroups.length === 0) return null;
 
     const config = GROUP_CONFIG[groupKey];
     const isExpanded = expandedGroups.has(groupKey);
-    let itemIndex = 0;
 
     return (
       <div key={groupKey}>
@@ -396,10 +432,22 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
           `}
         >
           <AnimatePresence>
-            {groups.map((group) => {
-              const currentIndex = itemIndex++;
-              return renderChatItem(group, currentIndex, groupKey);
-            })}
+            {sectionGroups.map((group) => (
+              <ChatItemRow
+                key={group.id}
+                group={group}
+                isActive={currentGroupId === group.id}
+                tick={timeUpdateKey}
+                personas={personas as Record<string, { color?: string; name?: string; avatar_url?: string | null }>}
+                onSelect={() => handleSelectGroup(group.id)}
+                onDelete={(groupId) => {
+                  void handleDeleteGroup(undefined, groupId);
+                }}
+                onUnpin={(groupId) => {
+                  void handleUnpinGroup(groupId, true);
+                }}
+              />
+            ))}
           </AnimatePresence>
         </div>
       </div>
@@ -407,7 +455,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
   };
 
   const renderSearchResults = () => {
-    const { searchData, loading, query, activeTab } = globalSearch;
+    const { searchData, loading: searchLoading, query, activeTab } = globalSearch;
     if (!query.trim()) {
       return (
         <div className="flex flex-col items-center justify-center h-64 text-text-muted animate-fade-in">
@@ -427,7 +475,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
       );
     }
 
-    if (loading) {
+    if (searchLoading) {
       return (
         <div className="flex items-center justify-center h-40">
           <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-accent"></div>
@@ -462,7 +510,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
           <div>
             {activeTab === 'all' && (
               <div className="flex items-center gap-1.5 px-4 py-1.5">
-                <svg className="w-3 h-3 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" /></svg>
+                <svg className="w-3 h-3 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 5.25 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" /></svg>
                 <span className="text-[10px] font-medium text-accent">群聊</span>
                 <span className="text-[10px] text-text-muted">{groupResults.length}</span>
               </div>
@@ -471,7 +519,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
               <div key={r.id} onClick={() => { handleSelectGroup(r.id); handleExitSearch(); }} className="px-4 py-2.5 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                 <div className="flex items-center gap-2">
                   <div className="w-7 h-7 rounded-lg bg-accent/10 flex items-center justify-center flex-shrink-0">
-                    <svg className="w-3.5 h-3.5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" /></svg>
+                    <svg className="w-3.5 h-3.5 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 5.25 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" /></svg>
                   </div>
                   <div className="flex-1 min-w-0">
                     <span className="font-medium text-[11px] text-text-primary">{highlightText(r.name, searchRegex)}</span>
@@ -493,7 +541,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
               </div>
             )}
             {messageResults.map(r => (
-              <div key={r.id} onClick={() => { selectGroup(r.group_id); setScrollToMessageId(r.id); handleExitSearch(); }} className="px-4 py-2.5 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+              <div key={r.id} onClick={() => { selectGroupAction(r.group_id); setScrollToMessageId(r.id); handleExitSearch(); }} className="px-4 py-2.5 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                 <div className="flex items-start gap-2">
                   <div className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-semibold flex-shrink-0" style={{ backgroundColor: getSenderColor(r.sender_type, r.sender_id) }}>
                     {getAvatarLetter(r.sender_type, r.sender_id)}
@@ -509,7 +557,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
                       <p className="text-[11px] text-text-secondary line-clamp-2">{highlightText(r.content, searchRegex)}</p>
                     )}
                     {r.match_type === 'attachment' && r.attachment_match && (
-                      <p className="text-[10px] text-text-muted">📎 {highlightText(r.attachment_match.filename, searchRegex)}</p>
+                      <p className="text-[10px] text-text-muted flex items-center gap-1"><svg className="w-3 h-3 inline text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="m18.375 12.739-7.693 7.693a4.5 4.5 0 0 1-6.364-6.364l10.94-10.94A3 3 0 1 1 19.5 7.372L8.55 18.328a1.5 1.5 0 0 1-2.122-2.122l9.193-9.193" /></svg> {highlightText(r.attachment_match.filename, searchRegex)}</p>
                     )}
                   </div>
                 </div>
@@ -528,7 +576,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
               </div>
             )}
             {fileResults.map(r => (
-              <div key={r.id} onClick={() => { selectGroup(r.group_id); if (r.linked_message_id) setScrollToMessageId(r.linked_message_id); handleExitSearch(); }} className="px-4 py-2.5 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+              <div key={r.id} onClick={() => { selectGroupAction(r.group_id); if (r.linked_message_id) setScrollToMessageId(r.linked_message_id); handleExitSearch(); }} className="px-4 py-2.5 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                 <div className="flex items-start gap-2">
                   <div className="w-7 h-7 rounded-lg bg-emerald-500/10 flex items-center justify-center flex-shrink-0 text-emerald-500">
                     {getFileIcon(r.mime_type)}
@@ -613,7 +661,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
               </div>
             )}
             {commentResults.map(r => (
-              <div key={r.id} onClick={() => { if (r.group_id) { selectGroup(r.group_id); setScrollToMessageId(r.message_id); } handleExitSearch(); }} className="px-4 py-2.5 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+              <div key={r.id} onClick={() => { if (r.group_id) { selectGroupAction(r.group_id); setScrollToMessageId(r.message_id); } handleExitSearch(); }} className="px-4 py-2.5 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                 <div className="flex items-start gap-2">
                   <div className="w-5 h-5 rounded-full flex items-center justify-center text-white text-[9px] font-semibold flex-shrink-0" style={{ backgroundColor: getSenderColor(r.sender_type, r.sender_id) }}>
                     {getAvatarLetter(r.sender_type, r.sender_id)}
@@ -642,7 +690,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
               </div>
             )}
             {memberResults.map(r => (
-              <div key={`${r.id}_${r.group_id}`} onClick={() => { selectGroup(r.group_id); handleExitSearch(); }} className="px-4 py-2.5 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+              <div key={`${r.id}_${r.group_id}`} onClick={() => { selectGroupAction(r.group_id); handleExitSearch(); }} className="px-4 py-2.5 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                 <div className="flex items-center gap-2">
                   <div className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[9px] font-semibold flex-shrink-0" style={{ backgroundColor: r.type === 'ai' ? (r.color || AI_COLORS[r.id] || '#6b7280') : '#171717' }}>
                     {r.type === 'ai' ? (r.name?.[0] || 'A') : 'U'}
@@ -665,16 +713,22 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
           <div>
             {activeTab === 'all' && (
               <div className="flex items-center gap-1.5 px-4 py-1.5">
-                <svg className="w-3 h-3 text-pink-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0 0 22.5 18.75V5.25A2.25 2.25 0 0 0 20.25 3H3.75A2.25 2.25 0 0 0 1.5 5.25v13.5A2.25 2.25 0 0 0 3.75 21Z" /></svg>
+                <svg className="w-3 h-3 text-pink-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
                 <span className="text-[10px] font-medium text-pink-500">媒体</span>
                 <span className="text-[10px] text-text-muted">{mediaResults.length}</span>
               </div>
             )}
             {mediaResults.map(r => {
-              const mediaIcon = r.media_type === 'image' ? '🖼️' : r.media_type === 'audio' ? '🎵' : '🎬';
+              const mediaIcon = r.media_type === 'image' ? (
+                <svg className="w-3 h-3 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
+              ) : r.media_type === 'audio' ? (
+                <svg className="w-3 h-3 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" /></svg>
+              ) : (
+                <svg className="w-3 h-3 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" /></svg>
+              );
               const mediaLabel = r.media_type === 'image' ? '图片' : r.media_type === 'audio' ? '音频' : '视频';
               return (
-                <div key={r.id} onClick={() => { selectGroup(r.group_id); handleExitSearch(); }} className="px-4 py-2.5 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+                <div key={r.id} onClick={() => { selectGroupAction(r.group_id); handleExitSearch(); }} className="px-4 py-2.5 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                   <div className="flex items-start gap-2">
                     <div className="w-7 h-7 rounded-lg bg-pink-500/10 flex items-center justify-center flex-shrink-0 text-[14px]">
                       {mediaIcon}
@@ -757,6 +811,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
         <div className="flex-1 overflow-y-auto pb-safe">
           {renderSearchResults()}
         </div>
+        {Toast}
       </div>
     );
   }
@@ -782,43 +837,60 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto pb-safe">
-        <AnimatePresence mode="wait">
-          {loading && groups.length === 0 ? (
-            <motion.div
-              key="chat-list-skeleton"
-              initial={{ opacity: 1 }}
-              exit={reducedMotion ? { opacity: 1 } : { opacity: 0 }}
-              transition={{ duration: 0.15 }}
-            >
-              <ChatListSkeleton count={8} />
-            </motion.div>
-          ) : (
-            <motion.div
-              key="chat-list-content"
-              initial={reducedMotion ? { opacity: 1 } : { opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ duration: 0.2, ease: [0.0, 0.0, 0.2, 1] }}
-            >
-              {renderGroupSection('pinned', groupedGroups.pinned)}
-              {renderGroupSection('today', groupedGroups.today)}
-              {renderGroupSection('yesterday', groupedGroups.yesterday)}
-              {renderGroupSection('thisWeek', groupedGroups.thisWeek)}
-              {renderGroupSection('earlier', groupedGroups.earlier)}
-
-              {!loading && sortedGroups.length === 0 && (
-                <div className="flex flex-col items-center justify-center h-64 text-text-muted animate-fade-in">
-                  <svg className="w-16 h-16 mb-4 opacity-30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
-                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                  </svg>
-                  <span className="text-sm">还没有聊天</span>
-                  <span className="text-xs mt-1">点击右上角 + 创建新聊天</span>
-                </div>
-              )}
-            </motion.div>
+      <div className="flex-1 overflow-hidden">
+        <ErrorBoundary
+          fallback={({ reset }) => (
+            <div className="flex flex-col items-center justify-center h-full p-6 text-center">
+              <p className="text-sm text-text-secondary mb-3">聊天列表出现异常，请重试</p>
+              <button
+                onClick={reset}
+                className="px-4 py-1.5 text-xs font-medium text-white bg-accent rounded-lg hover:bg-accent-hover transition-colors"
+              >
+                重试
+              </button>
+            </div>
           )}
-        </AnimatePresence>
+        >
+          <div className="h-full overflow-y-auto pb-safe">
+            <AnimatePresence mode="wait">
+              {loading && groups.length === 0 ? (
+                <motion.div
+                  key="chat-list-skeleton"
+                  initial={{ opacity: 1 }}
+                  exit={{ opacity: 1 }}
+                  transition={{ duration: 0.15 }}
+                >
+                  <ChatListSkeleton count={8} />
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="chat-list-content"
+                  initial={{ opacity: 1 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ duration: 0.2, ease: [0.0, 0.0, 0.2, 1] }}
+                >
+                  {renderGroupSection('pinned', groupedGroups.pinned)}
+                  {renderGroupSection('today', groupedGroups.today)}
+                  {renderGroupSection('yesterday', groupedGroups.yesterday)}
+                  {renderGroupSection('thisWeek', groupedGroups.thisWeek)}
+                  {renderGroupSection('earlier', groupedGroups.earlier)}
+
+                  {!loading && sortedGroups.length === 0 && (
+                    <div className="flex flex-col items-center justify-center h-64 text-text-muted animate-fade-in">
+                      <svg className="w-16 h-16 mb-4 opacity-30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                      </svg>
+                      <span className="text-sm">还没有聊天</span>
+                      <span className="text-xs mt-1">点击右上角 + 创建新聊天</span>
+                    </div>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </ErrorBoundary>
       </div>
+      {Toast}
     </div>
   );
 }

@@ -95,6 +95,12 @@ export default {
         'chat-item-in': 'chatItemIn 300ms ease-out forwards',
         'chat-group-in': 'chatGroupIn 200ms ease-out forwards',
         'action-btn-in': 'actionBtnIn 150ms ease-out forwards',
+        'checkmark': 'checkmark 300ms ease-out forwards',
+        'draw-check': 'drawCheck 400ms ease-out forwards',
+        'ping-fast': 'pingFast 600ms cubic-bezier(0, 0, 0.2, 1) infinite',
+        'new-message-badge-pulse': 'newMessageBadgePulse 2s ease-in-out infinite',
+        'bounce-subtle': 'bounceSubtle 2s ease-in-out infinite',
+        'member-item-in': 'memberItemIn 250ms ease-out forwards',
       },
       keyframes: {
         messageIn: {
@@ -218,6 +224,30 @@ export default {
         actionBtnIn: {
           '0%': { opacity: '0', transform: 'scale(0.8)' },
           '100%': { opacity: '1', transform: 'scale(1)' },
+        },
+        checkmark: {
+          '0%': { opacity: '0', transform: 'scale(0)' },
+          '100%': { opacity: '1', transform: 'scale(1)' },
+        },
+        drawCheck: {
+          '0%': { strokeDashoffset: '20' },
+          '100%': { strokeDashoffset: '0' },
+        },
+        pingFast: {
+          '0%': { transform: 'scale(1)', opacity: '1' },
+          '75%, 100%': { transform: 'scale(2)', opacity: '0' },
+        },
+        newMessageBadgePulse: {
+          '0%, 100%': { boxShadow: '0 0 0 0 rgba(239, 68, 68, 0.5)' },
+          '50%': { boxShadow: '0 0 0 6px rgba(239, 68, 68, 0)' },
+        },
+        bounceSubtle: {
+          '0%, 100%': { transform: 'translateY(0)' },
+          '50%': { transform: 'translateY(-3px)' },
+        },
+        memberItemIn: {
+          '0%': { opacity: '0', transform: 'translateX(-8px)' },
+          '100%': { opacity: '1', transform: 'translateX(0)' },
         },
       },
       transitionDuration: {

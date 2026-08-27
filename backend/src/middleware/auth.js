@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { getAuthDb } from '../models/authDb.js';
+import { getAuthDb, findSessionByToken, isAdminUserId } from '../models/authDb.js';
 import { safeLog } from '../utils/logger.js';
 
 const authMode = process.env.AUTH_MODE || 'session';
@@ -11,13 +11,12 @@ const publicPaths = [
   '/api/csrf-token',
   '/api/auth/token',
   '/api/auth/register',
-  '/api/auth/login',
   '/api/auth/login-phone',
   '/api/auth/register-sms',
   '/api/auth/me',
   '/api/sms/send',
   '/api/sms/verify',
-  '/api/tts/audio'
+  '/api/files/public'
 ];
 
 async function refreshSessionIfNeeded(session, req, res) {
@@ -32,14 +31,7 @@ async function refreshSessionIfNeeded(session, req, res) {
       const { withWriteLock } = await import('../models/db.js');
       await withWriteLock('auth', async () => {
         await db.read();
-        const s = db.data.sessions.find(s => {
-          if (s.token.length !== session.token.length) return false;
-          try {
-            return crypto.timingSafeEqual(Buffer.from(s.token), Buffer.from(session.token));
-          } catch {
-            return false;
-          }
-        });
+        const s = findSessionByToken(db, session.token);
         if (s) {
           s.expires_at = newExpiresAt;
           await db.write();
@@ -52,7 +44,8 @@ async function refreshSessionIfNeeded(session, req, res) {
         domain: isProduction ? undefined : 'localhost',
         path: '/',
         sameSite: isProduction ? 'none' : 'lax',
-        maxAge: Math.floor(SESSION_MAX_AGE / 1000),
+        // Express res.cookie 的 maxAge 单位是毫秒。
+        maxAge: SESSION_MAX_AGE,
         secure: isProduction
       });
       session.expires_at = newExpiresAt;
@@ -60,6 +53,18 @@ async function refreshSessionIfNeeded(session, req, res) {
       safeLog('warn', '会话刷新失败:', { error: err?.message });
     }
   }
+}
+
+async function resolveSessionUser(req) {
+  const token = req.cookies?.session_token;
+  if (!token) return { error: 'unauthenticated' };
+  const db = getAuthDb();
+  await db.read();
+  const session = findSessionByToken(db, token);
+  if (!session || new Date(session.expires_at) < new Date()) {
+    return { error: 'expired' };
+  }
+  return { session };
 }
 
 const authMiddleware = async (req, res, next) => {
@@ -91,33 +96,21 @@ const authMiddleware = async (req, res, next) => {
   }
 
 
-  const token = req.cookies?.session_token;
-  if (!token) {
-    return res.status(401).json({
-      error: '未登录',
-      requiresAuth: true
-    });
-  }
-
   try {
-    const db = getAuthDb();
-    await db.read();
-    
-    const session = db.data.sessions.find(s => {
-      if (s.token.length !== token.length) return false;
-      try {
-        return crypto.timingSafeEqual(Buffer.from(s.token), Buffer.from(token));
-      } catch {
-        return false;
-      }
-    });
-    if (!session || new Date(session.expires_at) < new Date()) {
+    const { session, error } = await resolveSessionUser(req);
+    if (error === 'unauthenticated') {
+      return res.status(401).json({
+        error: '未登录',
+        requiresAuth: true
+      });
+    }
+    if (error === 'expired' || !session) {
       return res.status(401).json({
         error: '会话已过期',
         requiresAuth: true
       });
     }
-    
+
     req.userId = session.userId;
     req.session = session;
 
@@ -138,27 +131,15 @@ export const requireAuth = async (req, res, next) => {
     return next();
   }
 
-  const token = req.cookies?.session_token;
-  if (!token) {
-    return res.status(401).json({
-      error: '需要身份验证',
-      requiresAuth: true
-    });
-  }
-
   try {
-    const db = getAuthDb();
-    await db.read();
-
-    const session = db.data.sessions.find(s => {
-      if (s.token.length !== token.length) return false;
-      try {
-        return crypto.timingSafeEqual(Buffer.from(s.token), Buffer.from(token));
-      } catch {
-        return false;
-      }
-    });
-    if (!session || new Date(session.expires_at) < new Date()) {
+    const { session, error } = await resolveSessionUser(req);
+    if (error === 'unauthenticated') {
+      return res.status(401).json({
+        error: '需要身份验证',
+        requiresAuth: true
+      });
+    }
+    if (error === 'expired' || !session) {
       return res.status(401).json({
         error: '会话已过期',
         requiresAuth: true
@@ -178,12 +159,28 @@ export const requireAuth = async (req, res, next) => {
 };
 
 export const requireAdmin = async (req, res, next) => {
-  await requireAuth(req, res, async () => {
-    if (!req.userId || !req.userId.startsWith('admin')) {
+  const proceed = async () => {
+    let isAdmin = isAdminUserId(req.userId);
+    if (!isAdmin) {
+      try {
+        const db = getAuthDb();
+        await db.read();
+        const user = db.data.users.find(u => u.id === req.userId);
+        isAdmin = user?.role === 'admin' || isAdminUserId(user?.id);
+      } catch (err) {
+        safeLog('error', '管理员校验失败:', { error: err?.message });
+      }
+    }
+    if (!isAdmin) {
       return res.status(403).json({ error: '需要管理员权限' });
     }
     next();
-  });
+  };
+
+  if (req.session || req.userId) {
+    return proceed();
+  }
+  await requireAuth(req, res, proceed);
 };
 
 export default authMiddleware;

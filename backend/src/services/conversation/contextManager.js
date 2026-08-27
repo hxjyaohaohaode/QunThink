@@ -27,6 +27,14 @@ class ConversationContextManager {
       }
     }
   }
+
+  static dispose() {
+    const instance = conversationContextManager;
+    if (instance && instance._cleanupTimer) {
+      clearInterval(instance._cleanupTimer);
+      instance._cleanupTimer = null;
+    }
+  }
   
   cleanupStaleEntries() {
     const maxAge = 60 * 60 * 1000;
@@ -82,7 +90,11 @@ class ConversationContextManager {
     
     // 保持历史长度
     if (context.messages.length > this.config.maxHistoryLength) {
+      const removedCount = context.messages.length - this.config.maxHistoryLength;
       context.messages = context.messages.slice(-this.config.maxHistoryLength);
+      if (context.currentTopic && typeof context.currentTopic.startMessageIndex === 'number') {
+        context.currentTopic.startMessageIndex = Math.max(0, context.currentTopic.startMessageIndex - removedCount);
+      }
     }
     
     // 分析话题

@@ -34,7 +34,24 @@ export function AnimatedButton({
   const [showCheckmark, setShowCheckmark] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const rippleIdRef = useRef(0);
+  const timersRef = useRef<number[]>([]);
   const reducedMotion = useReducedMotion();
+
+  const safeSetTimeout = useCallback((fn: () => void, delay: number) => {
+    const id = window.setTimeout(() => {
+      fn();
+      timersRef.current = timersRef.current.filter((t) => t !== id);
+    }, delay);
+    timersRef.current.push(id);
+    return id;
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      timersRef.current.forEach((id) => clearTimeout(id));
+      timersRef.current = [];
+    };
+  }, []);
 
   const sizeClasses = {
     sm: 'px-3 py-1.5 text-sm',
@@ -60,7 +77,7 @@ export function AnimatedButton({
 
   const handleMouseDown = useCallback((e: React.MouseEvent<HTMLButtonElement>) => {
     if (disabled) return;
-    
+
     setIsPressed(true);
     setIsRecovering(false);
 
@@ -85,14 +102,14 @@ export function AnimatedButton({
 
   const handleMouseUp = useCallback(() => {
     if (disabled) return;
-    
+
     setIsPressed(false);
     setIsRecovering(true);
-    
-    setTimeout(() => {
+
+    safeSetTimeout(() => {
       setIsRecovering(false);
     }, 100);
-  }, [disabled]);
+  }, [disabled, safeSetTimeout]);
 
   const handleMouseEnter = useCallback(() => {
     if (!disabled) {
@@ -108,29 +125,27 @@ export function AnimatedButton({
 
   const handleClick = useCallback(async (e: React.MouseEvent<HTMLButtonElement>) => {
     if (disabled) return;
-    
+
     if (onClick) {
       onClick(e);
     }
-    
+
     if (showSuccess && onSuccess) {
       onSuccess();
       setShowCheckmark(true);
-      setTimeout(() => {
+      safeSetTimeout(() => {
         setShowCheckmark(false);
       }, 1500);
     }
-  }, [disabled, onClick, showSuccess, onSuccess]);
+  }, [disabled, onClick, showSuccess, onSuccess, safeSetTimeout]);
 
   useEffect(() => {
-    const cleanup = setTimeout(() => {
-      if (ripples.length > 0) {
-        setRipples(prev => prev.slice(1));
-      }
+    if (ripples.length === 0) return;
+    const cleanup = safeSetTimeout(() => {
+      setRipples(prev => prev.slice(1));
     }, 500);
-
     return () => clearTimeout(cleanup);
-  }, [ripples]);
+  }, [ripples, safeSetTimeout]);
 
   const getTransformStyle = () => {
     if (reducedMotion) return 'none';
@@ -161,11 +176,11 @@ export function AnimatedButton({
       style={{
         transform: getTransformStyle(),
         boxShadow: getShadowStyle(),
-        transition: reducedMotion 
+        transition: reducedMotion
           ? 'none'
-          : isPressed 
-            ? 'transform 100ms ease-out' 
-            : isRecovering 
+          : isPressed
+            ? 'transform 100ms ease-out'
+            : isRecovering
               ? 'transform 100ms ease-out'
               : 'transform 150ms ease-out, box-shadow 150ms ease-out, background-color 150ms ease-out',
       }}
@@ -190,7 +205,7 @@ export function AnimatedButton({
           }}
         />
       ))}
-      
+
       <span className="relative z-10 flex items-center justify-center gap-2">
         {showCheckmark ? (
           <CheckmarkIcon reducedMotion={reducedMotion} />
@@ -204,16 +219,16 @@ export function AnimatedButton({
 
 function CheckmarkIcon({ reducedMotion }: { reducedMotion: boolean }) {
   return (
-    <svg 
+    <svg
       className={`w-5 h-5 ${reducedMotion ? '' : 'animate-checkmark'}`}
-      viewBox="0 0 24 24" 
-      fill="none" 
-      stroke="currentColor" 
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
       strokeWidth="3"
-      strokeLinecap="round" 
+      strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <path 
+      <path
         d="M5 13l4 4L19 7"
         className={reducedMotion ? '' : 'animate-draw-check'}
       />

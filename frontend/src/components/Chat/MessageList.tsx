@@ -85,10 +85,19 @@ const MessageItemWrapper = React.memo(({
 });
 
 export function MessageList() {
-  const { currentGroup } = useGroupsStore();
-  const { messages, pagination, loading, batchDeleteMessages, clearAllMessages, loadMoreMessages, streamUpdateCounter } = useMessagesStore();
-  const { typingIndicators, addReplyingTo } = useUIStore();
-  const { scrollToMessageId, setScrollToMessageId } = useNavigationStore();
+  const currentGroup = useGroupsStore((s) => s.currentGroup);
+  const currentGroupId = currentGroup?.id ?? null;
+  const rawGroupMessages = useMessagesStore((s) => (currentGroupId ? s.messages[currentGroupId] : undefined));
+  const loading = useMessagesStore((s) => s.loading);
+  const streamUpdateCounter = useMessagesStore((s) => s.streamUpdateCounter);
+  const rawPagination = useMessagesStore((s) => (currentGroupId ? s.pagination[currentGroupId] : undefined));
+  const batchDeleteMessages = useMessagesStore((s) => s.batchDeleteMessages);
+  const clearAllMessages = useMessagesStore((s) => s.clearAllMessages);
+  const loadMoreMessages = useMessagesStore((s) => s.loadMoreMessages);
+  const rawTyping = useUIStore((s) => (currentGroupId ? s.typingIndicators[currentGroupId] : undefined));
+  const addReplyingTo = useUIStore((s) => s.addReplyingTo);
+  const scrollToMessageId = useNavigationStore((s) => s.scrollToMessageId);
+  const setScrollToMessageId = useNavigationStore((s) => s.setScrollToMessageId);
   const { confirm, ConfirmModal } = useConfirm();
   const { showToast, Toast } = useToast();
   const virtuosoRef = useRef<any>(null);
@@ -129,24 +138,34 @@ export function MessageList() {
 
   const visibleMessageIds = useRef<Set<string>>(new Set());
 
-  const markAsRead = async (messageId: string) => {
+  // 已读回执批量防抖：逐条 POST 会在进入含大量历史消息的群时瞬间打满限流桶，
+  // 连带把真正的消息发送挤成 429。收集后 800ms 合并为一次批量请求。
+  const pendingReadIdsRef = useRef<Set<string>>(new Set());
+  const readFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const markAsRead = useCallback((messageId: string) => {
     if (!currentGroup) return;
-    try {
-      await api.markMessageRead(currentGroup.id, messageId);
-    } catch (error) { }
-  };
+    pendingReadIdsRef.current.add(messageId);
+    if (readFlushTimerRef.current) return;
+    readFlushTimerRef.current = setTimeout(async () => {
+      readFlushTimerRef.current = null;
+      const ids = [...pendingReadIdsRef.current];
+      pendingReadIdsRef.current.clear();
+      if (ids.length === 0 || !currentGroup) return;
+      try {
+        await api.markMessagesReadBatch(currentGroup.id, ids);
+      } catch { /* 已读回执失败可静默，下次可见范围变化会重试 */ }
+    }, 800);
+  }, [currentGroup]);
 
   const isDebateMode = currentGroup?.debate_mode || false;
 
-  const groupMessages = useMemo(() => {
-    return currentGroup ? (messages[currentGroup.id] || []) : [];
-  }, [currentGroup?.id, messages]);
-  const groupTyping = useMemo(() => {
-    return currentGroup ? (typingIndicators[currentGroup.id] || {}) : {};
-  }, [currentGroup?.id, typingIndicators]);
-  const groupPagination = useMemo(() => {
-    return currentGroup ? (pagination[currentGroup.id] || { hasMore: false, loadingMore: false, oldestMessageId: null }) : { hasMore: false, loadingMore: false, oldestMessageId: null };
-  }, [currentGroup?.id, pagination]);
+  const groupMessages = useMemo(() => rawGroupMessages || [], [rawGroupMessages]);
+  const groupTyping = useMemo(() => rawTyping || {}, [rawTyping]);
+  const groupPagination = useMemo(
+    () => rawPagination || { hasMore: false, loadingMore: false, oldestMessageId: null },
+    [rawPagination]
+  );
 
   const typingAiIds = useMemo(() => Object.entries(groupTyping)
     .filter(([_, isTyping]) => isTyping)
@@ -217,26 +236,53 @@ export function MessageList() {
     }
   }, []);
 
+  // 用户主动上滚意图：仅由 wheel/touch 事件设置（程序化滚动不触发），
+  // 用于在等待 AI 回复期间让用户能够脱离底部跟随。
+  const userScrolledUpRef = useRef(false);
+
+  useEffect(() => {
+    const el = scrollerRef.current;
+    if (!(el instanceof HTMLElement)) return;
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < -5) {
+        userScrolledUpRef.current = true;
+        if (awaitingResponseRef.current) clearAwaitingResponse();
+      } else if (e.deltaY > 5) {
+        userScrolledUpRef.current = false;
+      }
+    };
+    let touchStartY = 0;
+    const onTouchStart = (e: TouchEvent) => { touchStartY = e.touches[0]?.clientY ?? 0; };
+    const onTouchMove = (e: TouchEvent) => {
+      const y = e.touches[0]?.clientY ?? 0;
+      if (y - touchStartY > 8) {
+        userScrolledUpRef.current = true;
+        if (awaitingResponseRef.current) clearAwaitingResponse();
+      }
+    };
+    el.addEventListener('wheel', onWheel, { passive: true });
+    el.addEventListener('touchstart', onTouchStart, { passive: true });
+    el.addEventListener('touchmove', onTouchMove, { passive: true });
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove', onTouchMove);
+    };
+  }, [currentGroup?.id, clearAwaitingResponse]);
+
   const handleAtBottomStateChange = useCallback((atBottom: boolean) => {
     const wasAtBottom = isAtBottom;
 
-    if (!atBottom && awaitingResponseRef.current && !isScrollingRef.current) {
-      return;
-    }
-
     setIsAtBottom(atBottom);
-
-    if (!atBottom) {
-      if (isScrollingRef.current) {
-        clearAwaitingResponse();
-      }
+    if (atBottom) {
+      userScrolledUpRef.current = false;
     }
 
     if (!wasAtBottom && atBottom && unreadCount > 0) {
       setUnreadCount(0);
       setFirstUnreadMessageId(null);
     }
-  }, [isAtBottom, unreadCount, clearAwaitingResponse]);
+  }, [isAtBottom, unreadCount]);
 
   const handleAtTopStateChange = useCallback((atTop: boolean) => {
     if (atTop && currentGroup && groupPagination.hasMore && !groupPagination.loadingMore && !loadingMoreRef.current) {
@@ -250,9 +296,8 @@ export function MessageList() {
       loadingMoreRef.current = true;
 
       loadMoreMessages(currentGroup.id).then(() => {
-        setTimeout(() => {
-          loadingMoreRef.current = false;
-        }, 100);
+        // 在加载完成后立即重置，不再使用固定100ms定时器
+        loadingMoreRef.current = false;
       }).catch(() => {
         loadingMoreRef.current = false;
       });
@@ -274,18 +319,21 @@ export function MessageList() {
       const hasUserMessage = newMessages.some(m => m.sender_type === 'user');
       if (hasUserMessage) {
         setIsAtBottom(true);
+        userScrolledUpRef.current = false;
         awaitingResponseRef.current = true;
         if (awaitingResponseTimerRef.current) {
           clearTimeout(awaitingResponseTimerRef.current);
         }
+        // 超时时间延长至 120 秒，覆盖长回复场景（推理模型、长文本生成等）
+        // 在流式输出过程中会通过 hasStreamingMessages 重置此定时器
         awaitingResponseTimerRef.current = setTimeout(() => {
           awaitingResponseRef.current = false;
           awaitingResponseTimerRef.current = null;
-        }, 30000);
+        }, 120000);
         setTimeout(() => scrollToBottom('smooth'), 50);
       }
 
-      if (!isAtBottom && !awaitingResponseRef.current) {
+      if (!isAtBottom && !awaitingResponseRef.current && !userScrolledUpRef.current) {
         const aiMessageCount = newMessages.filter(m => m.sender_type === 'ai').length;
         if (aiMessageCount > 0) {
           setUnreadCount(prev => prev + aiMessageCount);
@@ -299,7 +347,7 @@ export function MessageList() {
         }
       }
 
-      if (awaitingResponseRef.current && !hasUserMessage) {
+      if (awaitingResponseRef.current && !hasUserMessage && !userScrolledUpRef.current) {
         setTimeout(() => scrollToBottom('smooth'), 50);
       }
     }
@@ -335,7 +383,7 @@ export function MessageList() {
   }, [loading, groupMessages.length, listItems.length, scrollToBottom]);
 
   useEffect(() => {
-    if (typingAiIds.length > 0 && awaitingResponseRef.current) {
+    if (typingAiIds.length > 0 && awaitingResponseRef.current && !userScrolledUpRef.current) {
       setTimeout(() => scrollToBottom('smooth'), 50);
     }
   }, [typingAiIds.length, listItems.length, scrollToBottom]);
@@ -345,7 +393,15 @@ export function MessageList() {
       const now = Date.now();
       if (now - lastStreamScrollRef.current >= 100) {
         lastStreamScrollRef.current = now;
-        scrollToBottom('auto');
+        if (!userScrolledUpRef.current) scrollToBottom('auto');
+      }
+      // 流式输出过程中持续重置 awaitingResponse 定时器，避免长回复超时
+      if (awaitingResponseTimerRef.current) {
+        clearTimeout(awaitingResponseTimerRef.current);
+        awaitingResponseTimerRef.current = setTimeout(() => {
+          awaitingResponseRef.current = false;
+          awaitingResponseTimerRef.current = null;
+        }, 120000);
       }
     }
   }, [streamUpdateCounter, hasStreamingMessages, scrollToBottom]);
@@ -355,12 +411,23 @@ export function MessageList() {
       const lastMsg = groupMessages[groupMessages.length - 1];
       if (lastMsg && lastMsg.sender_type === 'ai' && !lastMsg.is_streaming) {
         clearAwaitingResponse();
+        // 流式结束且 AI 回复完成时，强制滚动到底部，确保完整消息可见
+        if (!userScrolledUpRef.current) {
+          setTimeout(() => scrollToBottom('smooth'), 50);
+        }
       }
     }
-  }, [typingAiIds.length, hasStreamingMessages, groupMessages, clearAwaitingResponse]);
+  }, [typingAiIds.length, hasStreamingMessages, groupMessages, clearAwaitingResponse, scrollToBottom]);
 
   useEffect(() => {
-    if (scrollToMessageId && groupMessages.length > 0) {
+    if (!scrollToMessageId) return;
+
+    // 5 秒内未能定位到目标消息则消费掉导航请求，避免永久悬挂
+    const consumeTimeoutId = setTimeout(() => {
+      setScrollToMessageId(null);
+    }, 5000);
+
+    if (groupMessages.length > 0) {
       const itemIndex = listItems.findIndex(
         item => item.type === 'message' && item.data.id === scrollToMessageId
       );
@@ -387,6 +454,8 @@ export function MessageList() {
         setScrollToMessageId(null);
       }
     }
+
+    return () => clearTimeout(consumeTimeoutId);
   }, [scrollToMessageId, groupMessages.length, listItems, setScrollToMessageId]);
 
   const toggleMultiSelectMode = useCallback(() => {
@@ -476,12 +545,19 @@ export function MessageList() {
     setUnreadCount(0);
   }, [firstUnreadMessageId, listItems, scrollToBottom]);
 
-  const renderItem = useCallback((_index: number, item: ListItem) => {
+  const renderItem = useCallback((_index: number, item: ListItem, context: { selectedIds: Set<string> }) => {
     const message = item.data as Message;
-    const isSelected = selectedMessageIdsRef.current.has(message.id);
+    const isSelected = context.selectedIds.has(message.id) || selectedMessageIdsRef.current.has(message.id);
     const isRecentNew = newMessageIdsRef.current.has(message.id) && !initialLoadRef.current;
     const isNearBottom = _index >= listItems.length - MAX_ANIMATED_MESSAGES;
     const isNew = isRecentNew && isNearBottom;
+
+    // 计算是否为同发送者最后一条消息（避免每条消息都订阅store）
+    const nextItem = _index < listItems.length - 1 ? listItems[_index + 1] : null;
+    const nextMessage = nextItem?.data as Message | undefined;
+    const isLastInGroup = !nextMessage ||
+      nextMessage.sender_type !== message.sender_type ||
+      nextMessage.sender_id !== message.sender_id;
 
     return (
       <MessageItemWrapper
@@ -517,12 +593,16 @@ export function MessageList() {
               onReply={() => !isMultiSelectMode && addReplyingTo(message.id)}
               isMultiSelectMode={isMultiSelectMode}
               isDebateMode={isDebateMode}
+              isLastInGroup={isLastInGroup}
             />
           </div>
         </div>
       </MessageItemWrapper>
     );
   }, [isMultiSelectMode, toggleMessageSelection, addReplyingTo, isDebateMode, reducedMotion, listItems.length]);
+
+  // 通过 virtuoso context 下发选中集合，勾选变化时触发可见项重渲染
+  const virtuosoContext = useMemo(() => ({ selectedIds: selectedMessageIds }), [selectedMessageIds]);
 
   if (!currentGroup) {
     return (
@@ -624,7 +704,11 @@ export function MessageList() {
               transition={{ duration: 0.2 }}
             >
               <div className="text-center">
-                <div className="text-6xl mb-4">👋</div>
+                <div className="flex justify-center mb-4">
+                  <svg className="w-14 h-14 text-accent/60" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" />
+                  </svg>
+                </div>
                 <p className="text-text-secondary mb-2">开始你的第一个问题吧！</p>
                 <p className="text-text-muted text-sm">
                   试试问：「帮我分析一下这段代码有什么问题」
@@ -644,6 +728,7 @@ export function MessageList() {
                 ref={virtuosoRef}
                 data={listItems}
                 itemContent={renderItem}
+                context={virtuosoContext}
                 scrollerRef={(ref) => { scrollerRef.current = ref; }}
                 isScrolling={handleIsScrolling}
                 atBottomStateChange={handleAtBottomStateChange}

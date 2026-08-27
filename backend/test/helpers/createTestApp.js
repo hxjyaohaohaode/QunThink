@@ -8,6 +8,7 @@ import messagesRouter from '../../src/routes/messages.js';
 import filesRouter from '../../src/routes/files.js';
 import memoryRouter from '../../src/routes/memory.js';
 import ttsRouter from '../../src/routes/tts.js';
+import apiConfigRouter from '../../src/routes/apiconfig.js';
 import authMiddleware, { isAuthConfigured } from '../../src/middleware/auth.js';
 import { injectUserDb } from '../../src/middleware/userDb.js';
 import { getAuthDb } from '../../src/models/authDb.js';
@@ -103,6 +104,7 @@ export function createTestApp() {
   app.use('/api', authRouter);
   app.use(authMiddleware);
   app.use(injectUserDb);
+  app.use('/api/user', apiConfigRouter);
   app.use('/api', groupsRouter);
   app.use('/api', messagesRouter);
   app.use('/api', filesRouter);

@@ -8,26 +8,35 @@ export function injectUserDb(req, res, next) {
 
   const userId = req.userId;
   if (!userId) {
-    if (requestPath.startsWith('/api/tts/audio/')) {
-      return next();
-    }
-    return res.status(500).json({ error: '用户身份未设置' });
+    // 公开路径（如签名下载）不携带身份：不注入但放行；
+    // 受保护路径的 userId 已由认证中间件保证。
+    return next();
   }
-  
+
   req.getUserDb = async () => {
     return getUserDb(userId);
   };
-  
+
   next();
 }
 
 export function requireGroupMembership(req, res, next) {
-  const groupId = req.params.id || req.params.groupId || req.params.group_id || req.body.group_id;
+  const groupId = req.params.id || req.params.groupId || req.params.group_id || req.body?.group_id;
   if (!groupId) {
-    return next();
+    return res.status(400).json({ error: '缺少群组ID' });
   }
-  
-  req.getUserDb().then(db => {
+
+  if (typeof req.getUserDb !== 'function') {
+    return res.status(500).json({ error: '用户数据库未注入' });
+  }
+
+  req.getUserDb().then(async db => {
+    try {
+      await db.read();
+    } catch (err) {
+      console.error('群组权限检查读取失败:', err);
+      return res.status(500).json({ error: '服务器错误' });
+    }
     const group = db.data.groups?.find(g => g.id === groupId);
     if (!group) {
       return res.status(404).json({ error: '群组不存在或无权访问' });
@@ -40,12 +49,22 @@ export function requireGroupMembership(req, res, next) {
 }
 
 export function requireGroupOwner(req, res, next) {
-  const groupId = req.params.id || req.params.groupId || req.params.group_id || req.body.group_id;
+  const groupId = req.params.id || req.params.groupId || req.params.group_id || req.body?.group_id;
   if (!groupId) {
     return res.status(400).json({ error: '缺少群组ID' });
   }
 
-  req.getUserDb().then(db => {
+  if (typeof req.getUserDb !== 'function') {
+    return res.status(500).json({ error: '用户数据库未注入' });
+  }
+
+  req.getUserDb().then(async db => {
+    try {
+      await db.read();
+    } catch (err) {
+      console.error('群主权限检查读取失败:', err);
+      return res.status(500).json({ error: '服务器错误' });
+    }
     const group = db.data.groups?.find(g => g.id === groupId);
     if (!group) {
       return res.status(404).json({ error: '群组不存在' });

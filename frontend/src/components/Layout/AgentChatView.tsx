@@ -1,7 +1,8 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+﻿import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { useAgentsStore } from '../../stores/agentsStore';
 import { AgentChatMessage } from '../../types';
 import { motion, AnimatePresence } from 'framer-motion';
+import { avatarBackgroundImageStyle } from '../Common/Avatar';
 
 interface AgentChatViewProps {
   agentId: string;
@@ -110,7 +111,15 @@ const SuggestionButtons = React.memo(function SuggestionButtons({
 });
 
 export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
-  const { agents, currentAgent, selectAgent, agentMessages, fetchAgentMessages, sendAgentMessage, fetchAgentSuggestions } = useAgentsStore();
+  const agents = useAgentsStore((s) => s.agents);
+  const currentAgent = useAgentsStore((s) => s.currentAgent);
+  const selectAgent = useAgentsStore((s) => s.selectAgent);
+  const fetchAgentMessages = useAgentsStore((s) => s.fetchAgentMessages);
+  const sendAgentMessage = useAgentsStore((s) => s.sendAgentMessage);
+  const fetchAgentSuggestions = useAgentsStore((s) => s.fetchAgentSuggestions);
+  const agentMessages = useAgentsStore((s) =>
+    (currentAgent?.id ?? agentId) ? s.agentMessages.get(currentAgent?.id ?? agentId) : undefined
+  );
   const [inputValue, setInputValue] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
@@ -138,7 +147,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
     );
   }
 
-  const messages = agentMessages.get(agentId) || [];
+  const messages = agentMessages || [];
   const isAgentStreaming = messages.some((m) => m.is_streaming);
 
   const lastFinishedAgentMsgId = messages.length > 0
@@ -280,19 +289,24 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
     setAttachedFiles(prev => prev.filter((_, i) => i !== index));
   }, []);
 
-  const getFileIcon = (file: File) => {
+  const getFileIcon = (file: File): React.ReactNode => {
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
     const mimeType = file.type || '';
-    if (mimeType.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) return '🖼️';
-    if (mimeType.startsWith('audio/') || ['mp3', 'wav', 'm4a', 'aac', 'flac', 'wma', 'ogg'].includes(ext)) return '🎵';
-    if (mimeType.startsWith('video/') || ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv'].includes(ext)) return '🎬';
-    if (ext === 'pdf') return '📄';
-    if (['doc', 'docx'].includes(ext)) return '📝';
-    if (['xls', 'xlsx', 'csv'].includes(ext)) return '📊';
-    if (['ppt', 'pptx'].includes(ext)) return '�';
-    if (['txt', 'md', 'json', 'xml', 'yaml', 'yml', 'toml'].includes(ext)) return '📃';
-    if (['py', 'js', 'ts', 'jsx', 'tsx', 'html', 'css', 'java', 'c', 'cpp', 'go', 'rs'].includes(ext)) return '�';
-    return '📁';
+    const renderIcon = (d: string): React.ReactNode => (
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d={d} />
+      </svg>
+    );
+    if (mimeType.startsWith('image/') || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) return renderIcon('m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z');
+    if (mimeType.startsWith('audio/') || ['mp3', 'wav', 'm4a', 'aac', 'flac', 'wma', 'ogg'].includes(ext)) return renderIcon('M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z');
+    if (mimeType.startsWith('video/') || ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv'].includes(ext)) return renderIcon('m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z');
+    if (ext === 'pdf') return renderIcon('M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z');
+    if (['doc', 'docx'].includes(ext)) return renderIcon('M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z');
+    if (['xls', 'xlsx', 'csv'].includes(ext)) return renderIcon('M3.75 3v11.25A2.25 2.25 0 0 0 6 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0 1 18 16.5h-2.25m-7.5 0h7.5m-7.5 0-1 3m8.5-3 1 3m0 0 .5 1.5m-.5-1.5h-9.5m0 0-.5 1.5m.75-9 3-3 2.148 2.148A12.061 12.061 0 0 1 16.5 7.605');
+    if (['ppt', 'pptx'].includes(ext)) return renderIcon('M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z');
+    if (['txt', 'md', 'json', 'xml', 'yaml', 'yml', 'toml'].includes(ext)) return renderIcon('M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z');
+    if (['py', 'js', 'ts', 'jsx', 'tsx', 'html', 'css', 'java', 'c', 'cpp', 'go', 'rs'].includes(ext)) return renderIcon('M17.25 6.75 22.5 12l-5.25 5.25M6.75 17.25 1.5 12l5.25-5.25');
+    return renderIcon('M3.75 9.776c.112-.017.227-.026.344-.026h15.812c.117 0 .232.009.344.026m-16.5 0a2.25 2.25 0 0 0-1.883 2.542l.857 6a2.25 2.25 0 0 0 2.227 1.932H19.05a2.25 2.25 0 0 0 2.227-1.932l.857-6a2.25 2.25 0 0 0-1.883-2.542m-16.5 0V6A2.25 2.25 0 0 1 6 3.75h3.879a1.5 1.5 0 0 1 1.06.44l2.122 2.12a1.5 1.5 0 0 0 1.06.44H18A2.25 2.25 0 0 1 20.25 9v.776');
   };
 
   const clearSuggestions = useCallback(() => {
@@ -330,7 +344,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   }, [inputValue, attachedFiles, isSending, isAgentStreaming, agentId, clearSuggestions, sendAgentMessage]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSend();
     }
@@ -378,7 +392,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
               className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-semibold flex-shrink-0 shadow-sm overflow-hidden"
               style={{
                 backgroundColor: agent.avatar_url ? 'transparent' : avatarColor,
-                backgroundImage: agent.avatar_url ? `url(${agent.avatar_url})` : 'none',
+                backgroundImage: avatarBackgroundImageStyle(agent.avatar_url),
                 backgroundSize: 'cover',
                 backgroundPosition: 'center',
               }}
@@ -405,7 +419,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
                   className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-semibold flex-shrink-0 shadow-sm overflow-hidden mt-1"
                   style={{
                     backgroundColor: agent.avatar_url ? 'transparent' : avatarColor,
-                    backgroundImage: agent.avatar_url ? `url(${agent.avatar_url})` : 'none',
+                    backgroundImage: avatarBackgroundImageStyle(agent.avatar_url),
                     backgroundSize: 'cover',
                     backgroundPosition: 'center',
                   }}
@@ -438,7 +452,25 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
                                 : 'bg-bg-surface2 text-text-secondary'
                                 }`}
                             >
-                              <span>{att.type === 'image' ? '🖼️' : att.type === 'audio' ? '🎵' : att.type === 'video' ? '🎬' : '📄'}</span>
+                              <span className="inline-flex">
+                                {att.type === 'image' ? (
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" />
+                                  </svg>
+                                ) : att.type === 'audio' ? (
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
+                                  </svg>
+                                ) : att.type === 'video' ? (
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="m15.75 10.5 4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9a2.25 2.25 0 0 0-2.25-2.25h-9A2.25 2.25 0 0 0 2.25 7.5v9a2.25 2.25 0 0 0 2.25 2.25Z" />
+                                  </svg>
+                                ) : (
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+                                  </svg>
+                                )}
+                              </span>
                               <span className="max-w-[120px] truncate">{att.filename}</span>
                             </span>
                           ))}
@@ -516,7 +548,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
                   onClick={() => removeAttachedFile(index)}
                   className="ml-1 text-text-muted hover:text-red-500 transition-colors"
                 >
-                  ✕
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                 </button>
               </div>
             ))}

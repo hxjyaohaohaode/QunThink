@@ -1,14 +1,23 @@
-import React, { useRef, useEffect, useState, useCallback, memo } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo, memo } from 'react';
 import { useAudioStore } from '../../stores/audioStore';
 import { getDevUserId } from '../../services/api';
 import { resolveBackendAssetUrl } from '../../services/runtimeConfig';
+import { Strands } from '../Visual/Strands';
 
 interface AudioPlayerProps {
   messageId: string;
   audioUrl: string;
   duration: number;
   onDelete?: () => void;
+  /** 该消息 AI 的主题色（avatar_color）；缺省时使用与全局 accent 同源的默认三色 */
+  accentColor?: string;
 }
+
+// 与主题 accent（#6C5CE7）及暗色 accent（#93BBFD）同源的默认三色
+const DEFAULT_STRAND_COLORS = ['#6C5CE7', '#A29BFE', '#93BBFD'];
+
+const isMobileViewport = (): boolean =>
+  typeof window !== 'undefined' && !!window.matchMedia?.('(max-width: 767px)').matches;
 
 function buildAudioSrc(rawUrl: string): string {
   let src = rawUrl;
@@ -40,10 +49,14 @@ function buildAudioSrc(rawUrl: string): string {
   return src;
 }
 
-export const AudioPlayer = memo(function AudioPlayer({ messageId, audioUrl, duration, onDelete }: AudioPlayerProps) {
+export const AudioPlayer = memo(function AudioPlayer({ messageId, audioUrl, duration, onDelete, accentColor }: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const srcRef = useRef<string>('');
-  const { setAudioPlaying, setAudioTime, setCurrentAudioId, currentAudioId, stopAll } = useAudioStore();
+  const setAudioPlaying = useAudioStore((s) => s.setAudioPlaying);
+  const setAudioTime = useAudioStore((s) => s.setAudioTime);
+  const setCurrentAudioId = useAudioStore((s) => s.setCurrentAudioId);
+  const stopAll = useAudioStore((s) => s.stopAll);
+  const currentAudioId = useAudioStore((s) => s.currentAudioId);
   const [progress, setProgress] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -53,15 +66,12 @@ export const AudioPlayer = memo(function AudioPlayer({ messageId, audioUrl, dura
 
   useEffect(() => {
     const src = buildAudioSrc(audioUrl);
-
-    if (srcRef.current === src) return;
     srcRef.current = src;
 
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.removeAttribute('src');
       audioRef.current.load();
-      audioRef.current = null;
     }
 
     const audio = new Audio();
@@ -153,6 +163,10 @@ export const AudioPlayer = memo(function AudioPlayer({ messageId, audioUrl, dura
       audio.pause();
       audio.removeAttribute('src');
       audio.load();
+      if (audioRef.current === audio) {
+        audioRef.current = null;
+      }
+      srcRef.current = '';
     };
   }, [audioUrl, messageId, setAudioPlaying, setAudioTime, setCurrentAudioId]);
 
@@ -214,6 +228,43 @@ export const AudioPlayer = memo(function AudioPlayer({ messageId, audioUrl, dura
     setCurrentTime(audio.currentTime);
   }, []);
 
+  const seekToPercent = useCallback((pct: number) => {
+    const audio = audioRef.current;
+    if (!audio || !audio.duration) return;
+    const clampedPct = Math.min(100, Math.max(0, pct));
+    const nextTime = (clampedPct / 100) * audio.duration;
+    audio.currentTime = nextTime;
+    setProgress(clampedPct);
+    setCurrentTime(nextTime);
+  }, []);
+
+  const handleProgressKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    switch (e.key) {
+      case 'ArrowLeft':
+      case 'ArrowDown':
+        e.preventDefault();
+        e.stopPropagation();
+        seekToPercent(progress - 5);
+        break;
+      case 'ArrowRight':
+      case 'ArrowUp':
+        e.preventDefault();
+        e.stopPropagation();
+        seekToPercent(progress + 5);
+        break;
+      case 'Home':
+        e.preventDefault();
+        e.stopPropagation();
+        seekToPercent(0);
+        break;
+      case 'End':
+        e.preventDefault();
+        e.stopPropagation();
+        seekToPercent(100);
+        break;
+    }
+  }, [progress, seekToPercent]);
+
   const handleDelete = useCallback(() => {
     const audio = audioRef.current;
     if (audio) {
@@ -240,6 +291,13 @@ export const AudioPlayer = memo(function AudioPlayer({ messageId, audioUrl, dura
   const sanitizedDuration = (preferredDuration > 0 && preferredDuration < 600) ? preferredDuration : 0;
   const displayDuration = sanitizedDuration > 0 ? sanitizedDuration : 5;
 
+  // 播放中声波球：优先用 AI 主题色，否则默认三色；移动端降级 count/scale
+  const strandColors = useMemo(
+    () => (accentColor ? [accentColor, '#7C3AED', '#06B6D4'] : DEFAULT_STRAND_COLORS),
+    [accentColor]
+  );
+  const orbMobile = isPlaying && isMobileViewport();
+
   return (
     <div className="flex items-center gap-2 mt-3 group/audio">
       {audioError ? (
@@ -257,6 +315,7 @@ export const AudioPlayer = memo(function AudioPlayer({ messageId, audioUrl, dura
       <div className="flex items-center gap-2.5 bg-bg-surface3 backdrop-blur-sm rounded-xl px-3.5 py-2 min-w-[160px] max-w-[280px]">
         <button
           onClick={isPlaying ? handlePause : handlePlay}
+          aria-pressed={isPlaying}
           className="w-8 h-8 flex items-center justify-center rounded-full bg-white/25 hover:bg-white/40 text-white transition-all flex-shrink-0 shadow-sm"
           title={isPlaying ? '暂停' : '播放'}
         >
@@ -272,10 +331,45 @@ export const AudioPlayer = memo(function AudioPlayer({ messageId, audioUrl, dura
           )}
         </button>
 
+        {isPlaying && (
+          <div
+            aria-hidden="true"
+            className={`relative flex-shrink-0 rounded-full ${orbMobile ? 'w-9 h-9' : 'w-11 h-11'}`}
+          >
+            <Strands
+              className="absolute inset-0"
+              colors={strandColors}
+              count={orbMobile ? 2 : 3}
+              speed={0.9}
+              amplitude={1}
+              waviness={1.1}
+              thickness={0.85}
+              glow={2.8}
+              taper={3}
+              spread={1}
+              intensity={0.75}
+              saturation={1.5}
+              scale={orbMobile ? 1.15 : 1}
+              glass
+              refraction={1}
+              dispersion={1}
+              glassSize={1}
+              dpr={1}
+            />
+          </div>
+        )}
+
         <div className="flex-1 flex flex-col gap-1.5 min-w-0">
           <div
             className="w-full h-2 bg-white/20 rounded-full cursor-pointer relative group/progress"
             onClick={handleSeek}
+            role="slider"
+            aria-label="播放进度"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(progress)}
+            tabIndex={0}
+            onKeyDown={handleProgressKeyDown}
           >
             <div
               className="h-full bg-indigo-400 rounded-full relative transition-all"

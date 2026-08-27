@@ -4,11 +4,19 @@ const { Pool } = pg;
 
 let pool = null;
 let initialized = false;
-let _connectionFailed = false;
+let _lastConnectionFailureAt = 0;
+const CONNECTION_RETRY_COOLDOWN_MS = 60 * 1000;
 let initializing = null;
 
 export function isSupabaseEnabled() {
-  return !!process.env.SUPABASE_DB_URL && !_connectionFailed;
+  if (!process.env.SUPABASE_DB_URL) return false;
+  if (_lastConnectionFailureAt === 0) return true;
+  if (Date.now() - _lastConnectionFailureAt >= CONNECTION_RETRY_COOLDOWN_MS) {
+    console.warn('🔁 Supabase 冷却期结束，下次访问将重试连接');
+    _lastConnectionFailureAt = 0;
+    return true;
+  }
+  return false;
 }
 
 export function isCloudDbEnabled() {
@@ -24,16 +32,12 @@ export async function getPool() {
 
   initializing = (async () => {
     try {
-      const sslConfig = connectionString.includes('pooler.supabase.com')
-        ? { ssl: { rejectUnauthorized: false } }
-        : { ssl: { rejectUnauthorized: false } };
-
       pool = new Pool({
         connectionString,
         max: 5,
         idleTimeoutMillis: 60000,
         connectionTimeoutMillis: 15000,
-        ...sslConfig
+        ssl: { rejectUnauthorized: true }
       });
 
       pool.on('error', (err) => {
@@ -51,16 +55,19 @@ export async function getPool() {
       client.release();
 
       initialized = true;
+      _lastConnectionFailureAt = 0;
       console.log('✅ Supabase/PostgreSQL 连接成功');
       initializing = null;
       return pool;
     } catch (err) {
       console.error('❌ Supabase/PostgreSQL 连接失败:', err.message);
-      _connectionFailed = true;
+      console.error('⚠️ 将在 60 秒后自动重试；期间新请求按无云库处理。数据不会静默切换到本地存储。');
+      _lastConnectionFailureAt = Date.now();
       if (pool) {
         try { await pool.end(); } catch (e) {}
       }
       pool = null;
+      initialized = false;
       initializing = null;
       throw err;
     }
@@ -81,6 +88,9 @@ export class PgLow {
     try {
       const p = await getPool();
       if (!p) {
+        if (process.env.NODE_ENV === 'production') {
+          throw new Error('PostgreSQL连接不可用');
+        }
         this.data = JSON.parse(JSON.stringify(this.defaultData));
         return;
       }
@@ -95,6 +105,7 @@ export class PgLow {
       }
     } catch (err) {
       console.warn('PgLow read failed:', err.message);
+      if (process.env.NODE_ENV === 'production') throw err;
       this.data = JSON.parse(JSON.stringify(this.defaultData));
     }
   }
@@ -102,7 +113,7 @@ export class PgLow {
   async write() {
     try {
       const p = await getPool();
-      if (!p) return;
+      if (!p) throw new Error('PostgreSQL连接不可用，拒绝丢弃写入');
       await p.query(
         `INSERT INTO kv_store (key, data, updated_at)
          VALUES ($1, $2, NOW())

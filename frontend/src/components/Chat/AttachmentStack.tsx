@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
+﻿import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { MessageAttachment } from '../../types';
 import { sanitizeUrl } from '../../utils/sanitizeUrl';
@@ -26,6 +26,8 @@ const STACK_FRONT_CARD_TOP = 4;
 function getSwipeThreshold() {
   return Math.max(SWIPE_THRESHOLD_MIN, Math.min(SWIPE_THRESHOLD_MAX, STACK_CARD_WIDTH * 0.18));
 }
+
+// 阈值只与常量相关，模块级计算一次即可
 
 export function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
@@ -149,8 +151,19 @@ const LightboxModal: React.FC<{
   const panStartRef = useRef({ x: 0, y: 0 });
   const containerRef = useRef<HTMLDivElement>(null);
   const controlsTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const currentTypeRef = useRef<string>('');
 
-  const current = attachments[currentIndex];
+  const safeIndex = Math.min(currentIndex, Math.max(attachments.length - 1, 0));
+  const current = attachments[safeIndex];
+
+  // 删除附件后按新长度收敛索引，避免 currentIndex 越界渲染出 null
+  useEffect(() => {
+    setCurrentIndex(prev => Math.min(prev, Math.max(attachments.length - 1, 0)));
+  }, [attachments.length]);
+
+  useEffect(() => {
+    currentTypeRef.current = current?.type || '';
+  }, [current?.type]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -220,18 +233,25 @@ const LightboxModal: React.FC<{
     return () => { if (controlsTimerRef.current) clearTimeout(controlsTimerRef.current); };
   }, [currentIndex, resetControlsTimer]);
 
-  const handleWheel = useCallback((e: React.WheelEvent) => {
-    if (!isImageType(current?.type || '')) return;
-    e.preventDefault();
-    const delta = e.deltaY > 0 ? 0.9 : 1.1;
-    setZoomScale(prev => {
-      const next = prev * delta;
-      if (next <= 1) { setIsZoomed(false); return 1; }
-      if (next >= 5) return 5;
-      setIsZoomed(true);
-      return next;
-    });
-  }, [current?.type]);
+  // 原生 wheel 监听（passive:false），React 的 onWheel 无法阻止默认滚动行为
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const handleWheelNative = (e: WheelEvent) => {
+      if (!isImageType(currentTypeRef.current)) return;
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      setZoomScale(prev => {
+        const next = prev * delta;
+        if (next <= 1) { setIsZoomed(false); return 1; }
+        if (next >= 5) return 5;
+        setIsZoomed(true);
+        return next;
+      });
+    };
+    el.addEventListener('wheel', handleWheelNative, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheelNative);
+  }, []);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     if (!isZoomed) return;
@@ -271,7 +291,6 @@ const LightboxModal: React.FC<{
         style={{ zIndex: LIGHTBOX_Z_INDEX }}
         onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
         onMouseMove={resetControlsTimer}
-        onWheel={handleWheel}
       >
         <div
           className="relative max-w-[95vw] max-h-[95vh] flex items-center justify-center"
@@ -297,6 +316,7 @@ const LightboxModal: React.FC<{
             <video
               src={sanitizeUrl(current.url)}
               controls
+              muted
               className="max-w-[90vw] max-h-[85vh] rounded-lg"
               autoPlay
             />
@@ -309,7 +329,7 @@ const LightboxModal: React.FC<{
                 </svg>
               </div>
               <p className="text-white text-sm font-medium">{current.name}</p>
-              <audio src={sanitizeUrl(current.url)} controls className="w-80" autoPlay />
+              <audio src={sanitizeUrl(current.url)} controls muted className="w-80" autoPlay />
             </div>
           )}
           {!isImageType(current.type) && !isVideoType(current.type) && !isAudioType(current.type) && (
@@ -351,7 +371,7 @@ const LightboxModal: React.FC<{
                     <button onClick={onClose} className="w-9 h-9 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-white transition-colors">
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
                     </button>
-                    <span className="text-white text-sm font-medium">{currentIndex + 1} / {attachments.length}</span>
+                    <span className="text-white text-sm font-medium">{safeIndex + 1} / {attachments.length}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     {isImageType(current.type) && (

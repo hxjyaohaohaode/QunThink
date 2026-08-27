@@ -1,0 +1,45 @@
+# ============================================================
+# Netlify 部署配置（前端 SPA）
+#
+# ⚠️ 必改项：API 代理目标后端
+#   下方 redirects 中所有 {YOUR_BACKEND_HOST} 均为占位符，
+#   必须替换为你真实的后端域名（例如 your-app.onrender.com）。
+#
+#   说明：
+#   - Netlify 的 redirects/rewrites 不支持环境变量插值，
+#     无法在运行时读取 Netlify 后台的环境变量来填充该值，
+#     因此占位符必须以真实域名形式落盘在本文件中。
+#   - 推荐流程：在 Netlify 后台 Site configuration →
+#     Environment variables 配置 BACKEND_HOST=你的后端域名，
+#     并在构建命令中先渲染本文件的占位符，例如：
+#       command = "sed -i \"s/{YOUR_BACKEND_HOST}/$BACKEND_HOST/g\" ../netlify.toml && npm run build"
+#     （或使用任何等价的模板渲染手段）
+# ============================================================
+
+[build]
+  base = "frontend"
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# API 反向代理：把 /api/* 转发到后端，规避浏览器跨域限制
+[[redirects]]
+  from = "/api/*"
+  to = "https://{YOUR_BACKEND_HOST}/api/:splat"
+  status = 200
+  force = true
+
+# WebSocket 代理（Netlify 对 WS 支持有限，生产建议使用支持 WS 的平台）
+[[redirects]]
+  from = "/ws"
+  to = "https://{YOUR_BACKEND_HOST}/ws"
+  status = 200
+  force = true
+
+# SPA 回退：所有未命中路径交给前端路由
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

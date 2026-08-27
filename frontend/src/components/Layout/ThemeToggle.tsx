@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+﻿import React, { useState, useEffect, useRef } from 'react';
 import { useThemeStore, Theme } from '../../stores/themeStore';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 
@@ -9,7 +9,8 @@ const themeOptions: { value: Theme; label: string; icon: React.ReactNode }[] = [
 ];
 
 export function ThemeToggle() {
-  const { theme, setTheme } = useThemeStore();
+  const theme = useThemeStore((s) => s.theme);
+  const setTheme = useThemeStore((s) => s.setTheme);
   const [isAnimating, setIsAnimating] = useState(false);
   const [prevTheme, setPrevTheme] = useState<Theme>(theme);
   const containerRef = useRef<HTMLDivElement>(null);

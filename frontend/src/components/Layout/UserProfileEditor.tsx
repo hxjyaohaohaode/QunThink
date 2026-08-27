@@ -1,7 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+﻿import { useState, useEffect, useCallback } from 'react';
 import { useProfileStore, UserProfile } from '../../stores/profileStore';
 import { useModalAnimation } from '../../hooks/useModalAnimation';
 import { useToast } from '../Common';
+import { avatarBackgroundImageStyle } from '../Common/Avatar';
 
 interface UserProfileEditorProps {
   isOpen: boolean;
@@ -88,7 +89,9 @@ function TagSelector({
 }
 
 export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
-  const { profile, fetchProfile, updateProfile } = useProfileStore();
+  const profile = useProfileStore((s) => s.profile);
+  const fetchProfile = useProfileStore((s) => s.fetchProfile);
+  const updateProfile = useProfileStore((s) => s.updateProfile);
   const { isVisible, close: handleClose, overlayClass, contentClass, sheetClass } = useModalAnimation(isOpen, onClose);
   const { showToast } = useToast();
   const [form, setForm] = useState<UserProfile>(profile);
@@ -237,7 +240,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
                 className="w-16 h-16 rounded-full flex items-center justify-center text-white text-xl font-bold overflow-hidden border-2 border-border-subtle"
                 style={{
                   backgroundColor: form.avatar_url ? 'transparent' : 'var(--accent-color, #4f46e5)',
-                  backgroundImage: form.avatar_url ? `url(${form.avatar_url})` : 'none',
+                  backgroundImage: avatarBackgroundImageStyle(form.avatar_url),
                   backgroundSize: 'cover',
                   backgroundPosition: 'center'
                 }}

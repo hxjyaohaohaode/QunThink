@@ -1,274 +1,174 @@
 /**
  * 互动行为记录与分析API路由
  * 提供互动日志查询、统计分析、质量评估等功能
+ * 所有数据严格限定在当前登录用户自己的数据库内
  */
 
 import express from 'express';
 import interactionLogger from '../services/interactionLogger.js';
-import { requireAuth } from '../middleware/auth.js';
+import { asyncHandler } from '../middleware/errorHandler.js';
 
 const router = express.Router();
+
+function buildFilter(query) {
+  const filter = {};
+  if (query.type) filter.type = String(query.type).slice(0, 64);
+  if (query.participantType) filter.participantType = String(query.participantType).slice(0, 32);
+  if (query.participantId) filter.participantId = String(query.participantId).slice(0, 128);
+  if (query.groupId) filter.groupId = String(query.groupId).slice(0, 128);
+  if (query.startDate) filter.startDate = String(query.startDate).slice(0, 40);
+  if (query.endDate) filter.endDate = String(query.endDate).slice(0, 40);
+  return filter;
+}
+
+function parseLimit(raw, fallback = 100) {
+  const parsed = parseInt(String(raw), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, 1), 1000);
+}
+
+function parseOffset(raw) {
+  const parsed = parseInt(String(raw), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return parsed;
+}
 
 /**
  * 获取互动日志
  * GET /api/interaction/logs
  */
-router.get('/interaction/logs', async (req, res) => {
-  try {
-    const {
-      type,
-      participantType,
-      participantId,
-      groupId,
-      startDate,
-      endDate,
-      limit = 100,
-      offset = 0
-    } = req.query;
-    
-    const filter = {};
-    if (type) filter.type = type;
-    if (participantType) filter.participantType = participantType;
-    if (participantId) filter.participantId = participantId;
-    if (groupId) filter.groupId = groupId;
-    if (startDate) filter.startDate = startDate;
-    if (endDate) filter.endDate = endDate;
-    if (limit) filter.limit = parseInt(limit, 10);
-    
-    const result = await interactionLogger.getLogs(filter);
-    
-    // 应用分页
-    const start = parseInt(offset, 10) || 0;
-    const paginatedLogs = result.logs.slice(start, start + (filter.limit || 100));
-    
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      total: result.count,
-      returned: paginatedLogs.length,
-      offset: start,
-      limit: filter.limit,
-      logs: paginatedLogs
-    });
-  } catch (error) {
-    console.error('获取互动日志错误:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: '获取互动日志失败',
-      details: error.message 
-    });
-  }
-});
+router.get('/interaction/logs', asyncHandler(async (req, res) => {
+  const filter = buildFilter(req.query);
+  const limit = parseLimit(req.query.limit ?? req.queryLimit);
+  const offset = parseOffset(req.query.offset);
+
+  const result = await interactionLogger.getLogs(req.userId, { ...filter, limit });
+
+  const paginatedLogs = result.logs.slice(offset, offset + limit);
+
+  res.json({
+    success: true,
+    timestamp: new Date().toISOString(),
+    total: result.count,
+    returned: paginatedLogs.length,
+    offset,
+    limit,
+    logs: paginatedLogs
+  });
+}));
 
 /**
  * 获取互动统计
  * GET /api/interaction/stats
  */
-router.get('/interaction/stats', async (req, res) => {
-  try {
-    const { timeRange = '24h', groupId } = req.query;
-    
-    const result = await interactionLogger.getInteractionStats(timeRange, groupId);
-    
-    res.json({
-      success: true,
-      ...result
-    });
-  } catch (error) {
-    console.error('获取互动统计错误:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: '获取互动统计失败',
-      details: error.message 
-    });
-  }
-});
+router.get('/interaction/stats', asyncHandler(async (req, res) => {
+  const timeRange = String(req.query.timeRange || '24h').slice(0, 8);
+  const groupId = req.query.groupId ? String(req.query.groupId).slice(0, 128) : null;
+  const result = await interactionLogger.getInteractionStats(req.userId, timeRange, groupId);
+  res.json({ success: true, ...result });
+}));
 
 /**
  * 获取话题参与度分析
  * GET /api/interaction/participation
  */
-router.get('/interaction/participation', async (req, res) => {
-  try {
-    const { groupId, timeRange = '24h' } = req.query;
-    
-    if (!groupId) {
-      return res.status(400).json({ 
-        success: false, 
-        error: '缺少groupId参数' 
-      });
-    }
-    
-    const result = await interactionLogger.getTopicParticipation(groupId, timeRange);
-    
-    res.json({
-      success: true,
-      ...result
-    });
-  } catch (error) {
-    console.error('获取话题参与度分析错误:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: '获取话题参与度分析失败',
-      details: error.message 
+router.get('/interaction/participation', asyncHandler(async (req, res) => {
+  const { groupId } = req.query;
+
+  if (!groupId || typeof groupId !== 'string') {
+    return res.status(400).json({
+      success: false,
+      error: '缺少groupId参数'
     });
   }
-});
+
+  const timeRange = String(req.query.timeRange || '24h').slice(0, 8);
+  const result = await interactionLogger.getTopicParticipation(req.userId, groupId.slice(0, 128), timeRange);
+  res.json({ success: true, ...result });
+}));
 
 /**
  * 获取互动质量评估
  * GET /api/interaction/quality
  */
-router.get('/interaction/quality', async (req, res) => {
-  try {
-    const { timeRange = '24h' } = req.query;
-    
-    const result = await interactionLogger.getInteractionQualityMetrics(timeRange);
-    
-    res.json({
-      success: true,
-      ...result
-    });
-  } catch (error) {
-    console.error('获取互动质量评估错误:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: '获取互动质量评估失败',
-      details: error.message 
-    });
-  }
-});
+router.get('/interaction/quality', asyncHandler(async (req, res) => {
+  const timeRange = String(req.query.timeRange || '24h').slice(0, 8);
+  const result = await interactionLogger.getInteractionQualityMetrics(req.userId, timeRange);
+  res.json({ success: true, ...result });
+}));
 
 /**
  * 导出互动日志
  * GET /api/interaction/export
  */
-router.get('/interaction/export', async (req, res) => {
-  try {
-    const { 
-      format = 'json',
-      type,
-      participantType,
-      participantId,
-      groupId,
-      startDate,
-      endDate
-    } = req.query;
-    
-    const filter = {};
-    if (type) filter.type = type;
-    if (participantType) filter.participantType = participantType;
-    if (participantId) filter.participantId = participantId;
-    if (groupId) filter.groupId = groupId;
-    if (startDate) filter.startDate = startDate;
-    if (endDate) filter.endDate = endDate;
-    
-    const result = await interactionLogger.exportLogs(format, filter);
-    
-    // 设置响应头
-    if (format === 'csv') {
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', `attachment; filename=interaction_logs_${Date.now()}.csv`);
-      res.send(result.content);
-    } else {
-      res.json(result);
-    }
-  } catch (error) {
-    console.error('导出互动日志错误:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: '导出互动日志失败',
-      details: error.message 
-    });
+router.get('/interaction/export', asyncHandler(async (req, res) => {
+  const format = req.query.format === 'csv' ? 'csv' : 'json';
+  const filter = buildFilter(req.query);
+
+  const result = await interactionLogger.exportLogs(req.userId, format, filter);
+
+  if (format === 'csv') {
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=interaction_logs_${Date.now()}.csv`);
+    res.send(result.content);
+  } else {
+    res.json(result);
   }
-});
+}));
 
 /**
- * 获取系统状态
+ * 获取系统状态（当前用户视角）
  * GET /api/interaction/status
  */
-router.get('/interaction/status', async (req, res) => {
-  try {
-    const result = await interactionLogger.getSystemStatus();
-    
-    res.json({
-      success: true,
-      ...result
-    });
-  } catch (error) {
-    console.error('获取系统状态错误:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: '获取系统状态失败',
-      details: error.message 
-    });
-  }
-});
+router.get('/interaction/status', asyncHandler(async (req, res) => {
+  const result = await interactionLogger.getSystemStatus(req.userId);
+  res.json({ success: true, ...result });
+}));
+
+const ALLOWED_EVENT_TYPES = new Set(['like', 'comment', 'reply', 'message', 'topic_change', 'file_share', 'custom']);
+const ALLOWED_PARTICIPANT_TYPES = new Set(['ai', 'user', 'system']);
 
 /**
- * 清理旧日志（需要管理员权限）
- * POST /api/interaction/cleanup
- */
-router.post('/interaction/cleanup', requireAuth, async (req, res) => {
-  try {
-    if (!req.userId || !req.userId.startsWith('admin')) {
-      return res.status(403).json({ error: '需要管理员权限' });
-    }
-
-    const { daysToKeep = 30, confirm } = req.body;
-    
-    if (confirm !== 'CONFIRM_CLEANUP') {
-      return res.status(400).json({ 
-        success: false, 
-        error: '需要确认操作，请提供正确的确认代码' 
-      });
-    }
-    
-    const result = await interactionLogger.cleanupOldLogs(daysToKeep);
-    
-    res.json({
-      success: true,
-      ...result
-    });
-  } catch (error) {
-    console.error('清理旧日志错误:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: '清理旧日志失败',
-      details: error.message 
-    });
-  }
-});
-
-/**
- * 记录自定义互动事件（用于测试）
+ * 记录自定义互动事件
  * POST /api/interaction/log
  */
-router.post('/interaction/log', async (req, res) => {
-  try {
-    const event = req.body;
-    
-    if (!event.type || !event.participantType || !event.participantId) {
-      return res.status(400).json({ 
-        success: false, 
-        error: '缺少必要参数：type, participantType, participantId' 
-      });
-    }
-    
-    const result = await interactionLogger.logInteraction(event);
-    
-    res.json({
-      success: true,
-      ...result
-    });
-  } catch (error) {
-    console.error('记录互动事件错误:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: '记录互动事件失败',
-      details: error.message 
+router.post('/interaction/log', asyncHandler(async (req, res) => {
+  const event = req.body || {};
+
+  if (!ALLOWED_EVENT_TYPES.has(event.type) || !ALLOWED_PARTICIPANT_TYPES.has(event.participantType)) {
+    return res.status(400).json({
+      success: false,
+      error: '参数不合法：type 或 participantType 不在允许范围内'
     });
   }
-});
+
+  if (!event.participantId || typeof event.participantId !== 'string' || event.participantId.length > 128) {
+    return res.status(400).json({
+      success: false,
+      error: '缺少必要参数：participantId（≤128字符）'
+    });
+  }
+
+  if (event.content !== undefined && (typeof event.content !== 'string' || event.content.length > 2000)) {
+    return res.status(400).json({
+      success: false,
+      error: 'content 必须是不超过2000字符的字符串'
+    });
+  }
+
+  if (event.metadata !== undefined && (typeof event.metadata !== 'object' || event.metadata === null || Array.isArray(event.metadata))) {
+    return res.status(400).json({
+      success: false,
+      error: 'metadata 必须是对象'
+    });
+  }
+
+  const result = await interactionLogger.logInteraction(req.userId, event);
+
+  res.json({
+    success: true,
+    ...result
+  });
+}));
 
 export default router;

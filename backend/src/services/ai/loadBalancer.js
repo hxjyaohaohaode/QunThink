@@ -5,7 +5,8 @@
  */
 
 import axios from 'axios';
-import { aiHealthStatus, getAIConfigs } from './index.js';
+import { aiHealthStatus, getAIConfigs, normalizeBaseUrl } from './index.js';
+import { getSafeExternalRequestOptions } from '../../utils/safeExternalUrl.js';
 
 // 模型配置（从环境变量读取）
 const MODEL_CONFIGS = {
@@ -36,7 +37,9 @@ const MODEL_CONFIGS = {
   mimo_flash: {
     name: 'MiMo Pro',
     apiKey: process.env.MIMO_API_KEY || '',
-    endpoint: process.env.MIMO_BASE_URL ? `${process.env.MIMO_BASE_URL}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions',
+    endpoint: process.env.MIMO_BASE_URL
+      ? `${normalizeBaseUrl(process.env.MIMO_BASE_URL)}/chat/completions`
+      : 'https://api.xiaomimimo.com/v1/chat/completions',
     model: 'mimo-v2.5-pro',
     enabled: true,
     priority: 4
@@ -61,7 +64,6 @@ const PERFORMANCE_REQUIREMENTS = {
 class AILoadBalancer {
   constructor() {
     this.models = new Map();
-    this.metrics = new Map();
     this.healthStatus = new Map();
     this.circuitBreakers = new Map();
     this._timers = [];
@@ -76,15 +78,10 @@ class AILoadBalancer {
 
       // 延长健康检查间隔到5分钟，减少API调用压力
       const healthTimer = setInterval(() => this.performHealthChecks(), 5 * 60 * 1000);
-      const cleanupTimer = setInterval(() => this.cleanupOldMetrics(), 60 * 60 * 1000);
       if (typeof healthTimer.unref === 'function') {
         healthTimer.unref();
       }
-      if (typeof cleanupTimer.unref === 'function') {
-        cleanupTimer.unref();
-      }
       this._timers.push(healthTimer);
-      this._timers.push(cleanupTimer);
     }
   }
 
@@ -178,21 +175,6 @@ class AILoadBalancer {
     await Promise.allSettled(promises);
   }
 
-  /**
-   * 健康检查
-   */
-  async healthCheck(modelId) {
-    const model = this.models.get(modelId);
-    if (!model) throw new Error(`模型 ${modelId} 不存在`);
-
-    const status = aiHealthStatus.get(modelId);
-    if (status && status.status === 'healthy') {
-      return true;
-    } else {
-      throw new Error(status?.error || `模型 ${modelId} 不健康`);
-    }
-  }
-
   async probeHealth(modelId) {
     const aiConfigs = getAIConfigs();
     const config = aiConfigs[modelId];
@@ -205,26 +187,37 @@ class AILoadBalancer {
     aiHealthStatus.set(modelId, { status: 'checking', lastCheck: Date.now(), error: null, responseTime: 0 });
 
     const startTime = Date.now();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
 
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
-
-      const url = new URL(config.endpoint);
-      const healthCheckUrl = `${url.protocol}//${url.host}/`;
+      // 向实际的 /chat/completions 接口发送轻量级测试请求
+      // 使用 max_tokens:1 降低成本，仅验证鉴权与路径可达性
+      const testBody = {
+        model: config.model,
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 1,
+        stream: false
+      };
 
       try {
-        await axios.head(healthCheckUrl, {
+        const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
+        await axios.post(config.endpoint, testBody, {
+          headers: {
+            'Authorization': `Bearer ${config.apiKey}`,
+            'Content-Type': 'application/json'
+          },
           signal: controller.signal,
-          timeout: 5000,
-          validateStatus: () => true
+          timeout: 10000,
+          ...safeRequestOptions,
+          // 接受 2xx 与绝大多数 4xx 状态码：4xx 表示路径可达但鉴权/参数有问题，
+          // 仍可证明网络层与端点路径正确；但 401/403 意味着密钥失效，必须判为不健康
+          validateStatus: (status) => (status >= 200 && status < 300)
+            || (status >= 400 && status < 500 && status !== 401 && status !== 403)
         });
-      } catch {
-        await axios.get(healthCheckUrl, {
-          signal: controller.signal,
-          timeout: 5000,
-          validateStatus: () => true
-        });
+      } catch (err) {
+        // 若 axios 抛出，说明是网络层错误（DNS、连接超时、断网等）或鉴权失效，视为不健康
+        throw err;
       }
 
       clearTimeout(timeoutId);
@@ -240,6 +233,7 @@ class AILoadBalancer {
 
       return true;
     } catch (error) {
+      clearTimeout(timeoutId);
       const responseTime = Date.now() - startTime;
       aiHealthStatus.set(modelId, { status: 'unhealthy', lastCheck: Date.now(), error: error.message, responseTime });
       return false;
@@ -247,205 +241,10 @@ class AILoadBalancer {
   }
 
   /**
-   * 选择最佳模型
-   * @param {string} preference - 优先选择的模型ID
-   * @returns {string} 选择的模型ID
-   */
-  selectModel(preference = null) {
-    // 1. 过滤可用的模型
-    const availableModels = Array.from(this.models.entries())
-      .filter(([modelId, model]) => {
-        // 检查是否启用
-        if (!model.enabled) return false;
-
-        // 检查断路器状态
-        const breaker = this.circuitBreakers.get(modelId);
-        if (breaker.state === 'OPEN') {
-          // 如果断路器打开，检查是否可以重试
-          if (breaker.nextAttempt && Date.now() >= breaker.nextAttempt) {
-            breaker.state = 'HALF_OPEN';
-            breaker.nextAttempt = null;
-          } else {
-            return false;
-          }
-        }
-
-        // 检查健康状态
-        const health = this.healthStatus.get(modelId);
-        return health !== 'unhealthy';
-      });
-
-    if (availableModels.length === 0) {
-      throw new Error('没有可用的AI模型');
-    }
-
-    // 2. 如果有偏好且可用，优先选择
-    if (preference && availableModels.some(([id]) => id === preference)) {
-      return preference;
-    }
-
-    // 3. 基于优先级和性能指标选择
-    const scoredModels = availableModels.map(([modelId, model]) => {
-      const metrics = model.metrics;
-      const breaker = this.circuitBreakers.get(modelId);
-
-      // 计算性能得分
-      let score = 0;
-
-      // 成功率得分（权重40%）
-      const successRate = metrics.totalCalls > 0 ?
-        metrics.successfulCalls / metrics.totalCalls : 1;
-      score += successRate * 40;
-
-      // 响应时间得分（权重30%）
-      const avgResponseTime = metrics.successfulCalls > 0 ?
-        metrics.totalResponseTime / metrics.successfulCalls : 0;
-      const responseTimeScore = avgResponseTime > 0 ?
-        Math.max(0, 1 - avgResponseTime / PERFORMANCE_REQUIREMENTS.maxResponseTime) : 1;
-      score += responseTimeScore * 30;
-
-      // 相关性得分（权重20%）
-      const relevanceScore = metrics.relevanceScores.length > 0 ?
-        metrics.relevanceScores.reduce((a, b) => a + b, 0) / metrics.relevanceScores.length : 5;
-      const normalizedRelevance = relevanceScore / 5; // 归一化到0-1
-      score += normalizedRelevance * 20;
-
-      // 优先级得分（权重10%）
-      const priorityScore = (5 - model.priority) * 2; // 优先级1得8分，优先级4得2分
-      score += priorityScore;
-
-      // 断路器惩罚
-      if (breaker.state === 'HALF_OPEN') {
-        score *= 0.5; // 半开状态减半
-      }
-
-      // 最近失败惩罚
-      if (breaker.failureCount > 0) {
-        score *= Math.max(0.1, 1 - (breaker.failureCount * 0.1));
-      }
-
-      return { modelId, score, metrics };
-    });
-
-    // 按得分排序
-    scoredModels.sort((a, b) => b.score - a.score);
-
-    // 返回得分最高的模型
-    return scoredModels[0].modelId;
-  }
-
-  /**
-   * 调用AI模型
-   * @param {Object} params - 调用参数
-   * @param {string} params.preference - 优先模型
-   * @param {Array} params.messages - 消息列表
-   * @param {Object} params.options - 其他选项
-   * @returns {Promise<Object>} 调用结果
-   */
-  async callModel(params) {
-    const { preference, messages, options = {} } = params;
-
-    let selectedModelId = null;
-    let lastError = null;
-    let attempts = 0;
-    const maxAttempts = this.models.size; // 最多尝试所有模型
-
-    while (attempts < maxAttempts) {
-      attempts++;
-
-      try {
-        // 选择模型
-        selectedModelId = this.selectModel(attempts === 1 ? preference : null);
-        const model = this.models.get(selectedModelId);
-
-        if (!model) {
-          throw new Error(`模型 ${selectedModelId} 不存在`);
-        }
-
-        // 记录开始时间
-        const startTime = Date.now();
-
-        // 准备请求参数
-        const requestData = {
-          model: model.model,
-          messages,
-          max_tokens: options.max_tokens || 1000,
-          temperature: options.temperature || 0.8,
-          ...options
-        };
-
-        // 设置超时（增加到30秒，给大模型充足响应时间）
-        const timeout = options.timeout || 30000;
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-        try {
-          // 发送请求
-          const response = await axios.post(model.endpoint, requestData, {
-            headers: {
-              'Authorization': `Bearer ${model.apiKey}`,
-              'Content-Type': 'application/json'
-            },
-            signal: controller.signal,
-            timeout: timeout
-          });
-
-          clearTimeout(timeoutId);
-
-          // 计算响应时间
-          const responseTime = Date.now() - startTime;
-
-          // 记录成功指标
-          this.recordSuccess(selectedModelId, responseTime);
-
-          // 重置断路器
-          this.resetCircuitBreaker(selectedModelId);
-
-          return {
-            success: true,
-            modelId: selectedModelId,
-            modelName: model.name,
-            content: response.data.choices[0].message.content,
-            responseTime,
-            meetsRequirements: {
-              responseTime: responseTime <= PERFORMANCE_REQUIREMENTS.maxResponseTime,
-              // 相关性评分需要后续计算
-            },
-            rawResponse: response.data
-          };
-
-        } catch (error) {
-          clearTimeout(timeoutId);
-          throw error;
-        }
-
-      } catch (error) {
-        lastError = error;
-
-        // 记录失败
-        if (selectedModelId) {
-          this.recordFailure(selectedModelId, error);
-        }
-
-        // 如果还有模型可尝试，继续（减少延迟到500ms）
-        if (attempts < maxAttempts) {
-          console.warn(`模型 ${selectedModelId} 调用失败，等待500ms后尝试下一个模型:`, error.message);
-          await new Promise(resolve => setTimeout(resolve, 500));
-          continue;
-        }
-      }
-    }
-
-    // 所有尝试都失败
-    throw new Error(`所有AI模型调用失败，最后错误: ${lastError?.message}`);
-  }
-
-  /**
    * 记录成功调用
    */
   recordSuccess(modelId, responseTime, relevanceScore = null) {
-    const model = this.models.get(modelId);
-    if (!model) return;
+    const model = this.ensureModelEntry(modelId);
 
     const metrics = model.metrics;
     metrics.totalCalls++;
@@ -477,8 +276,7 @@ class AILoadBalancer {
    * 记录失败调用
    */
   recordFailure(modelId, error) {
-    const model = this.models.get(modelId);
-    if (!model) return;
+    const model = this.ensureModelEntry(modelId);
 
     const metrics = model.metrics;
     metrics.totalCalls++;
@@ -503,16 +301,54 @@ class AILoadBalancer {
   }
 
   /**
-   * 重置断路器
+   * 确保模型统计与断路器档案存在（callAI 可能传入未预置的模型ID，动态建档）
+   */
+  ensureModelEntry(modelId) {
+    let model = this.models.get(modelId);
+    if (!model) {
+      model = {
+        id: modelId,
+        name: modelId,
+        apiKey: '',
+        endpoint: '',
+        model: modelId,
+        enabled: true,
+        priority: 99,
+        metrics: {
+          totalCalls: 0,
+          successfulCalls: 0,
+          failedCalls: 0,
+          totalResponseTime: 0,
+          relevanceScores: [],
+          lastCallTime: null,
+          lastSuccessTime: null,
+          lastError: null
+        }
+      };
+      this.models.set(modelId, model);
+      this.circuitBreakers.set(modelId, {
+        failureCount: 0,
+        lastFailureTime: null,
+        state: 'CLOSED',
+        nextAttempt: null
+      });
+    }
+    return model;
+  }
+
+  /**
+   * 重置断路器，返回重置后的快照；模型不存在时返回 null
    */
   resetCircuitBreaker(modelId) {
     const breaker = this.circuitBreakers.get(modelId);
-    if (breaker) {
-      breaker.failureCount = 0;
-      breaker.state = 'CLOSED';
-      breaker.lastFailureTime = null;
-      breaker.nextAttempt = null;
+    if (!breaker) {
+      return null;
     }
+    breaker.failureCount = 0;
+    breaker.state = 'CLOSED';
+    breaker.lastFailureTime = null;
+    breaker.nextAttempt = null;
+    return { state: breaker.state, failureCount: breaker.failureCount };
   }
 
   /**
@@ -539,32 +375,6 @@ class AILoadBalancer {
     const finalScore = Math.min(5, Math.max(1, rawScore * lengthPenalty));
 
     return finalScore;
-  }
-
-  /**
-   * 清理旧指标
-   */
-  cleanupOldMetrics() {
-    const now = Date.now();
-    const oneHourAgo = now - 60 * 60 * 1000;
-    const MAX_METRICS_ENTRIES = 10000;
-
-    for (const [key, entry] of this.metrics.entries()) {
-      if (entry.timestamp && entry.timestamp < oneHourAgo) {
-        this.metrics.delete(key);
-      }
-    }
-
-    if (this.metrics.size > MAX_METRICS_ENTRIES) {
-      const entries = Array.from(this.metrics.entries());
-      entries.sort((a, b) => (a[1].timestamp || 0) - (b[1].timestamp || 0));
-      const toDelete = this.metrics.size - MAX_METRICS_ENTRIES;
-      for (let i = 0; i < toDelete; i++) {
-        this.metrics.delete(entries[i][0]);
-      }
-    }
-
-    console.log(`🧹 清理旧的AI模型指标数据，剩余条目: ${this.metrics.size}`);
   }
 
   /**
@@ -666,12 +476,13 @@ class AILoadBalancer {
     if (!model) throw new Error(`模型 ${modelId} 不存在`);
 
     Object.keys(newConfig).forEach(key => {
-      if (key !== 'id' && key !== 'metrics' && model.hasOwnProperty(key)) {
+      if (key !== 'id' && key !== 'metrics' && key !== 'apiKey' && model.hasOwnProperty(key)) {
         model[key] = newConfig[key];
       }
     });
 
-    return { success: true, modelId, updatedConfig: model };
+    const { apiKey: _stripped, ...safeModel } = model;
+    return { success: true, modelId, updatedConfig: safeModel };
   }
 
   /**

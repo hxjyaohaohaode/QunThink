@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useFocusTrap } from './useFocusTrap';
 
 interface ConfirmModalProps {
   visible: boolean;
@@ -25,6 +26,7 @@ export function ConfirmModal({
 }: ConfirmModalProps) {
   const [show, setShow] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
+  const closeTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (visible) {
@@ -33,43 +35,58 @@ export function ConfirmModal({
     }
   }, [visible]);
 
+  useEffect(() => {
+    return () => {
+      if (closeTimerRef.current !== null) clearTimeout(closeTimerRef.current);
+    };
+  }, []);
+
   const handleClose = useCallback(() => {
+    if (isClosing) return;
     setIsClosing(true);
-    setTimeout(() => {
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
       setShow(false);
       setIsClosing(false);
       onCancel();
     }, 200);
-  }, [onCancel]);
+  }, [onCancel, isClosing]);
 
   const handleConfirm = useCallback(() => {
     if (isClosing) return; // 防止双击重复触发
     setIsClosing(true);
-    setTimeout(() => {
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
       setShow(false);
       setIsClosing(false);
       onConfirm();
     }, 200);
   }, [onConfirm, isClosing]);
 
+  const trapRef = useFocusTrap<HTMLDivElement>(show && !isClosing && visible, handleClose);
+
   if (!show && !visible) return null;
 
   return (
     <div
-      className={`fixed inset-0 flex items-center justify-center z-50 p-4 backdrop-blur-sm transition-opacity duration-200 ${
+      className={`fixed inset-0 flex items-center justify-center z-[80] p-4 backdrop-blur-sm transition-opacity duration-200 ${
         show && !isClosing ? 'opacity-100' : 'opacity-0'
       } bg-black/50`}
       onClick={handleClose}
     >
       <div
+        ref={trapRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
         className={`w-full max-w-[420px] bg-bg-surface rounded-2xl shadow-xl border border-border-subtle overflow-hidden transition-all duration-[250ms] ${
           show && !isClosing
             ? 'opacity-100 scale-100'
             : 'opacity-0 scale-90'
         }`}
         style={{
-          transitionTimingFunction: show && !isClosing 
-            ? 'cubic-bezier(0.175, 0.885, 0.32, 1.275)' 
+          transitionTimingFunction: show && !isClosing
+            ? 'cubic-bezier(0.175, 0.885, 0.32, 1.275)'
             : 'cubic-bezier(0.4, 0.0, 1, 1)'
         }}
         onClick={(e) => e.stopPropagation()}

@@ -53,10 +53,28 @@ const persistTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 const pendingSaveMessages: Record<string, Message[]> = {};
 const MAX_CACHED_GROUPS = 15;
 const MAX_COMMENT_DEPTH = 10;
-const MESSAGE_STALE_TIME_MS = 10 * 1000;
+const MESSAGE_STALE_TIME_MS = 3 * 1000;
 const messageFetchPromises = new Map<string, Promise<void>>();
 const lastMessageFetchAt = new Map<string, number>();
 const streamTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+
+// 清理指定消息的流式超时定时器
+function clearStreamTimeout(messageId: string) {
+  const timer = streamTimeouts.get(messageId);
+  if (timer) {
+    clearTimeout(timer);
+    streamTimeouts.delete(messageId);
+  }
+}
+
+// 清理指定群组所有消息的流式超时定时器
+function clearStreamTimeoutsForGroup(messages: Message[]) {
+  for (const msg of messages) {
+    if (msg.is_streaming) {
+      clearStreamTimeout(msg.id);
+    }
+  }
+}
 
 function applyLikeState(messages: Message[], messageId: string, userId: string, liked: boolean): Message[] {
   return messages.map(message => {
@@ -148,7 +166,7 @@ function persistMessages(groupId: string, messages: Message[]) {
   }, 2000);
 }
 
-export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
+export const useMessagesStore = create<MessagesState>((set, get) => ({
   messages: {},
   streamUpdateCounter: 0,
   pagination: {},
@@ -264,22 +282,28 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
       const hasMore = response.hasMore || false;
       const newOldestMessageId = olderMessages.length > 0 ? olderMessages[0].id : pagination.oldestMessageId;
 
-      set(state => ({
-        messages: {
-          ...state.messages,
-          [groupId]: [...olderMessages, ...currentMessages]
-        },
-        pagination: {
-          ...state.pagination,
-          [groupId]: { hasMore, loadingMore: false, oldestMessageId: newOldestMessageId }
-        }
-      }));
+      set(state => {
+        const latestMessages = state.messages[groupId] || [];
+        const existingIds = new Set(latestMessages.map(m => m.id));
+        const dedupedOlderMessages = olderMessages.filter(m => !existingIds.has(m.id));
+
+        return {
+          messages: {
+            ...state.messages,
+            [groupId]: [...dedupedOlderMessages, ...latestMessages]
+          },
+          pagination: {
+            ...state.pagination,
+            [groupId]: { hasMore, loadingMore: false, oldestMessageId: newOldestMessageId }
+          }
+        };
+      });
     } catch (error) {
       console.error('Failed to load more messages:', error);
       set(state => ({
         pagination: {
           ...state.pagination,
-          [groupId]: { ...pagination, loadingMore: false }
+          [groupId]: { ...(state.pagination[groupId] || pagination), loadingMore: false }
         },
         error: error instanceof Error ? error.message : '加载更多消息失败'
       }));
@@ -390,7 +414,7 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
         messages: {
           ...state.messages,
           [groupId]: (state.messages[groupId] || []).map(m =>
-            m.tempId === tempId ? { ...message, status: 'sent' } : m
+            m.tempId === tempId ? { ...m, ...message, status: 'sent', tempId: m.tempId } : m
           )
         },
         sending: { ...state.sending, [groupId]: false }
@@ -423,7 +447,11 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
   },
 
   deleteMessage: async (messageId: string, groupId: string) => {
-    const removedMessages = (get().messages[groupId] || []).filter(m => m.id === messageId);
+    const originalMessages = get().messages[groupId] || [];
+    const removedIndex = originalMessages.findIndex(m => m.id === messageId);
+    const removedMessages = removedIndex >= 0 ? [originalMessages[removedIndex]] : [];
+    // 清理被删除消息的流式超时定时器
+    clearStreamTimeout(messageId);
     set(state => ({
       messages: {
         ...state.messages,
@@ -432,21 +460,28 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
     }));
     try {
       await api.deleteMessage(messageId);
+      // 精确清理：仅删除该消息对应的pending条目（如有）
       for (const [tempId, entry] of pendingMessages.entries()) {
-        if (entry.groupId === groupId) {
+        if (entry.groupId === groupId && tempId === messageId) {
           pendingMessages.delete(tempId);
         }
       }
     } catch (error) {
       console.error('Failed to delete message:', error);
       set({ error: error instanceof Error ? error.message : '删除消息失败' });
-      if (removedMessages.length > 0) {
-        set(state => ({
-          messages: {
-            ...state.messages,
-            [groupId]: [...(state.messages[groupId] || []), ...removedMessages]
-          }
-        }));
+      // 回滚：按原始索引恢复消息，保持时间顺序
+      if (removedMessages.length > 0 && removedIndex >= 0) {
+        set(state => {
+          const currentMsgs = state.messages[groupId] || [];
+          const newMsgs = [...currentMsgs];
+          newMsgs.splice(Math.min(removedIndex, newMsgs.length), 0, removedMessages[0]);
+          return {
+            messages: {
+              ...state.messages,
+              [groupId]: newMsgs
+            }
+          };
+        });
       }
     }
   },
@@ -506,6 +541,15 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
     try {
       await api.clearAllMessages(groupId);
 
+      // 清理该群组所有流式超时定时器和持久化定时器
+      const groupMsgs = get().messages[groupId] || [];
+      clearStreamTimeoutsForGroup(groupMsgs);
+      if (persistTimers[groupId]) {
+        clearTimeout(persistTimers[groupId]);
+        delete persistTimers[groupId];
+      }
+      delete pendingSaveMessages[groupId];
+
       set(state => ({
         messages: {
           ...state.messages,
@@ -521,6 +565,10 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
   },
 
   removeMessages: (groupId: string, messageIds: string[]) => {
+    // 清理被删除消息的流式超时定时器
+    for (const id of messageIds) {
+      clearStreamTimeout(id);
+    }
     set(state => ({
       messages: {
         ...state.messages,
@@ -530,6 +578,15 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
   },
 
   clearMessages: (groupId: string) => {
+    // 清理该群组所有流式超时定时器
+    const groupMsgs = get().messages[groupId] || [];
+    clearStreamTimeoutsForGroup(groupMsgs);
+    // 清理该群组的持久化定时器
+    if (persistTimers[groupId]) {
+      clearTimeout(persistTimers[groupId]);
+      delete persistTimers[groupId];
+    }
+    delete pendingSaveMessages[groupId];
     set(state => ({
       messages: {
         ...state.messages,
@@ -550,10 +607,14 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
           ? { ...message, status: 'sent' as const }
           : { ...existing, ...message, status: (message.status || existing.status) as Message['status'] };
 
-        if (existing.content === updatedMessage.content &&
-          existing.status === updatedMessage.status &&
-          existing.is_streaming === updatedMessage.is_streaming &&
-          existing.reply_to === updatedMessage.reply_to) {
+        // 仅当所有关键字段都相同时才跳过更新；
+        // 但 metadata/attachments/likes/comments 等字段变化仍需触发更新
+        const contentUnchanged = existing.content === updatedMessage.content;
+        const statusUnchanged = existing.status === updatedMessage.status;
+        const streamingUnchanged = existing.is_streaming === updatedMessage.is_streaming;
+        const replyUnchanged = existing.reply_to === updatedMessage.reply_to;
+        const metadataUnchanged = JSON.stringify(existing.metadata) === JSON.stringify(updatedMessage.metadata);
+        if (contentUnchanged && statusUnchanged && streamingUnchanged && replyUnchanged && metadataUnchanged) {
           return state;
         }
 
@@ -887,6 +948,17 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
         return state;
       }
 
+      // 避免重复finalize：若消息已非streaming且内容已包含超时提示，跳过
+      const existing = groupMessages[existingIndex];
+      if (!existing.is_streaming && existing.content === content) {
+        return state;
+      }
+
+      // 避免 message_stream_end 的空 content 覆盖已流式累积的非空内容
+      const finalContent = (!content || content.trim().length === 0) && existing.content?.trim().length > 0
+        ? existing.content
+        : content;
+
       return {
         messages: {
           ...state.messages,
@@ -894,7 +966,7 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
             if (m.id === messageId) {
               return {
                 ...m,
-                content,
+                content: finalContent,
                 reply_to: replyTo,
                 reply_to_ids: replyToIds,
                 is_streaming: false
@@ -902,7 +974,10 @@ export const useMessagesStoreInternal = create<MessagesState>((set, get) => ({
             }
             return m;
           })
-        }
+        },
+        // 流式结束时也需更新 streamUpdateCounter，触发 MessageList 的滚动到底部逻辑
+        // 否则流式输出停止后视图停留在中间位置，需手动滚动
+        streamUpdateCounter: state.streamUpdateCounter + 1
       };
     });
   }
@@ -915,76 +990,13 @@ export function resetMessagesModuleState() {
     clearTimeout(timeout);
   }
   streamTimeouts.clear();
-}
-
-export function useMessagesStore() {
-  const {
-    messages,
-    streamUpdateCounter,
-    pagination,
-    loading,
-    sending,
-    error,
-    fetchMessages,
-    loadMoreMessages,
-    sendMessage,
-    retryMessage,
-    removeFailedMessage,
-    likeMessage,
-    unlikeMessage,
-    dislikeMessage,
-    undislikeMessage,
-    applyLikeUpdate,
-    applyUnlikeUpdate,
-    applyDislikeUpdate,
-    applyUndislikeUpdate,
-    deleteMessage,
-    editMessage,
-    batchDeleteMessages,
-    clearAllMessages,
-    addMessage,
-    addComment,
-    addCommentFromRemote,
-    updateMessage,
-    removeMessages,
-    clearMessages,
-    addStreamMessage,
-    updateStreamMessage,
-    finalizeStreamMessage,
-  } = useMessagesStoreInternal();
-
-  return {
-    messages,
-    streamUpdateCounter,
-    pagination,
-    loading,
-    sending,
-    error,
-    fetchMessages,
-    loadMoreMessages,
-    sendMessage,
-    retryMessage,
-    removeFailedMessage,
-    likeMessage,
-    unlikeMessage,
-    dislikeMessage,
-    undislikeMessage,
-    applyLikeUpdate,
-    applyUnlikeUpdate,
-    applyDislikeUpdate,
-    applyUndislikeUpdate,
-    deleteMessage,
-    editMessage,
-    batchDeleteMessages,
-    clearAllMessages,
-    addMessage,
-    addComment,
-    addCommentFromRemote,
-    updateMessage,
-    removeMessages,
-    clearMessages,
-    addStreamMessage,
-    updateStreamMessage,
-    finalizeStreamMessage,
-  };
+  for (const timer of Object.values(persistTimers)) {
+    clearTimeout(timer);
+  }
+  Object.keys(persistTimers).forEach(key => {
+    delete persistTimers[key];
+  });
+  Object.keys(pendingSaveMessages).forEach(key => {
+    delete pendingSaveMessages[key];
+  });
 }

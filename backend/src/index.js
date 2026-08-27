@@ -1,4 +1,4 @@
-import 'dotenv/config';
+﻿import 'dotenv/config';
 import express from 'express';
 
 import { createServer } from 'http';
@@ -25,10 +25,9 @@ import smsRouter from './routes/sms.js';
 import apiConfigRouter from './routes/apiconfig.js';
 import authMiddleware, { isAuthConfigured } from './middleware/auth.js';
 import { injectUserDb } from './middleware/userDb.js';
-import { rateLimiter, messageRateLimiter, fileRateLimiter, aiRateLimiter, queryRateLimiter, authRateLimiter } from './middleware/rateLimiter.js';
+import { rateLimiter, messageRateLimiter, fileRateLimiter, aiRateLimiter, queryRateLimiter, authRateLimiter, cleanup as cleanupRateLimiter } from './middleware/rateLimiter.js';
 import { errorHandler } from './middleware/errorHandler.js';
-import { generateCSRFToken } from './middleware/csrf.js';
-import { getUploadsDir, initDatabase } from './models/db.js';
+import { getUploadsDir, initDatabase, sanitizeGroupsForClient } from './models/db.js';
 import { getAuthDb, initAuthDb } from './models/authDb.js';
 import { closeMongoConnection } from './models/mongoAdapter.js';
 import { closeSupabaseConnection } from './models/supabaseAdapter.js';
@@ -38,9 +37,10 @@ import { setupWebSocket } from './websocket/index.js';
 import { checkAllAIHealth, loadAIConfigsFromDB } from './services/ai/index.js';
 import { safeLog } from './utils/logger.js';
 import { initializeKeyManager } from './utils/keyManager.js';
-import { startAutonomousChatTimer } from './services/scheduler/index.js';
 import { startTTSCleanupScheduler } from './services/scheduler/ttsCleanup.js';
 import { initSmsClient } from './services/sms/index.js';
+import { toPublicApiConfigs } from './utils/apiConfigSecurity.js';
+import { migrateApiConfigSecrets } from './services/apiConfigMigration.js';
 
 if (process.platform === 'win32') {
   const origWarn = console.warn;
@@ -75,11 +75,32 @@ const wss = new WebSocketServer({
 const isProduction = process.env.NODE_ENV === 'production';
 const PORT = process.env.PORT || 3002;
 
+if (process.env.AUTH_MODE === 'dev' && isProduction) {
+  console.error('\n🚨 CRITICAL SECURITY ERROR: AUTH_MODE=dev is not allowed in production!');
+  console.error('   The server will NOT start. Please set AUTH_MODE=session in production.\n');
+  process.exit(1);
+}
+
+const TRUST_PROXY = process.env.TRUST_PROXY;
+if (TRUST_PROXY !== undefined) {
+  if (TRUST_PROXY === 'false' || TRUST_PROXY === '') {
+    app.set('trust proxy', false);
+  } else if (/^\d+$/.test(TRUST_PROXY)) {
+    app.set('trust proxy', parseInt(TRUST_PROXY, 10));
+  } else {
+    app.set('trust proxy', TRUST_PROXY.split(',').map(s => s.trim()).filter(Boolean));
+  }
+  console.log(`🔗 trust proxy 设置为: ${TRUST_PROXY}`);
+} else if (isProduction) {
+  app.set('trust proxy', 1);
+  console.log('🔗 生产环境默认启用 trust proxy=1（可用 TRUST_PROXY=false 关闭）');
+}
+
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       imgSrc: ["'self'", "data:", "blob:", "https:"],
@@ -127,11 +148,23 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
+// 限流必须先于其保护的路由注册（Express 按注册顺序匹配）。
+// /api/csrf-token 与 /api/auth/token 定义在后，若限流挂载在其后将永不生效。
+app.use('/api/auth', authRateLimiter);
+app.use('/api/sms', authRateLimiter);
+// 消息端点：仅对写操作（POST/DELETE）限流；GET 拉取与已读回执走宽松的查询桶，
+// 避免列表刷新/已读上报流量把发送配额饿死（用户主动浏览不应惩罚自己的发送）
+app.use('/api/groups/:groupId/messages', (req, res, next) => {
+  if (req.method === 'GET' || /\.\/read$/.test(req.path) || req.path === '/read-batch') return queryRateLimiter(req, res, next);
+  return messageRateLimiter(req, res, next);
+});
+
 if (isAuthConfigured()) {
   const isProd = process.env.NODE_ENV === 'production';
   const CSRF_TOKEN_LENGTH = 32;
   const CSRF_COOKIE_NAME = 'XSRF-TOKEN';
   const CSRF_HEADER_NAME = 'x-csrf-token';
+  const CSRF_MAX_MAP_SIZE = 5000;
 
   function generateCsrfToken() {
     return crypto.randomBytes(CSRF_TOKEN_LENGTH).toString('base64url');
@@ -144,6 +177,10 @@ if (isAuthConfigured()) {
     let token = existingToken;
     if (!token || !csrfTokenMap.has(token)) {
       token = generateCsrfToken();
+      if (csrfTokenMap.size >= CSRF_MAX_MAP_SIZE) {
+        const oldestKey = csrfTokenMap.keys().next().value;
+        csrfTokenMap.delete(oldestKey);
+      }
       csrfTokenMap.set(token, { createdAt: Date.now() });
       res.cookie(CSRF_COOKIE_NAME, token, {
         httpOnly: false,
@@ -156,7 +193,7 @@ if (isAuthConfigured()) {
     next();
   });
 
-  setInterval(() => {
+  const csrfCleanupTimer = setInterval(() => {
     const now = Date.now();
     const maxAge = 24 * 60 * 60 * 1000;
     for (const [token, meta] of csrfTokenMap) {
@@ -165,13 +202,24 @@ if (isAuthConfigured()) {
       }
     }
   }, 60 * 60 * 1000);
+  if (typeof csrfCleanupTimer.unref === 'function') csrfCleanupTimer.unref();
 
   const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
   app.use((req, res, next) => {
     if (SAFE_METHODS.has(req.method)) return next();
+    // 监控错误上报走 sendBeacon（无法携带自定义头），豁免 CSRF；该端点仅写入内存分桶
+    if (req.path === '/api/monitoring/errors') return next();
     const cookieToken = req.cookies?.[CSRF_COOKIE_NAME];
     const headerToken = req.headers[CSRF_HEADER_NAME];
-    if (!cookieToken || !headerToken || cookieToken !== headerToken || !csrfTokenMap.has(cookieToken)) {
+    let tokensMatch = false;
+    if (cookieToken && headerToken && cookieToken.length === headerToken.length) {
+      try {
+        tokensMatch = crypto.timingSafeEqual(Buffer.from(cookieToken), Buffer.from(headerToken));
+      } catch {
+        tokensMatch = false;
+      }
+    }
+    if (!tokensMatch || !csrfTokenMap.has(cookieToken)) {
       return res.status(403).json({ error: 'CSRF token validation failed' });
     }
     next();
@@ -194,14 +242,11 @@ app.get('/api/health', async (req, res) => {
   };
 
   try {
-    const { listUserDatabases, getUserDb } = await import('./models/db.js');
+    const { listUserDatabases } = await import('./models/db.js');
     const userIds = await listUserDatabases();
-    // 仅验证数据库可读性，不暴露用户数据统计
-    if (userIds.length > 0) {
-      const db = await getUserDb(userIds[0]);
-      await db.read();
-    }
-    health.database = 'connected';
+    // 仅验证存储层可枚举性，不加载用户数据（避免健康检查产生重 IO）
+    health.database = Array.isArray(userIds) ? 'connected' : 'error';
+    if (!Array.isArray(userIds)) health.status = 'degraded';
   } catch (error) {
     health.database = 'error';
     health.status = 'degraded';
@@ -271,13 +316,10 @@ app.get('/api/auth/token', async (req, res) => {
   });
 });
 
-app.use('/api/auth', authRateLimiter);
-app.use('/api/sms', authRateLimiter);
 app.use('/api', authRouter);
 app.use('/api', smsRouter);
 app.use(authMiddleware);
 app.use(injectUserDb);
-app.use('/uploads', express.static(uploadsDir));
 
 app.get('/api/bootstrap', async (req, res) => {
   try {
@@ -307,10 +349,10 @@ app.get('/api/bootstrap', async (req, res) => {
     res.json({
       success: true,
       user,
-      groups: db.data.groups || [],
+      groups: sanitizeGroupsForClient(db.data.groups || []),
       profile: db.data.userProfile || {},
       personas: buildMergedPersonas(db.data.customPersonas || {}),
-      apiConfigs: db.data.aiApiConfigs || {}
+      apiConfigs: toPublicApiConfigs(db.data.aiApiConfigs || {})
     });
   } catch (error) {
     safeLog('error', 'bootstrap failed', { userId: req.userId, error: error?.message });
@@ -318,7 +360,6 @@ app.get('/api/bootstrap', async (req, res) => {
   }
 });
 
-app.use('/api/groups/:groupId/messages', messageRateLimiter);
 app.use('/api/groups', queryRateLimiter);
 app.use('/api/ai', aiRateLimiter);
 app.use('/api/tts', aiRateLimiter);
@@ -344,15 +385,10 @@ app.use('/api/tts', ttsRouter);
 app.use(errorHandler);
 
 initDatabase().then(async () => {
-  if (process.env.AUTH_MODE === 'dev' && process.env.NODE_ENV === 'production') {
-    console.error('\n🚨 CRITICAL SECURITY ERROR: AUTH_MODE=dev is not allowed in production!');
-    console.error('   The server will NOT start. Please set AUTH_MODE=session in production.\n');
-    process.exit(1);
-  }
-
   await initAuthDb();
   initSmsClient();
   await initializeKeyManager();
+  await migrateApiConfigSecrets();
 
   try {
     await fs.access(uploadsDir);
@@ -399,7 +435,7 @@ initDatabase().then(async () => {
   const { listUserDatabases, getUserDb } = await import('./models/db.js');
   const userIds = await listUserDatabases();
 
-  // 修复已存在的群组消息预览（解密加密的 content）
+  // 将历史遗留的明文消息预览统一迁移为加密存储（静态加密完整性修复）
   try {
     let totalFixed = 0;
     for (const userId of userIds) {
@@ -408,49 +444,36 @@ initDatabase().then(async () => {
       let userFixed = 0;
 
       for (const group of (db.data.groups || [])) {
-        if (group.last_message_preview && group.last_message_preview.includes('"encrypted"')) {
-          // 查找该群组的最后一条消息并生成正确的预览
-          const groupMessages = (db.data.messages || [])
-            .filter(m => m.group_id === group.id)
-            .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-
-          if (groupMessages.length > 0) {
-            const lastMsg = groupMessages[groupMessages.length - 1];
-            const prefix = lastMsg.sender_type === 'user' ? '[我] ' : '';
-            let content = lastMsg.content || '';
-
-            // 如果内容被加密，尝试解密
-            if (lastMsg.metadata?.encryption?.encrypted && typeof content === 'string') {
-              try {
-                const { decryptText } = await import('./utils/encryption.js');
-                content = decryptText(content);
-              } catch {
-                content = '[加密消息]';
-              }
-            }
-
-            group.last_message_preview = `${prefix}${content.substring(0, 50)}`;
+        const preview = group.last_message_preview;
+        const isPlaintext = typeof preview === 'string' && preview.length > 0 && !preview.includes('"encrypted"');
+        if (isPlaintext) {
+          try {
+            const { encryptText } = await import('./utils/encryption.js');
+            group.last_message_preview = encryptText(preview);
             userFixed++;
-          } else {
+          } catch {
             group.last_message_preview = null;
             userFixed++;
           }
+        } else if (preview !== null && preview !== undefined && typeof preview !== 'string') {
+          group.last_message_preview = null;
+          userFixed++;
         }
       }
 
       if (userFixed > 0) {
         await db.write();
-        console.log(`🔓 已修复用户 ${userId} 的 ${userFixed} 个群组的消息预览`);
+        console.log(`🔒 已加密用户 ${userId} 的 ${userFixed} 个群组的明文消息预览`);
         totalFixed += userFixed;
       }
     }
     if (totalFixed > 0) {
-      console.log(`✅ 共修复了 ${totalFixed} 个群组的加密消息预览`);
+      console.log(`✅ 共加密了 ${totalFixed} 个群组的明文消息预览`);
     } else {
-      console.log('✅ 所有群组的消息预览均已正常');
+      console.log('✅ 所有群组的消息预览均为加密状态');
     }
   } catch (error) {
-    console.warn('⚠️  修复消息预览时出错:', error.message);
+    console.warn('⚠️  迁移消息预览时出错:', error.message);
   }
   let startedTimers = 0;
 
@@ -471,15 +494,6 @@ initDatabase().then(async () => {
 
   startTTSCleanupScheduler();
 
-  server.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
-
-    checkAllAIHealth().then(results => {
-      console.log('AI健康检查完成:', results);
-    });
-  });
-
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {
       console.error(`\n端口 ${PORT} 已被占用，请先关闭占用该端口的进程，或修改 .env 中的 PORT 配置。`);
@@ -490,6 +504,20 @@ initDatabase().then(async () => {
       process.exit(1);
     }
   });
+
+  server.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
+
+    checkAllAIHealth().then(results => {
+      console.log('AI健康检查完成:', results);
+    });
+  });
+}).catch((error) => {
+  safeLog('error', '服务启动失败，已安全终止', { error: error?.message });
+  process.exitCode = 1;
+  server.close();
+  wss.close();
 });
 
 async function closeAllConnections() {
@@ -499,37 +527,27 @@ async function closeAllConnections() {
   ]);
 }
 
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully...');
+function gracefulShutdown(signal) {
+  console.log(`${signal} received, shutting down gracefully...`);
+  try { cleanupRateLimiter(); } catch {}
   server.close(() => {
     console.log('HTTP server closed');
     wss.close(() => {
       console.log('WebSocket server closed');
-      closeAllConnections().then(() => {
-        process.exit(0);
-      }).catch(() => {
-        process.exit(0);
-      });
+      closeAllConnections().then(() => process.exit(0)).catch(() => process.exit(0));
     });
   });
   setTimeout(() => {
     console.error('Forced shutdown after timeout');
-    process.exit(1);
-  }, 30000);
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down...');
-  server.close(() => {
-    wss.close(() => {
-      closeAllConnections().then(() => {
-        process.exit(0);
-      }).catch(() => {
-        process.exit(0);
-      });
+    wss.clients?.forEach(client => {
+      try { client.terminate(); } catch {}
     });
-  });
-});
+    process.exit(1);
+  }, 10000);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // 全局未捕获异常处理，防止单次异常导致进程崩溃
 process.on('uncaughtException', (err) => {
@@ -539,7 +557,8 @@ process.on('uncaughtException', (err) => {
     return;
   }
   console.error('致命未捕获异常，进程即将退出:', err.message);
-  setTimeout(() => process.exit(1), 5000);
+  try { server.close(); } catch {}
+  setTimeout(() => process.exit(1), 3000).unref?.();
 });
 
 process.on('unhandledRejection', (reason) => {

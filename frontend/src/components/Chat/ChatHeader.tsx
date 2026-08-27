@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef } from 'react';
+import { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useUIStore } from '../../stores/uiStore';
 import { DebateControlPanel } from './DebateControlPanel';
-import { GroupInfoPage } from './GroupInfoPage';
 import { useToast } from '../Common';
+
+const GroupInfoPage = lazy(() => import('./GroupInfoPage').then(({ GroupInfoPage }) => ({ default: GroupInfoPage })));
 
 interface ChatHeaderProps {
   showGroupInfoButton?: boolean;
@@ -13,21 +14,19 @@ interface ChatHeaderProps {
 }
 
 export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBack }: ChatHeaderProps = {}) {
-  const { 
-    currentGroup, 
-    toggleDebateMode, 
-    setDebateLevel, 
-    startAIPrivateChat, 
-    stopAIPrivateChat,
-    startAutonomousChat,
-    stopAutonomousChat,
-    getAutonomousChatStatus,
-    chatStatus,
-    updateChatStatus,
-    setTypingAI,
-    fetchChatStatus
-  } = useGroupsStore();
-  const { toggleSidebar } = useNavigationStore();
+  const currentGroup = useGroupsStore((s) => s.currentGroup);
+  const toggleDebateMode = useGroupsStore((s) => s.toggleDebateMode);
+  const setDebateLevel = useGroupsStore((s) => s.setDebateLevel);
+  const startAIPrivateChat = useGroupsStore((s) => s.startAIPrivateChat);
+  const stopAIPrivateChat = useGroupsStore((s) => s.stopAIPrivateChat);
+  const startAutonomousChat = useGroupsStore((s) => s.startAutonomousChat);
+  const stopAutonomousChat = useGroupsStore((s) => s.stopAutonomousChat);
+  const getAutonomousChatStatus = useGroupsStore((s) => s.getAutonomousChatStatus);
+  const chatStatus = useGroupsStore((s) => s.chatStatus);
+  const updateChatStatus = useGroupsStore((s) => s.updateChatStatus);
+  const setTypingAI = useGroupsStore((s) => s.setTypingAI);
+  const fetchChatStatus = useGroupsStore((s) => s.fetchChatStatus);
+  const toggleSidebar = useNavigationStore((s) => s.toggleSidebar);
   const { showToast, Toast } = useToast();
   const [showTopicModal, setShowTopicModal] = useState(false);
   const [topic, setTopic] = useState('');
@@ -35,9 +34,19 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
   const [showDebatePanel, setShowDebatePanel] = useState(false);
   const [showGroupInfo, setShowGroupInfo] = useState(false);
   const [autonomousRunning, setAutonomousRunning] = useState(false);
-  const [autonomousPaused, setAutonomousPaused] = useState(false);
   const [debateLevelAnim, setDebateLevelAnim] = useState<number | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autonomousRequestIdRef = useRef(0);
+  const debateLevelAnimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (debateLevelAnimTimerRef.current) {
+        clearTimeout(debateLevelAnimTimerRef.current);
+        debateLevelAnimTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const isPrivateChat = currentGroup?.is_private === true;
   const isAIPrivateChat = currentGroup?.is_ai_private === true || currentGroup?.type === 'ai_private';
@@ -66,11 +75,17 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
 
   useEffect(() => {
     if (currentGroup && !isAIPrivateChat && !isPrivateChat) {
+      const currentRequestId = ++autonomousRequestIdRef.current;
       getAutonomousChatStatus(currentGroup.id).then((status: any) => {
-        setAutonomousRunning(status?.isRunning === true || status?.status === 'running');
-      }).catch(() => {});
+        if (currentRequestId === autonomousRequestIdRef.current) {
+          setAutonomousRunning(status?.isRunning === true || status?.status === 'running');
+        }
+      }).catch(() => { });
     }
-  }, [currentGroup?.id, isAIPrivateChat, isPrivateChat]);
+    return () => {
+      autonomousRequestIdRef.current += 1;
+    };
+  }, [currentGroup?.id, isAIPrivateChat, isPrivateChat, getAutonomousChatStatus]);
 
   useEffect(() => {
     if (!isAIPrivateChat && !isPrivateChat) {
@@ -92,7 +107,7 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
     setTopic('');
     setActionLoading(true);
     updateChatStatus(currentGroup.id, { isRunning: true, currentSpeaker: null, status: 'running' });
-    
+
     try {
       const result = await startAIPrivateChat(currentGroup.id, topic || undefined);
       if (import.meta.env.DEV) console.log('开始对话结果:', result);
@@ -110,7 +125,7 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
     setTopic('');
     setActionLoading(true);
     setAutonomousRunning(true);
-    
+
     try {
       const result = await startAutonomousChat(currentGroup.id, topic || undefined);
       if (import.meta.env.DEV) console.log('开始自主对话结果:', result);
@@ -129,7 +144,6 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
       const result = await stopAutonomousChat(currentGroup.id);
       if (import.meta.env.DEV) console.log('停止自主对话结果:', result);
       setAutonomousRunning(false);
-      setAutonomousPaused(false);
       setTypingAI(currentGroup.id, null);
     } catch (error) {
       console.error('停止自主对话失败:', error);
@@ -164,12 +178,8 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
   };
 
   const handleToggleAutonomous = () => {
-    if (autonomousRunning && !autonomousPaused) {
-      setAutonomousPaused(true);
-      updateChatStatus(currentGroup!.id, { isRunning: true, currentSpeaker: null, status: 'paused' });
-    } else if (autonomousPaused) {
-      setAutonomousPaused(false);
-      updateChatStatus(currentGroup!.id, { isRunning: true, currentSpeaker: null, status: 'running' });
+    if (autonomousRunning) {
+      handleStopAutonomousChat();
     } else {
       setShowTopicModal(true);
     }
@@ -183,7 +193,8 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
   const handleSetDebateLevel = (level: number) => {
     if (!currentGroup) return;
     setDebateLevelAnim(level);
-    setTimeout(() => setDebateLevelAnim(null), 300);
+    if (debateLevelAnimTimerRef.current) clearTimeout(debateLevelAnimTimerRef.current);
+    debateLevelAnimTimerRef.current = setTimeout(() => setDebateLevelAnim(null), 300);
     setDebateLevel(currentGroup.id, level);
   };
 
@@ -251,41 +262,23 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
                 <button
                   onClick={handleToggleAutonomous}
                   disabled={actionLoading}
-                  aria-label={autonomousRunning ? (autonomousPaused ? '恢复AI自主对话' : '暂停AI自主对话') : '开始AI自主对话'}
+                  aria-label={autonomousRunning ? '停止AI自主对话' : '开始AI自主对话'}
                   className="p-2 rounded-lg hover:bg-sidebar-hover transition-colors text-text-secondary hover:text-text-primary flex items-center gap-1"
-                  title={autonomousRunning ? (autonomousPaused ? '恢复AI自主对话' : '暂停AI自主对话') : '开始AI自主对话'}
+                  title={autonomousRunning ? '停止AI自主对话' : '开始AI自主对话'}
                 >
-                  {autonomousRunning && !autonomousPaused ? (
-                    <svg className="w-4 h-4 text-amber-500" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zM7 8a1 1 0 012 0v4a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v4a1 1 0 102 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
-                    </svg>
-                  ) : autonomousPaused ? (
-                    <svg className="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+                  {autonomousRunning ? (
+                    <svg className="w-4 h-4 text-red-500" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clipRule="evenodd" />
                     </svg>
                   ) : (
-                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                    <svg className="w-4 h-4 text-accent" fill="currentColor" viewBox="0 0 20 20">
                       <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
                     </svg>
                   )}
                   <span className="text-xs hidden sm:inline">
-                    {autonomousRunning ? (autonomousPaused ? '继续' : '暂停') : 'AI对话'}
+                    {autonomousRunning ? '停止' : 'AI对话'}
                   </span>
                 </button>
-                {autonomousRunning && (
-                  <button
-                    onClick={handleStopAutonomousChat}
-                    disabled={actionLoading}
-                    aria-label="停止AI自主对话"
-                    className="p-2 rounded-lg hover:bg-sidebar-hover transition-colors text-text-secondary hover:text-red-500 flex items-center gap-1"
-                    title="停止AI自主对话"
-                  >
-                    <div className="w-4 h-4 flex items-center justify-center">
-                      <div className="w-2.5 h-2.5 rounded-sm bg-red-500"></div>
-                    </div>
-                    <span className="text-xs hidden sm:inline">停止</span>
-                  </button>
-                )}
 
                 <button
                   onClick={() => setShowDebatePanel(true)}
@@ -297,31 +290,19 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
                   <span className="text-xs hidden sm:inline">辩论</span>
                 </button>
 
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-bg-surface2">
-                  <span className="text-[11px] text-text-muted">辩论</span>
-                  <button
-                    onClick={handleToggleDebateMode}
-                    aria-label={currentGroup.debate_mode ? '关闭辩论模式' : '开启辩论模式'}
-                    className={`relative w-9 h-[18px] rounded-full transition-all duration-200 ease-spring overflow-hidden ${
-                      currentGroup.debate_mode
-                        ? 'bg-accent shadow-[0_0_12px_rgba(0,102,255,0.3)]'
-                        : 'bg-bg-surface3'
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white shadow-md transition-all duration-200 ease-spring ${
-                        currentGroup.debate_mode
-                          ? 'left-[calc(100%-16px)] scale-110'
-                          : 'left-[2px] scale-100'
-                      }`}
-                      style={{
-                        boxShadow: currentGroup.debate_mode
-                          ? '0 2px 8px rgba(0,0,0,0.15), 0 0 0 2px rgba(0,102,255,0.2)'
-                          : '0 1px 3px rgba(0,0,0,0.1)'
-                      }}
-                    />
-                  </button>
-                </div>
+                <button
+                  onClick={handleToggleDebateMode}
+                  aria-label={currentGroup.debate_mode ? '关闭辩论模式' : '开启辩论模式'}
+                  title={currentGroup.debate_mode ? '辩论模式：开' : '辩论模式：关'}
+                  className={`flex items-center p-2 rounded-lg transition-colors ${currentGroup.debate_mode
+                    ? 'text-accent bg-accent/10'
+                    : 'text-text-muted hover:text-text-primary hover:bg-sidebar-hover'}`}
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v3m0 12v3M5.6 5.6l2.1 2.1m8.6 8.6l2.1 2.1M3 12h3m12 0h3M5.6 18.4l2.1-2.1m8.6-8.6l2.1-2.1" />
+                  </svg>
+                  {currentGroup.debate_mode && <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />}
+                </button>
               </>
             )}
 
@@ -348,11 +329,10 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
                 <button
                   key={level}
                   onClick={() => handleSetDebateLevel(level)}
-                  className={`px-3 py-0.5 rounded-full text-xs font-medium transition-all duration-200 transform ${
-                    currentGroup.debate_level === level
-                      ? 'bg-accent text-white shadow-md scale-105'
-                      : 'bg-bg-surface2 text-text-secondary hover:bg-bg-surface3 hover:scale-105'
-                  } ${debateLevelAnim === level ? 'debate-level-anim' : ''}`}
+                  className={`px-3 py-0.5 rounded-full text-xs font-medium transition-all duration-200 transform ${currentGroup.debate_level === level
+                    ? 'bg-accent text-white shadow-md scale-105'
+                    : 'bg-bg-surface2 text-text-secondary hover:bg-bg-surface3 hover:scale-105'
+                    } ${debateLevelAnim === level ? 'debate-level-anim' : ''}`}
                 >
                   {level === 1 ? <><svg className="w-3 h-3 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" /></svg> 温和</> : level === 2 ? <><svg className="w-3 h-3 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M3 3l7.07 7.07M21 21l-7.07-7.07M3 21l7.07-7.07M21 3l-7.07 7.07" /></svg> 标准</> : <><svg className="w-3 h-3 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M15.362 5.214A8.252 8.252 0 0112 21 8.25 8.25 0 016.038 7.048 8.287 8.287 0 009 9.6a8.983 8.983 0 013.361-6.867 8.21 8.21 0 003 2.48z" /><path strokeLinecap="round" strokeLinejoin="round" d="M12 18a3.75 3.75 0 00.495-7.467 5.99 5.99 0 00-1.925 3.546 5.974 5.974 0 01-2.133-1A3.75 3.75 0 0012 18z" /></svg> 激烈</>}
                 </button>
@@ -382,7 +362,7 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
                   {isAIPrivateChat ? '开始AI对话' : '启动AI自主对话'}
                 </h3>
                 <p className="text-xs text-text-muted">
-                  {isAIPrivateChat 
+                  {isAIPrivateChat
                     ? '设置话题让AI围绕主题讨论'
                     : '让AI们自己开始聊天'}
                 </p>
@@ -425,11 +405,13 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
       )}
 
       {showGroupInfo && currentGroup && (
-        <GroupInfoPage
-          groupId={currentGroup.id}
-          isOpen={showGroupInfo}
-          onClose={() => setShowGroupInfo(false)}
-        />
+        <Suspense fallback={null}>
+          <GroupInfoPage
+            groupId={currentGroup.id}
+            isOpen={showGroupInfo}
+            onClose={() => setShowGroupInfo(false)}
+          />
+        </Suspense>
       )}
       {Toast}
     </>

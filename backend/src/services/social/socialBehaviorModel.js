@@ -626,10 +626,6 @@ class SocialBehaviorModel {
     if (this.interactionHistory.length > this.maxInteractionHistory) {
       this.interactionHistory = this.interactionHistory.slice(-this.maxInteractionHistory);
     }
-    
-    if (this.interactionHistory.length > 1000) {
-      this.interactionHistory = this.interactionHistory.slice(-1000);
-    }
   }
   
   /**
@@ -692,13 +688,34 @@ class SocialBehaviorModel {
   }
 }
 
-// 创建单例实例
-const socialBehaviorModel = new SocialBehaviorModel();
+// 按 userId 分桶管理实例（LRU，上限 50 个），避免跨用户状态混杂
+const MAX_BEHAVIOR_MODEL_INSTANCES = 50;
+const instances = new Map();
 
-export default socialBehaviorModel;
+export function getSocialBehaviorModel(userId) {
+  if (userId === undefined || userId === null || userId === '') {
+    throw new Error('social behavior model requires an explicit userId');
+  }
+
+  if (instances.has(userId)) {
+    const existing = instances.get(userId);
+    instances.delete(userId);
+    instances.set(userId, existing);
+    return existing;
+  }
+
+  const model = new SocialBehaviorModel();
+  instances.set(userId, model);
+
+  while (instances.size > MAX_BEHAVIOR_MODEL_INSTANCES) {
+    const oldestKey = instances.keys().next().value;
+    instances.delete(oldestKey);
+  }
+
+  return model;
+}
 
 // 导出功能
 export {
-  socialBehaviorModel,
   SocialBehaviorModel
 };

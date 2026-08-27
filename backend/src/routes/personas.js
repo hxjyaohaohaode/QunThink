@@ -1,11 +1,48 @@
 import express from 'express';
 import { withWriteLock } from '../models/db.js';
-import { AI_PERSONAS } from '../config/personas.js';
+import { AI_PERSONAS, AI_LIST } from '../config/personas.js';
 import { loadCustomPersonas } from '../services/scheduler/index.js';
 import { validateBody, updatePersonaSchema } from '../validators/index.js';
+import { asyncHandler } from '../middleware/errorHandler.js';
 import { broadcastPersonaUpdate, broadcastPersonasSync } from '../websocket/index.js';
 
 const router = express.Router();
+
+const VALID_AI_IDS = new Set(AI_LIST);
+
+const PERSONA_ALLOWED_FIELDS = [
+  'name', 'systemPrompt', 'avatar', 'avatar_url', 'color', 'styleTag', 'style', 'replyStyle', 'personality',
+  'typicalPhrases', 'expertise', 'speakingTraits', 'keywords', 'messageLength',
+  'responseConfig', 'socialConfig', 'modelConfig', 'debateConfig',
+  'preferredRole', 'customRoleName', 'questionProbability', 'debateTendency',
+  'silenceProbability', 'refusalProbability', 'speakingOrder', 'firstSpeakerTopics',
+  'relationships'
+];
+
+const PERSONA_NESTED_FIELDS = ['responseConfig', 'socialConfig', 'modelConfig', 'debateConfig', 'relationships'];
+
+function isKnownAiId(aiId) {
+  return VALID_AI_IDS.has(aiId);
+}
+
+async function resolveAiId(req, res) {
+  const { aiId } = req.params;
+  if (isKnownAiId(aiId)) return aiId;
+  const db = await req.getUserDb();
+  await db.read();
+  if (db.data.customPersonas && Object.hasOwn(db.data.customPersonas, aiId)) return aiId;
+  res.status(404).json({ error: '未找到该AI' });
+  return null;
+}
+
+export function getCustomPersonaUpdatedAt(customPersona) {
+  if (!customPersona || typeof customPersona !== 'object') return null;
+  if (customPersona._meta && Number.isFinite(customPersona._meta.updatedAt)) {
+    return customPersona._meta.updatedAt;
+  }
+  if (Number.isFinite(customPersona._updatedAt)) return customPersona._updatedAt;
+  return null;
+}
 
 const defaultResponseConfig = {
   enabled: true,
@@ -88,202 +125,163 @@ export function buildMergedPersonas(customPersonas = {}) {
   return merged;
 }
 
-router.get('/personas', async (req, res) => {
-  try {
-    const db = await req.getUserDb();
-    await db.read();
-    const customPersonas = db.data.customPersonas || {};
-    const merged = buildMergedPersonas(customPersonas);
+router.get('/personas', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  await db.read();
+  const customPersonas = db.data.customPersonas || {};
+  const merged = buildMergedPersonas(customPersonas);
 
-    // 无缓存头 - 确保前端始终获取最新数据
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    res.setHeader('Surrogate-Control', 'no-store');
+  // 无缓存头 - 确保前端始终获取最新数据
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
 
-    res.json({ success: true, personas: merged, _timestamp: Date.now() });
-  } catch (error) {
-    console.error('获取AI人设错误:', error);
-    res.status(500).json({ success: false, error: '获取AI人设失败', details: error.message });
+  res.json({ success: true, personas: merged, _timestamp: Date.now() });
+}));
+
+router.put('/personas/:aiId', validateBody(updatePersonaSchema), asyncHandler(async (req, res) => {
+  const resolvedAiId = await resolveAiId(req, res);
+  if (!resolvedAiId) return;
+  const aiId = resolvedAiId;
+  const db = await req.getUserDb();
+  await db.read();
+  const updates = req.body;
+  if (!updates || typeof updates !== 'object') {
+    return res.status(400).json({ error: '更新数据不能为空' });
   }
-});
-
-router.put('/personas/:aiId', validateBody(updatePersonaSchema), async (req, res) => {
-  try {
-    const { aiId } = req.params;
-    if (!AI_PERSONAS[aiId]) {
-      return res.status(404).json({ error: '未找到该AI' });
-    }
-    const db = await req.getUserDb();
-    await db.read();
-    const updates = req.body;
-    if (!updates || typeof updates !== 'object') {
-      return res.status(400).json({ error: '更新数据不能为空' });
-    }
-    const allowedFields = [
-      'name', 'avatar', 'avatar_url', 'color', 'styleTag', 'style', 'replyStyle', 'personality',
-      'typicalPhrases', 'expertise', 'speakingTraits', 'keywords', 'messageLength',
-      'responseConfig', 'socialConfig', 'modelConfig', 'debateConfig',
-      'preferredRole', 'customRoleName', 'questionProbability', 'debateTendency',
-      'silenceProbability', 'refusalProbability', 'speakingOrder', 'firstSpeakerTopics',
-      'relationships'
-    ];
-    if (!db.data.customPersonas[aiId]) {
-      db.data.customPersonas[aiId] = {};
-    }
-    for (const key of Object.keys(updates)) {
-      if (allowedFields.includes(key)) {
-        if (key === 'responseConfig' && updates.responseConfig) {
-          db.data.customPersonas[aiId].responseConfig = {
-            ...db.data.customPersonas[aiId].responseConfig,
-            ...updates.responseConfig
-          };
-        } else if (key === 'socialConfig' && updates.socialConfig) {
-          db.data.customPersonas[aiId].socialConfig = {
-            ...db.data.customPersonas[aiId].socialConfig,
-            ...updates.socialConfig
-          };
-        } else if (key === 'modelConfig' && updates.modelConfig) {
-          db.data.customPersonas[aiId].modelConfig = {
-            ...db.data.customPersonas[aiId].modelConfig,
-            ...updates.modelConfig
-          };
-        } else if (key === 'debateConfig' && updates.debateConfig) {
-          db.data.customPersonas[aiId].debateConfig = {
-            ...db.data.customPersonas[aiId].debateConfig,
-            ...updates.debateConfig
-          };
-        } else {
-          db.data.customPersonas[aiId][key] = updates[key];
-        }
-      }
-    }
-    await withWriteLock(req.userId, async () => {
-      await db.write();
-    });
-    // 立即重新加载调度器缓存（而非仅删除），确保下一次AI调用使用最新人设
-    await loadCustomPersonas(req.userId);
-    // 通过WebSocket广播人设更新，确保前端和其他进程立即感知变更
-    broadcastPersonaUpdate(aiId, req.userId).catch(err =>
-      console.error('广播人设更新失败:', err)
-    );
-    const custom = db.data.customPersonas[aiId];
-    const defaultPersona = AI_PERSONAS[aiId];
-    const merged = mergePersona(defaultPersona, custom);
-    res.json({ success: true, persona: merged });
-  } catch (error) {
-    console.error('更新AI人设错误:', error);
-    res.status(500).json({ success: false, error: '更新AI人设失败', details: error.message });
+  if (!db.data.customPersonas[aiId]) {
+    db.data.customPersonas[aiId] = {};
   }
-});
-
-// PATCH /api/personas/:aiId - 实时部分更新人设（轻量级，快速生效）
-router.patch('/personas/:aiId', async (req, res) => {
-  try {
-    const { aiId } = req.params;
-    if (!AI_PERSONAS[aiId]) {
-      return res.status(404).json({ error: '未找到该AI' });
-    }
-
-    const db = await req.getUserDb();
-    await db.read();
-
-    const updates = req.body;
-    if (!updates || typeof updates !== 'object' || Object.keys(updates).length === 0) {
-      return res.status(400).json({ error: '更新数据不能为空' });
-    }
-
-    const allowedFields = [
-      'name', 'avatar', 'avatar_url', 'color', 'styleTag', 'style', 'replyStyle', 'personality',
-      'typicalPhrases', 'expertise', 'speakingTraits', 'keywords', 'messageLength',
-      'responseConfig', 'socialConfig', 'modelConfig', 'debateConfig',
-      'preferredRole', 'customRoleName', 'questionProbability', 'debateTendency',
-      'silenceProbability', 'refusalProbability', 'speakingOrder', 'firstSpeakerTopics',
-      'relationships'
-    ];
-
-    if (!db.data.customPersonas) {
-      db.data.customPersonas = {};
-    }
-    if (!db.data.customPersonas[aiId]) {
-      db.data.customPersonas[aiId] = {};
-    }
-
-    // 支持嵌套对象的部分更新
-    const nestedKeys = ['responseConfig', 'socialConfig', 'modelConfig', 'debateConfig', 'relationships'];
-    for (const key of Object.keys(updates)) {
-      if (!allowedFields.includes(key)) continue;
-
-      if (nestedKeys.includes(key) && updates[key] && typeof updates[key] === 'object') {
-        if (!db.data.customPersonas[aiId][key]) {
-          db.data.customPersonas[aiId][key] = {};
-        }
-        Object.assign(db.data.customPersonas[aiId][key], updates[key]);
+  for (const key of Object.keys(updates)) {
+    if (PERSONA_ALLOWED_FIELDS.includes(key)) {
+      if (key === 'responseConfig' && updates.responseConfig) {
+        db.data.customPersonas[aiId].responseConfig = {
+          ...db.data.customPersonas[aiId].responseConfig,
+          ...updates.responseConfig
+        };
+      } else if (key === 'socialConfig' && updates.socialConfig) {
+        db.data.customPersonas[aiId].socialConfig = {
+          ...db.data.customPersonas[aiId].socialConfig,
+          ...updates.socialConfig
+        };
+      } else if (key === 'modelConfig' && updates.modelConfig) {
+        db.data.customPersonas[aiId].modelConfig = {
+          ...db.data.customPersonas[aiId].modelConfig,
+          ...updates.modelConfig
+        };
+      } else if (key === 'debateConfig' && updates.debateConfig) {
+        db.data.customPersonas[aiId].debateConfig = {
+          ...db.data.customPersonas[aiId].debateConfig,
+          ...updates.debateConfig
+        };
       } else {
         db.data.customPersonas[aiId][key] = updates[key];
       }
     }
+  }
+  await withWriteLock(req.userId, async () => {
+    await db.write();
+  });
+  // 立即重新加载调度器缓存（而非仅删除），确保下一次AI调用使用最新人设
+  await loadCustomPersonas(req.userId);
+  // 通过WebSocket广播人设更新，确保前端和其他进程立即感知变更
+  broadcastPersonaUpdate(aiId, req.userId).catch(err =>
+    console.error('广播人设更新失败:', err)
+  );
+  const custom = db.data.customPersonas[aiId];
+  const defaultPersona = AI_PERSONAS[aiId];
+  const merged = mergePersona(defaultPersona, custom);
+  res.json({ success: true, persona: merged });
+}));
+
+// PATCH /api/personas/:aiId - 实时部分更新人设（轻量级，快速生效）
+router.patch('/personas/:aiId', validateBody(updatePersonaSchema), asyncHandler(async (req, res) => {
+  const { aiId } = req.params;
+  const resolvedAiId = await resolveAiId(req, res);
+  if (!resolvedAiId) return;
+
+  const db = await req.getUserDb();
+
+  const updates = req.body;
+  if (!updates || typeof updates !== 'object' || Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: '更新数据不能为空' });
+  }
+
+  await withWriteLock(req.userId, async () => {
+    await db.read();
+
+    if (!db.data.customPersonas) {
+      db.data.customPersonas = {};
+    }
+    if (!db.data.customPersonas[resolvedAiId]) {
+      db.data.customPersonas[resolvedAiId] = {};
+    }
+
+    // 支持嵌套对象的部分更新
+    for (const key of Object.keys(updates)) {
+      if (!PERSONA_ALLOWED_FIELDS.includes(key)) continue;
+
+      if (PERSONA_NESTED_FIELDS.includes(key) && updates[key] && typeof updates[key] === 'object') {
+        if (!db.data.customPersonas[resolvedAiId][key]) {
+          db.data.customPersonas[resolvedAiId][key] = {};
+        }
+        Object.assign(db.data.customPersonas[resolvedAiId][key], updates[key]);
+      } else {
+        db.data.customPersonas[resolvedAiId][key] = updates[key];
+      }
+    }
 
     // 标记最后更新时间戳
-    db.data.customPersonas[aiId]._updatedAt = Date.now();
-
-    // 立即写入并重新加载缓存
-    await withWriteLock(req.userId, async () => {
-      await db.write();
-    });
-
-    // 立即重新加载调度器缓存（而非仅删除），确保下一次AI调用使用最新人设
-    await loadCustomPersonas(req.userId);
-
-    // 通过WebSocket广播人设更新，确保前端和其他进程立即感知变更
-    broadcastPersonaUpdate(aiId, req.userId).catch(err =>
-      console.error('广播人设更新失败:', err)
-    );
-
-    // 构建合并后的人设返回
-    const custom = db.data.customPersonas[aiId];
-    const defaultPersona = AI_PERSONAS[aiId];
-    const merged = mergePersona(defaultPersona, custom);
-
-    // 确保响应不会被缓存
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.json({ success: true, persona: merged, _timestamp: Date.now() });
-  } catch (error) {
-    console.error('实时更新AI人设错误:', error);
-    res.status(500).json({ success: false, error: '实时更新AI人设失败', details: error.message });
-  }
-});
-
-router.put('/personas/:aiId/reset', async (req, res) => {
-  try {
-    const { aiId } = req.params;
-    if (!AI_PERSONAS[aiId]) {
-      return res.status(404).json({ error: '未找到该AI' });
+    if (!db.data.customPersonas[resolvedAiId]._meta || typeof db.data.customPersonas[resolvedAiId]._meta !== 'object') {
+      db.data.customPersonas[resolvedAiId]._meta = {};
     }
-    const db = await req.getUserDb();
-    await db.read();
-    delete db.data.customPersonas[aiId];
-    await withWriteLock(req.userId, async () => {
-      await db.write();
-    });
-    // 立即重新加载调度器缓存，确保重置后下一次AI调用使用默认人设
-    await loadCustomPersonas(req.userId);
-    const defaultPersona = AI_PERSONAS[aiId];
-    const resetPersona = mergePersona(defaultPersona);
+    db.data.customPersonas[resolvedAiId]._meta.updatedAt = Date.now();
 
-    // 通过WebSocket广播人设更新（重置为默认）
-    broadcastPersonaUpdate(aiId, req.userId).catch(err =>
-      console.error('广播人设重置更新失败:', err)
-    );
+    await db.write();
+  });
 
-    res.json({
-      success: true,
-      persona: resetPersona
-    });
-  } catch (error) {
-    console.error('重置AI人设错误:', error);
-    res.status(500).json({ success: false, error: '重置AI人设失败', details: error.message });
-  }
-});
+  // 立即重新加载调度器缓存（而非仅删除），确保下一次AI调用使用最新人设
+  await loadCustomPersonas(req.userId);
+
+  // 通过WebSocket广播人设更新，确保前端和其他进程立即感知变更
+  broadcastPersonaUpdate(resolvedAiId, req.userId).catch(err =>
+    console.error('广播人设更新失败:', err)
+  );
+
+  // 构建合并后的人设返回
+  const custom = db.data.customPersonas[resolvedAiId];
+  const defaultPersona = AI_PERSONAS[resolvedAiId] || { id: resolvedAiId };
+  const merged = mergePersona(defaultPersona, custom);
+
+  // 确保响应不会被缓存
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.json({ success: true, persona: merged, _timestamp: Date.now() });
+}));
+
+router.put('/personas/:aiId/reset', asyncHandler(async (req, res) => {
+  const resolvedAiId = await resolveAiId(req, res);
+  if (!resolvedAiId) return;
+  const db = await req.getUserDb();
+  await db.read();
+  delete db.data.customPersonas[resolvedAiId];
+  await withWriteLock(req.userId, async () => {
+    await db.write();
+  });
+  // 立即重新加载调度器缓存，确保重置后下一次AI调用使用默认人设
+  await loadCustomPersonas(req.userId);
+  const defaultPersona = AI_PERSONAS[resolvedAiId] || { id: resolvedAiId };
+  const resetPersona = mergePersona(defaultPersona);
+
+  // 通过WebSocket广播人设更新（重置为默认）
+  broadcastPersonaUpdate(resolvedAiId, req.userId).catch(err =>
+    console.error('广播人设重置更新失败:', err)
+  );
+
+  res.json({
+    success: true,
+    persona: resetPersona
+  });
+}));
 
 export default router;

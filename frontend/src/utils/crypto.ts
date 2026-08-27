@@ -153,7 +153,14 @@ async function getKey(): Promise<CryptoKey | null> {
   }
 }
 
+let legacyKeyMigrationDone = false;
+
 function migrateOldLocalStorageKey(): void {
+  if (legacyKeyMigrationDone) {
+    return;
+  }
+  legacyKeyMigrationDone = true;
+
   const OLD_GLOBAL_KEY = 'app_cache_key';
   const userId = typeof window !== 'undefined' ? localStorage.getItem('app_current_user_id') : null;
   const storageKey = userId ? `app_cache_key_${userId}` : OLD_GLOBAL_KEY;

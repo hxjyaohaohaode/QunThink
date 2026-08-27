@@ -5,10 +5,12 @@ import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
-import { getUploadsDir, withWriteLock } from '../models/db.js';
+import { getUploadsDir, getDataDir, getUserDb, withWriteLock } from '../models/db.js';
 import { parseFile } from '../services/fileParser/index.js';
 import { annotateFile, annotateWithoutFile, generateMediaDescription, annotateAndDescribe } from '../services/fileAnnotation/index.js';
 import { safeLog } from '../utils/logger.js';
+import { getKey } from '../utils/keyManager.js';
+import { asyncHandler } from '../middleware/errorHandler.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -45,7 +47,7 @@ const ALLOWED_MIME_TYPES = [
   'application/octet-stream'
 ];
 
-const DANGEROUS_EXTENSIONS = ['.exe', '.bat', '.sh', '.cmd', '.ps1', '.vbs', '.msi', '.com', '.scr', '.dll', '.pif', '.reg', '.wsf', '.ws'];
+const DANGEROUS_EXTENSIONS = ['.exe', '.bat', '.sh', '.cmd', '.ps1', '.vbs', '.js', '.mjs', '.cjs', '.msi', '.com', '.scr', '.dll', '.pif', '.reg', '.wsf', '.ws'];
 
 const MAGIC_BYTES_MAP = {
   'image/jpeg': [[0xFF, 0xD8, 0xFF]],
@@ -78,6 +80,13 @@ const OFFICE_MIME_TYPES = new Set([
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 ]);
 
+const OFFICE_ZIP_MAX_BYTES = 50 * 1024 * 1024;
+const MAX_PARSED_CONTENT_LENGTH = 100 * 1024;
+const DOWNLOAD_TOKEN_TTL_MS = 10 * 60 * 1000;
+const REINDEX_MAX_FILES = 50;
+const REINDEX_CONCURRENCY = 2;
+const REINDEX_INTERVAL_MS = 200;
+
 const EXTENSION_MIME_MAP = {
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -91,6 +100,66 @@ const EXTENSION_MIME_MAP = {
   '.tar': 'application/x-tar',
   '.rar': 'application/x-rar-compressed',
 };
+
+let downloadTokenSecret = null;
+
+function getDownloadTokenSecret() {
+  if (downloadTokenSecret) {
+    return downloadTokenSecret;
+  }
+  try {
+    const key = getKey();
+    if (key && key.length >= 32) {
+      downloadTokenSecret = key;
+      return downloadTokenSecret;
+    }
+  } catch (error) {
+    safeLog('warn', '读取下载令牌签名密钥失败，回退到派生密钥', { error: error?.message });
+  }
+  console.warn('[Security] keyManager 未初始化，使用 DATA_DIR 派生的静态密钥签署下载令牌');
+  downloadTokenSecret = crypto.createHash('sha256').update(`file-download-token:${getDataDir()}`).digest();
+  return downloadTokenSecret;
+}
+
+function signDownloadToken(fileId, ownerId, expiresAt = Date.now() + DOWNLOAD_TOKEN_TTL_MS) {
+  const signature = crypto.createHmac('sha256', getDownloadTokenSecret())
+    .update(`${fileId}.${ownerId}.${expiresAt}`)
+    .digest('base64url');
+  return `${expiresAt}.${Buffer.from(String(ownerId), 'utf-8').toString('base64url')}.${signature}`;
+}
+
+function verifyDownloadToken(fileId, token) {
+  if (typeof token !== 'string' || token.length === 0) {
+    return null;
+  }
+  const parts = token.split('.');
+  if (parts.length !== 3) {
+    return null;
+  }
+  const expiresAt = Number(parts[0]);
+  const signature = parts[2];
+  let ownerId;
+  try {
+    ownerId = Buffer.from(parts[1], 'base64url').toString('utf-8');
+  } catch {
+    return null;
+  }
+  if (!ownerId || !Number.isSafeInteger(expiresAt) || Date.now() > expiresAt) {
+    return null;
+  }
+  const expected = crypto.createHmac('sha256', getDownloadTokenSecret())
+    .update(`${fileId}.${ownerId}.${expiresAt}`)
+    .digest('base64url');
+  const givenBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (givenBuffer.length !== expectedBuffer.length) {
+    return null;
+  }
+  if (!crypto.timingSafeEqual(givenBuffer, expectedBuffer)) {
+    return null;
+  }
+  return ownerId;
+}
 
 function validateMagicBytes(buffer, mimeType) {
   const signatures = MAGIC_BYTES_MAP[mimeType];
@@ -126,24 +195,41 @@ function validateExtensionMimeConsistency(filename, mimeType) {
 async function validateOfficeDocument(filePath, mimeType) {
   if (!OFFICE_MIME_TYPES.has(mimeType)) return true;
   try {
-    const { default: AdmZip } = await import('adm-zip');
-    const zip = new AdmZip(filePath);
-    const entryNames = zip.getEntries().map(e => e.entryName);
-    if (!entryNames.includes('[Content_Types].xml')) {
+    const stat = await fs.promises.stat(filePath);
+    if (stat.size > OFFICE_ZIP_MAX_BYTES) {
       return false;
     }
-    return true;
+    const { default: AdmZip } = await import('adm-zip');
+    const zip = new AdmZip(filePath);
+    try {
+      return zip.getEntries().some(entry => entry.entryName === '[Content_Types].xml');
+    } finally {
+      zip.entries = {};
+    }
   } catch {
-    return true;
+    // A document that cannot be structurally inspected must not be accepted
+    // as an Office archive.  Failing closed prevents renamed arbitrary ZIPs
+    // from reaching the background parser.
+    return false;
   }
 }
 
 function toFileResponse(fileRecord) {
   return {
-    ...fileRecord,
+    id: fileRecord.id,
+    group_id: fileRecord.group_id,
+    filename: fileRecord.filename,
     original_name: fileRecord.filename,
-    url: `/api/files/${fileRecord.id}/download?token=${encodeURIComponent(fileRecord.download_token || '')}&group_id=${encodeURIComponent(fileRecord.group_id)}`,
-    media_description: fileRecord.media_description || ''
+    mime_type: fileRecord.mime_type,
+    file_size: fileRecord.file_size,
+    created_at: fileRecord.created_at,
+    parse_status: fileRecord.parse_status,
+    parse_error: fileRecord.parse_error || null,
+    annotate_error: fileRecord.annotate_error || null,
+    search_description: fileRecord.search_description || '',
+    search_tags: fileRecord.search_tags || [],
+    media_description: fileRecord.media_description || '',
+    url: `/api/files/public/${fileRecord.id}?token=${encodeURIComponent(signDownloadToken(fileRecord.id, fileRecord.owner_user_id || fileRecord.uploader_id || 'default'))}&group_id=${encodeURIComponent(fileRecord.group_id)}`
   };
 }
 
@@ -177,8 +263,20 @@ function resolveStoredFilePath(fileRecord, currentUserId) {
 
   const uploadsRoot = path.resolve(getUploadsDir());
   const safeFilePath = path.resolve(path.join(uploadsRoot, ownerId, storedFilename));
-  if (!safeFilePath.startsWith(uploadsRoot)) {
+  const relativePath = path.relative(uploadsRoot, safeFilePath);
+  if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
     return null;
+  }
+
+  if (fs.existsSync(safeFilePath)) {
+    try {
+      const realRoot = fs.realpathSync(uploadsRoot);
+      const realFile = fs.realpathSync(safeFilePath);
+      const realRelative = path.relative(realRoot, realFile);
+      if (!realRelative || realRelative.startsWith('..') || path.isAbsolute(realRelative)) return null;
+    } catch {
+      return null;
+    }
   }
 
   return safeFilePath;
@@ -214,6 +312,31 @@ async function removeStoredFileFromDisk(fileRecord, currentUserId) {
   }
 }
 
+async function cleanupUploadedBatch(files) {
+  for (const file of files || []) {
+    if (file?.path && fs.existsSync(file.path)) {
+      await fs.promises.unlink(file.path).catch(() => { });
+    }
+  }
+}
+
+const INLINE_DOWNLOAD_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp',
+  '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac',
+  '.mp4', '.webm', '.mov', '.avi', '.mkv'];
+
+function sendFileDownload(res, file, safeFilePath) {
+  const ext = path.extname(file.filename || '').toLowerCase();
+  const isInline = INLINE_DOWNLOAD_EXTENSIONS.includes(ext);
+  const disposition = isInline ? 'inline' : 'attachment';
+  res.setHeader('Content-Type', file.mime_type || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `${disposition}; filename*=UTF-8''${encodeURIComponent(file.filename || 'download')}`);
+  if (!isInline) res.setHeader('Content-Security-Policy', 'sandbox');
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.sendFile(safeFilePath);
+}
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const userId = req.userId || 'anonymous';
@@ -236,6 +359,10 @@ const upload = multer({
       return cb(new Error('不允许上传可执行文件'));
     }
 
+    if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+      return cb(new Error('不允许的文件类型'));
+    }
+
     cb(null, true);
   }
 });
@@ -253,7 +380,7 @@ router.post('/files/upload', (req, res, next) => {
     }
     next();
   });
-}, async (req, res) => {
+}, asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   await db.read();
 
@@ -262,6 +389,7 @@ router.post('/files/upload', (req, res, next) => {
   }
 
   if (req.files.length > 10) {
+    await cleanupUploadedBatch(req.files);
     return res.status(400).json({ error: '最多只能上传10个文件' });
   }
 
@@ -270,20 +398,18 @@ router.post('/files/upload', (req, res, next) => {
   const uploadedFiles = [];
 
   if (!uploaderId) {
+    await cleanupUploadedBatch(req.files);
     return res.status(401).json({ error: '未认证' });
   }
 
   if (!group_id || typeof group_id !== 'string') {
+    await cleanupUploadedBatch(req.files);
     return res.status(400).json({ error: 'group_id is required' });
   }
 
   const group = db.data.groups.find(entry => entry.id === group_id);
   if (!group) {
-    for (const file of req.files) {
-      if (file?.path && fs.existsSync(file.path)) {
-        await fs.promises.unlink(file.path).catch(() => { });
-      }
-    }
+    await cleanupUploadedBatch(req.files);
     return res.status(404).json({ error: '群组不存在' });
   }
 
@@ -298,15 +424,19 @@ router.post('/files/upload', (req, res, next) => {
       fs.readSync(fd, headerBuf, 0, 8, 0);
       fs.closeSync(fd);
       if (!validateMagicBytes(headerBuf, mimeType)) {
-        fs.unlinkSync(filePath);
+        await cleanupUploadedBatch(req.files);
         return res.status(400).json({ error: `文件内容与声明的类型 ${mimeType} 不匹配` });
       }
       if (!validateExtensionMimeConsistency(fileName, mimeType)) {
-        fs.unlinkSync(filePath);
+        await cleanupUploadedBatch(req.files);
         return res.status(400).json({ error: `文件扩展名与声明的类型 ${mimeType} 不匹配` });
       }
+      if (!(await validateOfficeDocument(filePath, mimeType))) {
+        await cleanupUploadedBatch(req.files);
+        return res.status(400).json({ error: 'Office 文件结构校验失败' });
+      }
     } catch (e) {
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      await cleanupUploadedBatch(req.files);
       return res.status(400).json({ error: '无法读取文件进行验证' });
     }
   }
@@ -328,13 +458,20 @@ router.post('/files/upload', (req, res, next) => {
       parsedContent = `[解析失败: ${error.message}]`;
     }
 
+    let storedParsedContent = parsedContent;
+    let parsedTruncated = false;
+    if (typeof parsedContent === 'string' && parsedContent.length > MAX_PARSED_CONTENT_LENGTH) {
+      storedParsedContent = parsedContent.substring(0, MAX_PARSED_CONTENT_LENGTH);
+      parsedTruncated = true;
+    }
+
     let searchDescription = '';
     let searchTags = [];
     let mediaDescription = '';
     let annotateError = null;
 
     try {
-      const textContent = typeof parsedContent === 'string' ? parsedContent : '';
+      const textContent = typeof storedParsedContent === 'string' ? storedParsedContent : '';
       const { annotation, description } = await annotateAndDescribe(filePath, mimeType, fileName, fileSize, textContent);
       if (annotation) {
         searchDescription = annotation.description || '';
@@ -359,8 +496,8 @@ router.post('/files/upload', (req, res, next) => {
           ? `${(fileSize / (1024 * 1024)).toFixed(1)}MB`
           : `${(fileSize / 1024).toFixed(0)}KB`;
         mediaDescription = `[媒体文件: ${fileName}, 大小: ${sizeStr}]`;
-      } else if (typeof parsedContent === 'string' && parsedContent.length > 0 && !parsedContent.startsWith('[解析失败')) {
-        mediaDescription = parsedContent.substring(0, 500);
+      } else if (typeof storedParsedContent === 'string' && storedParsedContent.length > 0 && !storedParsedContent.startsWith('[解析失败')) {
+        mediaDescription = storedParsedContent.substring(0, 500);
       }
     }
 
@@ -374,11 +511,11 @@ router.post('/files/upload', (req, res, next) => {
       original_path: filePath,
       file_size: fileSize,
       mime_type: mimeType,
-      parsed_content: parsedContent,
+      parsed_content: storedParsedContent,
+      parsed_truncated: parsedTruncated,
       media_description: mediaDescription || '',
       search_description: searchDescription,
       search_tags: searchTags,
-      download_token: crypto.randomBytes(16).toString('hex'),
       parse_status: parseError ? 'error' : 'success',
       parse_error: parseError || null,
       annotate_error: annotateError || null,
@@ -398,9 +535,9 @@ router.post('/files/upload', (req, res, next) => {
       ? { file: uploadedFiles[0] }
       : { files: uploadedFiles }
   );
-});
+}));
 
-router.get('/files/:id', async (req, res) => {
+router.get('/files/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const groupId = typeof req.query.group_id === 'string' ? req.query.group_id : undefined;
   const { file, error, status } = await getAccessibleFileRecord(req, id, groupId);
@@ -409,9 +546,9 @@ router.get('/files/:id', async (req, res) => {
   }
 
   res.json(toFileResponse(file));
-});
+}));
 
-router.get('/files/:id/content', async (req, res) => {
+router.get('/files/:id/content', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const groupId = typeof req.query.group_id === 'string' ? req.query.group_id : undefined;
   const { file, error, status } = await getAccessibleFileRecord(req, id, groupId);
@@ -420,9 +557,9 @@ router.get('/files/:id/content', async (req, res) => {
   }
 
   res.json({ content: file.parsed_content });
-});
+}));
 
-router.get('/files/:id/media-description', async (req, res) => {
+router.get('/files/:id/media-description', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const groupId = typeof req.query.group_id === 'string' ? req.query.group_id : undefined;
   const { file, error, status } = await getAccessibleFileRecord(req, id, groupId);
@@ -439,9 +576,9 @@ router.get('/files/:id/media-description', async (req, res) => {
     search_description: file.search_description || '',
     search_tags: file.search_tags || []
   });
-});
+}));
 
-router.post('/files/:id/analyze', async (req, res) => {
+router.post('/files/:id/analyze', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const groupId = typeof req.body?.group_id === 'string' ? req.body.group_id : undefined;
   const { db, file, error, status } = await getAccessibleFileRecord(req, id, groupId);
@@ -487,46 +624,64 @@ router.post('/files/:id/analyze', async (req, res) => {
     safeLog('error', 'File analysis error', { error: error?.message || error });
     res.status(500).json({ error: '文件分析失败' });
   }
-});
+}));
 
-router.get('/files/:id/download', async (req, res) => {
+// 公开签名下载：仅凭短时效 HMAC token 访问（供 <a download> 等无 cookie 场景使用）。
+// 该路径在 auth 中间件白名单中，token 内编码了属主 ID，严格校验签名与时效。
+router.get('/files/public/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const token = typeof req.query.token === 'string' ? req.query.token : undefined;
+  const token = typeof req.query.token === 'string' ? req.query.token : '';
+
+  const tokenOwnerId = verifyDownloadToken(id, token);
+  if (!tokenOwnerId) {
+    return res.status(401).json({ error: '下载链接无效或已过期' });
+  }
+
+  const db = await getUserDb(tokenOwnerId);
+  await db.read();
+  const file = db.data.files.find(f => f.id === id) || null;
+  if (!file) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+
+  const safeFilePath = resolveStoredFilePath(file, tokenOwnerId);
+  if (!safeFilePath || !fs.existsSync(safeFilePath)) {
+    return res.status(404).json({ error: 'File not found on disk' });
+  }
+
+  sendFileDownload(res, file, safeFilePath);
+}));
+
+router.get('/files/:id/download', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const token = typeof req.query.token === 'string' ? req.query.token : '';
   const groupId = typeof req.query.group_id === 'string' ? req.query.group_id : undefined;
 
-  if (token) {
-    try {
-      const db = await req.getUserDb();
-      await db.read();
-      const file = db.data.files.find(f => f.id === id && f.download_token === token);
-      if (file) {
-        const safeFilePath = resolveStoredFilePath(file, req.userId || file.uploader_id || file.owner_user_id);
-        if (safeFilePath && fs.existsSync(safeFilePath)) {
-          const ext = path.extname(file.filename || '').toLowerCase();
-          const inlineTypes = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg',
-            '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac',
-            '.mp4', '.webm', '.mov', '.avi', '.mkv',
-            '.txt', '.md', '.csv', '.json', '.xml', '.pdf'];
-          const isInline = inlineTypes.includes(ext);
-          res.setHeader('Content-Type', file.mime_type || 'application/octet-stream');
-          res.setHeader('Content-Disposition', isInline ? 'inline' : 'attachment');
-          res.setHeader('Cache-Control', 'private, max-age=3600');
-          res.setHeader('Access-Control-Allow-Origin', '*');
-          return res.sendFile(safeFilePath);
-        }
-      }
+  let file = null;
+  let effectiveOwner = req.userId;
+
+  const tokenOwnerId = token ? verifyDownloadToken(id, token) : null;
+  if (tokenOwnerId) {
+    const db = await getUserDb(tokenOwnerId);
+    await db.read();
+    file = db.data.files.find(f => f.id === id) || null;
+    effectiveOwner = tokenOwnerId;
+    if (!file) {
       return res.status(404).json({ error: 'File not found' });
-    } catch (error) {
-      return res.status(500).json({ error: error.message });
     }
+  } else {
+    const { file: record, error, status } = await getAccessibleFileRecord(req, id, groupId);
+    if (!record) {
+      return res.status(status).json({ error });
+    }
+    const ownerUserId = record.owner_user_id || record.uploader_id;
+    if (ownerUserId && ownerUserId !== req.userId) {
+      return res.status(403).json({ error: '禁止访问' });
+    }
+    file = record;
   }
 
-  const { file, error, status } = await getAccessibleFileRecord(req, id, groupId);
-  if (!file) {
-    return res.status(status).json({ error });
-  }
-
-  const safeFilePath = resolveStoredFilePath(file, req.userId);
+  const safeFilePath = resolveStoredFilePath(file, effectiveOwner);
   if (!safeFilePath) {
     return res.status(403).json({ error: '禁止访问' });
   }
@@ -535,24 +690,10 @@ router.get('/files/:id/download', async (req, res) => {
     return res.status(404).json({ error: 'File not found on disk' });
   }
 
-  const ext = path.extname(file.filename || '').toLowerCase();
-  const inlineTypes = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg',
-    '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac',
-    '.mp4', '.webm', '.mov', '.avi', '.mkv',
-    '.txt', '.md', '.csv', '.json', '.xml', '.pdf'];
-  const isInline = inlineTypes.includes(ext);
+  sendFileDownload(res, file, safeFilePath);
+}));
 
-  res.setHeader('Content-Type', file.mime_type || 'application/octet-stream');
-  if (isInline) {
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.filename)}"`);
-  } else {
-    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.filename)}"`);
-  }
-  res.setHeader('Cache-Control', 'private, max-age=3600');
-  res.sendFile(safeFilePath);
-});
-
-router.delete('/files/:id', async (req, res) => {
+router.delete('/files/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const groupId = typeof req.body?.group_id === 'string' ? req.body.group_id : undefined;
   const { db, file, error, status } = await getAccessibleFileRecord(req, id, groupId);
@@ -560,96 +701,117 @@ router.delete('/files/:id', async (req, res) => {
     return res.status(status).json({ error });
   }
 
-  await removeStoredFileFromDisk(file, req.userId).catch(() => { });
   db.data.files = (db.data.files || []).filter(entry => entry.id !== id);
   await withWriteLock(req.userId, async () => {
     await db.write();
   });
 
+  removeStoredFileFromDisk(file, req.userId).catch(unlinkError => {
+    safeLog('warn', '删除磁盘文件失败', { fileId: id, error: unlinkError?.message });
+  });
+
   res.json({ success: true });
-});
+}));
 
-router.post('/files/reindex', async (req, res) => {
-  try {
-    const db = await req.getUserDb();
-    await db.read();
+router.post('/files/reindex', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  await db.read();
 
-    const files = db.data.files || [];
-    let reindexed = 0;
+  const files = db.data.files || [];
+  const candidates = [];
 
-    for (const file of files) {
-      if (file.search_description && file.search_tags && file.media_description) continue;
+  for (const file of files) {
+    if (candidates.length >= REINDEX_MAX_FILES) break;
+    const hasAnyAnnotation = Boolean(
+      file.search_description
+      || (Array.isArray(file.search_tags) && file.search_tags.length > 0)
+      || file.media_description
+    );
+    if (hasAnyAnnotation) continue;
+    candidates.push(file);
+  }
 
-      let searchDescription = '';
-      let searchTags = [];
+  const processReindexFile = async (file) => {
+    let searchDescription = '';
+    let searchTags = [];
 
-      try {
-        const safeFilePath = resolveStoredFilePath(file, req.userId);
-        const fileExists = !!safeFilePath && fs.existsSync(safeFilePath);
-        const textContent = typeof file.parsed_content === 'string' ? file.parsed_content : '';
-        if (fileExists) {
-          const annotation = await annotateFile(safeFilePath, file.mime_type, file.filename, file.file_size, textContent);
-          if (annotation) {
-            searchDescription = annotation.description || '';
-            searchTags = annotation.tags || [];
-          }
-        } else if (textContent.length > 0) {
-          const annotation = await annotateWithoutFile(file.filename, file.mime_type, file.file_size, textContent);
-          if (annotation) {
-            searchDescription = annotation.description || '';
-            searchTags = annotation.tags || [];
-          }
+    try {
+      const safeFilePath = resolveStoredFilePath(file, req.userId);
+      const fileExists = !!safeFilePath && fs.existsSync(safeFilePath);
+      const textContent = typeof file.parsed_content === 'string' ? file.parsed_content : '';
+      if (fileExists) {
+        const annotation = await annotateFile(safeFilePath, file.mime_type, file.filename, file.file_size, textContent);
+        if (annotation) {
+          searchDescription = annotation.description || '';
+          searchTags = annotation.tags || [];
         }
-      } catch (e) {
-        safeLog('error', 'Reindex annotation error', { error: e.message });
-      }
-
-      if (!searchDescription && !searchTags.length) {
-        const ext = path.extname(file.filename).toLowerCase();
-        const sizeStr = file.file_size > 1024 * 1024
-          ? `${(file.file_size / (1024 * 1024)).toFixed(1)}MB`
-          : `${(file.file_size / 1024).toFixed(0)}KB`;
-        const baseName = path.basename(file.filename, ext);
-        searchDescription = `文件: ${baseName} (${sizeStr})`;
-        searchTags = [ext.replace('.', ''), baseName.substring(0, 10)];
-      }
-
-      file.search_description = searchDescription;
-      file.search_tags = searchTags;
-
-      if (!file.media_description) {
-        try {
-          const safeFilePath2 = resolveStoredFilePath(file, req.userId);
-          const fileExists2 = !!safeFilePath2 && fs.existsSync(safeFilePath2);
-          if (fileExists2) {
-            file.media_description = await generateMediaDescription(
-              safeFilePath2,
-              file.mime_type,
-              file.filename,
-              file.file_size,
-              file.parsed_content
-            );
-          } else if (typeof file.parsed_content === 'string' && file.parsed_content.length > 0) {
-            file.media_description = file.parsed_content.substring(0, 500);
-          }
-        } catch (e) {
-          safeLog('error', 'Reindex media description error', { error: e.message });
-          file.media_description = file.search_description || '';
+      } else if (textContent.length > 0) {
+        const annotation = await annotateWithoutFile(file.filename, file.mime_type, file.file_size, textContent);
+        if (annotation) {
+          searchDescription = annotation.description || '';
+          searchTags = annotation.tags || [];
         }
       }
-
-      reindexed++;
+    } catch (e) {
+      safeLog('error', 'Reindex annotation error', { error: e.message });
     }
 
-    await withWriteLock(req.userId, async () => {
-      await db.write();
-    });
+    if (!searchDescription && !searchTags.length) {
+      const ext = path.extname(file.filename).toLowerCase();
+      const sizeStr = file.file_size > 1024 * 1024
+        ? `${(file.file_size / (1024 * 1024)).toFixed(1)}MB`
+        : `${(file.file_size / 1024).toFixed(0)}KB`;
+      const baseName = path.basename(file.filename, ext);
+      searchDescription = `文件: ${baseName} (${sizeStr})`;
+      searchTags = [ext.replace('.', ''), baseName.substring(0, 10)];
+    }
 
-    res.json({ reindexed, total: files.length });
-  } catch (error) {
-    safeLog('error', 'File reindex error', { error: error?.message || error });
-    res.status(500).json({ error: '重新索引失败' });
-  }
-});
+    file.search_description = searchDescription;
+    file.search_tags = searchTags;
+
+    if (!file.media_description) {
+      try {
+        const safeFilePath2 = resolveStoredFilePath(file, req.userId);
+        const fileExists2 = !!safeFilePath2 && fs.existsSync(safeFilePath2);
+        if (fileExists2) {
+          file.media_description = await generateMediaDescription(
+            safeFilePath2,
+            file.mime_type,
+            file.filename,
+            file.file_size,
+            file.parsed_content
+          );
+        } else if (typeof file.parsed_content === 'string' && file.parsed_content.length > 0) {
+          file.media_description = file.parsed_content.substring(0, 500);
+        }
+      } catch (e) {
+        safeLog('error', 'Reindex media description error', { error: e.message });
+        file.media_description = file.search_description || '';
+      }
+    }
+  };
+
+  let cursor = 0;
+  const reindexWorker = async () => {
+    while (cursor < candidates.length) {
+      const file = candidates[cursor];
+      cursor += 1;
+      await processReindexFile(file);
+      if (cursor < candidates.length) {
+        await new Promise(resolve => setTimeout(resolve, REINDEX_INTERVAL_MS));
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(REINDEX_CONCURRENCY, candidates.length) }, () => reindexWorker())
+  );
+
+  await withWriteLock(req.userId, async () => {
+    await db.write();
+  });
+
+  res.json({ reindexed: candidates.length, total: files.length });
+}));
 
 export default router;

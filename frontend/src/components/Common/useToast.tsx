@@ -1,5 +1,5 @@
-import { useState, useCallback, useRef } from 'react';
-import { Toast, ToastType } from './Toast';
+import { useCallback } from 'react';
+import { Toast, ToastType, pushGlobalToast } from './Toast';
 
 interface ToastOptions {
   message: string;
@@ -7,49 +7,20 @@ interface ToastOptions {
   duration?: number;
 }
 
-interface ToastState {
-  visible: boolean;
-  message: string;
-  type: ToastType;
-  duration: number;
-  toastId: number;
-}
-
+/**
+ * 模块级单例 toast 队列：同屏多个 toast 堆叠展示，互不覆盖。
+ * 返回的 Toast 元素为兼容占位（全局宿主负责渲染），保留既有调用点写法。
+ */
 export function useToast() {
-  const toastIdRef = useRef(0);
-  const [state, setState] = useState<ToastState>({
-    visible: false,
-    message: '',
-    type: 'info',
-    duration: 2500,
-    toastId: 0,
-  });
-
   const showToast = useCallback((options: ToastOptions) => {
-    toastIdRef.current += 1;
-    setState({
-      visible: true,
+    pushGlobalToast({
       message: options.message,
-      type: options.type || 'info',
-      duration: options.duration || 2500,
-      toastId: toastIdRef.current,
+      type: options.type,
+      duration: options.duration,
     });
   }, []);
 
-  const handleClose = useCallback(() => {
-    setState((prev) => ({ ...prev, visible: false }));
-  }, []);
-
-  const ToastComponent = (
-    <Toast
-      visible={state.visible}
-      message={state.message}
-      type={state.type}
-      duration={state.duration}
-      toastId={state.toastId}
-      onClose={handleClose}
-    />
-  );
+  const ToastComponent = <Toast />;
 
   return { showToast, Toast: ToastComponent };
 }

@@ -20,6 +20,7 @@ interface AudioStore {
 }
 
 const TTS_STORAGE_KEY = 'tts-audios-store';
+const MAX_PERSISTED_TTS_AUDIOS = 30;
 
 export const useAudioStore = create<AudioStore>()(
   persist(
@@ -89,16 +90,32 @@ export const useAudioStore = create<AudioStore>()(
       },
 
       setTTSAudio: (messageId: string, audio: MessageTTSAudio) => {
-        set(state => ({
-          ttsAudios: {
+        set(state => {
+          const nextTtsAudios: Record<string, MessageTTSAudio> = {
             ...state.ttsAudios,
             [messageId]: audio
-          },
-          ttsLoadingStates: {
-            ...state.ttsLoadingStates,
-            [messageId]: false
+          };
+
+          const ids = Object.keys(nextTtsAudios);
+          if (ids.length > MAX_PERSISTED_TTS_AUDIOS) {
+            const getTimestamp = (id: string) => {
+              const parsed = new Date(nextTtsAudios[id].createdAt).getTime();
+              return Number.isNaN(parsed) ? 0 : parsed;
+            };
+            ids.sort((a, b) => getTimestamp(a) - getTimestamp(b));
+            for (const staleId of ids.slice(0, ids.length - MAX_PERSISTED_TTS_AUDIOS)) {
+              delete nextTtsAudios[staleId];
+            }
           }
-        }));
+
+          return {
+            ttsAudios: nextTtsAudios,
+            ttsLoadingStates: {
+              ...state.ttsLoadingStates,
+              [messageId]: false
+            }
+          };
+        });
       },
 
       removeTTSAudio: (messageId: string) => {

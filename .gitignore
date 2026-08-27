@@ -38,18 +38,9 @@ yarn-error.log*
 # OS
 Thumbs.db
 
-# Backend data
-backend/data/users/*.json
-!backend/data/users/.gitkeep
-backend/data/auth.json
-backend/data/db.json
-backend/data/.rate_limits.json
-backend/data/tts/
-backend/data/uploads/
-
-# Encryption keys
-backend/data/.encryption_key
-backend/data/.encryption_key.meta
+# Backend data — 整目录排除（运行时数据、用户库、备份、密钥一律不入库）
+backend/data/*
+!backend/data/.gitkeep
 
 # Uploads
 backend/uploads/*
@@ -83,3 +74,9 @@ fix-logo.js
 # Sensitive files with API keys - NEVER commit
 API文件.txt
 短信服务.md
+*.log
+backend/*.log
+frontend/*.log
+*.tsbuildinfo
+*.development
+*.production

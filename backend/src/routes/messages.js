@@ -1,5 +1,6 @@
-import express from 'express';
+﻿import express from 'express';
 import { withWriteLock, resetGroupActivity, updateGroupActivity } from '../models/db.js';
+import { invalidateInsightsCache } from '../services/insightsCache.js';
 import { v4 as uuidv4 } from 'uuid';
 import { queueAIMessages, handleUserReaction, handleUserComment, startAutonomousChat, stopAutonomousChat, getAutonomousChatStatus } from '../services/scheduler/index.js';
 import socialService from '../services/social/index.js';
@@ -9,30 +10,53 @@ import { broadcastToGroup } from '../websocket/index.js';
 import { validateBody, sendMessageSchema, editMessageSchema, batchDeleteSchema, commentSchema } from '../validators/index.js';
 import { safeLog } from '../utils/logger.js';
 import { sanitizeObject, MESSAGE_SANITIZE_CONFIG, COMMENT_SANITIZE_CONFIG } from '../utils/sanitize.js';
+import { asyncHandler } from '../middleware/errorHandler.js';
 
 const router = express.Router();
 
-const safeErrorResponse = (error) => {
-  if (process.env.NODE_ENV === 'production') {
-    return { error: '服务器内部错误' };
+const MESSAGE_INDEX_CACHE = new Map();
+const DEFAULT_MESSAGE_LIMIT = 50;
+const MAX_MESSAGE_LIMIT = 200;
+
+function discardLegacyPersistedIndexes(db) {
+  if (db.data && Object.prototype.hasOwnProperty.call(db.data, '_indexes')) {
+    delete db.data._indexes;
   }
-  return { error: error.message };
-};
+}
+
+async function readUserData(db) {
+  await db.read();
+  discardLegacyPersistedIndexes(db);
+  return db;
+}
+
+function parseMessageLimit(rawLimit) {
+  const parsed = parseInt(rawLimit, 10);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_MESSAGE_LIMIT;
+  }
+  return Math.min(Math.max(parsed, 1), MAX_MESSAGE_LIMIT);
+}
+
+function rebuildGroupMessageIndex(db, groupId) {
+  const groupMessages = db.data.messages.filter(m => m.group_id === groupId);
+  groupMessages.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const groupIndex = groupMessages.map(m => m.id);
+  MESSAGE_INDEX_CACHE.set(groupId, groupIndex);
+  return groupIndex;
+}
+
+function getGroupMessageIndex(db, groupId) {
+  const cachedIndex = MESSAGE_INDEX_CACHE.get(groupId);
+  const groupMsgCount = db.data.messages.filter(m => m.group_id === groupId).length;
+  if (!cachedIndex || cachedIndex.length !== groupMsgCount) {
+    return rebuildGroupMessageIndex(db, groupId);
+  }
+  return cachedIndex;
+}
 
 function getMessagesForGroup(db, groupId, limit = 50, before = null, after = null) {
-  const indexes = db.data._indexes;
-  if (!indexes || !indexes.messagesByGroup) {
-    db.data._indexes = { messagesByGroup: {} };
-  }
-
-  let groupIndex = db.data._indexes.messagesByGroup[groupId];
-  const groupMsgCount = db.data.messages.filter(m => m.group_id === groupId).length;
-  if (!groupIndex || groupIndex.length !== groupMsgCount) {
-    const msgs = db.data.messages.filter(m => m.group_id === groupId);
-    msgs.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-    groupIndex = msgs.map(m => m.id);
-    db.data._indexes.messagesByGroup[groupId] = groupIndex;
-  }
+  const groupIndex = getGroupMessageIndex(db, groupId);
 
   const messageMap = new Map(db.data.messages.map(m => [m.id, m]));
   let messages = groupIndex.map(id => messageMap.get(id)).filter(Boolean);
@@ -64,25 +88,33 @@ function getMessagesForGroup(db, groupId, limit = 50, before = null, after = nul
 }
 
 function addMessageToIndex(db, message) {
-  const indexes = db.data._indexes;
-  if (!indexes || !indexes.messagesByGroup) {
-    db.data._indexes = { messagesByGroup: {} };
-  }
   const groupId = message.group_id;
-  if (!db.data._indexes.messagesByGroup[groupId]) {
-    db.data._indexes.messagesByGroup[groupId] = [];
+  let groupIndex = MESSAGE_INDEX_CACHE.get(groupId);
+  if (!groupIndex) {
+    groupIndex = [];
+    MESSAGE_INDEX_CACHE.set(groupId, groupIndex);
   }
-  db.data._indexes.messagesByGroup[groupId].push(message.id);
+  groupIndex.push(message.id);
 }
 
 function removeMessageFromIndex(db, messageId, groupId) {
-  const indexes = db.data._indexes;
-  if (indexes?.messagesByGroup?.[groupId]) {
-    const idx = indexes.messagesByGroup[groupId].indexOf(messageId);
+  const groupIndex = MESSAGE_INDEX_CACHE.get(groupId);
+  if (groupIndex) {
+    const idx = groupIndex.indexOf(messageId);
     if (idx > -1) {
-      indexes.messagesByGroup[groupId].splice(idx, 1);
+      groupIndex.splice(idx, 1);
     }
   }
+}
+
+function stripAttachmentFullContent(attachments) {
+  return (attachments || []).map(att => {
+    if (att && typeof att === 'object' && Object.prototype.hasOwnProperty.call(att, 'parsed_content')) {
+      const { parsed_content: _strippedContent, ...rest } = att;
+      return rest;
+    }
+    return att;
+  });
 }
 
 function normalizeLikeState(message) {
@@ -103,13 +135,12 @@ function normalizeDislikeState(message) {
   return message.disliked_by;
 }
 
-router.get('/groups/:groupId/messages', async (req, res) => {
-  const db = await req.getUserDb();
-  await db.read();
+router.get('/groups/:groupId/messages', asyncHandler(async (req, res) => {
+  const db = await readUserData(await req.getUserDb());
   const { groupId } = req.params;
-  const { limit = 50, before, after } = req.query;
+  const { limit, before, after } = req.query;
 
-  const { messages, hasMore } = getMessagesForGroup(db, groupId, parseInt(limit), before, after);
+  const { messages, hasMore } = getMessagesForGroup(db, groupId, parseMessageLimit(limit), before, after);
 
   const decryptedMessages = messages.map(message => {
     try {
@@ -140,11 +171,10 @@ router.get('/groups/:groupId/messages', async (req, res) => {
     messages: decryptedMessages,
     hasMore
   });
-});
+}));
 
-router.post('/groups/:groupId/messages', validateBody(sendMessageSchema), async (req, res) => {
-  const db = await req.getUserDb();
-  await db.read();
+router.post('/groups/:groupId/messages', validateBody(sendMessageSchema), asyncHandler(async (req, res) => {
+  const db = await readUserData(await req.getUserDb());
   const { groupId } = req.params;
   const sanitizedBody = sanitizeObject(req.body, MESSAGE_SANITIZE_CONFIG);
   const content = sanitizedBody.content;
@@ -232,6 +262,8 @@ router.post('/groups/:groupId/messages', validateBody(sendMessageSchema), async 
     await db.write();
   });
 
+  invalidateInsightsCache(req.userId, groupId);
+
   broadcastToGroup(groupId, {
     type: 'new_message',
     group_id: groupId,
@@ -241,12 +273,12 @@ router.post('/groups/:groupId/messages', validateBody(sendMessageSchema), async 
     content: content,
     content_type,
     reply_to,
-    attachments: enrichedAttachments,
+    attachments: stripAttachmentFullContent(enrichedAttachments),
     created_at: message.created_at
   });
 
   if (process.env.NODE_ENV !== 'test') {
-    queueAIMessages(groupId, content, reply_to).catch((error) => {
+    queueAIMessages(groupId, content, reply_to, req.userId).catch((error) => {
       safeLog('error', 'AI消息队列执行失败', { groupId, error: error?.message });
     });
   }
@@ -265,11 +297,10 @@ router.post('/groups/:groupId/messages', validateBody(sendMessageSchema), async 
   };
 
   res.status(201).json(responseMessage);
-});
+}));
 
-router.put('/messages/:id', validateBody(editMessageSchema), async (req, res) => {
-  const db = await req.getUserDb();
-  await db.read();
+router.put('/messages/:id', validateBody(editMessageSchema), asyncHandler(async (req, res) => {
+  const db = await readUserData(await req.getUserDb());
   const { id } = req.params;
   const { content } = req.body;
 
@@ -351,11 +382,10 @@ router.put('/messages/:id', validateBody(editMessageSchema), async (req, res) =>
   };
 
   res.json(responseMessage);
-});
+}));
 
-router.delete('/messages/:id', async (req, res) => {
-  const db = await req.getUserDb();
-  await db.read();
+router.delete('/messages/:id', asyncHandler(async (req, res) => {
+  const db = await readUserData(await req.getUserDb());
   const { id } = req.params;
 
   const messageIndex = db.data.messages.findIndex(m => m.id === id);
@@ -384,11 +414,10 @@ router.delete('/messages/:id', async (req, res) => {
   }
 
   res.json({ success: true });
-});
+}));
 
-router.post('/messages/batch-delete', validateBody(batchDeleteSchema), async (req, res) => {
-  const db = await req.getUserDb();
-  await db.read();
+router.post('/messages/batch-delete', validateBody(batchDeleteSchema), asyncHandler(async (req, res) => {
+  const db = await readUserData(await req.getUserDb());
   const { message_ids, group_id } = req.body;
 
   if (!Array.isArray(message_ids) || message_ids.length === 0) {
@@ -419,10 +448,9 @@ router.post('/messages/batch-delete', validateBody(batchDeleteSchema), async (re
   const deletedIds = messagesToDelete.map(message => message.id);
 
   if (deletedCount > 0) {
-    if (db.data._indexes?.messagesByGroup?.[group_id]) {
-      db.data._indexes.messagesByGroup[group_id] = db.data._indexes.messagesByGroup[group_id].filter(
-        id => !idSet.has(id)
-      );
+    const cachedGroupIndex = MESSAGE_INDEX_CACHE.get(group_id);
+    if (cachedGroupIndex) {
+      MESSAGE_INDEX_CACHE.set(group_id, cachedGroupIndex.filter(id => !idSet.has(id)));
     }
     resetGroupActivity(db, group_id);
     await withWriteLock(req.userId, async () => {
@@ -443,12 +471,11 @@ router.post('/messages/batch-delete', validateBody(batchDeleteSchema), async (re
     deleted_count: deletedCount,
     deleted_ids: deletedIds
   });
-});
+}));
 
 // 清空群聊所有消息
-router.delete('/groups/:groupId/messages', async (req, res) => {
-  const db = await req.getUserDb();
-  await db.read();
+router.delete('/groups/:groupId/messages', asyncHandler(async (req, res) => {
+  const db = await readUserData(await req.getUserDb());
   const { groupId } = req.params;
 
   const group = db.data.groups.find(g => g.id === groupId);
@@ -460,9 +487,7 @@ router.delete('/groups/:groupId/messages', async (req, res) => {
   db.data.messages = db.data.messages.filter(m => m.group_id !== groupId);
   const deletedCount = originalCount - db.data.messages.length;
 
-  if (db.data._indexes?.messagesByGroup) {
-    db.data._indexes.messagesByGroup[groupId] = [];
-  }
+  MESSAGE_INDEX_CACHE.set(groupId, []);
   resetGroupActivity(db, groupId);
 
   await withWriteLock(req.userId, async () => {
@@ -481,86 +506,89 @@ router.delete('/groups/:groupId/messages', async (req, res) => {
     deleted_count: deletedCount,
     message: `已清空群聊中的所有消息，共删除 ${deletedCount} 条`
   });
-});
+}));
 
-router.post('/messages/:id/dislike', async (req, res) => {
-  const db = await req.getUserDb();
-  await db.read();
+router.post('/messages/:id/dislike', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const userId = req.userId;
   if (!userId) return res.status(401).json({ error: '未认证' });
+  const db = await req.getUserDb();
 
-  const message = db.data.messages.find(m => m.id === id);
-  if (!message) {
-    return res.status(404).json({ error: 'Message not found' });
-  }
+  await withWriteLock(req.userId, async () => {
+    await readUserData(db);
+    const message = db.data.messages.find(m => m.id === id);
+    if (!message) {
+      const err = new Error('Message not found');
+      err.status = 404;
+      throw err;
+    }
+    normalizeDislikeState(message);
 
-  normalizeDislikeState(message);
-
-  if (!message.disliked_by.includes(userId)) {
-    message.disliked_by.push(userId);
-    message.dislikes = message.disliked_by.length;
-    await withWriteLock(req.userId, async () => {
+    if (!message.disliked_by.includes(userId)) {
+      message.disliked_by.push(userId);
+      message.dislikes = message.disliked_by.length;
       await db.write();
-    });
 
-    if (message.group_id) {
-      broadcastToGroup(message.group_id, {
-        type: 'message_disliked',
-        group_id: message.group_id,
-        message_id: id,
-        disliked_by: userId,
-        disliked_by_type: userId === 'user' ? 'user' : 'ai',
-        timestamp: new Date().toISOString()
-      });
+      if (message.group_id) {
+        broadcastToGroup(message.group_id, {
+          type: 'message_disliked',
+          group_id: message.group_id,
+          message_id: id,
+          disliked_by: userId,
+          disliked_by_type: userId === 'user' ? 'user' : 'ai',
+          timestamp: new Date().toISOString()
+        });
 
-      if (message.sender_type === 'ai') {
-        setTimeout(() => {
-          handleUserReaction(message.group_id, id, 'dislike', userId);
-        }, 500);
+        if (message.sender_type === 'ai') {
+          setTimeout(() => {
+            handleUserReaction(message.group_id, id, 'dislike', userId, req.userId);
+          }, 500);
+        }
       }
     }
-  }
 
-  res.json({ success: true, dislikes: message.dislikes, disliked_by: message.disliked_by });
-});
+    res.json({ success: true, dislikes: message.dislikes, disliked_by: message.disliked_by });
+  });
+}));
 
-router.delete('/messages/:id/dislike', async (req, res) => {
-  const db = await req.getUserDb();
-  await db.read();
+router.delete('/messages/:id/dislike', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const userId = req.userId;
   if (!userId) return res.status(401).json({ error: '未认证' });
+  const db = await req.getUserDb();
 
-  const message = db.data.messages.find(m => m.id === id);
-  if (!message) {
-    return res.status(404).json({ error: 'Message not found' });
-  }
-
-  normalizeDislikeState(message);
-  if (message.disliked_by && message.disliked_by.includes(userId)) {
-    message.disliked_by = message.disliked_by.filter(id => id !== userId);
-    message.dislikes = message.disliked_by.length;
-    await withWriteLock(req.userId, async () => {
-      await db.write();
-    });
-
-    if (message.group_id) {
-      broadcastToGroup(message.group_id, {
-        type: 'message_undisliked',
-        group_id: message.group_id,
-        message_id: id,
-        undisliked_by: userId,
-        undisliked_by_type: userId === 'user' ? 'user' : 'ai',
-        timestamp: new Date().toISOString()
-      });
+  await withWriteLock(req.userId, async () => {
+    await readUserData(db);
+    const message = db.data.messages.find(m => m.id === id);
+    if (!message) {
+      const err = new Error('Message not found');
+      err.status = 404;
+      throw err;
     }
-  }
+    normalizeDislikeState(message);
 
-  res.json({ success: true, dislikes: message.dislikes || 0, disliked_by: message.disliked_by || [] });
-});
+    if (message.disliked_by.includes(userId)) {
+      message.disliked_by = message.disliked_by.filter(uid => uid !== userId);
+      message.dislikes = message.disliked_by.length;
+      await db.write();
 
-router.post('/comments', validateBody(commentSchema), async (req, res) => {
+      if (message.group_id) {
+        broadcastToGroup(message.group_id, {
+          type: 'message_undisliked',
+          group_id: message.group_id,
+          message_id: id,
+          undisliked_by: userId,
+          undisliked_by_type: userId === 'user' ? 'user' : 'ai',
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+
+    res.json({ success: true, dislikes: message.dislikes || 0, disliked_by: message.disliked_by || [] });
+  });
+}));
+
+router.post('/comments', validateBody(commentSchema), asyncHandler(async (req, res) => {
   const sanitizedBody = sanitizeObject(req.body, COMMENT_SANITIZE_CONFIG);
   const { message_id, content, parent_id, reply_to } = sanitizedBody;
 
@@ -568,8 +596,7 @@ router.post('/comments', validateBody(commentSchema), async (req, res) => {
     return res.status(400).json({ error: 'message_id and content are required' });
   }
 
-  const db = await req.getUserDb();
-  await db.read();
+  const db = await readUserData(await req.getUserDb());
 
   const message = db.data.messages.find(m => m.id === message_id);
   if (!message) {
@@ -594,7 +621,7 @@ router.post('/comments', validateBody(commentSchema), async (req, res) => {
   const sender_id = req.userId;
   if (!sender_id) return res.status(401).json({ error: '未认证' });
   const comment = {
-    id: 'comment_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+    id: uuidv4(),
     message_id,
     parent_id: parent_id || null,
     reply_to: reply_to || null,
@@ -627,684 +654,677 @@ router.post('/comments', validateBody(commentSchema), async (req, res) => {
 
   if (message.sender_type === 'ai') {
     setTimeout(() => {
-      handleUserComment(message.group_id, message_id, comment, comment.id);
+      handleUserComment(message.group_id, message_id, comment, comment.id, req.userId);
     }, 500);
   }
 
   res.status(201).json({ comment });
-});
+}));
 
-router.post('/messages/:id/like', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const user_id = req.userId;
-    if (!user_id) return res.status(401).json({ error: '未认证' });
-    const db = await req.getUserDb();
+router.post('/messages/:id/like', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const user_id = req.userId;
+  if (!user_id) return res.status(401).json({ error: '未认证' });
+  const db = await req.getUserDb();
 
-    await withWriteLock(req.userId, async () => {
-      await db.read();
-      const message = db.data.messages.find(m => m.id === id);
-      if (!message) {
-        const err = new Error('Message not found');
-        err.status = 404;
-        throw err;
-      }
-      normalizeLikeState(message);
-      if (!message.likes.includes(user_id)) {
-        message.likes.push(user_id);
-        message.liked_by = [...message.likes];
-      }
-      await db.write();
-
-      broadcastToGroup(message.group_id, {
-        type: 'message_liked',
-        group_id: message.group_id,
-        message_id: id,
-        liked_by: user_id,
-        liked_by_type: user_id === 'user' ? 'user' : 'ai',
-        timestamp: new Date().toISOString()
-      });
-
-      if (message.group_id && message.sender_type === 'ai') {
-        setTimeout(() => {
-          handleUserReaction(message.group_id, id, 'like', user_id);
-        }, 500);
-      }
-
-      res.json({ likes: message.likes, liked_by: message.liked_by, likes_count: message.likes.length });
-    });
-  } catch (error) {
-    if (error.status === 404) {
-      return res.status(404).json({ error: 'Message not found' });
-    }
-    safeLog('error', '点赞操作失败', { error: error.message });
-    res.status(500).json(safeErrorResponse(error));
-  }
-});
-
-router.delete('/messages/:id/like', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const user_id = req.userId;
-    if (!user_id) return res.status(401).json({ error: '未认证' });
-    const db = await req.getUserDb();
-    await db.read();
+  await withWriteLock(req.userId, async () => {
+    await readUserData(db);
     const message = db.data.messages.find(m => m.id === id);
-    if (!message) return res.status(404).json({ error: 'Message not found' });
+    if (!message) {
+      const err = new Error('Message not found');
+      err.status = 404;
+      throw err;
+    }
     normalizeLikeState(message);
-    const wasLiked = message.likes.includes(user_id);
-    message.likes = message.likes.filter(uid => uid !== user_id);
-    message.liked_by = [...message.likes];
-    await withWriteLock(req.userId, async () => {
-      await db.write();
+    if (!message.likes.includes(user_id)) {
+      message.likes.push(user_id);
+      message.liked_by = [...message.likes];
+    }
+    await db.write();
+
+    broadcastToGroup(message.group_id, {
+      type: 'message_liked',
+      group_id: message.group_id,
+      message_id: id,
+      liked_by: user_id,
+      liked_by_type: user_id === 'user' ? 'user' : 'ai',
+      timestamp: new Date().toISOString()
     });
 
-    if (wasLiked && message.group_id) {
-      broadcastToGroup(message.group_id, {
-        type: 'message_unliked',
-        group_id: message.group_id,
-        message_id: id,
-        unliked_by: user_id,
-        unliked_by_type: user_id === 'user' ? 'user' : 'ai',
-        timestamp: new Date().toISOString()
-      });
+    if (message.group_id && message.sender_type === 'ai') {
+      setTimeout(() => {
+        handleUserReaction(message.group_id, id, 'like', user_id, req.userId);
+      }, 500);
     }
 
     res.json({ likes: message.likes, liked_by: message.liked_by, likes_count: message.likes.length });
-  } catch (error) {
-    safeLog('error', '取消点赞操作失败', { error: error.message });
-    res.status(500).json(safeErrorResponse(error));
+  });
+}));
+
+router.delete('/messages/:id/like', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const user_id = req.userId;
+  if (!user_id) return res.status(401).json({ error: '未认证' });
+  const db = await readUserData(await req.getUserDb());
+  const message = db.data.messages.find(m => m.id === id);
+  if (!message) return res.status(404).json({ error: 'Message not found' });
+  normalizeLikeState(message);
+  const wasLiked = message.likes.includes(user_id);
+  message.likes = message.likes.filter(uid => uid !== user_id);
+  message.liked_by = [...message.likes];
+  await withWriteLock(req.userId, async () => {
+    await db.write();
+  });
+
+  if (wasLiked && message.group_id) {
+    broadcastToGroup(message.group_id, {
+      type: 'message_unliked',
+      group_id: message.group_id,
+      message_id: id,
+      unliked_by: user_id,
+      unliked_by_type: user_id === 'user' ? 'user' : 'ai',
+      timestamp: new Date().toISOString()
+    });
   }
-});
 
-router.post('/groups/:groupId/autonomous-chat/start', async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const { topic } = req.body;
+  res.json({ likes: message.likes, liked_by: message.liked_by, likes_count: message.likes.length });
+}));
 
-    const result = await startAutonomousChat(groupId, topic);
+router.post('/groups/:groupId/autonomous-chat/start', asyncHandler(async (req, res) => {
+  const { groupId } = req.params;
+  const { topic } = req.body;
 
-    if (result.success) {
-      res.json(result);
-    } else {
-      res.status(400).json(result);
-    }
-  } catch (error) {
-    safeLog('error', '启动自发对话失败', { error: error.message });
-    res.status(500).json(safeErrorResponse(error));
-  }
-});
+  const result = await startAutonomousChat(groupId, topic);
 
-router.post('/groups/:groupId/autonomous-chat/stop', async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const result = stopAutonomousChat(groupId);
+  if (result.success) {
     res.json(result);
-  } catch (error) {
-    safeLog('error', '停止自发对话失败', { error: error.message });
-    res.status(500).json(safeErrorResponse(error));
+  } else {
+    res.status(400).json(result);
   }
-});
+}));
 
-router.get('/groups/:groupId/autonomous-chat/status', async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const status = getAutonomousChatStatus(groupId);
-    res.json(status);
-  } catch (error) {
-    safeLog('error', '获取自发对话状态失败', { error: error.message });
-    res.status(500).json(safeErrorResponse(error));
-  }
-});
+router.post('/groups/:groupId/autonomous-chat/stop', asyncHandler(async (req, res) => {
+  const { groupId } = req.params;
+  const result = stopAutonomousChat(groupId);
+  res.json(result);
+}));
 
-router.post('/groups/:groupId/private-chat/start', async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const { topic } = req.body;
+router.get('/groups/:groupId/autonomous-chat/status', asyncHandler(async (req, res) => {
+  const { groupId } = req.params;
+  const status = getAutonomousChatStatus(groupId);
+  res.json(status);
+}));
 
-    const { startAIPrivateChat } = await import('../services/scheduler/index.js');
-    const result = await startAIPrivateChat(groupId, topic);
+router.post('/groups/:groupId/private-chat/start', asyncHandler(async (req, res) => {
+  const { groupId } = req.params;
+  const { topic } = req.body;
 
-    if (result.status === 'success') {
-      res.json(result);
-    } else if (result.status === 'already_active') {
-      res.status(409).json(result);
-    } else {
-      res.status(400).json(result);
-    }
-  } catch (error) {
-    safeLog('error', '启动私聊失败', { error: error.message });
-    res.status(500).json(safeErrorResponse(error));
-  }
-});
+  const { startAIPrivateChat } = await import('../services/scheduler/index.js');
+  const result = await startAIPrivateChat(groupId, topic);
 
-router.post('/groups/:groupId/private-chat/stop', async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const { stopAIPrivateChat } = await import('../services/scheduler/index.js');
-    const result = stopAIPrivateChat(groupId);
+  if (result.status === 'success') {
     res.json(result);
-  } catch (error) {
-    safeLog('error', '停止私聊失败', { error: error.message });
-    res.status(500).json(safeErrorResponse(error));
+  } else if (result.status === 'already_active') {
+    res.status(409).json(result);
+  } else {
+    res.status(400).json(result);
   }
-});
+}));
 
-router.get('/groups/:groupId/private-chat/status', async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const { getChatStatus } = await import('../services/scheduler/index.js');
-    const status = getChatStatus(groupId);
-    res.json(status);
-  } catch (error) {
-    safeLog('error', '获取私聊状态失败', { error: error.message });
-    res.status(500).json(safeErrorResponse(error));
+router.post('/groups/:groupId/private-chat/stop', asyncHandler(async (req, res) => {
+  const { groupId } = req.params;
+  const { stopAIPrivateChat } = await import('../services/scheduler/index.js');
+  const result = stopAIPrivateChat(groupId);
+  res.json(result);
+}));
+
+router.get('/groups/:groupId/private-chat/status', asyncHandler(async (req, res) => {
+  const { groupId } = req.params;
+  const { getChatStatus } = await import('../services/scheduler/index.js');
+  const status = getChatStatus(groupId);
+  res.json(status);
+}));
+
+router.get('/search', asyncHandler(async (req, res) => {
+  const { q, type, groupId, limit = 20, quickFilter, dateFrom, dateTo } = req.query;
+  const maxLimit = Math.min(parseInt(limit) || 20, 50);
+
+  if (!q || typeof q !== 'string' || q.trim().length === 0) {
+    return res.status(400).json({ error: '搜索关键词不能为空' });
   }
-});
 
-router.get('/search', async (req, res) => {
-  try {
-    const { q, type, groupId, limit = 20, quickFilter, dateFrom, dateTo } = req.query;
-    const maxLimit = Math.min(parseInt(limit) || 20, 50);
+  const db = await readUserData(await req.getUserDb());
 
-    if (!q || typeof q !== 'string' || q.trim().length === 0) {
-      return res.status(400).json({ error: '搜索关键词不能为空' });
+  const searchQuery = q.toLowerCase().trim();
+  const searchTypes = type ? type.split(',') : ['groups', 'messages', 'files', 'agents', 'personas', 'comments', 'members', 'media'];
+
+  // 解析日期范围
+  const fromDate = dateFrom ? new Date(dateFrom) : null;
+  const toDate = dateTo ? new Date(dateTo + 'T23:59:59.999Z') : null;
+
+  // 快速筛选：根据 quickFilter 限定消息搜索类型
+  const quickFilterImages = quickFilter === 'images';
+  const quickFilterFiles = quickFilter === 'files';
+  const quickFilterLinks = quickFilter === 'links';
+  const quickFilterMedia = quickFilter === 'media';
+  const results = {
+    groups: [],
+    messages: [],
+    files: [],
+    agents: [],
+    personas: [],
+    comments: [],
+    members: [],
+    media: [],
+    total: 0,
+    query: q
+  };
+
+  if (searchTypes.includes('groups')) {
+    const groups = db.data.groups || [];
+    for (const group of groups) {
+      if (results.groups.length >= maxLimit) break;
+      const nameMatch = group.name?.toLowerCase().includes(searchQuery);
+      const descMatch = group.description?.toLowerCase().includes(searchQuery);
+      const announcementMatch = group.announcement?.toLowerCase().includes(searchQuery);
+      const memberMatch = (group.ai_members || []).some(m => m.toLowerCase().includes(searchQuery));
+      if (nameMatch || descMatch || announcementMatch || memberMatch) {
+        results.groups.push({
+          id: group.id,
+          name: group.name,
+          description: group.description || '',
+          type: group.type,
+          memberCount: group.ai_members?.length || 0,
+          pinned: group.pinned,
+          created_at: group.created_at,
+          matchField: nameMatch ? 'name' : descMatch ? 'description' : announcementMatch ? 'announcement' : 'member'
+        });
+      }
+    }
+  }
+
+  if (searchTypes.includes('messages')) {
+    let messages = db.data.messages || [];
+    if (groupId) {
+      messages = messages.filter(m => m.group_id === groupId);
     }
 
-    const db = await req.getUserDb();
-    await db.read();
+    // 按日期范围筛选
+    if (fromDate || toDate) {
+      messages = messages.filter(m => {
+        const msgDate = new Date(m.created_at);
+        if (fromDate && msgDate < fromDate) return false;
+        if (toDate && msgDate > toDate) return false;
+        return true;
+      });
+    }
 
-    const searchQuery = q.toLowerCase().trim();
-    const searchTypes = type ? type.split(',') : ['groups', 'messages', 'files', 'agents', 'personas', 'comments', 'members', 'media'];
+    // 按 quickFilter 预筛选消息附件类型
+    if (quickFilterImages || quickFilterFiles || quickFilterLinks) {
+      messages = messages.filter(m => {
+        if (!m.attachments || m.attachments.length === 0) return false;
+        return m.attachments.some(att => {
+          const mimeType = (att.type || att.mime_type || '').toLowerCase();
+          const fileName = (att.name || att.filename || '').toLowerCase();
+          if (quickFilterImages) return mimeType.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(fileName);
+          if (quickFilterFiles) return !mimeType.startsWith('image/') && !/\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(fileName) && !/^https?:\/\//i.test(att.url || '');
+          if (quickFilterLinks) return /^https?:\/\//i.test(att.url || '') || /^https?:\/\//i.test(att.name || '') || m.content_type === 'link' || /https?:\/\/[^\s]+/.test(m.content || '');
+          return false;
+        });
+      });
+    }
 
-    // 解析日期范围
-    const fromDate = dateFrom ? new Date(dateFrom) : null;
-    const toDate = dateTo ? new Date(dateTo + 'T23:59:59.999Z') : null;
+    const filesIndex = {};
+    for (const f of (db.data.files || [])) {
+      filesIndex[f.id] = f;
+    }
 
-    // 快速筛选：根据 quickFilter 限定消息搜索类型
-    const quickFilterImages = quickFilter === 'images';
-    const quickFilterFiles = quickFilter === 'files';
-    const quickFilterLinks = quickFilter === 'links';
-    const quickFilterMedia = quickFilter === 'media';
-    const results = {
-      groups: [],
-      messages: [],
-      files: [],
-      agents: [],
-      personas: [],
-      comments: [],
-      members: [],
-      media: [],
-      total: 0,
-      query: q
-    };
-
-    if (searchTypes.includes('groups')) {
-      const groups = db.data.groups || [];
-      for (const group of groups) {
-        if (results.groups.length >= maxLimit) break;
-        const nameMatch = group.name?.toLowerCase().includes(searchQuery);
-        const descMatch = group.description?.toLowerCase().includes(searchQuery);
-        const announcementMatch = group.announcement?.toLowerCase().includes(searchQuery);
-        const memberMatch = (group.ai_members || []).some(m => m.toLowerCase().includes(searchQuery));
-        if (nameMatch || descMatch || announcementMatch || memberMatch) {
-          results.groups.push({
-            id: group.id,
-            name: group.name,
-            description: group.description || '',
-            type: group.type,
-            memberCount: group.ai_members?.length || 0,
-            pinned: group.pinned,
-            created_at: group.created_at,
-            matchField: nameMatch ? 'name' : descMatch ? 'description' : announcementMatch ? 'announcement' : 'member'
-          });
+    for (const message of messages) {
+      if (results.messages.length >= maxLimit) break;
+      try {
+        let content = message.content;
+        if (message.metadata?.encryption?.encrypted && typeof content === 'string') {
+          content = encryptionUtils.decryptText(content);
         }
-      }
-    }
 
-    if (searchTypes.includes('messages')) {
-      let messages = db.data.messages || [];
-      if (groupId) {
-        messages = messages.filter(m => m.group_id === groupId);
-      }
+        const ttsTranscript = typeof message.metadata?.tts?.transcript === 'string'
+          ? message.metadata.tts.transcript
+          : '';
+        let contentMatch = content && content.toLowerCase().includes(searchQuery);
+        const ttsMatch = !contentMatch && ttsTranscript.toLowerCase().includes(searchQuery);
 
-      // 按日期范围筛选
-      if (fromDate || toDate) {
-        messages = messages.filter(m => {
-          const msgDate = new Date(m.created_at);
-          if (fromDate && msgDate < fromDate) return false;
-          if (toDate && msgDate > toDate) return false;
-          return true;
-        });
-      }
-
-      // 按 quickFilter 预筛选消息附件类型
-      if (quickFilterImages || quickFilterFiles || quickFilterLinks) {
-        messages = messages.filter(m => {
-          if (!m.attachments || m.attachments.length === 0) return false;
-          return m.attachments.some(att => {
-            const mimeType = (att.type || att.mime_type || '').toLowerCase();
-            const fileName = (att.name || att.filename || '').toLowerCase();
-            if (quickFilterImages) return mimeType.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(fileName);
-            if (quickFilterFiles) return !mimeType.startsWith('image/') && !/\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(fileName) && !/^https?:\/\//i.test(att.url || '');
-            if (quickFilterLinks) return /^https?:\/\//i.test(att.url || '') || /^https?:\/\//i.test(att.name || '') || m.content_type === 'link' || /https?:\/\/[^\s]+/.test(m.content || '');
-            return false;
-          });
-        });
-      }
-
-      const filesIndex = {};
-      for (const f of (db.data.files || [])) {
-        filesIndex[f.id] = f;
-      }
-
-      for (const message of messages) {
-        if (results.messages.length >= maxLimit) break;
-        try {
-          let content = message.content;
-          if (message.metadata?.encryption?.encrypted && typeof content === 'string') {
-            content = encryptionUtils.decryptText(content);
-          }
-
-          const ttsTranscript = typeof message.metadata?.tts?.transcript === 'string'
-            ? message.metadata.tts.transcript
-            : '';
-          let contentMatch = content && content.toLowerCase().includes(searchQuery);
-          const ttsMatch = !contentMatch && ttsTranscript.toLowerCase().includes(searchQuery);
-
-          let attachmentMatch = false;
-          let attachmentMatchInfo = null;
-          if (!contentMatch && !ttsMatch && message.attachments && message.attachments.length > 0) {
-            for (const att of message.attachments) {
-              const attMediaDescMatch = att.media_description && att.media_description.toLowerCase().includes(searchQuery);
-              if (attMediaDescMatch) {
+        let attachmentMatch = false;
+        let attachmentMatchInfo = null;
+        if (!contentMatch && !ttsMatch && message.attachments && message.attachments.length > 0) {
+          for (const att of message.attachments) {
+            const attMediaDescMatch = att.media_description && att.media_description.toLowerCase().includes(searchQuery);
+            if (attMediaDescMatch) {
+              attachmentMatch = true;
+              attachmentMatchInfo = { filename: att.name || '附件', match_type: 'media_description' };
+              break;
+            }
+            const fileId = att.id || att.url?.split('/').pop();
+            const fileRecord = fileId ? filesIndex[fileId] : null;
+            if (fileRecord) {
+              const attNameMatch = fileRecord.filename?.toLowerCase().includes(searchQuery);
+              const attDescMatch = fileRecord.search_description?.toLowerCase().includes(searchQuery);
+              const attTagsMatch = (fileRecord.search_tags || []).some(t => t.toLowerCase().includes(searchQuery));
+              const attContentMatch = typeof fileRecord.parsed_content === 'string' && fileRecord.parsed_content.toLowerCase().includes(searchQuery);
+              if (attNameMatch || attDescMatch || attTagsMatch || attContentMatch) {
                 attachmentMatch = true;
-                attachmentMatchInfo = { filename: att.name || '附件', match_type: 'media_description' };
+                attachmentMatchInfo = {
+                  filename: fileRecord.filename,
+                  match_type: attNameMatch ? 'filename' : attDescMatch ? 'description' : attTagsMatch ? 'tags' : 'content'
+                };
                 break;
               }
-              const fileId = att.id || att.url?.split('/').pop();
-              const fileRecord = fileId ? filesIndex[fileId] : null;
+            }
+            const attNameDirect = att.name?.toLowerCase().includes(searchQuery);
+            if (attNameDirect) {
+              attachmentMatch = true;
+              attachmentMatchInfo = { filename: att.name, match_type: 'filename' };
+              break;
+            }
+          }
+        }
+
+        if (contentMatch || ttsMatch || attachmentMatch) {
+          const groupObj = (db.data.groups || []).find(g => g.id === message.group_id);
+          let resultContent = content || '';
+          let attachmentMatchPreview = null;
+
+          if (attachmentMatch && !contentMatch && !ttsMatch) {
+            if (attachmentMatchInfo?.filename) {
+              resultContent = `[附件: ${attachmentMatchInfo.filename}] ${resultContent}`.trim();
+            }
+            const fileId = message.attachments?.[0]?.id || message.attachments?.[0]?.url?.match(/\/files\/([^/]+)/)?.[1];
+            if (fileId) {
+              const fileRecord = filesIndex[fileId];
               if (fileRecord) {
-                const attNameMatch = fileRecord.filename?.toLowerCase().includes(searchQuery);
-                const attDescMatch = fileRecord.search_description?.toLowerCase().includes(searchQuery);
-                const attTagsMatch = (fileRecord.search_tags || []).some(t => t.toLowerCase().includes(searchQuery));
-                const attContentMatch = typeof fileRecord.parsed_content === 'string' && fileRecord.parsed_content.toLowerCase().includes(searchQuery);
-                if (attNameMatch || attDescMatch || attTagsMatch || attContentMatch) {
-                  attachmentMatch = true;
-                  attachmentMatchInfo = {
-                    filename: fileRecord.filename,
-                    match_type: attNameMatch ? 'filename' : attDescMatch ? 'description' : attTagsMatch ? 'tags' : 'content'
-                  };
-                  break;
+                if (fileRecord.media_description) {
+                  attachmentMatchPreview = `AI识别: ${fileRecord.media_description.substring(0, 150)}`;
                 }
-              }
-              const attNameDirect = att.name?.toLowerCase().includes(searchQuery);
-              if (attNameDirect) {
-                attachmentMatch = true;
-                attachmentMatchInfo = { filename: att.name, match_type: 'filename' };
-                break;
-              }
-            }
-          }
-
-          if (contentMatch || ttsMatch || attachmentMatch) {
-            const groupObj = (db.data.groups || []).find(g => g.id === message.group_id);
-            let resultContent = content || '';
-            let attachmentMatchPreview = null;
-
-            if (attachmentMatch && !contentMatch && !ttsMatch) {
-              if (attachmentMatchInfo?.filename) {
-                resultContent = `[附件: ${attachmentMatchInfo.filename}] ${resultContent}`.trim();
-              }
-              const fileId = message.attachments?.[0]?.id || message.attachments?.[0]?.url?.match(/\/files\/([^/]+)/)?.[1];
-              if (fileId) {
-                const fileRecord = filesIndex[fileId];
-                if (fileRecord) {
-                  if (fileRecord.media_description) {
-                    attachmentMatchPreview = `AI识别: ${fileRecord.media_description.substring(0, 150)}`;
-                  }
-                  if (fileRecord.search_description) {
-                    attachmentMatchPreview = (attachmentMatchPreview ? attachmentMatchPreview + '\n' : '') + `摘要: ${fileRecord.search_description.substring(0, 150)}`;
-                  }
-                  if (typeof fileRecord.parsed_content === 'string' && fileRecord.parsed_content.length > 0) {
-                    const idx = fileRecord.parsed_content.toLowerCase().indexOf(searchQuery);
-                    if (idx !== -1) {
-                      const start = Math.max(0, idx - 30);
-                      const end = Math.min(fileRecord.parsed_content.length, idx + searchQuery.length + 50);
-                      const preview = (start > 0 ? '...' : '') + fileRecord.parsed_content.substring(start, end) + (end < fileRecord.parsed_content.length ? '...' : '');
-                      attachmentMatchPreview = (attachmentMatchPreview ? attachmentMatchPreview + '\n' : '') + `内容: ${preview}`;
-                    }
+                if (fileRecord.search_description) {
+                  attachmentMatchPreview = (attachmentMatchPreview ? attachmentMatchPreview + '\n' : '') + `摘要: ${fileRecord.search_description.substring(0, 150)}`;
+                }
+                if (typeof fileRecord.parsed_content === 'string' && fileRecord.parsed_content.length > 0) {
+                  const idx = fileRecord.parsed_content.toLowerCase().indexOf(searchQuery);
+                  if (idx !== -1) {
+                    const start = Math.max(0, idx - 30);
+                    const end = Math.min(fileRecord.parsed_content.length, idx + searchQuery.length + 50);
+                    const preview = (start > 0 ? '...' : '') + fileRecord.parsed_content.substring(start, end) + (end < fileRecord.parsed_content.length ? '...' : '');
+                    attachmentMatchPreview = (attachmentMatchPreview ? attachmentMatchPreview + '\n' : '') + `内容: ${preview}`;
                   }
                 }
               }
             }
-
-            results.messages.push({
-              id: message.id,
-              group_id: message.group_id,
-              group_name: groupObj?.name || '未知群组',
-              sender_type: message.sender_type,
-              sender_id: message.sender_id,
-              content: resultContent ? resultContent.substring(0, 200) : '',
-              content_type: message.content_type,
-              has_attachments: !!(message.attachments && message.attachments.length > 0),
-              attachments: message.attachments || [],
-              tts_audio: message.metadata?.tts || null,
-              attachment_match: attachmentMatchInfo,
-              attachment_match_preview: attachmentMatchPreview,
-              match_type: contentMatch ? 'content' : (ttsMatch ? 'tts_transcript' : 'attachment'),
-              created_at: message.created_at
-            });
           }
-        } catch (e) {
-          safeLog('debug', '搜索解密失败跳过', { messageId: message.id, error: e.message });
+
+          results.messages.push({
+            id: message.id,
+            group_id: message.group_id,
+            group_name: groupObj?.name || '未知群组',
+            sender_type: message.sender_type,
+            sender_id: message.sender_id,
+            content: resultContent ? resultContent.substring(0, 200) : '',
+            content_type: message.content_type,
+            has_attachments: !!(message.attachments && message.attachments.length > 0),
+            attachments: message.attachments || [],
+            tts_audio: message.metadata?.tts || null,
+            attachment_match: attachmentMatchInfo,
+            attachment_match_preview: attachmentMatchPreview,
+            match_type: contentMatch ? 'content' : (ttsMatch ? 'tts_transcript' : 'attachment'),
+            created_at: message.created_at
+          });
+        }
+      } catch (e) {
+        safeLog('debug', '搜索解密失败跳过', { messageId: message.id, error: e.message });
+      }
+    }
+    results.messages.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  }
+
+  if (searchTypes.includes('files')) {
+    const files = db.data.files || [];
+
+    const messagesByAttachmentKey = new Map();
+    const registerAttachmentLink = (key, msg) => {
+      if (key && !messagesByAttachmentKey.has(key)) {
+        messagesByAttachmentKey.set(key, msg);
+      }
+    };
+    for (const msg of (db.data.messages || [])) {
+      for (const att of (msg.attachments || [])) {
+        registerAttachmentLink(att.id, msg);
+        if (typeof att.url === 'string' && att.url.includes('/files/')) {
+          registerAttachmentLink(att.url.split('/files/')[1]?.split(/[/?#]/)[0], msg);
+        }
+        registerAttachmentLink(att.name, msg);
+        if (att.name) {
+          registerAttachmentLink(encodeURIComponent(att.name), msg);
         }
       }
-      results.messages.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     }
 
-    if (searchTypes.includes('files')) {
-      const files = db.data.files || [];
-      for (const file of files) {
-        if (results.files.length >= maxLimit) break;
-        const nameMatch = file.filename?.toLowerCase().includes(searchQuery);
-        const descMatch = file.search_description?.toLowerCase().includes(searchQuery);
-        const tagsMatch = (file.search_tags || []).some(t => t.toLowerCase().includes(searchQuery));
-        const mediaDescMatch = file.media_description && file.media_description.toLowerCase().includes(searchQuery);
+    for (const file of files) {
+      if (results.files.length >= maxLimit) break;
+      const nameMatch = file.filename?.toLowerCase().includes(searchQuery);
+      const descMatch = file.search_description?.toLowerCase().includes(searchQuery);
+      const tagsMatch = (file.search_tags || []).some(t => t.toLowerCase().includes(searchQuery));
+      const mediaDescMatch = file.media_description && file.media_description.toLowerCase().includes(searchQuery);
 
-        let contentMatch = false;
-        let contentPreview = '';
-        if (typeof file.parsed_content === 'string') {
-          contentMatch = file.parsed_content.toLowerCase().includes(searchQuery);
-          if (contentMatch) {
-            const idx = file.parsed_content.toLowerCase().indexOf(searchQuery);
-            const start = Math.max(0, idx - 30);
-            const end = Math.min(file.parsed_content.length, idx + searchQuery.length + 50);
-            contentPreview = (start > 0 ? '...' : '') + file.parsed_content.substring(start, end) + (end < file.parsed_content.length ? '...' : '');
-          } else {
-            contentPreview = file.parsed_content.substring(0, 80);
-          }
-        } else if (file.parsed_content && typeof file.parsed_content === 'object') {
-          const objStr = file.parsed_content.description || JSON.stringify(file.parsed_content).substring(0, 200);
-          contentMatch = objStr.toLowerCase().includes(searchQuery);
-          contentPreview = objStr.substring(0, 80);
+      let contentMatch = false;
+      let contentPreview = '';
+      if (typeof file.parsed_content === 'string') {
+        contentMatch = file.parsed_content.toLowerCase().includes(searchQuery);
+        if (contentMatch) {
+          const idx = file.parsed_content.toLowerCase().indexOf(searchQuery);
+          const start = Math.max(0, idx - 30);
+          const end = Math.min(file.parsed_content.length, idx + searchQuery.length + 50);
+          contentPreview = (start > 0 ? '...' : '') + file.parsed_content.substring(start, end) + (end < file.parsed_content.length ? '...' : '');
+        } else {
+          contentPreview = file.parsed_content.substring(0, 80);
         }
+      } else if (file.parsed_content && typeof file.parsed_content === 'object') {
+        const objStr = file.parsed_content.description || JSON.stringify(file.parsed_content).substring(0, 200);
+        contentMatch = objStr.toLowerCase().includes(searchQuery);
+        contentPreview = objStr.substring(0, 80);
+      }
 
-        if (nameMatch || descMatch || tagsMatch || contentMatch || mediaDescMatch) {
-          const groupObj = (db.data.groups || []).find(g => g.id === file.group_id);
-          let matchField = nameMatch ? 'filename' : descMatch ? 'description' : tagsMatch ? 'tags' : mediaDescMatch ? 'media_description' : 'content';
+      if (nameMatch || descMatch || tagsMatch || contentMatch || mediaDescMatch) {
+        const groupObj = (db.data.groups || []).find(g => g.id === file.group_id);
+        let matchField = nameMatch ? 'filename' : descMatch ? 'description' : tagsMatch ? 'tags' : mediaDescMatch ? 'media_description' : 'content';
 
-          const linkedMessage = (db.data.messages || []).find(m =>
-            m.attachments && m.attachments.some(a => {
-              if (a.id === file.id) return true;
-              if (a.url && a.url.includes(`/${file.id}`)) return true;
-              if (a.name === file.filename) return true;
-              if (a.url && file.filename && a.url.includes(encodeURIComponent(file.filename))) return true;
-              return false;
-            })
-          );
+        const linkedMessage = messagesByAttachmentKey.get(file.id)
+          || (file.filename ? (
+            messagesByAttachmentKey.get(file.filename)
+            || messagesByAttachmentKey.get(encodeURIComponent(file.filename))
+          ) : null)
+          || null;
 
-          results.files.push({
-            id: file.id,
-            group_id: file.group_id,
+        results.files.push({
+          id: file.id,
+          group_id: file.group_id,
+          group_name: groupObj?.name || '未知群组',
+          filename: file.filename,
+          mime_type: file.mime_type,
+          file_size: file.file_size,
+          search_description: file.search_description || '',
+          search_tags: file.search_tags || [],
+          media_description: file.media_description || '',
+          content_preview: contentPreview,
+          match_field: matchField,
+          url: `/api/files/${file.id}/download?group_id=${encodeURIComponent(file.group_id)}`,
+          linked_message_id: linkedMessage?.id || null,
+          created_at: file.created_at
+        });
+      }
+    }
+  }
+
+  if (searchTypes.includes('agents')) {
+    const agents = db.data.agents || [];
+    for (const agent of agents) {
+      if (results.agents.length >= maxLimit) break;
+      const nameMatch = agent.name?.toLowerCase().includes(searchQuery);
+      const descMatch = agent.description?.toLowerCase().includes(searchQuery);
+      const promptMatch = agent.system_prompt?.toLowerCase().includes(searchQuery);
+      const openingMatch = agent.opening_message?.toLowerCase().includes(searchQuery);
+      if (nameMatch || descMatch || promptMatch || openingMatch) {
+        results.agents.push({
+          id: agent.id,
+          name: agent.name,
+          description: agent.description || '',
+          avatar_url: agent.avatar_url || null,
+          opening_message: agent.opening_message || '',
+          match_field: nameMatch ? 'name' : descMatch ? 'description' : promptMatch ? 'system_prompt' : 'opening_message',
+          created_at: agent.created_at
+        });
+      }
+    }
+  }
+
+  if (searchTypes.includes('personas')) {
+    for (const [aiId, persona] of Object.entries(AI_PERSONAS)) {
+      if (results.personas.length >= maxLimit) break;
+      const nameMatch = persona.name?.toLowerCase().includes(searchQuery);
+      const styleMatch = persona.style?.toLowerCase().includes(searchQuery);
+      const personalityMatch = persona.personality?.toLowerCase().includes(searchQuery);
+      const expertiseMatch = (persona.expertise || []).some(e => e.toLowerCase().includes(searchQuery));
+      const keywordsMatch = (persona.keywords || []).some(k => k.toLowerCase().includes(searchQuery));
+      const replyStyleMatch = persona.replyStyle?.toLowerCase().includes(searchQuery);
+      if (nameMatch || styleMatch || personalityMatch || expertiseMatch || keywordsMatch || replyStyleMatch) {
+        results.personas.push({
+          id: aiId,
+          name: persona.name,
+          style: persona.style || '',
+          personality: persona.personality || '',
+          expertise: persona.expertise || [],
+          keywords: persona.keywords || [],
+          color: persona.color,
+          match_field: nameMatch ? 'name' : styleMatch ? 'style' : personalityMatch ? 'personality' : expertiseMatch ? 'expertise' : keywordsMatch ? 'keywords' : 'replyStyle'
+        });
+      }
+    }
+  }
+
+  if (searchTypes.includes('comments')) {
+    let messages = db.data.messages || [];
+    if (groupId) {
+      messages = messages.filter(m => m.group_id === groupId);
+    }
+    for (const msg of messages) {
+      if (results.comments.length >= maxLimit) break;
+      if (!msg.comments || msg.comments.length === 0) continue;
+      for (const comment of msg.comments) {
+        if (results.comments.length >= maxLimit) break;
+        const contentMatch = comment.content?.toLowerCase().includes(searchQuery);
+        if (contentMatch) {
+          const groupObj = (db.data.groups || []).find(g => g.id === msg.group_id);
+          results.comments.push({
+            id: comment.id,
+            message_id: comment.message_id || msg.id,
+            group_id: msg.group_id,
             group_name: groupObj?.name || '未知群组',
-            filename: file.filename,
-            mime_type: file.mime_type,
-            file_size: file.file_size,
-            search_description: file.search_description || '',
-            search_tags: file.search_tags || [],
-            media_description: file.media_description || '',
-            content_preview: contentPreview,
-            match_field: matchField,
-            url: `/api/files/${file.id}/download?group_id=${encodeURIComponent(file.group_id)}`,
-            linked_message_id: linkedMessage?.id || null,
-            created_at: file.created_at
+            sender_type: comment.sender_type,
+            sender_id: comment.sender_id,
+            content: comment.content.substring(0, 150),
+            created_at: comment.created_at
           });
         }
       }
     }
+  }
 
-    if (searchTypes.includes('agents')) {
+  if (searchTypes.includes('members')) {
+    const groups = db.data.groups || [];
+    const filteredGroups = groupId ? groups.filter(g => g.id === groupId) : groups;
+    const seenMemberIds = new Set();
+    for (const group of filteredGroups) {
+      // 搜索 AI 成员
+      const aiMembers = group.ai_members || [];
+      for (const aiId of aiMembers) {
+        if (results.members.length >= maxLimit) break;
+        const memberKey = `ai_${aiId}`;
+        if (seenMemberIds.has(memberKey)) continue;
+        const persona = AI_PERSONAS[aiId];
+        const aiName = persona?.name || aiId;
+        const nameMatch = aiName.toLowerCase().includes(searchQuery);
+        const personalityMatch = persona?.personality?.toLowerCase().includes(searchQuery);
+        const styleMatch = persona?.style?.toLowerCase().includes(searchQuery);
+        const expertiseMatch = (persona?.expertise || []).some(e => e.toLowerCase().includes(searchQuery));
+        const keywordsMatch = (persona?.keywords || []).some(k => k.toLowerCase().includes(searchQuery));
+        if (nameMatch || personalityMatch || styleMatch || expertiseMatch || keywordsMatch) {
+          seenMemberIds.add(memberKey);
+          results.members.push({
+            id: aiId,
+            name: aiName,
+            type: 'ai',
+            group_id: group.id,
+            group_name: group.name,
+            personality: persona?.personality || '',
+            style: persona?.style || '',
+            expertise: persona?.expertise || [],
+            color: persona?.color || null,
+            match_field: nameMatch ? 'name' : personalityMatch ? 'personality' : styleMatch ? 'style' : expertiseMatch ? 'expertise' : 'keywords'
+          });
+        }
+      }
+      // 搜索自定义智能体成员
       const agents = db.data.agents || [];
       for (const agent of agents) {
-        if (results.agents.length >= maxLimit) break;
+        if (results.members.length >= maxLimit) break;
+        if (!aiMembers.includes(agent.id)) continue;
+        const memberKey = `agent_${agent.id}`;
+        if (seenMemberIds.has(memberKey)) continue;
         const nameMatch = agent.name?.toLowerCase().includes(searchQuery);
         const descMatch = agent.description?.toLowerCase().includes(searchQuery);
-        const promptMatch = agent.system_prompt?.toLowerCase().includes(searchQuery);
-        const openingMatch = agent.opening_message?.toLowerCase().includes(searchQuery);
-        if (nameMatch || descMatch || promptMatch || openingMatch) {
-          results.agents.push({
+        if (nameMatch || descMatch) {
+          seenMemberIds.add(memberKey);
+          results.members.push({
             id: agent.id,
             name: agent.name,
-            description: agent.description || '',
+            type: 'ai',
+            group_id: group.id,
+            group_name: group.name,
+            personality: agent.description || '',
             avatar_url: agent.avatar_url || null,
-            opening_message: agent.opening_message || '',
-            match_field: nameMatch ? 'name' : descMatch ? 'description' : promptMatch ? 'system_prompt' : 'opening_message',
-            created_at: agent.created_at
+            match_field: nameMatch ? 'name' : 'description'
+          });
+        }
+      }
+      // 搜索用户成员
+      const userMembers = group.user_members || [];
+      for (const userId of userMembers) {
+        if (results.members.length >= maxLimit) break;
+        const memberKey = `user_${userId}`;
+        if (seenMemberIds.has(memberKey)) break;
+        const idMatch = userId.toLowerCase().includes(searchQuery);
+        if (idMatch) {
+          seenMemberIds.add(memberKey);
+          results.members.push({
+            id: userId,
+            name: userId,
+            type: 'user',
+            group_id: group.id,
+            group_name: group.name,
+            match_field: 'name'
           });
         }
       }
     }
-
-    if (searchTypes.includes('personas')) {
-      for (const [aiId, persona] of Object.entries(AI_PERSONAS)) {
-        if (results.personas.length >= maxLimit) break;
-        const nameMatch = persona.name?.toLowerCase().includes(searchQuery);
-        const styleMatch = persona.style?.toLowerCase().includes(searchQuery);
-        const personalityMatch = persona.personality?.toLowerCase().includes(searchQuery);
-        const expertiseMatch = (persona.expertise || []).some(e => e.toLowerCase().includes(searchQuery));
-        const keywordsMatch = (persona.keywords || []).some(k => k.toLowerCase().includes(searchQuery));
-        const replyStyleMatch = persona.replyStyle?.toLowerCase().includes(searchQuery);
-        if (nameMatch || styleMatch || personalityMatch || expertiseMatch || keywordsMatch || replyStyleMatch) {
-          results.personas.push({
-            id: aiId,
-            name: persona.name,
-            style: persona.style || '',
-            personality: persona.personality || '',
-            expertise: persona.expertise || [],
-            keywords: persona.keywords || [],
-            color: persona.color,
-            match_field: nameMatch ? 'name' : styleMatch ? 'style' : personalityMatch ? 'personality' : expertiseMatch ? 'expertise' : keywordsMatch ? 'keywords' : 'replyStyle'
-          });
-        }
-      }
-    }
-
-    if (searchTypes.includes('comments')) {
-      let messages = db.data.messages || [];
-      if (groupId) {
-        messages = messages.filter(m => m.group_id === groupId);
-      }
-      for (const msg of messages) {
-        if (results.comments.length >= maxLimit) break;
-        if (!msg.comments || msg.comments.length === 0) continue;
-        for (const comment of msg.comments) {
-          if (results.comments.length >= maxLimit) break;
-          const contentMatch = comment.content?.toLowerCase().includes(searchQuery);
-          if (contentMatch) {
-            const groupObj = (db.data.groups || []).find(g => g.id === msg.group_id);
-            results.comments.push({
-              id: comment.id,
-              message_id: comment.message_id || msg.id,
-              group_id: msg.group_id,
-              group_name: groupObj?.name || '未知群组',
-              sender_type: comment.sender_type,
-              sender_id: comment.sender_id,
-              content: comment.content.substring(0, 150),
-              created_at: comment.created_at
-            });
-          }
-        }
-      }
-    }
-
-    if (searchTypes.includes('members')) {
-      const groups = db.data.groups || [];
-      const filteredGroups = groupId ? groups.filter(g => g.id === groupId) : groups;
-      const seenMemberIds = new Set();
-      for (const group of filteredGroups) {
-        // 搜索 AI 成员
-        const aiMembers = group.ai_members || [];
-        for (const aiId of aiMembers) {
-          if (results.members.length >= maxLimit) break;
-          const memberKey = `ai_${aiId}`;
-          if (seenMemberIds.has(memberKey)) continue;
-          const persona = AI_PERSONAS[aiId];
-          const aiName = persona?.name || aiId;
-          const nameMatch = aiName.toLowerCase().includes(searchQuery);
-          const personalityMatch = persona?.personality?.toLowerCase().includes(searchQuery);
-          const styleMatch = persona?.style?.toLowerCase().includes(searchQuery);
-          const expertiseMatch = (persona?.expertise || []).some(e => e.toLowerCase().includes(searchQuery));
-          const keywordsMatch = (persona?.keywords || []).some(k => k.toLowerCase().includes(searchQuery));
-          if (nameMatch || personalityMatch || styleMatch || expertiseMatch || keywordsMatch) {
-            seenMemberIds.add(memberKey);
-            results.members.push({
-              id: aiId,
-              name: aiName,
-              type: 'ai',
-              group_id: group.id,
-              group_name: group.name,
-              personality: persona?.personality || '',
-              style: persona?.style || '',
-              expertise: persona?.expertise || [],
-              color: persona?.color || null,
-              match_field: nameMatch ? 'name' : personalityMatch ? 'personality' : styleMatch ? 'style' : expertiseMatch ? 'expertise' : 'keywords'
-            });
-          }
-        }
-        // 搜索自定义智能体成员
-        const agents = db.data.agents || [];
-        for (const agent of agents) {
-          if (results.members.length >= maxLimit) break;
-          if (!aiMembers.includes(agent.id)) continue;
-          const memberKey = `agent_${agent.id}`;
-          if (seenMemberIds.has(memberKey)) continue;
-          const nameMatch = agent.name?.toLowerCase().includes(searchQuery);
-          const descMatch = agent.description?.toLowerCase().includes(searchQuery);
-          if (nameMatch || descMatch) {
-            seenMemberIds.add(memberKey);
-            results.members.push({
-              id: agent.id,
-              name: agent.name,
-              type: 'ai',
-              group_id: group.id,
-              group_name: group.name,
-              personality: agent.description || '',
-              avatar_url: agent.avatar_url || null,
-              match_field: nameMatch ? 'name' : 'description'
-            });
-          }
-        }
-        // 搜索用户成员
-        const userMembers = group.user_members || [];
-        for (const userId of userMembers) {
-          if (results.members.length >= maxLimit) break;
-          const memberKey = `user_${userId}`;
-          if (seenMemberIds.has(memberKey)) break;
-          const idMatch = userId.toLowerCase().includes(searchQuery);
-          if (idMatch) {
-            seenMemberIds.add(memberKey);
-            results.members.push({
-              id: userId,
-              name: userId,
-              type: 'user',
-              group_id: group.id,
-              group_name: group.name,
-              match_field: 'name'
-            });
-          }
-        }
-      }
-    }
-
-    if (searchTypes.includes('media')) {
-      const files = db.data.files || [];
-      const mediaMimeTypes = ['image/', 'audio/', 'video/'];
-      const mediaExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'];
-      for (const file of files) {
-        if (results.media.length >= maxLimit) break;
-        if (groupId && file.group_id !== groupId) continue;
-
-        const ext = (file.filename || '').split('.').pop()?.toLowerCase() || '';
-        const isMedia = mediaMimeTypes.some(t => (file.mime_type || '').startsWith(t)) || mediaExtensions.includes(`.${ext}`);
-        if (!isMedia) continue;
-
-        const nameMatch = file.filename?.toLowerCase().includes(searchQuery);
-        const mediaDescMatch = file.media_description && file.media_description.toLowerCase().includes(searchQuery);
-        const searchDescMatch = file.search_description?.toLowerCase().includes(searchQuery);
-        const tagsMatch = (file.search_tags || []).some(t => t.toLowerCase().includes(searchQuery));
-        const parsedContentMatch = typeof file.parsed_content === 'string' && file.parsed_content.toLowerCase().includes(searchQuery);
-
-        if (nameMatch || mediaDescMatch || searchDescMatch || tagsMatch || parsedContentMatch) {
-          const groupObj = (db.data.groups || []).find(g => g.id === file.group_id);
-          let matchField = nameMatch ? 'filename' : mediaDescMatch ? 'media_description' : searchDescMatch ? 'description' : tagsMatch ? 'tags' : 'content';
-
-          let contentPreview = '';
-          if (mediaDescMatch && file.media_description) {
-            contentPreview = file.media_description.substring(0, 150);
-          } else if (searchDescMatch && file.search_description) {
-            contentPreview = file.search_description.substring(0, 150);
-          } else if (parsedContentMatch && typeof file.parsed_content === 'string') {
-            const idx = file.parsed_content.toLowerCase().indexOf(searchQuery);
-            const start = Math.max(0, idx - 30);
-            const end = Math.min(file.parsed_content.length, idx + searchQuery.length + 50);
-            contentPreview = (start > 0 ? '...' : '') + file.parsed_content.substring(start, end) + (end < file.parsed_content.length ? '...' : '');
-          }
-
-          const mediaType = (file.mime_type || '').startsWith('image/') || ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'].includes(`.${ext}`) ? 'image'
-            : (file.mime_type || '').startsWith('audio/') || ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma'].includes(`.${ext}`) ? 'audio'
-              : 'video';
-
-          results.media.push({
-            id: file.id,
-            group_id: file.group_id,
-            group_name: groupObj?.name || '未知群组',
-            filename: file.filename,
-            mime_type: file.mime_type,
-            media_type: mediaType,
-            file_size: file.file_size,
-            media_description: file.media_description || '',
-            search_description: file.search_description || '',
-            search_tags: file.search_tags || [],
-            content_preview: contentPreview,
-            match_field: matchField,
-            url: `/api/files/${file.id}/download?group_id=${encodeURIComponent(file.group_id)}`,
-            created_at: file.created_at
-          });
-        }
-      }
-    }
-
-    results.total = results.groups.length + results.messages.length + results.files.length + results.agents.length + results.personas.length + results.comments.length + results.members.length + results.media.length;
-
-    res.json(results);
-  } catch (error) {
-    safeLog('error', '统一搜索失败', { error: error.message });
-    res.status(500).json(safeErrorResponse(error));
   }
-});
 
-router.post('/groups/:groupId/messages/:messageId/read', async (req, res) => {
-  try {
-    const { groupId, messageId } = req.params;
-    const db = await req.getUserDb();
-    await db.read();
-    const message = db.data.messages.find(m => m.id === messageId && m.group_id === groupId);
-    if (!message) {
-      return res.status(404).json({ error: '消息不存在' });
+  if (searchTypes.includes('media')) {
+    const files = db.data.files || [];
+    const mediaMimeTypes = ['image/', 'audio/', 'video/'];
+    const mediaExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'];
+    for (const file of files) {
+      if (results.media.length >= maxLimit) break;
+      if (groupId && file.group_id !== groupId) continue;
+
+      const ext = (file.filename || '').split('.').pop()?.toLowerCase() || '';
+      const isMedia = mediaMimeTypes.some(t => (file.mime_type || '').startsWith(t)) || mediaExtensions.includes(`.${ext}`);
+      if (!isMedia) continue;
+
+      const nameMatch = file.filename?.toLowerCase().includes(searchQuery);
+      const mediaDescMatch = file.media_description && file.media_description.toLowerCase().includes(searchQuery);
+      const searchDescMatch = file.search_description?.toLowerCase().includes(searchQuery);
+      const tagsMatch = (file.search_tags || []).some(t => t.toLowerCase().includes(searchQuery));
+      const parsedContentMatch = typeof file.parsed_content === 'string' && file.parsed_content.toLowerCase().includes(searchQuery);
+
+      if (nameMatch || mediaDescMatch || searchDescMatch || tagsMatch || parsedContentMatch) {
+        const groupObj = (db.data.groups || []).find(g => g.id === file.group_id);
+        let matchField = nameMatch ? 'filename' : mediaDescMatch ? 'media_description' : searchDescMatch ? 'description' : tagsMatch ? 'tags' : 'content';
+
+        let contentPreview = '';
+        if (mediaDescMatch && file.media_description) {
+          contentPreview = file.media_description.substring(0, 150);
+        } else if (searchDescMatch && file.search_description) {
+          contentPreview = file.search_description.substring(0, 150);
+        } else if (parsedContentMatch && typeof file.parsed_content === 'string') {
+          const idx = file.parsed_content.toLowerCase().indexOf(searchQuery);
+          const start = Math.max(0, idx - 30);
+          const end = Math.min(file.parsed_content.length, idx + searchQuery.length + 50);
+          contentPreview = (start > 0 ? '...' : '') + file.parsed_content.substring(start, end) + (end < file.parsed_content.length ? '...' : '');
+        }
+
+        const mediaType = (file.mime_type || '').startsWith('image/') || ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'].includes(`.${ext}`) ? 'image'
+          : (file.mime_type || '').startsWith('audio/') || ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma'].includes(`.${ext}`) ? 'audio'
+            : 'video';
+
+        results.media.push({
+          id: file.id,
+          group_id: file.group_id,
+          group_name: groupObj?.name || '未知群组',
+          filename: file.filename,
+          mime_type: file.mime_type,
+          media_type: mediaType,
+          file_size: file.file_size,
+          media_description: file.media_description || '',
+          search_description: file.search_description || '',
+          search_tags: file.search_tags || [],
+          content_preview: contentPreview,
+          match_field: matchField,
+          url: `/api/files/${file.id}/download?group_id=${encodeURIComponent(file.group_id)}`,
+          created_at: file.created_at
+        });
+      }
     }
+  }
+
+  results.total = results.groups.length + results.messages.length + results.files.length + results.agents.length + results.personas.length + results.comments.length + results.members.length + results.media.length;
+
+  res.json(results);
+}));
+
+router.post('/groups/:groupId/messages/:messageId/read', asyncHandler(async (req, res) => {
+  const { groupId, messageId } = req.params;
+  const db = await readUserData(await req.getUserDb());
+  const message = db.data.messages.find(m => m.id === messageId && m.group_id === groupId);
+  if (!message) {
+    return res.status(404).json({ error: '消息不存在' });
+  }
+  if (!message.readBy) message.readBy = [];
+  if (!message.readBy.includes(req.userId)) {
+    message.readBy.push(req.userId);
+  }
+  await withWriteLock(req.userId, async () => {
+    await db.write();
+  });
+  res.json({ success: true, messageId, read: true });
+}));
+
+// 批量已读回执：前端进入历史较多的群时会一次性标记大量可见消息，
+// 单独的批量端点避免逐条请求打满限流桶
+router.post('/groups/:groupId/messages/read-batch', asyncHandler(async (req, res) => {
+  const { groupId } = req.params;
+  const rawIds = req.body?.messageIds;
+  if (!Array.isArray(rawIds) || rawIds.length === 0) {
+    return res.status(400).json({ error: 'messageIds 不能为空' });
+  }
+  const messageIds = [...new Set(rawIds.filter(id => typeof id === 'string'))].slice(0, 200);
+  if (messageIds.length === 0) {
+    return res.status(400).json({ error: 'messageIds 不含有效 ID' });
+  }
+
+  const db = await readUserData(await req.getUserDb());
+  const idSet = new Set(messageIds);
+  let updated = 0;
+  for (const message of db.data.messages) {
+    if (message.group_id !== groupId || !idSet.has(message.id)) continue;
     if (!message.readBy) message.readBy = [];
-    if (!message.readBy.includes('user')) {
-      message.readBy.push('user');
+    if (!message.readBy.includes(req.userId)) {
+      message.readBy.push(req.userId);
+      updated += 1;
     }
+  }
+  if (updated > 0) {
     await withWriteLock(req.userId, async () => {
       await db.write();
     });
-    res.json({ success: true, messageId, read: true });
-  } catch (error) {
-    safeLog('error', '标记已读错误', { error: error?.message || error });
-    res.status(500).json({ success: false, error: '标记已读失败' });
   }
-});
+  res.json({ success: true, requested: messageIds.length, updated });
+}));
 
 export default router;

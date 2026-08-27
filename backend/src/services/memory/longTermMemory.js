@@ -205,32 +205,22 @@ class LongTermMemoryManager {
   }
   
   /**
-   * 驱逐旧记忆
+   * 驱逐旧记忆（惰性批量裁剪：按 lastAccessed 排序后一次性裁剪到上限的90%）
    */
   evictOldMemories() {
-    const toRemove = this.memories.size - this.config.maxMemories;
-    
-    if (toRemove <= 0) return;
-    
-    for (let i = 0; i < toRemove; i++) {
-      let oldestId = null;
-      let oldestTime = Infinity;
-      
-      for (const [memoryId, memory] of this.memories.entries()) {
-        const accessTime = memory.metadata.lastAccessed || memory.metadata.storedAt;
-        const time = new Date(accessTime).getTime();
-        if (time < oldestTime) {
-          oldestTime = time;
-          oldestId = memoryId;
-        }
-      }
-      
-      if (oldestId) {
-        this.removeMemory(oldestId);
-      }
-    }
-    
-    console.log(`移除了 ${toRemove} 个旧记忆`);
+    if (this.memories.size <= this.config.maxMemories) return;
+
+    const targetSize = Math.floor(this.config.maxMemories * 0.9);
+    const excess = this.memories.size - targetSize;
+
+    const entries = [...this.memories.entries()].sort((a, b) => {
+      const timeA = new Date(a[1].metadata.lastAccessed || a[1].metadata.storedAt).getTime();
+      const timeB = new Date(b[1].metadata.lastAccessed || b[1].metadata.storedAt).getTime();
+      return timeA - timeB;
+    });
+
+    const toRemove = entries.slice(0, excess);
+    toRemove.forEach(([memoryId]) => this.removeMemory(memoryId));
   }
   
   /**
@@ -310,12 +300,13 @@ class LongTermMemoryManager {
       // 4. 基于内容的相似度搜索
       const results = [];
       const queryVector = this.createMemoryVector({ content: query });
-      
+
       candidateIds.forEach(memoryId => {
         const memory = this.memories.get(memoryId);
         if (!memory) return;
-        
-        const similarity = this.calculateVectorSimilarity(queryVector, memory.vector);
+
+        // 查询侧没有 senderType（恒 unknown），跳过该维度并把权重重分配到其余维度
+        const similarity = this.calculateVectorSimilarity(queryVector, memory.vector, { skipSenderType: true });
         
         if (similarity >= this.config.vectorSearchThreshold) {
           results.push({
@@ -345,9 +336,11 @@ class LongTermMemoryManager {
       // 8. 计算性能指标
       const endTime = Date.now();
       const retrievalTime = endTime - startTime;
-      
+
       this.performanceStats.totalRetrievals++;
-      this.performanceStats.successfulRetrievals++;
+      if (finalResults.length > 0 && finalResults[0].similarity >= 0.3) {
+        this.performanceStats.successfulRetrievals++;
+      }
       this.performanceStats.retrievalTimes.push(retrievalTime);
       
       // 保持样本大小
@@ -415,43 +408,43 @@ class LongTermMemoryManager {
   /**
    * 计算向量相似度
    */
-  calculateVectorSimilarity(vector1, vector2) {
+  calculateVectorSimilarity(vector1, vector2, options = {}) {
     // 简单的相似度计算（在实际应用中可以使用余弦相似度）
     let similarity = 0;
     let weightSum = 0;
-    
+    const addComponent = (score, weight) => {
+      similarity += score * weight;
+      weightSum += weight;
+    };
+
     // 内容长度相似度
     const maxLength = Math.max(vector1.contentLength, vector2.contentLength);
-    const lengthSimilarity = maxLength > 0 ? 
+    const lengthSimilarity = maxLength > 0 ?
       1 - Math.abs(vector1.contentLength - vector2.contentLength) / maxLength : 1;
-    similarity += lengthSimilarity * 0.3;
-    weightSum += 0.3;
-    
+    addComponent(lengthSimilarity, 0.3);
+
     // 问题标记相似度
     const questionSimilarity = vector1.hasQuestion === vector2.hasQuestion ? 1 : 0;
-    similarity += questionSimilarity * 0.2;
-    weightSum += 0.2;
-    
+    addComponent(questionSimilarity, 0.2);
+
     // 数字内容相似度
     const numberSimilarity = vector1.hasNumbers === vector2.hasNumbers ? 1 : 0;
-    similarity += numberSimilarity * 0.1;
-    weightSum += 0.1;
-    
-    // 发送者类型相似度
-    const senderSimilarity = vector1.senderType === vector2.senderType ? 1 : 0;
-    similarity += senderSimilarity * 0.1;
-    weightSum += 0.1;
-    
+    addComponent(numberSimilarity, 0.1);
+
+    // 发送者类型相似度（查询侧 senderType 恒 unknown 时跳过，保持总分归一）
+    if (!options.skipSenderType) {
+      const senderSimilarity = vector1.senderType === vector2.senderType ? 1 : 0;
+      addComponent(senderSimilarity, 0.1);
+    }
+
     // 类别权重相似度
     const categorySimilarity = 1 - Math.abs(vector1.categoryWeight - vector2.categoryWeight);
-    similarity += categorySimilarity * 0.2;
-    weightSum += 0.2;
-    
+    addComponent(categorySimilarity, 0.2);
+
     // 关键词密度相似度
     const densitySimilarity = 1 - Math.abs(vector1.keywordDensity - vector2.keywordDensity);
-    similarity += densitySimilarity * 0.1;
-    weightSum += 0.1;
-    
+    addComponent(densitySimilarity, 0.1);
+
     return weightSum > 0 ? similarity / weightSum : 0;
   }
   
@@ -598,7 +591,7 @@ class LongTermMemoryManager {
     this.categoryIndex.clear();
     this.senderIndex.clear();
     this.temporalIndex.clear();
-    
+
     this.performanceStats = {
       totalStores: 0,
       totalRetrievals: 0,
@@ -608,8 +601,45 @@ class LongTermMemoryManager {
       retrievalTimes: [],
       referenceAccuracies: []
     };
-    
+
     return { success: true, message: '所有记忆已清空' };
+  }
+
+  /**
+   * 释放资源（清理内部索引与统计，供 LRU 淘汰时调用）
+   */
+  dispose() {
+    this.clearAllMemories();
+  }
+
+  /**
+   * 记忆回顾摘要：按重要度与新鲜度加权取Top记忆（供 /memory/digest 端点）
+   */
+  getDigestMemories(limit = 12) {
+    const now = Date.now();
+    const items = [];
+    this.memories.forEach((memory) => {
+      if (!memory || typeof memory.content !== 'string') return;
+      const ageDays = Math.max(0, (now - new Date(memory.timestamp).getTime()) / (24 * 60 * 60 * 1000));
+      const importance = typeof memory.importance === 'number' ? memory.importance : 0.5;
+      // 新鲜度：7天内接近满分，之后指数衰减
+      const freshness = Math.exp(-ageDays / 14);
+      const accessBoost = Math.min(0.15, (memory.metadata?.accessCount || 0) * 0.03);
+      items.push({
+        id: memory.id,
+        content: memory.content.substring(0, 300),
+        category: memory.category,
+        timestamp: memory.timestamp,
+        importance,
+        access_count: memory.metadata?.accessCount || 0,
+        score: Number((importance * 0.6 + freshness * 0.3 + accessBoost).toFixed(4))
+      });
+    });
+    items.sort((a, b) => b.score - a.score);
+    return {
+      total: this.memories.size,
+      memories: items.slice(0, limit)
+    };
   }
 }
 

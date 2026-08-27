@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
-import { loadProfileCache, saveProfileCache, saveProfileCacheAsync } from '../utils/cacheUtils';
+import { loadProfileCache, saveProfileCache } from '../utils/cacheUtils';
 
 export interface UserProfile {
   nickname: string;
@@ -76,7 +76,6 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
         const data = await api.getProfile();
         lastProfileFetchAt = Date.now();
         saveProfileCache(data);
-        saveProfileCacheAsync(data).catch(() => { });
         set({ profile: data, loading: false, initialized: true });
       } catch (error) {
         console.error('Failed to fetch profile:', error);
@@ -94,7 +93,6 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
       const updated = await api.updateProfile(updates);
       lastProfileFetchAt = Date.now();
       saveProfileCache(updated);
-      saveProfileCacheAsync(updated).catch(() => { });
       set({ profile: updated, initialized: true });
     } catch (error) {
       console.error('Failed to update profile:', error);

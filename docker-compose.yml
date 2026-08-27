@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   backend:
     build:
@@ -12,13 +10,21 @@ services:
     environment:
       - PORT=3002
       - NODE_ENV=production
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-your_deepseek_api_key}
-      - GLM_API_KEY=${GLM_API_KEY:-your_glm_api_key}
-      - MIMO_API_KEY=${MIMO_API_KEY:-your_mimo_api_key}
-      - QWEN_API_KEY=${QWEN_API_KEY:-your_qwen_api_key}
+      - AUTH_MODE=session
+      - DATA_DIR=/app/data
+      # ENCRYPTION_KEY 为 base64 编码的 32 字节随机串。
+      # 生成方式（任选其一）：
+      #   openssl rand -base64 32
+      #   powershell -Command "$b=New-Object byte[] 32;[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b);[Convert]::ToBase64String($b)"
+      # 建议通过根目录 .env 提供（setup-api-keys.bat 可自动写入）。
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY must be a base64 encoded 32-byte secret}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:3010}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - GLM_API_KEY=${GLM_API_KEY:-}
+      - MIMO_API_KEY=${MIMO_API_KEY:-}
+      - QWEN_API_KEY=${QWEN_API_KEY:-}
     volumes:
       - backend-data:/app/data
-      - backend-uploads:/app/uploads
     networks:
       - ai-chat-network
     healthcheck:
@@ -50,9 +56,6 @@ services:
 volumes:
   backend-data:
     driver: local
-  backend-uploads:
-    driver: local
-
 networks:
   ai-chat-network:
     driver: bridge

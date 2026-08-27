@@ -9,9 +9,139 @@ const USER_ID_STORAGE_KEY = 'app_current_user_id';
 
 let currentCacheUserId: string | null = null;
 
+const memoryMirrors = new Map<string, CacheData<unknown>>();
+const inFlightWrites = new Map<string, Promise<boolean>>();
+const pendingWriteData = new Map<string, unknown>();
+
+function isCacheExpired(cache: CacheData<unknown>): boolean {
+  const expiryMs = CACHE_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
+  return Date.now() - cache.timestamp > expiryMs;
+}
+
+function readMemoryMirror<T>(key: string): T | null {
+  const cached = memoryMirrors.get(key);
+  if (!cached) return null;
+  if (isCacheExpired(cached)) {
+    memoryMirrors.delete(key);
+    return null;
+  }
+  return cached.data as T;
+}
+
+function writeMemoryMirror<T>(key: string, data: T): void {
+  memoryMirrors.set(key, {
+    data,
+    timestamp: Date.now(),
+    version: CACHE_VERSION
+  });
+}
+
+function clearMemoryMirrors(): void {
+  memoryMirrors.clear();
+  inFlightWrites.clear();
+  pendingWriteData.clear();
+}
+
+function handleQuotaPressure(failedKey: string): void {
+  try {
+    const userPrefix = CACHE_PREFIX + getUserPrefix();
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const storedKey = localStorage.key(i);
+      if (storedKey && storedKey.startsWith(userPrefix)) {
+        const raw = localStorage.getItem(storedKey);
+        if (!raw || !isEncrypted(raw)) {
+          keysToRemove.push(storedKey);
+        }
+      }
+    }
+    keysToRemove.forEach(storedKey => {
+      try { localStorage.removeItem(storedKey); } catch {}
+    });
+    try { localStorage.removeItem(getFullKey(failedKey)); } catch {}
+  } catch (e) {
+    console.warn('[Cache] Quota cleanup failed:', e);
+  }
+}
+
+async function writeEncryptedCache<T>(key: string, data: T): Promise<boolean> {
+  writeMemoryMirror(key, data);
+
+  // 写入进行中又有新数据到达：记录最新值，当前写入完成后补写一次，
+  // 保证 localStorage 最终状态与最后一次写入一致（否则会被旧数据覆盖）。
+  const inFlight = inFlightWrites.get(key);
+  if (inFlight) {
+    pendingWriteData.set(key, data as unknown);
+    return inFlight;
+  }
+
+  const runWrite = async (): Promise<boolean> => {
+    let payload: unknown = data;
+    let result = false;
+    for (;;) {
+      const cacheData: CacheData<unknown> = {
+        data: payload,
+        timestamp: Date.now(),
+        version: CACHE_VERSION
+      };
+      result = false;
+      if (isCryptoAvailable()) {
+        try {
+          const encrypted = await encryptData(JSON.stringify(cacheData));
+          if (encrypted) {
+            try {
+              localStorage.setItem(getFullKey(key), ENCRYPTED_MARKER + encrypted);
+              result = true;
+            } catch (quotaError) {
+              console.warn('加密缓存写入失败（配额），清理后重试:', quotaError);
+              handleQuotaPressure(key);
+              try {
+                localStorage.setItem(getFullKey(key), ENCRYPTED_MARKER + encrypted);
+                result = true;
+              } catch (retryError) {
+                console.warn('加密缓存重试写入失败:', retryError);
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('加密缓存写入失败:', e);
+        }
+      }
+      const next = pendingWriteData.get(key);
+      if (next === undefined) {
+        break;
+      }
+      pendingWriteData.delete(key);
+      payload = next;
+    }
+    return result;
+  };
+
+  const writePromise = (async () => {
+    try {
+      return await runWrite();
+    } finally {
+      inFlightWrites.delete(key);
+      if (pendingWriteData.has(key)) {
+        const nextData = pendingWriteData.get(key);
+        pendingWriteData.delete(key);
+        if (nextData !== undefined) {
+          void writeEncryptedCache(key, nextData);
+        }
+      }
+    }
+  })();
+
+  inFlightWrites.set(key, writePromise);
+  return writePromise;
+}
+
 export function setCacheUserId(userId: string | null): void {
   const previousUserId = currentCacheUserId;
   currentCacheUserId = userId;
+  if (previousUserId !== userId) {
+    clearMemoryMirrors();
+  }
   if (userId) {
     try {
       localStorage.setItem(USER_ID_STORAGE_KEY, userId);
@@ -83,77 +213,12 @@ export const DEFAULT_CACHE_CONFIG: CacheConfig = {
 };
 
 export function saveCache<T>(key: string, data: T): boolean {
-  try {
-    const cacheData: CacheData<T> = {
-      data,
-      timestamp: Date.now(),
-      version: CACHE_VERSION
-    };
-    localStorage.setItem(getFullKey(key), JSON.stringify(cacheData));
-    return true;
-  } catch (e) {
-    console.warn('localStorage write failed:', e);
-    clearOldCaches();
-    try {
-      const cacheData: CacheData<T> = {
-        data,
-        timestamp: Date.now(),
-        version: CACHE_VERSION
-      };
-      localStorage.setItem(getFullKey(key), JSON.stringify(cacheData));
-      return true;
-    } catch (retryError) {
-      console.warn('localStorage retry write failed:', retryError);
-      // 更激进的清理：仅保留最近5个最活跃群组的缓存，或清理当前用户的所有缓存
-      aggressiveCleanup();
-      try {
-        const cacheData: CacheData<T> = {
-          data,
-          timestamp: Date.now(),
-          version: CACHE_VERSION
-        };
-        localStorage.setItem(getFullKey(key), JSON.stringify(cacheData));
-        return true;
-      } catch (lastError) {
-        console.warn('localStorage aggressive cleanup still failed:', lastError);
-        return false;
-      }
-    }
-  }
+  writeEncryptedCache(key, data).catch(() => { });
+  return true;
 }
 
 export function loadCache<T>(key: string): T | null {
-  const storageKey = getFullKey(key);
-  try {
-    const raw = localStorage.getItem(storageKey);
-    if (!raw) return null;
-
-    if (isEncrypted(raw)) {
-      return null;
-    }
-    
-    const cache: CacheData<T> = JSON.parse(raw);
-    
-    if (cache.version !== CACHE_VERSION) {
-      localStorage.removeItem(storageKey);
-      return null;
-    }
-    
-    const expiryMs = CACHE_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
-    if (Date.now() - cache.timestamp > expiryMs) {
-      localStorage.removeItem(storageKey);
-      return null;
-    }
-    
-    return cache.data;
-  } catch (e) {
-    try {
-      localStorage.removeItem(storageKey);
-    } catch {
-    }
-    console.warn('localStorage read failed:', e);
-    return null;
-  }
+  return readMemoryMirror<T>(key);
 }
 
 export function isCacheEncrypted(key: string): boolean {
@@ -166,6 +231,7 @@ export function isCacheEncrypted(key: string): boolean {
 }
 
 export function removeCache(key: string): void {
+  memoryMirrors.delete(key);
   try {
     localStorage.removeItem(getFullKey(key));
   } catch (e) {
@@ -173,103 +239,25 @@ export function removeCache(key: string): void {
   }
 }
 
-export function clearOldCaches(): void {
-  try {
-    const userPrefix = CACHE_PREFIX + getUserPrefix();
-    const keysToRemove: string[] = [];
-    const expiryThreshold = 24 * 60 * 60 * 1000; // 24 hours
-    
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith(userPrefix)) {
-        try {
-          const raw = localStorage.getItem(key);
-          if (raw) {
-            const cache = JSON.parse(raw);
-            const timestamp = cache.timestamp || 0;
-            // 删除超过24小时的缓存条目
-            if (timestamp > 0 && Date.now() - timestamp > expiryThreshold) {
-              keysToRemove.push(key);
-            }
-          }
-        } catch {
-          keysToRemove.push(key);
-        }
-      }
-    }
-    
-    keysToRemove.forEach(key => {
-      try {
-        localStorage.removeItem(key);
-      } catch (e) {
-        console.warn('Failed to remove cache key:', key, e);
-      }
-    });
-  } catch (e) {
-    console.warn('clearOldCaches failed:', e);
-  }
-}
-
-function aggressiveCleanup(): void {
-  try {
-    const userPrefix = CACHE_PREFIX + getUserPrefix();
-    // 收集所有缓存条目并按时间戳排序
-    const entries: { key: string; timestamp: number }[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith(userPrefix)) {
-        try {
-          const raw = localStorage.getItem(key);
-          if (raw) {
-            const cache = JSON.parse(raw);
-            entries.push({ key, timestamp: cache.timestamp || 0 });
-          }
-        } catch {
-          // 损坏的条目直接删除
-          try { localStorage.removeItem(key!); } catch {}
-        }
-      }
-    }
-    
-    // 按时间戳降序排序，保留最近5个条目，删除其余
-    entries.sort((a, b) => b.timestamp - a.timestamp);
-    const toDelete = entries.slice(5);
-    for (const { key } of toDelete) {
-      try {
-        localStorage.removeItem(key);
-      } catch {}
-    }
-    
-    if (toDelete.length > 0) {
-      console.warn(`[Cache] Aggressive cleanup: removed ${toDelete.length} entries, kept ${Math.min(entries.length, 5)} most recent`);
-    }
-  } catch (e) {
-    console.warn('[Cache] Aggressive cleanup failed:', e);
-    // 最后手段：清理当前用户的所有缓存
-    try {
-      clearAllCachesForUser();
-    } catch {}
-  }
-}
-
 export function clearAllCachesForUser(userId?: string): void {
+  clearMemoryMirrors();
   try {
     const prefix = userId ? `${CACHE_PREFIX}${userId}_` : `${CACHE_PREFIX}${getUserPrefix()}`;
     const keysToRemove: string[] = [];
-    
+
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
       if (key && key.startsWith(prefix)) {
         keysToRemove.push(key);
       }
     }
-    
+
     keysToRemove.forEach(key => {
       try {
         localStorage.removeItem(key);
       } catch {}
     });
-    
+
     if (import.meta.env.DEV) {
       console.log(`[Cache] Cleared ${keysToRemove.length} cache entries for user: ${userId || 'current'}`);
     }
@@ -279,16 +267,17 @@ export function clearAllCachesForUser(userId?: string): void {
 }
 
 export function clearAllCaches(): void {
+  clearMemoryMirrors();
   try {
     const keysToRemove: string[] = [];
-    
+
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
       if (key && key.startsWith(CACHE_PREFIX)) {
         keysToRemove.push(key);
       }
     }
-    
+
     keysToRemove.forEach(key => {
       try {
         localStorage.removeItem(key);
@@ -299,35 +288,42 @@ export function clearAllCaches(): void {
   }
 }
 
+function trimMessagesForCache(
+  messages: Record<string, Message[]>,
+  config: CacheConfig
+): Record<string, Message[]> {
+  const maxGroups = config.maxGroups || DEFAULT_CACHE_CONFIG.maxGroups!;
+  const maxMessages = config.maxMessagesPerGroup || DEFAULT_CACHE_CONFIG.maxMessagesPerGroup!;
+
+  const groupIds = Object.keys(messages);
+
+  let selectedGroups: { id: string; lastActivity: number }[] = groupIds.map(id => {
+    const msgs = messages[id] || [];
+    const lastMsg = msgs[msgs.length - 1];
+    return {
+      id,
+      lastActivity: lastMsg?.created_at ? new Date(lastMsg.created_at).getTime() : 0
+    };
+  });
+
+  selectedGroups.sort((a, b) => b.lastActivity - a.lastActivity);
+  selectedGroups = selectedGroups.slice(0, maxGroups);
+
+  const trimmedMessages: Record<string, Message[]> = {};
+  for (const { id } of selectedGroups) {
+    const msgs = messages[id] || [];
+    trimmedMessages[id] = msgs.slice(-maxMessages);
+  }
+
+  return trimmedMessages;
+}
+
 export function saveMessagesCache(
   messages: Record<string, Message[]>,
   config: CacheConfig = DEFAULT_CACHE_CONFIG
 ): boolean {
   try {
-    const maxGroups = config.maxGroups || 3;
-    const maxMessages = config.maxMessagesPerGroup || 100;
-    
-    const groupIds = Object.keys(messages);
-    
-    let selectedGroups: { id: string; lastActivity: number }[] = groupIds.map(id => {
-      const msgs = messages[id] || [];
-      const lastMsg = msgs[msgs.length - 1];
-      return {
-        id,
-        lastActivity: lastMsg?.created_at ? new Date(lastMsg.created_at).getTime() : 0
-      };
-    });
-    
-    selectedGroups.sort((a, b) => b.lastActivity - a.lastActivity);
-    selectedGroups = selectedGroups.slice(0, maxGroups);
-    
-    const trimmedMessages: Record<string, Message[]> = {};
-    for (const { id } of selectedGroups) {
-      const msgs = messages[id] || [];
-      trimmedMessages[id] = msgs.slice(-maxMessages);
-    }
-    
-    return saveCache('messages_cache', trimmedMessages);
+    return saveCache('messages_cache', trimMessagesForCache(messages, config));
   } catch (e) {
     console.warn('saveMessagesCache failed:', e);
     return false;
@@ -363,8 +359,8 @@ export function loadProfileCache<T>(): T | null {
 }
 
 function isCryptoAvailable(): boolean {
-  return typeof window !== 'undefined' && 
-         typeof window.crypto !== 'undefined' && 
+  return typeof window !== 'undefined' &&
+         typeof window.crypto !== 'undefined' &&
          typeof window.crypto.subtle !== 'undefined';
 }
 
@@ -373,51 +369,38 @@ function isEncrypted(raw: string): boolean {
 }
 
 export async function saveCacheAsync<T>(key: string, data: T): Promise<boolean> {
-  if (isCryptoAvailable()) {
-    try {
-      const cacheData: CacheData<T> = {
-        data,
-        timestamp: Date.now(),
-        version: CACHE_VERSION
-      };
-      const plainText = JSON.stringify(cacheData);
-      const encrypted = await encryptData(plainText);
-      if (encrypted) {
-        localStorage.setItem(getFullKey(key), ENCRYPTED_MARKER + encrypted);
-        return true;
-      }
-    } catch (e) {
-      console.warn('加密缓存写入失败，回退到明文:', e);
-    }
-  }
-  
-  return saveCache(key, data);
+  return writeEncryptedCache(key, data);
 }
 
 export async function loadCacheAsync<T>(key: string): Promise<T | null> {
+  const mirrored = readMemoryMirror<T>(key);
+  if (mirrored !== null) {
+    return mirrored;
+  }
+
   const storageKey = getFullKey(key);
   try {
     const raw = localStorage.getItem(storageKey);
     if (!raw) return null;
-    
+
     if (isEncrypted(raw)) {
       const encryptedContent = raw.slice(ENCRYPTED_MARKER.length);
       const decrypted = await decryptData(encryptedContent);
       if (decrypted) {
         try {
           const cache: CacheData<T> = JSON.parse(decrypted);
-          
+
           if (cache.version !== CACHE_VERSION) {
             localStorage.removeItem(storageKey);
             return null;
           }
-          
-          const expiryMs = CACHE_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
-          if (Date.now() - cache.timestamp > expiryMs) {
+
+          if (isCacheExpired(cache)) {
             localStorage.removeItem(storageKey);
             return null;
           }
-          
+
+          writeMemoryMirror(key, cache.data);
           return cache.data;
         } catch (parseError) {
           console.warn('解密数据解析失败:', parseError);
@@ -428,21 +411,21 @@ export async function loadCacheAsync<T>(key: string): Promise<T | null> {
       localStorage.removeItem(storageKey);
       return null;
     }
-    
+
     try {
       const cache: CacheData<T> = JSON.parse(raw);
-      
+
       if (cache.version !== CACHE_VERSION) {
         localStorage.removeItem(storageKey);
         return null;
       }
-      
-      const expiryMs = CACHE_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
-      if (Date.now() - cache.timestamp > expiryMs) {
+
+      if (isCacheExpired(cache)) {
         localStorage.removeItem(storageKey);
         return null;
       }
-      
+
+      writeMemoryMirror(key, cache.data);
       return cache.data;
     } catch (e) {
       try {
@@ -461,30 +444,7 @@ export async function saveMessagesCacheAsync(
   config: CacheConfig = DEFAULT_CACHE_CONFIG
 ): Promise<boolean> {
   try {
-    const maxGroups = config.maxGroups || 3;
-    const maxMessages = config.maxMessagesPerGroup || 100;
-    
-    const groupIds = Object.keys(messages);
-    
-    let selectedGroups: { id: string; lastActivity: number }[] = groupIds.map(id => {
-      const msgs = messages[id] || [];
-      const lastMsg = msgs[msgs.length - 1];
-      return {
-        id,
-        lastActivity: lastMsg?.created_at ? new Date(lastMsg.created_at).getTime() : 0
-      };
-    });
-    
-    selectedGroups.sort((a, b) => b.lastActivity - a.lastActivity);
-    selectedGroups = selectedGroups.slice(0, maxGroups);
-    
-    const trimmedMessages: Record<string, Message[]> = {};
-    for (const { id } of selectedGroups) {
-      const msgs = messages[id] || [];
-      trimmedMessages[id] = msgs.slice(-maxMessages);
-    }
-
-    return await saveCacheAsync('messages_cache', trimmedMessages);
+    return await saveCacheAsync('messages_cache', trimMessagesForCache(messages, config));
   } catch (e) {
     console.warn('saveMessagesCacheAsync failed:', e);
     return false;

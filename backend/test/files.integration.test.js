@@ -9,7 +9,7 @@ process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-chat-file-data-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 
-const { getUploadsDir, initDatabase } = await import('../src/models/db.js');
+const { initDatabase } = await import('../src/models/db.js');
 const { initAuthDb } = await import('../src/models/authDb.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
 const supertest = (await import('supertest')).default;
@@ -63,9 +63,12 @@ test('uploaded file is stored under configured uploads directory and parsed succ
   assert.ok(uploadResponse.body.file);
 
   const uploadedFile = uploadResponse.body.file;
-  assert.ok(uploadedFile.original_path.startsWith(getUploadsDir()));
-  assert.notEqual(uploadedFile.uploader_id, 'spoofed-user');
-  assert.equal(uploadedFile.owner_user_id, uploadedFile.uploader_id);
+  for (const sensitiveField of ['original_path', 'stored_filename', 'download_token', 'uploader_id', 'owner_user_id', 'parsed_content']) {
+    assert.ok(!(sensitiveField in uploadedFile), `response must not expose ${sensitiveField}`);
+  }
+  assert.ok(uploadedFile.url.includes('/files/public/'));
+  assert.ok(uploadedFile.url.includes('token='));
+  assert.ok(uploadedFile.url.includes(`group_id=${encodeURIComponent(groupId)}`));
 
   const contentResponse = await request
     .get(`/api/files/${uploadedFile.id}/content`)

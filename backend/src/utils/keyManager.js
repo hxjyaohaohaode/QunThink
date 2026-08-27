@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import fsSync from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -53,7 +53,17 @@ async function ensureKeyHistoryDirExists() {
 function setFilePermissions(filePath) {
   if (process.platform === 'win32') {
     try {
-      execSync(`icacls "${filePath}" /inheritance:r /grant:r "%USERNAME%:R"`, { stdio: 'ignore' });
+      const userName = process.env.USERNAME || process.env.USER;
+      if (!userName || /[\\/"&|<>^]/.test(userName)) {
+        console.warn('Windows密钥文件权限设置跳过（用户名缺失或含特殊字符）');
+        return;
+      }
+      // 使用参数数组形式调用，避免 shell 注入；授予当前用户完全控制并移除继承，
+      // 防止其他本机用户读取密钥，同时保留应用自身轮换密钥所需的写权限。
+      const result = spawnSync('icacls', [filePath, '/inheritance:r', `/grant:r`, `${userName}:F`], { stdio: 'ignore' });
+      if (result.status !== 0) {
+        console.warn('Windows密钥文件权限设置失败（非致命）: icacls exit ' + result.status);
+      }
     } catch (error) {
       console.warn('Windows密钥文件权限设置失败（非致命）:', error.message);
     }
@@ -118,6 +128,9 @@ async function loadOrGenerateEncryptionKey() {
 
   if (envKey) {
     showMigrationWarning();
+    if (isProduction && envKey.length < 32) {
+      throw new Error('生产环境 ENCRYPTION_KEY 强度过低：要求 base64 编码的 32 字节密钥（openssl rand -base64 32）');
+    }
     const keyBuffer = Buffer.from(envKey, 'base64');
     if (keyBuffer.length < KEY_LENGTH) {
       const hash = crypto.createHash('sha256');
@@ -218,6 +231,9 @@ function loadOrGenerateEncryptionKeySync() {
 
   if (envKey) {
     showMigrationWarning();
+    if (isProduction && envKey.length < 32) {
+      throw new Error('生产环境 ENCRYPTION_KEY 强度过低：要求 base64 编码的 32 字节密钥（openssl rand -base64 32）');
+    }
     const keyBuffer = Buffer.from(envKey, 'base64');
     if (keyBuffer.length < KEY_LENGTH) {
       const hash = crypto.createHash('sha256');

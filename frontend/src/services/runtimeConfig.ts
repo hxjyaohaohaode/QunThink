@@ -123,20 +123,33 @@ export function getBackendOrigin(): string {
 }
 
 export function getApiBaseUrl(): string {
+  // 开发模式下优先使用 Vite 代理（相对路径），避免跨域请求被浏览器取消
+  if (import.meta.env.DEV) {
+    return '/api';
+  }
   const backendOrigin = getBackendOrigin();
   return backendOrigin ? `${backendOrigin}/api` : '/api';
 }
 
 export function getApiBaseUrlCandidates(): string[] {
+  // 开发模式下将 /api（Vite 代理）放在首位，避免直连后端触发跨域问题
+  const devProxyCandidate = import.meta.env.DEV ? ['/api'] : [];
   const candidates = getBackendOriginCandidates();
   if (candidates.length === 0) {
-    return ['/api'];
+    return [...devProxyCandidate, '/api'];
   }
-
-  return candidates.map(origin => `${origin}/api`);
+  const fullCandidates = candidates.map(origin => `${origin}/api`);
+  return dedupeOrigins([...devProxyCandidate, ...fullCandidates, '/api']);
 }
 
 export function getWebSocketUrl(): string {
+  // 开发模式：WS 与 API 一致走 vite 同源代理（/ws 配置了 ws:true），
+  // 避免「API 走代理、WS 直连候选端口」的连接分裂（候选端口可能被其他服务占用）
+  if (import.meta.env.DEV && typeof window !== 'undefined') {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${wsProtocol}//${window.location.host}/ws`;
+  }
+
   const backendOrigin = getBackendOrigin();
   if (backendOrigin) {
     const wsProtocol = backendOrigin.startsWith('https://') ? 'wss' : 'ws';

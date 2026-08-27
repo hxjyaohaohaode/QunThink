@@ -4,9 +4,32 @@ import { callAIDebate, normalizeResponse, applyMessageLengthLimit } from '../ai/
 import { broadcastToGroup, broadcastTypingStatus } from '../../websocket/index.js';
 import { AI_PERSONAS } from '../../config/personas.js';
 import { getEffectivePersona as getSchedulerPersona, loadCustomPersonas } from '../scheduler/index.js';
+import { decryptText } from '../../utils/encryption.js';
 
 const activeDebates = new Map();
 const groupToUserMap = new Map();
+
+function decryptMessages(messages) {
+  return messages.map(msg => {
+    if (msg.metadata?.encryption?.encrypted && typeof msg.content === 'string') {
+      try {
+        return { ...msg, content: decryptText(msg.content) };
+      } catch (error) {
+        console.warn(`[解密] 消息 ${msg.id} 解密失败:`, error.message);
+      }
+    }
+    return msg;
+  });
+}
+
+function shuffleArray(arr) {
+  const result = [...arr];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
 
 if (process.env.NODE_ENV !== 'test') {
   const debateCleanupTimer = setInterval(() => {
@@ -73,7 +96,7 @@ async function findGroupAndMessagesInAnyUserDb(groupId) {
     await db.read();
     const group = db.data.groups.find(g => g.id === groupId);
     if (group) {
-      const messages = db.data.messages.filter(m => m.group_id === groupId);
+      const messages = decryptMessages(db.data.messages.filter(m => m.group_id === groupId));
       return { db, userId: cachedUserId, group, messages };
     }
   }
@@ -85,7 +108,7 @@ async function findGroupAndMessagesInAnyUserDb(groupId) {
     populateGroupCache(userId, db);
     const group = db.data.groups.find(g => g.id === groupId);
     if (group) {
-      const messages = db.data.messages.filter(m => m.group_id === groupId);
+      const messages = decryptMessages(db.data.messages.filter(m => m.group_id === groupId));
       return { db, userId, group, messages };
     }
   }
@@ -308,19 +331,29 @@ function getDebatePhaseConfig(phase, roles) {
   }
 }
 
+const DEBATE_AI_NAMES_FALLBACK = {
+  deepseek: 'deepseek-chat',
+  deepseek_reasoner: 'deepseek-reasoner',
+  glm_air: 'GLM-4.5-Air',
+  glm_flash: 'GLM-4.7-Flash',
+  glm_flashx: 'GLM-4.7-FlashX',
+  mimo_flash: 'mimo-v2.5',
+  mimo_omni: 'mimo-v2-omni',
+  mimo_tts: 'mimo-v2-tts',
+  qwen_flash: 'Qwen3.5-Flash',
+  qwen_turbo: 'qwen-turbo'
+};
+
+const debateAiNames = (() => {
+  const merged = { ...DEBATE_AI_NAMES_FALLBACK };
+  for (const [aiId, persona] of Object.entries(AI_PERSONAS || {})) {
+    if (persona?.name) merged[aiId] = persona.name;
+  }
+  return merged;
+})();
+
 function buildDebateRolePrompt(persona, role, topic, phase, phaseConfig, recentMessages, allRoles) {
-  const aiNames = {
-    deepseek: 'deepseek-chat',
-    deepseek_reasoner: 'deepseek-reasoner',
-    glm_air: 'GLM-4.5-Air',
-    glm_flash: 'GLM-4.7-Flash',
-    glm_flashx: 'GLM-4.7-FlashX',
-    mimo_flash: 'mimo-v2.5',
-    mimo_omni: 'mimo-v2-omni',
-    mimo_tts: 'mimo-v2-tts',
-    qwen_flash: 'Qwen3.5-Flash',
-    qwen_turbo: 'qwen-turbo'
-  };
+  const aiNames = debateAiNames;
 
   const roleNames = {
     proponent: '正方',
@@ -746,9 +779,9 @@ async function getRecentMessages(groupId, limit = 50) {
   if (cachedUserId) {
     const db = await getUserDb(cachedUserId);
     await db.read();
-    const messages = db.data.messages
+    const messages = decryptMessages(db.data.messages
       .filter(m => m.group_id === groupId)
-      .slice(-limit);
+      .slice(-limit));
     if (messages.length > 0) return messages;
   }
 
@@ -757,9 +790,9 @@ async function getRecentMessages(groupId, limit = 50) {
     const db = await getUserDb(userId);
     await db.read();
     populateGroupCache(userId, db);
-    const messages = db.data.messages
+    const messages = decryptMessages(db.data.messages
       .filter(m => m.group_id === groupId)
-      .slice(-limit);
+      .slice(-limit));
     if (messages.length > 0) return messages;
   }
   return [];
@@ -847,11 +880,15 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
 
   activeDebates.set(debateKey, context);
 
-  group.debate_mode = true;
-  group.debate_level = debateLevel;
-  group.debate_topic = topic;
-  group.debate_roles = roles;
   await withWriteLock(userId, async () => {
+    await userDb.read();
+    const lockedGroup = userDb.data.groups.find(g => g.id === groupId);
+    if (lockedGroup) {
+      lockedGroup.debate_mode = true;
+      lockedGroup.debate_level = debateLevel;
+      lockedGroup.debate_topic = topic;
+      lockedGroup.debate_roles = roles;
+    }
     await userDb.write();
   });
 
@@ -895,7 +932,7 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
             ? phaseConfig.speakers  // 反方先（已在getDebatePhaseConfig中排列好）
             : phase === DEBATE_PHASES.AUDIENCE_COMMENT
               ? [...phaseConfig.speakers]
-              : [...phaseConfig.speakers].sort(() => Math.random() - 0.5);
+              : shuffleArray(phaseConfig.speakers);
 
       // Track which AIs have spoken this turn for inter-AI targeting
       const spokenThisTurn = new Set();
@@ -958,7 +995,7 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
 
               // 随机选择1-2个回应者
               const responderCount = Math.min(Math.ceil(Math.random() * 2), availableResponders.length);
-              const shuffled = [...availableResponders].sort(() => Math.random() - 0.5);
+              const shuffled = shuffleArray(availableResponders);
               const selectedResponders = shuffled.slice(0, responderCount);
 
               for (const responderId of selectedResponders) {
@@ -1098,6 +1135,11 @@ export function getDebateStatus(groupId) {
 }
 
 export async function triggerAudienceComment(groupId, audienceMembers) {
+  const debateKey = `debate:${groupId}`;
+  if (activeDebates.has(debateKey)) {
+    return { success: false, reason: 'debate_running' };
+  }
+
   const result = await findGroupAndMessagesInAnyUserDb(groupId);
   if (!result) {
     return { success: false, error: '群组不存在' };

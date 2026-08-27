@@ -1,12 +1,20 @@
-import { useState, useRef, useEffect, useMemo, type ReactNode } from 'react';
+import { useState, useRef, useEffect, useMemo, lazy, Suspense, type ReactNode } from 'react';
+import { motion, AnimatePresence, useMotionValue, useTransform, animate } from 'framer-motion';
+
+const LazyInsightRadar = lazy(() =>
+  import('../Visual/Radar').then(m => ({ default: () => <m.default {...m.RADAR_INSIGHT_PRESET} className="w-full h-full" /> }))
+);
 import { useGroupsStore } from '../../stores/groupsStore';
 import { usePersonasStore } from '../../stores/personasStore';
-import { useMessagesStoreInternal } from '../../stores/messagesStore';
+import { useMessagesStore } from '../../stores/messagesStore';
 import { AI_NAMES, AI_COLORS, AI_AVATAR_LETTERS, AI_LIST, GroupFile } from '../../types';
+import type { Message, GroupInsights, MemoryDigest } from '../../types';
 import { formatFileSize, getFileTypeIcon } from './AttachmentStack';
 import { api } from '../../services/api';
 import { sanitizeUrl } from '../../utils/sanitizeUrl';
-import { useConfirm, useToast } from '../Common';
+import { useConfirm, useToast, Skeleton } from '../Common';
+import { MiniBars } from '../Common/MiniBars';
+import { useReducedMotion } from '../../hooks/useReducedMotion';
 import dayjs from 'dayjs';
 import 'dayjs/locale/zh-cn';
 
@@ -26,22 +34,160 @@ interface GroupInfoPageProps {
   onClose: () => void;
 }
 
-type TabType = 'info' | 'members' | 'search' | 'files' | 'settings';
+type TabType = 'info' | 'members' | 'search' | 'insights' | 'files' | 'settings';
+
+const EMPTY_MESSAGES: Message[] = [];
+
+const INSIGHT_STAT_ICONS: Record<string, ReactNode> = {
+  messages: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 8.511c.884.284 1.5 1.128 1.5 2.097v4.286c0 1.136-.847 2.1-1.98 2.193-.34.027-.68.052-1.02.072v3.091l-3-3c-1.354 0-2.694-.055-4.02-.163a2.115 2.115 0 01-.825-.242m9.345-8.334a2.126 2.126 0 00-.476-.095 48.64 48.64 0 00-8.048 0c-1.131.094-1.976 1.057-1.976 2.192v4.286c0 .837.46 1.58 1.155 1.951m9.345-8.334V6.637c0-1.621-1.152-3.026-2.76-3.235A48.455 48.455 0 0011.25 3c-2.115 0-4.198.137-6.24.402-1.608.209-2.76 1.614-2.76 3.235v6.226c0 1.621 1.152 3.026 2.76 3.235.577.075 1.157.14 1.74.194V21l4.155-4.155" /></svg>,
+  ai: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z" /></svg>,
+  likes: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M6.633 10.25c.806 0 1.533-.446 2.031-1.08a9.041 9.041 0 012.861-2.4c.723-.384 1.35-.956 1.653-1.715a4.498 4.498 0 00.322-1.672V3a.75.75 0 01.75-.75A2.25 2.25 0 0116.5 4.5c0 1.152-.26 2.243-.723 3.218-.266.558.107 1.282.725 1.282h3.126c1.026 0 1.945.694 2.054 1.715.045.422.068.85.068 1.285a11.95 11.95 0 01-2.649 7.521c-.388.482-.987.729-1.605.729H13.48c-.483 0-.964-.078-1.423-.23l-3.114-1.04a4.501 4.501 0 00-1.423-.23H5.904m10.598-9.75H14.25M5.904 18.5c.083.205.173.405.27.602.197.4-.078.898-.523.898h-.908c-.889 0-1.713-.518-1.972-1.368a12 12 0 01-.521-3.507c0-1.553.295-3.036.831-4.398C3.387 9.953 4.167 9.5 5 9.5h1.053c.472 0 .745.556.5.96a8.958 8.958 0 00-1.302 4.665c0 1.194.232 2.333.654 3.375z" /></svg>,
+  comments: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 20.25c4.97 0 9-3.694 9-8.25s-4.03-8.25-9-8.25S3 7.444 3 12c0 2.104.859 4.023 2.273 5.48.432.447.74 1.04.586 1.641a4.483 4.483 0 01-.923 1.785A5.969 5.969 0 006 21c1.282 0 2.47-.402 3.445-1.087.81.22 1.668.337 2.555.337z" /></svg>
+};
+
+interface StatCardProps {
+  label: string;
+  value: number;
+  icon: ReactNode;
+  delay?: number;
+  reducedMotion?: boolean;
+}
+
+function StatCard({ label, value, icon, delay = 0, reducedMotion = false }: StatCardProps) {
+  const countValue = useMotionValue(reducedMotion ? value : 0);
+  const displayText = useTransform(countValue, (v) => Math.round(v).toLocaleString());
+
+  useEffect(() => {
+    if (reducedMotion) {
+      countValue.set(value);
+      return;
+    }
+    countValue.set(0);
+    const controls = animate(countValue, value, {
+      duration: 0.9,
+      delay,
+      ease: [0.22, 1, 0.36, 1]
+    });
+    return () => controls.stop();
+  }, [value, reducedMotion, delay, countValue]);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.35, delay, ease: 'easeOut' }}
+      className="bg-bg-surface border border-border-subtle rounded-xl p-3 min-w-0"
+    >
+      <div className="flex items-center gap-1.5 text-text-muted mb-1">
+        {icon}
+        <span className="text-[11px] truncate">{label}</span>
+      </div>
+      <motion.span className="block text-xl font-semibold text-text-primary tabular-nums leading-none">
+        {displayText}
+      </motion.span>
+    </motion.div>
+  );
+}
+
+interface SentimentPoint {
+  date: string;
+  avg_score: number;
+  samples: number;
+}
+
+function SentimentTrendChart({ data }: { data: SentimentPoint[] }) {
+  const W = 100;
+  const H = 100;
+  const scores = data.map((p) => p.avg_score);
+  const min = Math.min(...scores);
+  const max = Math.max(...scores);
+  const span = max - min || Math.abs(max) || 1;
+  const lo = min - span * 0.2;
+  const hi = max + span * 0.2;
+  const xs = data.map((_, i) => (data.length === 1 ? W / 2 : (i / (data.length - 1)) * W));
+  const ys = scores.map((s) => H - ((s - lo) / (hi - lo)) * H);
+  const coords = data.map((_, i) => `${xs[i].toFixed(2)},${ys[i].toFixed(2)}`).join(' ');
+  const latest = data[data.length - 1];
+
+  return (
+    <div>
+      <div className="relative h-28">
+        <svg className="absolute inset-0 w-full h-full text-accent" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="sentiment-fill-gradient" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="currentColor" stopOpacity="0.22" />
+              <stop offset="100%" stopColor="currentColor" stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          <polygon points={`0,${H} ${coords} ${W},${H}`} fill="url(#sentiment-fill-gradient)" />
+          <polyline
+            points={coords}
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
+        {data.map((p, i) => (
+          <span
+            key={`${p.date}-${i}`}
+            className="absolute w-1.5 h-1.5 rounded-full bg-accent"
+            style={{ left: `${xs[i]}%`, top: `${ys[i]}%`, transform: 'translate(-50%, -50%)' }}
+            title={`${dayjs(p.date).format('M/D')}：${p.avg_score.toFixed(2)}（${p.samples} 条样本）`}
+          />
+        ))}
+        <span className="absolute right-0 -top-1 text-[11px] font-medium text-accent bg-bg-surface px-1">
+          {latest.avg_score.toFixed(2)}
+        </span>
+      </div>
+      <div className="flex justify-between mt-1 text-[10px] text-text-muted">
+        <span>{dayjs(data[0].date).format('M/D')}</span>
+        <span>{dayjs(latest.date).format('M/D')}</span>
+      </div>
+    </div>
+  );
+}
+
+function formatRelativeTime(timestamp: string): string {
+  const target = dayjs(timestamp);
+  if (!target.isValid()) return '';
+  const diffMinutes = Math.floor((Date.now() - target.valueOf()) / 60000);
+  if (diffMinutes < 1) return '刚刚';
+  if (diffMinutes < 60) return `${diffMinutes} 分钟前`;
+  const hours = Math.floor(diffMinutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days} 天前`;
+  return target.format('M/D');
+}
+
+const MEMORY_CATEGORY_BADGES: Record<string, string> = {
+  fact: 'bg-blue-500/10 text-blue-600 dark:text-blue-400',
+  preference: 'bg-purple-500/10 text-purple-600 dark:text-purple-400',
+  event: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+  relationship: 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
+};
+
+function formatParticipationRatio(ratio: number): string {
+  if (typeof ratio !== 'number' || Number.isNaN(ratio)) return '--';
+  const pct = ratio <= 1 ? ratio * 100 : ratio;
+  return `${Math.round(pct)}%`;
+}
 
 export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) {
-  const {
-    groups,
-    updateGroupSettings,
-    pinGroup,
-    selectGroup,
-    deleteGroup,
-    addGroupMember,
-    removeGroupMember
-  } = useGroupsStore();
-  const { personas } = usePersonasStore();
-  const allMessages = useMessagesStoreInternal((state) => state.messages);
-  const clearAllMessages = useMessagesStoreInternal((state) => state.clearAllMessages);
-  const messages = allMessages[groupId] || [];
+  const groups = useGroupsStore((s) => s.groups);
+  const updateGroupSettings = useGroupsStore((s) => s.updateGroupSettings);
+  const pinGroup = useGroupsStore((s) => s.pinGroup);
+  const selectGroup = useGroupsStore((s) => s.selectGroup);
+  const deleteGroup = useGroupsStore((s) => s.deleteGroup);
+  const addGroupMember = useGroupsStore((s) => s.addGroupMember);
+  const removeGroupMember = useGroupsStore((s) => s.removeGroupMember);
+  const personas = usePersonasStore((s) => s.personas);
+  const rawMessages = useMessagesStore((s) => s.messages[groupId]);
+  const clearAllMessages = useMessagesStore((s) => s.clearAllMessages);
+  const messages = rawMessages || EMPTY_MESSAGES;
   const [activeTab, setActiveTab] = useState<TabType>('info');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchFilter, setSearchFilter] = useState<SearchFilterType>('all');
@@ -68,6 +214,18 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
   const [isClosing, setIsClosing] = useState(false);
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
   const [showAvatarColorPicker, setShowAvatarColorPicker] = useState(false);
+  const loadFilesRequestIdRef = useRef(0);
+  const insightsRequestIdRef = useRef(0);
+  const memoryRequestIdRef = useRef(0);
+  const [insights, setInsights] = useState<GroupInsights | null>(null);
+  const [insightsDays, setInsightsDays] = useState<7 | 30>(7);
+  const [loadingInsights, setLoadingInsights] = useState(false);
+  const [memoryDigest, setMemoryDigest] = useState<MemoryDigest | null>(null);
+  const [loadingMemory, setLoadingMemory] = useState(false);
+  const [memoryError, setMemoryError] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const reducedMotion = useReducedMotion();
+  const handleCloseRef = useRef<() => void>(() => {});
 
   const isDirty = editingName || editingDesc || editingAnnouncement;
 
@@ -96,7 +254,7 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') handleClose();
+      if (e.key === 'Escape') handleCloseRef.current();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
@@ -107,6 +265,21 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
       loadFiles();
     }
   }, [activeTab, groupId]);
+
+  useEffect(() => {
+    if (isOpen && activeTab === 'insights') {
+      void loadInsights(insightsDays);
+    }
+    // 与上方 files 效果保持一致：仅由 tab / 群组变化触发
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, groupId, isOpen]);
+
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'insights') return;
+    if (memoryDigest || loadingMemory || memoryError) return;
+    void loadMemoryDigest();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, activeTab, memoryDigest, loadingMemory, memoryError]);
 
   const handleClose = () => {
     if (isDirty) {
@@ -121,18 +294,145 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
     }, 300);
   };
 
+  // Escape 监听通过 ref 调用最新的 handleClose，避免陈旧闭包
+  useEffect(() => {
+    handleCloseRef.current = handleClose;
+  });
+
   const loadFiles = async () => {
+    const currentRequestId = ++loadFilesRequestIdRef.current;
     setLoadingFiles(true);
     try {
       const fileList = await api.getGroupFiles(groupId);
+      if (currentRequestId !== loadFilesRequestIdRef.current) return;
       setFiles(fileList);
     } catch (error) {
       console.error('加载文件失败:', error);
+      if (currentRequestId !== loadFilesRequestIdRef.current) return;
       setFiles([]);
     } finally {
-      setLoadingFiles(false);
+      if (currentRequestId === loadFilesRequestIdRef.current) {
+        setLoadingFiles(false);
+      }
     }
   };
+
+  const loadInsights = async (days: 7 | 30 = insightsDays) => {
+    const currentRequestId = ++insightsRequestIdRef.current;
+    setLoadingInsights(true);
+    try {
+      const result = await api.getGroupInsights(groupId, days);
+      if (currentRequestId !== insightsRequestIdRef.current) return;
+      setInsights(result);
+    } catch (error) {
+      console.error('加载洞察数据失败:', error);
+      if (currentRequestId !== insightsRequestIdRef.current) return;
+      setInsights(null);
+    } finally {
+      if (currentRequestId === insightsRequestIdRef.current) {
+        setLoadingInsights(false);
+      }
+    }
+  };
+
+  const handleSwitchInsightsDays = (days: 7 | 30) => {
+    if (days === insightsDays && insights && !loadingInsights) return;
+    setInsightsDays(days);
+    void loadInsights(days);
+  };
+
+  const loadMemoryDigest = async () => {
+    const currentRequestId = ++memoryRequestIdRef.current;
+    setLoadingMemory(true);
+    setMemoryError(false);
+    try {
+      const result = await api.getMemoryDigest(8);
+      if (currentRequestId !== memoryRequestIdRef.current) return;
+      setMemoryDigest(result);
+    } catch (error) {
+      console.error('加载记忆回顾失败:', error);
+      if (currentRequestId !== memoryRequestIdRef.current) return;
+      setMemoryError(true);
+    } finally {
+      if (currentRequestId === memoryRequestIdRef.current) {
+        setLoadingMemory(false);
+      }
+    }
+  };
+
+  // hooks 全部上移到 early-return 之前；group 可能为 null，在 memo 内部兜底
+  const aiMembers = useMemo(() => group?.ai_members || [], [group?.ai_members]);
+
+  const filteredMessages = useMemo(() => {
+    let result = messages;
+
+    if (searchQuery) {
+      result = result.filter(m =>
+        m.content.toLowerCase().includes(searchQuery.toLowerCase())
+      );
+    }
+
+    if (searchFilter === 'member' && selectedMemberId) {
+      if (selectedMemberId === 'user') {
+        result = result.filter(m => m.sender_type === 'user');
+      } else {
+        result = result.filter(m => m.sender_id === selectedMemberId);
+      }
+    }
+
+    if (searchFilter === 'date' && selectedDate) {
+      result = result.filter(m =>
+        dayjs(m.created_at).format('YYYY-MM-DD') === selectedDate
+      );
+    }
+
+    if (searchFilter === 'media') {
+      result = result.filter(m =>
+        m.attachments?.some(a => a.type?.startsWith('image/') || a.type?.startsWith('video/'))
+      );
+    }
+
+    if (searchFilter === 'file') {
+      result = result.filter(m =>
+        m.attachments?.some(a =>
+          !a.type?.startsWith('image/') && !a.type?.startsWith('video/')
+        )
+      );
+    }
+
+    return result;
+  }, [messages, searchQuery, searchFilter, selectedMemberId, selectedDate]);
+
+  const availableDates = useMemo(() => {
+    const dateSet = new Set<string>();
+    messages.forEach(m => {
+      dateSet.add(dayjs(m.created_at).format('YYYY-MM-DD'));
+    });
+    return Array.from(dateSet).sort().reverse();
+  }, [messages]);
+
+  const groupMembers = useMemo(() => {
+    const members: { id: string; name: string; color: string; letter: string; avatarUrl?: string | null }[] = [
+      { id: 'user', name: '我', color: '#171717', letter: '我' }
+    ];
+    aiMembers.forEach((aiId: string) => {
+      const persona = personas[aiId];
+      members.push({
+        id: aiId,
+        name: persona?.name || AI_NAMES[aiId] || aiId,
+        color: persona?.color || AI_COLORS[aiId] || '#737373',
+        letter: AI_AVATAR_LETTERS[aiId] || AI_NAMES[aiId]?.[0] || aiId[0],
+        avatarUrl: persona?.avatar_url
+      });
+    });
+    if (memberSearchQuery) {
+      return members.filter(m =>
+        m.name.toLowerCase().includes(memberSearchQuery.toLowerCase()) ||
+        m.id.toLowerCase().includes(memberSearchQuery.toLowerCase())
+      );
+    }
+    return members;
+  }, [aiMembers, personas, memberSearchQuery]);
 
   if (!isOpen || !group) return null;
 
@@ -333,105 +633,31 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
     }
   };
 
-  const handleDeleteMemory = async (aiName: string) => {
-    const confirmed = await confirm({ title: '清除记忆', description: `确定要清除${aiName} 的记忆吗？`, danger: true });
+  const handleDeleteMemory = async () => {
+    const confirmed = await confirm({ title: '清空全部 AI 记忆', description: '此操作将清空所有群聊中全部 AI 的记忆数据，对所有群组全局生效且不可恢复。确定继续吗？', danger: true });
     if (!confirmed) return;
     try {
       await api.clearMemories();
-      showToast({ message: '记忆已清除', type: 'success' });
+      showToast({ message: '全部 AI 记忆已清空', type: 'success' });
     } catch (error) {
       console.error('清除记忆失败:', error);
-      showToast({ message: '清除记忆失败，请重试', type: 'error' });
+      showToast({ message: '清空记忆失败，请重试', type: 'error' });
     }
   };
 
 
 
-  const getFileIcon = (type: string): ReactNode => {
-    const { icon } = getFileTypeIcon(type);
-    return <span className="text-base">{icon}</span>;
-  };
+  const getFileIcon = (type: string): ReactNode => getFileTypeIcon(type).svg(16);
 
-  const filteredMessages = useMemo(() => {
-    let result = messages;
-
-    if (searchQuery) {
-      result = result.filter(m =>
-        m.content.toLowerCase().includes(searchQuery.toLowerCase())
-      );
-    }
-
-    if (searchFilter === 'member' && selectedMemberId) {
-      if (selectedMemberId === 'user') {
-        result = result.filter(m => m.sender_type === 'user');
-      } else {
-        result = result.filter(m => m.sender_id === selectedMemberId);
-      }
-    }
-
-    if (searchFilter === 'date' && selectedDate) {
-      result = result.filter(m =>
-        dayjs(m.created_at).format('YYYY-MM-DD') === selectedDate
-      );
-    }
-
-    if (searchFilter === 'media') {
-      result = result.filter(m =>
-        m.attachments?.some(a => a.type?.startsWith('image/') || a.type?.startsWith('video/'))
-      );
-    }
-
-    if (searchFilter === 'file') {
-      result = result.filter(m =>
-        m.attachments?.some(a =>
-          !a.type?.startsWith('image/') && !a.type?.startsWith('video/')
-        )
-      );
-    }
-
-    return result;
-  }, [messages, searchQuery, searchFilter, selectedMemberId, selectedDate]);
-
-  const availableDates = useMemo(() => {
-    const dateSet = new Set<string>();
-    messages.forEach(m => {
-      dateSet.add(dayjs(m.created_at).format('YYYY-MM-DD'));
-    });
-    return Array.from(dateSet).sort().reverse();
-  }, [messages]);
-
-  const aiMembers = group.ai_members || [];
   const allAIs = [...AI_LIST].filter(id => id !== 'mimo_tts');
   const availableAIs = allAIs.filter(ai => !aiMembers.includes(ai));
   const isAIPrivateChat = group.is_ai_private === true || group.type === 'ai_private';
-
-  const groupMembers = useMemo(() => {
-    const members: { id: string; name: string; color: string; letter: string; avatarUrl?: string | null }[] = [
-      { id: 'user', name: '我', color: '#171717', letter: '我' }
-    ];
-    aiMembers.forEach((aiId: string) => {
-      const persona = personas[aiId];
-      members.push({
-        id: aiId,
-        name: persona?.name || AI_NAMES[aiId] || aiId,
-        color: persona?.color || AI_COLORS[aiId] || '#737373',
-        letter: AI_AVATAR_LETTERS[aiId] || AI_NAMES[aiId]?.[0] || aiId[0],
-        avatarUrl: persona?.avatar_url
-      });
-    });
-    if (memberSearchQuery) {
-      return members.filter(m =>
-        m.name.toLowerCase().includes(memberSearchQuery.toLowerCase()) ||
-        m.id.toLowerCase().includes(memberSearchQuery.toLowerCase())
-      );
-    }
-    return members;
-  }, [aiMembers, personas, memberSearchQuery]);
 
   const tabs = [
     { key: 'info', label: '基本信息' },
     ...(isAIPrivateChat ? [] : [{ key: 'members', label: '成员管理' }]),
     { key: 'search', label: '聊天记录' },
+    { key: 'insights', label: '洞察' },
     { key: 'files', label: '文件管理' },
     { key: 'settings', label: '设置' }
   ];
@@ -1006,6 +1232,247 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
             </div>
           )}
 
+          {activeTab === 'insights' && (() => {
+            const totals = insights?.totals;
+            const topAi = insights
+              ? [...insights.per_ai].sort((a, b) => b.count - a.count).slice(0, 5)
+              : [];
+            const maxAiCount = topAi[0]?.count || 0;
+            const aiTotal = totals?.ai_messages || topAi.reduce((sum, item) => sum + item.count, 0) || 1;
+            const sentimentPoints = (insights?.sentiment_trend || []).filter(
+              (p): p is { date: string; avg_score: number; samples: number } =>
+                typeof p.avg_score === 'number'
+            );
+            const activityDaily = insights?.activity_daily || [];
+            const memoryItems = memoryDigest?.memories || [];
+
+            return (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold text-text-primary flex items-center gap-1.5 flex-shrink-0">
+                    群聊洞察
+                    {loadingInsights && insights && (
+                      <svg className="w-3.5 h-3.5 animate-spin text-accent" viewBox="0 0 24 24" fill="none">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                      </svg>
+                    )}
+                  </h3>
+                  <div className="flex bg-bg-surface2 rounded-full p-0.5 flex-shrink-0">
+                    {([7, 30] as const).map((days) => (
+                      <button
+                        key={days}
+                        onClick={() => handleSwitchInsightsDays(days)}
+                        disabled={loadingInsights}
+                        className={`px-3 py-1 text-xs rounded-full transition-colors disabled:opacity-60 ${
+                          insightsDays === days
+                            ? 'bg-accent text-white shadow'
+                            : 'text-text-muted hover:text-text-primary'
+                        }`}
+                      >
+                        {days}天
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {loadingInsights && !insights ? (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      {Array.from({ length: 4 }).map((_, i) => (
+                        <Skeleton key={i} height={64} className="rounded-xl" />
+                      ))}
+                    </div>
+                    <Skeleton height={140} className="rounded-xl" />
+                    <Skeleton height={170} className="rounded-xl" />
+                  </div>
+                ) : !insights || !totals ? (
+                  <div className="text-center py-10 text-text-muted">
+                    <p className="mb-3">暂无洞察数据</p>
+                    <button
+                      onClick={() => void loadInsights(insightsDays)}
+                      className="text-xs text-accent hover:underline"
+                    >
+                      重新加载
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      <StatCard label="总消息" value={totals.messages} icon={INSIGHT_STAT_ICONS.messages} delay={0} reducedMotion={reducedMotion} />
+                      <StatCard label="AI 发言" value={totals.ai_messages} icon={INSIGHT_STAT_ICONS.ai} delay={0.06} reducedMotion={reducedMotion} />
+                      <StatCard label="点赞" value={totals.likes} icon={INSIGHT_STAT_ICONS.likes} delay={0.12} reducedMotion={reducedMotion} />
+                      <StatCard label="评论" value={totals.comments} icon={INSIGHT_STAT_ICONS.comments} delay={0.18} reducedMotion={reducedMotion} />
+                    </div>
+                    <div className="flex items-center gap-3 rounded-xl bg-bg-surface border border-border-subtle p-3">
+                      <div className="w-20 h-20 rounded-full overflow-hidden flex-shrink-0 ring-1 ring-border-subtle/60 bg-black/85">
+                        <Suspense fallback={<div className="w-full h-full" />}>
+                          <LazyInsightRadar />
+                        </Suspense>
+                      </div>
+                      <p className="text-xs text-text-muted leading-relaxed">
+                        参与度 {formatParticipationRatio(insights.participation_ratio)} · 活跃 AI {totals.active_ais} 个
+                      </p>
+                    </div>
+
+                    <div className="bg-bg-surface border border-border-subtle rounded-xl p-3">
+                      <div className="flex items-center justify-between mb-2 gap-2">
+                        <span className="text-xs font-medium text-text-secondary">近{insights.window_days}日消息活跃</span>
+                        <span className="text-[11px] text-text-muted flex-shrink-0">共 {totals.messages} 条</span>
+                      </div>
+                      {activityDaily.length > 0 ? (
+                        <MiniBars data={activityDaily} height={96} />
+                      ) : (
+                        <p className="text-xs text-text-muted py-8 text-center">该时间窗内暂无消息</p>
+                      )}
+                    </div>
+
+                    <div className="bg-bg-surface border border-border-subtle rounded-xl p-3">
+                      <span className="text-xs font-medium text-text-secondary block mb-2">AI 发言分布</span>
+                      {topAi.length === 0 ? (
+                        <p className="text-xs text-text-muted py-6 text-center">暂无 AI 发言记录</p>
+                      ) : (
+                        <div className="space-y-1">
+                          {topAi.map((item) => {
+                            const name = item.name || personas[item.ai_id]?.name || AI_NAMES[item.ai_id] || item.ai_id;
+                            const color = personas[item.ai_id]?.color || AI_COLORS[item.ai_id] || '#22c55e';
+                            const barWidth = maxAiCount > 0 ? Math.max(6, Math.round((item.count / maxAiCount) * 100)) : 6;
+                            const share = Math.round((item.count / aiTotal) * 100);
+                            return (
+                              <div key={item.ai_id} className="flex items-center gap-2 py-1.5 min-w-0">
+                                <span className="w-[72px] sm:w-24 shrink-0 text-xs text-text-secondary truncate" title={name}>
+                                  {name}
+                                </span>
+                                <div className="flex-1 h-2.5 rounded-full bg-bg-surface2 overflow-hidden min-w-0">
+                                  <motion.div
+                                    className="h-full rounded-full"
+                                    style={{ backgroundColor: color }}
+                                    initial={reducedMotion ? false : { width: 0 }}
+                                    animate={{ width: `${barWidth}%` }}
+                                    transition={{ duration: reducedMotion ? 0 : 0.6, delay: reducedMotion ? 0 : 0.15, ease: 'easeOut' }}
+                                  />
+                                </div>
+                                <span className="w-16 shrink-0 text-right text-[11px] text-text-muted tabular-nums">
+                                  {share}% · {item.count}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="bg-bg-surface border border-border-subtle rounded-xl p-3">
+                      <span className="text-xs font-medium text-text-secondary block mb-2">情感趋势</span>
+                      {sentimentPoints.length >= 2 ? (
+                        <SentimentTrendChart data={sentimentPoints} />
+                      ) : (
+                        <div className="py-8 text-center">
+                          <svg className="w-8 h-8 mx-auto text-text-muted/50 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M2.25 18L9 11.25l4.306 4.306a11.95 11.95 0 015.814-5.518l2.74-1.22m0 0l-5.94-2.281m5.94 2.28l-2.28 5.941" /></svg>
+                          <p className="text-xs text-text-muted">暂无足够互动数据</p>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="bg-bg-surface border border-border-subtle rounded-xl overflow-hidden">
+                      <button
+                        onClick={() => setMemoryOpen((open) => !open)}
+                        className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-bg-surface2/60 transition-colors"
+                      >
+                        <svg className="w-4 h-4 text-accent flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" /></svg>
+                        <span className="text-sm font-medium text-text-primary">记忆回顾</span>
+                        {memoryDigest && memoryItems.length > 0 && (
+                          <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-accent/10 text-accent">
+                            {memoryItems.length}
+                          </span>
+                        )}
+                        <svg
+                          className={`ml-auto w-4 h-4 text-text-muted transition-transform ${memoryOpen ? 'rotate-180' : ''}`}
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                          strokeWidth={1.5}
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                        </svg>
+                      </button>
+                      <AnimatePresence initial={false}>
+                        {memoryOpen && (
+                          <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: reducedMotion ? 0 : 0.25, ease: 'easeInOut' }}
+                            className="overflow-hidden"
+                          >
+                            <div className="px-3 pb-3 pt-2 border-t border-border-subtle">
+                              {loadingMemory ? (
+                                <div className="space-y-2">
+                                  {Array.from({ length: 3 }).map((_, i) => (
+                                    <Skeleton key={i} height={56} className="rounded-lg" />
+                                  ))}
+                                </div>
+                              ) : memoryError ? (
+                                <div className="py-4 text-center">
+                                  <p className="text-xs text-text-muted mb-2">记忆加载失败</p>
+                                  <button
+                                    onClick={() => void loadMemoryDigest()}
+                                    className="text-xs text-accent hover:underline"
+                                  >
+                                    重试
+                                  </button>
+                                </div>
+                              ) : memoryItems.length === 0 ? (
+                                <p className="text-xs text-text-muted py-5 text-center leading-relaxed">
+                                  AI 还没有形成关于你们的长期记忆，多聊聊天吧
+                                </p>
+                              ) : (
+                                <>
+                                  <div className="grid sm:grid-cols-2 gap-2">
+                                    {memoryItems.map((item) => {
+                                      const badgeClass =
+                                        MEMORY_CATEGORY_BADGES[item.category || ''] ||
+                                        'bg-bg-surface2 text-text-muted';
+                                      return (
+                                        <div
+                                          key={item.id}
+                                          className="p-2.5 rounded-lg bg-bg-surface2/60 border border-border-subtle min-w-0"
+                                        >
+                                          <div className="flex items-center gap-2 mb-1.5 min-w-0">
+                                            <span className={`px-1.5 py-0.5 rounded text-[10px] leading-none flex-shrink-0 ${badgeClass}`}>
+                                              {item.category || '记忆'}
+                                            </span>
+                                            <span className="ml-auto text-[10px] text-text-muted flex-shrink-0">
+                                              {formatRelativeTime(item.timestamp)}
+                                            </span>
+                                          </div>
+                                          <p className="text-xs text-text-secondary leading-relaxed break-words">
+                                            {item.content.length > 120
+                                              ? `${item.content.slice(0, 120)}…`
+                                              : item.content}
+                                          </p>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                  {memoryItems.length > 0 && memoryDigest?.generated_at && (
+                                    <p className="mt-2 text-[10px] text-text-muted text-right">
+                                      生成于 {dayjs(memoryDigest.generated_at).format('M/D HH:mm')}
+                                    </p>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })()}
+
           {activeTab === 'files' && (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
@@ -1204,10 +1671,10 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
                 )}
                 {group?.debate_config?.memory_enabled && (
                   <button
-                    onClick={() => handleDeleteMemory(group.name)}
+                    onClick={() => { void handleDeleteMemory(); }}
                     className="w-full py-2 text-red-500 p-2 rounded-lg hover:bg-sidebar-hover text-sm"
                   >
-                    清除AI记忆
+                    清空全部 AI 记忆
                   </button>
                 )}
                 <button

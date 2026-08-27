@@ -4,7 +4,7 @@ import relativeTime from 'dayjs/plugin/relativeTime';
 import 'dayjs/locale/zh-cn';
 import { motion } from 'framer-motion';
 import { AI_COLORS, AI_NAMES, AI_AVATAR_LETTERS, DebateRole, DEBATE_ROLE_NAMES, DEBATE_ROLE_COLORS, DEBATE_ROLE_ICONS } from '../../types';
-import { useMessagesStore, useMessagesStoreInternal } from '../../stores/messagesStore';
+import { useMessagesStore } from '../../stores/messagesStore';
 import type { Message } from '../../types';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { usePersonasStore } from '../../stores/personasStore';
@@ -29,12 +29,12 @@ dayjs.locale('zh-cn');
 
 interface MessageBubbleProps {
   message: Message;
-  showActions?: boolean;
   onReply?: (messageId: string) => void;
   showTimeDivider?: boolean;
   isMultiSelectMode?: boolean;
   debateRole?: DebateRole;
   isDebateMode?: boolean;
+  isLastInGroup?: boolean;
 }
 
 const TIME_FORMATS = [
@@ -70,8 +70,33 @@ const messageAnimations = {
   },
 };
 
-const MessageBubbleComponent = ({ message, showActions: _showActions = true, onReply, showTimeDivider, isMultiSelectMode = false, debateRole, isDebateMode = false }: MessageBubbleProps) => {
-  const allMessages = useMessagesStoreInternal(state => state.messages[message.group_id] || []);
+// 稳定空数组常量，避免selector每次返回新引用导致重渲染
+const EMPTY_ARRAY: Message[] = [];
+const EMPTY_REPLY_IDS: string[] = [];
+
+const MessageBubbleComponent = ({ message, onReply, showTimeDivider, isMultiSelectMode = false, debateRole, isDebateMode = false, isLastInGroup: isLastInGroupProp }: MessageBubbleProps) => {
+  // 只订阅引用消息所在分组的数组引用，避免订阅整个消息字典导致全量重渲染
+  const replyIds = useMemo<string[]>(() => {
+    if (!message.reply_to) return EMPTY_REPLY_IDS;
+    return Array.isArray(message.reply_to) ? message.reply_to : [message.reply_to];
+  }, [message.reply_to]);
+
+  const groupMessages = useMessagesStore((state) => state.messages[message.group_id]);
+
+  const replyToMessages = useMemo(() => {
+    if (replyIds.length === 0 || !groupMessages) return EMPTY_ARRAY;
+    return replyIds.map(id => groupMessages.find(m => m.id === id)).filter(Boolean) as Message[];
+  }, [replyIds, groupMessages]);
+
+  // 仅在未通过props传入isLastInGroup时，才从store获取下一条消息
+  const nextMsg = useMemo(() => {
+    if (isLastInGroupProp !== undefined || !groupMessages) return undefined;
+    const idx = groupMessages.findIndex(m => m.id === message.id);
+    return idx >= 0 ? groupMessages[idx + 1] : undefined;
+  }, [groupMessages, isLastInGroupProp, message.id]);
+  const isLastInGroup = isLastInGroupProp !== undefined
+    ? isLastInGroupProp
+    : !nextMsg || nextMsg.sender_type !== message.sender_type || nextMsg.sender_id !== message.sender_id;
   const [showComments, setShowComments] = useState(false);
   const [showAIInfo, setShowAIInfo] = useState(false);
   const [aiInfoPosition, setAIInfoPosition] = useState({ x: 0, y: 0 });
@@ -82,14 +107,22 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
   const [isSaving, setIsSaving] = useState(false);
   const [showSendGlow, setShowSendGlow] = useState(false);
   const prevStatusRef = useRef(message.status);
-  const { deleteMessage, editMessage, retryMessage, removeFailedMessage, updateMessage } = useMessagesStore();
-  const { currentGroup } = useGroupsStore();
-  const { personas } = usePersonasStore();
-  const { addReplyingTo } = useUIStore();
+  const deleteMessage = useMessagesStore((s) => s.deleteMessage);
+  const editMessage = useMessagesStore((s) => s.editMessage);
+  const retryMessage = useMessagesStore((s) => s.retryMessage);
+  const removeFailedMessage = useMessagesStore((s) => s.removeFailedMessage);
+  const updateMessage = useMessagesStore((s) => s.updateMessage);
+  const currentGroup = useGroupsStore((s) => s.currentGroup);
+  const personas = usePersonasStore((s) => s.personas);
+  const addReplyingTo = useUIStore((s) => s.addReplyingTo);
   const { contextMenu, handleContextMenu, handleLongPress, closeContextMenu } = useMessageContextMenu();
   const { confirm, ConfirmModal } = useConfirm();
   const { showToast, Toast } = useToast();
-  const { getTTSAudio, setTTSAudio, setTTSLoading, isTTSLoading, removeTTSAudio } = useAudioStore();
+  const setTTSAudio = useAudioStore((s) => s.setTTSAudio);
+  const setTTSLoading = useAudioStore((s) => s.setTTSLoading);
+  const removeTTSAudio = useAudioStore((s) => s.removeTTSAudio);
+  const storedTtsAudio = useAudioStore((s) => s.ttsAudios[message.id]);
+  const ttsLoading = !!useAudioStore((s) => s.ttsLoadingStates[message.id]);
   const [showTTSModal, setShowTTSModal] = useState(false);
   const deletingRef = useRef(false);
 
@@ -111,8 +144,7 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
       provider: rawTts.provider
     } as MessageTTSAudio;
   }, [message.metadata]);
-  const ttsAudio = persistedTtsAudio || getTTSAudio(message.id);
-  const ttsLoading = isTTSLoading(message.id);
+  const ttsAudio = persistedTtsAudio || storedTtsAudio;
 
   useEffect(() => {
     if (prevStatusRef.current === 'sending' && message.status === 'sent') {
@@ -136,16 +168,6 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
 
   const effectiveDebateRole = debateRole || (message.metadata?.debate_role as DebateRole);
   const showDebateRole = isDebateMode && effectiveDebateRole && !isUser && !isSystem;
-
-  const currentMsgIndex = allMessages.findIndex(m => m.id === message.id);
-  const nextMsg = currentMsgIndex >= 0 ? allMessages[currentMsgIndex + 1] : undefined;
-  const isLastInGroup = !nextMsg || nextMsg.sender_type !== message.sender_type || nextMsg.sender_id !== message.sender_id;
-
-  const replyToMessages = useMemo(() => {
-    if (!message.reply_to) return [];
-    const replyIds = Array.isArray(message.reply_to) ? message.reply_to : [message.reply_to];
-    return replyIds.map((id: string) => allMessages.find(m => m.id === id)).filter(Boolean);
-  }, [message.reply_to, allMessages]);
 
   const handleDelete = async () => {
     if (deletingRef.current) return;
@@ -270,7 +292,6 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
 
       <motion.div
         className={`flex gap-1.5 md:gap-3 ${isLastInGroup ? 'mb-2.5 md:mb-4' : 'mb-0.5 md:mb-1'} ${isUser ? 'flex-row-reverse' : 'flex-row'} group`}
-        style={{ willChange: 'transform, opacity' }}
         data-message-id={message.id}
         onContextMenu={isMultiSelectMode ? undefined : (e) => handleContextMenu(e, message.id)}
         {...(isMultiSelectMode ? {} : handleLongPress(message.id))}
@@ -287,6 +308,9 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
         {!isUser && (
           <div
             className="w-9 h-9 rounded flex items-center justify-center text-white font-semibold text-xs md:text-sm flex-shrink-0 shadow-sm overflow-hidden cursor-pointer hover:ring-2 hover:ring-offset-2 hover:ring-gray-300 transition-all"
+            role="button"
+            tabIndex={0}
+            aria-label={`查看 ${name} 的模型信息`}
             style={{
               backgroundColor: avatarUrl ? 'transparent' : color,
               backgroundImage: avatarUrl ? `url(${sanitizeUrl(avatarUrl)})` : 'none',
@@ -298,6 +322,15 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
               const rect = e.currentTarget.getBoundingClientRect();
               setAIInfoPosition({ x: rect.right + 10, y: rect.top });
               setShowAIInfo(true);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                const rect = e.currentTarget.getBoundingClientRect();
+                setAIInfoPosition({ x: rect.right + 10, y: rect.top });
+                setShowAIInfo(true);
+              }
             }}
           >
             {!avatarUrl && avatarLetter}
@@ -516,11 +549,15 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
                 const format = TIME_FORMATS[timeFormatIndexRef.current];
                 const time = dayjs(message.created_at);
                 if (format.key === 'relative') {
+                  // 消息发布不足 1 分钟时显示绝对时间，避免出现"永远刚刚"的静止相对时间
+                  if (Math.abs(dayjs().diff(time, 'second')) < 60) {
+                    return time.format('HH:mm');
+                  }
                   return time.fromNow();
                 }
                 return time.format(format.format);
               })()}
-              <span className="ml-1 opacity-0 group-hover:opacity-100 transition-opacity text-[10px]">🕐</span>
+              <svg className="w-3 h-3 ml-1 opacity-0 group-hover:opacity-100 transition-opacity text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" /></svg>
             </button>
 
             {message.is_edited && (
@@ -569,7 +606,7 @@ const MessageBubbleComponent = ({ message, showActions: _showActions = true, onR
               </div>
             )}
 
-            {isUser && (message.status === 'sent' || (!message.status && message.status !== 'failed')) && (
+            {isUser && (message.status === 'sent' || !message.status) && (
               <div className="message-status sent">
                 <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                   <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
@@ -650,6 +687,11 @@ export const MessageBubble = React.memo(MessageBubbleComponent, (prevProps, next
   const prevDislikedBy = prevProps.message.disliked_by || [];
   const nextDislikedBy = nextProps.message.disliked_by || [];
 
+  // 比较metadata（含TTS状态等）；store保证metadata不可变更新，直接用引用相等
+  const prevMetadata = prevProps.message.metadata;
+  const nextMetadata = nextProps.message.metadata;
+  const metadataEqual = prevMetadata === nextMetadata;
+
   return (
     prevProps.message.id === nextProps.message.id &&
     prevProps.message.content === nextProps.message.content &&
@@ -665,20 +707,25 @@ export const MessageBubble = React.memo(MessageBubbleComponent, (prevProps, next
     prevProps.message.comments?.length === nextProps.message.comments?.length &&
     prevProps.message.comments?.[prevProps.message.comments.length - 1]?.id === nextProps.message.comments?.[nextProps.message.comments.length - 1]?.id &&
     prevProps.message.attachments?.length === nextProps.message.attachments?.length &&
+    metadataEqual &&
     prevProps.showTimeDivider === nextProps.showTimeDivider &&
     prevProps.isMultiSelectMode === nextProps.isMultiSelectMode &&
     prevProps.isDebateMode === nextProps.isDebateMode &&
-    prevProps.debateRole === nextProps.debateRole
+    prevProps.debateRole === nextProps.debateRole &&
+    prevProps.isLastInGroup === nextProps.isLastInGroup
   );
 });
 
 function formatTimeDivider(timestamp: string): string {
   const time = dayjs(timestamp);
   const now = dayjs();
+  const diffSeconds = Math.abs(now.diff(time, 'second'));
   const diffMinutes = now.diff(time, 'minute');
   const diffHours = now.diff(time, 'hour');
   const diffDays = now.diff(time, 'day');
 
+  // 不足 1 分钟显示绝对时间，避免出现"永远刚刚"的静止相对时间
+  if (diffSeconds < 60) return time.format('HH:mm');
   if (diffMinutes < 5) return '刚刚';
   if (diffHours < 1) return `${diffMinutes}分钟前`;
   if (diffDays < 1) return time.format('HH:mm');

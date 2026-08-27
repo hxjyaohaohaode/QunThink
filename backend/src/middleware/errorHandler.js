@@ -24,22 +24,27 @@ export function errorHandler(err, req, res, _next) {
     statusCode = err.statusCode;
     errorCode = err.code;
     message = err.message;
+  } else if (Number.isInteger(err.status) && err.status >= 400 && err.status < 600) {
+    // 路由内以 err.status 抛出的业务错误（如 404/400/403）
+    statusCode = err.status;
+    errorCode = err.status === 404 ? 'NOT_FOUND' : (err.status === 400 ? 'BAD_REQUEST' : (err.status === 403 ? 'FORBIDDEN' : 'REQUEST_ERROR'));
+    message = err.message || message;
   } else if (err.name === 'ZodError') {
     statusCode = 400;
     errorCode = 'VALIDATION_ERROR';
-    message = err.issues.map(e => `${e.path.join('.')}: ${e.message}`).join('; ');
+    message = (err.issues || []).map(e => `${e.path.join('.')}: ${e.message}`).join('; ');
   } else if (err.name === 'SyntaxError' && err.status === 400) {
     statusCode = 400;
     errorCode = 'INVALID_JSON';
     message = '请求体JSON格式错误';
+  } else if (err.type === 'entity.too.large') {
+    statusCode = 413;
+    errorCode = 'PAYLOAD_TOO_LARGE';
+    message = '请求体超过大小限制';
   } else if (err.code === 'LIMIT_FILE_SIZE') {
     statusCode = 400;
     errorCode = 'FILE_TOO_LARGE';
     message = '文件大小超过限制';
-  } else if (err.code === 'ENOENT') {
-    statusCode = 404;
-    errorCode = 'NOT_FOUND';
-    message = '请求的资源不存在';
   } else if (!isProduction) {
     message = err.message || '服务器内部错误';
   }
@@ -58,13 +63,6 @@ export function errorHandler(err, req, res, _next) {
     error: message,
     code: errorCode
   };
-
-  // 堆栈信息仅在日志中记录，不通过HTTP响应返回
-  if (!isProduction) {
-    safeLog('error', '服务器内部错误', { stack: err.stack, details: err.details });
-  } else {
-    safeLog('error', '服务器内部错误', { message: err.message, details: err.details });
-  }
 
   res.status(statusCode).json(response);
 }

@@ -198,7 +198,7 @@ export async function checkSmsVerifyCode(phone, code) {
   }
 }
 
-setInterval(() => {
+const smsLockCleanupTimer = setInterval(() => {
   const now = Date.now();
   for (const [phone, lockTime] of SMS_SEND_LOCKS) {
     if (now - lockTime > SMS_LOCK_TTL) {
@@ -206,3 +206,4 @@ setInterval(() => {
     }
   }
 }, 60 * 1000);
+if (typeof smsLockCleanupTimer.unref === 'function') smsLockCleanupTimer.unref();

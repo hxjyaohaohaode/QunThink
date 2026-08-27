@@ -1,4 +1,5 @@
-import { useState, useRef } from 'react';
+﻿import { useState, useRef, useEffect } from 'react';
+import { useFocusTrap } from '../Common/useFocusTrap';
 import { useAgentsStore } from '../../stores/agentsStore';
 import { AgentQuestion, Agent } from '../../types';
 import { useToast } from '../Common';
@@ -22,7 +23,10 @@ function getAvatarColor(name: string): string {
 }
 
 export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
-  const { generateQuestions, createAgent, creatingAgent } = useAgentsStore();
+  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isOpen);
+  const generateQuestions = useAgentsStore((s) => s.generateQuestions);
+  const createAgent = useAgentsStore((s) => s.createAgent);
+  const creatingAgent = useAgentsStore((s) => s.creatingAgent);
   const { showToast, Toast } = useToast();
 
   const [step, setStep] = useState(1);
@@ -72,6 +76,10 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
   const handleAvatarFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      showToast({ message: '请选择图片文件', type: 'error' });
+      return;
+    }
     if (file.size > 2 * 1024 * 1024) {
       showToast({ message: '图片大小不能超过2MB', type: 'error' });
       return;
@@ -151,10 +159,24 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
     onClose();
   };
 
+  // ESC键关闭弹窗（创建过程中禁用）
+  useEffect(() => {
+    if (!isOpen || creating) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        handleClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, creating, step, name, description, openingMessage]);
+
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={handleClose}>
+    <div ref={overlayTrapRef} role="dialog" aria-modal="true" className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={handleClose}>
       <input
         ref={avatarFileInputRef}
         type="file"
@@ -343,7 +365,7 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
                       {createdAgent.avatar_url ? (
                         <img src={createdAgent.avatar_url} className="w-full h-full rounded-full object-cover" alt={createdAgent.name} />
                       ) : (
-                        '✓'
+                        <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>
                       )}
                     </div>
                     <div>

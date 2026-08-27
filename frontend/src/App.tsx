@@ -1,37 +1,43 @@
-import { useEffect, useLayoutEffect, useState, useRef, useCallback, type TouchEvent as ReactTouchEvent } from 'react';
+﻿import { lazy, Suspense, useEffect, useLayoutEffect, useState, useRef, useCallback, type ReactNode, type TouchEvent as ReactTouchEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { Group } from './types';
 import { useGroupsStore } from './stores/groupsStore';
 import { useUIStore } from './stores/uiStore';
 import { useProfileStore, type UserProfile } from './stores/profileStore';
-import { ensurePersonasAutoRefresh, usePersonasStore, type PersonaConfig } from './stores/personasStore';
-import { useMessagesStoreInternal, resetMessagesModuleState } from './stores/messagesStore';
+import { ensurePersonasAutoRefresh, stopAutoRefresh as stopPersonasAutoRefresh, usePersonasStore, type PersonaConfig } from './stores/personasStore';
+import { useMessagesStore, resetMessagesModuleState } from './stores/messagesStore';
 import { useAgentsStore } from './stores/agentsStore';
 import { useNavigationStore } from './stores/navigationStore';
 import { connectWebSocket, destroyWebSocket, joinGroup, leaveGroup } from './services/websocket';
 import { Sidebar } from './components/Layout/Sidebar';
 import { MobileTabBar } from './components/Layout/MobileTabBar';
 import { ChatList } from './components/Layout/ChatList';
-import { SettingsPage } from './components/Layout/SettingsPage';
 import { NewChatModal } from './components/Layout/NewChatModal';
-import { AgentsPage } from './components/Layout/AgentsPage';
-import { AgentCreateModal } from './components/Layout/AgentCreateModal';
-import { AgentChatView } from './components/Layout/AgentChatView';
 import { ConnectionStatus } from './components/Layout/ConnectionStatus';
 import { SplashScreen } from './components/Layout/SplashScreen';
 import { LoginPage } from './components/Layout/LoginPage';
 import { ChatHeader, MessageList, MessageInput } from './components/Chat';
-import { ObserverControlPanel } from './components/Chat/ObserverControlPanel';
-import { GroupInfoPage } from './components/Chat/GroupInfoPage';
 import { ErrorBoundary } from './components/Common/ErrorBoundary';
+import { CommandPalette } from './components/Common';
 import { PWAInstallPrompt } from './components/Common/PWAInstallPrompt';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useReducedMotion } from './hooks/useReducedMotion';
 import { useSwipeBack } from './components/Common/SwipeTransition';
 import { api, getDevUserId, onAuthExpired } from './services/api';
 import { initFontSize } from './stores/fontSizeStore';
-import { setCacheUserId, getCacheUserId, clearAllCachesForUser, saveGroupsCache, saveGroupsCacheAsync, savePersonasCache, savePersonasCacheAsync, saveProfileCache, saveProfileCacheAsync } from './utils/cacheUtils';
+import { setCacheUserId, getCacheUserId, clearAllCachesForUser, saveGroupsCache, savePersonasCache, saveProfileCache } from './utils/cacheUtils';
 import { setIndexedDBUserId, clearAllIndexedDBForUser } from './utils/indexedDB';
+
+// The app shell is intentionally kept small for first paint. Settings, agent
+// workflows, group details and the private-observer controls are reached from
+// secondary views, so load them on demand instead of shipping every screen in
+// the initial JavaScript chunk.
+const SettingsPage = lazy(() => import('./components/Layout/SettingsPage').then(({ SettingsPage }) => ({ default: SettingsPage })));
+const AgentsPage = lazy(() => import('./components/Layout/AgentsPage').then(({ AgentsPage }) => ({ default: AgentsPage })));
+const AgentCreateModal = lazy(() => import('./components/Layout/AgentCreateModal').then(({ AgentCreateModal }) => ({ default: AgentCreateModal })));
+const AgentChatView = lazy(() => import('./components/Layout/AgentChatView').then(({ AgentChatView }) => ({ default: AgentChatView })));
+const ObserverControlPanel = lazy(() => import('./components/Chat/ObserverControlPanel').then(({ ObserverControlPanel }) => ({ default: ObserverControlPanel })));
+const GroupInfoPage = lazy(() => import('./components/Chat/GroupInfoPage').then(({ GroupInfoPage }) => ({ default: GroupInfoPage })));
 
 type MobileTab = 'chats' | 'agents' | 'settings';
 type MobileView = 'main' | 'groupInfo' | 'chat' | 'agents' | 'agentChat';
@@ -41,7 +47,7 @@ type AppPhase = 'splash' | 'auth' | 'app';
 const viewTransitionVariants = {
   initial: (direction: 1 | -1) => ({
     opacity: 0,
-    x: direction * 20,
+    x: direction * 16,
   }),
   animate: {
     opacity: 1,
@@ -49,23 +55,23 @@ const viewTransitionVariants = {
   },
   exit: (direction: 1 | -1) => ({
     opacity: 0,
-    x: direction * -12,
+    x: direction * -16,
   }),
 };
 
 const viewTransition = {
-  duration: 0.2,
+  duration: 0.15,
   ease: [0.4, 0, 0.2, 1] as const,
 };
 
 const reducedMotionTransition = { duration: 0.05 };
 
 type BootstrapPayload = {
-  user?: { id?: string };
+  user?: { id?: string; nickname?: string };
   groups?: Group[];
   profile?: UserProfile;
   personas?: Record<string, PersonaConfig>;
-  apiConfigs?: Record<string, { apiKey: string; baseUrl: string }>;
+  apiConfigs?: Record<string, { apiKey: string; apiKeyConfigured?: boolean; baseUrl: string }>;
 };
 
 const AUTH_MODE = import.meta.env.VITE_AUTH_MODE || 'session';
@@ -127,6 +133,10 @@ function hydrateBootstrapData(userId: string, payload: BootstrapPayload) {
 
   const groups = payload.groups || [];
   const profile = payload.profile || defaultProfileState;
+  // bootstrap 的 user.nickname 优先级最高（登录账号的权威昵称），profile 未设置时兜底
+  if (payload.user?.nickname && !profile.nickname) {
+    profile.nickname = payload.user.nickname;
+  }
   const personas = payload.personas || {};
   const currentGroupId = useGroupsStore.getState().currentGroup?.id;
   const currentGroup = currentGroupId ? groups.find(group => group.id === currentGroupId) || null : null;
@@ -138,6 +148,13 @@ function hydrateBootstrapData(userId: string, payload: BootstrapPayload) {
     initialized: true,
     error: null
   });
+
+  // 首次进入且未选中任何群时，自动选中第一个群，避免空旷的「开始对话」空态
+  if (!currentGroup && groups.length > 0) {
+    try {
+      useGroupsStore.getState().selectGroup(groups[0].id);
+    } catch { /* 自动选中失败不阻塞首屏 */ }
+  }
 
   useProfileStore.setState({
     profile,
@@ -152,17 +169,27 @@ function hydrateBootstrapData(userId: string, payload: BootstrapPayload) {
 
   ensurePersonasAutoRefresh();
   saveGroupsCache(groups);
-  saveGroupsCacheAsync(groups).catch(() => { });
   saveProfileCache(profile);
-  saveProfileCacheAsync(profile).catch(() => { });
   savePersonasCache(personas);
-  savePersonasCacheAsync(personas).catch(() => { });
 
-  // 缓存API配置供SettingsPage使用
+  // API 配置仅保存在内存中，绝不写入 localStorage（防止 XSS/本机读取窃取 Key）；
+  // SettingsPage 需要时通过 GET /api/user/apiconfig 拉取掩码版本。
   if (payload.apiConfigs) {
-    try {
-      localStorage.setItem(`${userId}_api_config`, JSON.stringify(payload.apiConfigs));
-    } catch { }
+    memoryApiConfigs.set(userId, payload.apiConfigs);
+  }
+}
+
+const memoryApiConfigs = new Map<string, Record<string, unknown>>();
+
+export function getMemoryApiConfigs(userId: string): Record<string, unknown> | undefined {
+  return memoryApiConfigs.get(userId);
+}
+
+export function clearMemoryApiConfigs(userId?: string): void {
+  if (userId) {
+    memoryApiConfigs.delete(userId);
+  } else {
+    memoryApiConfigs.clear();
   }
 }
 
@@ -207,6 +234,12 @@ async function handleLogout() {
   const cachedUserId = getCacheUserId();
 
   destroyWebSocket();
+  stopPersonasAutoRefresh();
+  if (cachedUserId) {
+    clearMemoryApiConfigs(cachedUserId);
+  } else {
+    clearMemoryApiConfigs();
+  }
 
   useUIStore.getState().clearAllTypingTimeouts();
 
@@ -244,7 +277,7 @@ async function handleLogout() {
 
   resetMessagesModuleState();
 
-  useMessagesStoreInternal.setState({
+  useMessagesStore.setState({
     messages: {},
     pagination: {},
     loading: false,
@@ -288,8 +321,8 @@ async function handleLogout() {
 }
 
 function App() {
-  const { currentGroup } = useGroupsStore();
-  const { applyTheme } = useUIStore();
+  const currentGroup = useGroupsStore((s) => s.currentGroup);
+  const applyTheme = useUIStore((s) => s.applyTheme);
   useKeyboardShortcuts();
 
   const [mobileTab, setMobileTab] = useState<MobileTab>('chats');
@@ -440,6 +473,27 @@ function App() {
     }
   }, [mobileView, navigateToView]);
 
+  // popstate回调：直接更新状态而不调用pushState，避免历史栈死循环
+  const handlePopStateBack = useCallback(() => {
+    if (mobileView === 'groupInfo') {
+      prevViewRef.current = mobileViewRef.current;
+      setMobileView('chat');
+    } else if (mobileView === 'agentChat') {
+      prevViewRef.current = mobileViewRef.current;
+      setMobileView('agents');
+    } else if (mobileView === 'agents') {
+      setMobileTab('chats');
+      prevViewRef.current = mobileViewRef.current;
+      setMobileView('main');
+    } else if (mobileView !== 'main') {
+      const { selectGroup } = useGroupsStore.getState();
+      selectGroup('');
+      setMobileTab('chats');
+      prevViewRef.current = mobileViewRef.current;
+      setMobileView('main');
+    }
+  }, [mobileView]);
+
   const handleTabChange = useCallback((tab: MobileTab) => {
     setMobileTab(tab);
     if (tab === 'chats') {
@@ -454,7 +508,7 @@ function App() {
   }, [navigateToView]);
 
   const shouldEnableSwipe = mobileView !== 'main' || mobileTab !== 'chats';
-  const { handlers: swipeHandlers, swipeProgress } = useSwipeBack(handleMobileBack, { threshold: 80, enabled: shouldEnableSwipe });
+  const { handlers: swipeHandlers, swipeProgress } = useSwipeBack(handleMobileBack, { threshold: 100, enabled: shouldEnableSwipe });
 
   const handleSplashComplete = useCallback(() => {
     if (splashCompletedRef.current) return;
@@ -522,6 +576,7 @@ function App() {
         handleTabChange={handleTabChange}
         swipeHandlers={swipeHandlers}
         swipeProgress={swipeProgress}
+        handlePopStateBack={handlePopStateBack}
       />
       <PWAInstallPrompt />
     </ErrorBoundary>
@@ -540,7 +595,22 @@ type AppContentProps = {
   handleTabChange: (tab: MobileTab) => void;
   swipeHandlers: Record<string, ((e: ReactTouchEvent) => void) | undefined>;
   swipeProgress: number;
+  handlePopStateBack: () => void;
 };
+
+function LazyBoundary({ children }: { children: ReactNode }) {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex min-h-24 items-center justify-center text-sm text-text-secondary" aria-busy="true">
+          正在加载功能…
+        </div>
+      }
+    >
+      {children}
+    </Suspense>
+  );
+}
 
 function AppContent({
   mobileTab,
@@ -554,8 +624,9 @@ function AppContent({
   handleTabChange,
   swipeHandlers,
   swipeProgress,
+  handlePopStateBack,
 }: AppContentProps) {
-  const { setActiveDesktopView } = useNavigationStore();
+  const setActiveDesktopView = useNavigationStore((s) => s.setActiveDesktopView);
   const reducedMotion = useReducedMotion();
   const [showAgents, setShowAgents] = useState(false);
   const [showAgentCreate, setShowAgentCreate] = useState(false);
@@ -563,8 +634,11 @@ function AppContent({
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 
   // 方向感知过渡：追踪历史栈，前进=1，后退=-1
-  const viewStackRef = useRef<string[]>(['main']);
-  const transitionDirRef = useRef<1 | -1>(1);
+  // 分离桌面端和移动端的视图栈和方向引用，避免互相污染
+  const desktopStackRef = useRef<string[]>(['welcome']);
+  const mobileStackRef = useRef<string[]>(['mobile-chat-list']);
+  const desktopTransitionDirRef = useRef<1 | -1>(1);
+  const mobileTransitionDirRef = useRef<1 | -1>(1);
 
   const deriveDesktopViewKey = useCallback(() => {
     if (showAgents) return selectedAgentId ? 'agent-chat' : 'agents-page';
@@ -588,13 +662,13 @@ function AppContent({
   useEffect(() => {
     const currentKey = deriveDesktopViewKey();
     if (currentKey !== prevDesktopKeyRef.current) {
-      const prevIdx = viewStackRef.current.indexOf(prevDesktopKeyRef.current);
-      if (prevIdx >= 0 && prevIdx < viewStackRef.current.length) {
-        transitionDirRef.current = -1;
-        viewStackRef.current = viewStackRef.current.slice(0, prevIdx);
+      const prevIdx = desktopStackRef.current.indexOf(prevDesktopKeyRef.current);
+      if (prevIdx >= 0 && prevIdx < desktopStackRef.current.length) {
+        desktopTransitionDirRef.current = -1;
+        desktopStackRef.current = desktopStackRef.current.slice(0, prevIdx);
       } else {
-        transitionDirRef.current = 1;
-        viewStackRef.current.push(currentKey);
+        desktopTransitionDirRef.current = 1;
+        desktopStackRef.current.push(currentKey);
       }
       prevDesktopKeyRef.current = currentKey;
     }
@@ -604,13 +678,13 @@ function AppContent({
   useEffect(() => {
     const currentKey = deriveMobileViewKey();
     if (currentKey !== prevMobileKeyRef.current) {
-      const prevIdx = viewStackRef.current.indexOf(prevMobileKeyRef.current);
-      if (prevIdx >= 0 && prevIdx < viewStackRef.current.length) {
-        transitionDirRef.current = -1;
-        viewStackRef.current = viewStackRef.current.slice(0, prevIdx);
+      const prevIdx = mobileStackRef.current.indexOf(prevMobileKeyRef.current);
+      if (prevIdx >= 0 && prevIdx < mobileStackRef.current.length) {
+        mobileTransitionDirRef.current = -1;
+        mobileStackRef.current = mobileStackRef.current.slice(0, prevIdx);
       } else {
-        transitionDirRef.current = 1;
-        viewStackRef.current.push(currentKey);
+        mobileTransitionDirRef.current = 1;
+        mobileStackRef.current.push(currentKey);
       }
       prevMobileKeyRef.current = currentKey;
     }
@@ -653,11 +727,11 @@ function AppContent({
   useEffect(() => {
     window.history.replaceState({ mobileView: 'main' }, '', '');
     const handlePopState = () => {
-      handleMobileBack();
+      handlePopStateBack();
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [handleMobileBack]);
+  }, [handlePopStateBack]);
 
   return (
     <div className="h-dvh bg-bg-primary text-text-primary overflow-hidden">
@@ -681,17 +755,21 @@ function AppContent({
                 initial="initial"
                 animate="animate"
                 exit="exit"
-                custom={transitionDirRef.current}
+                custom={desktopTransitionDirRef.current}
                 transition={reducedMotion ? reducedMotionTransition : viewTransition}
               >
                 {selectedAgentId ? (
-                  <AgentChatView agentId={selectedAgentId} onBack={() => setSelectedAgentId(null)} />
+                  <LazyBoundary>
+                    <AgentChatView agentId={selectedAgentId} onBack={() => setSelectedAgentId(null)} />
+                  </LazyBoundary>
                 ) : (
-                  <AgentsPage
-                    onBack={() => { setShowAgents(false); setActiveDesktopView('chat'); }}
-                    onOpenCreate={() => setShowAgentCreate(true)}
-                    onSelectAgent={(agentId: string) => { setSelectedAgentId(agentId); setActiveDesktopView('agents'); }}
-                  />
+                  <LazyBoundary>
+                    <AgentsPage
+                      onBack={() => { setShowAgents(false); setActiveDesktopView('chat'); }}
+                      onOpenCreate={() => setShowAgentCreate(true)}
+                      onSelectAgent={(agentId: string) => { setSelectedAgentId(agentId); setActiveDesktopView('agents'); }}
+                    />
+                  </LazyBoundary>
                 )}
               </motion.div>
             ) : currentGroup ? (
@@ -702,14 +780,16 @@ function AppContent({
                 initial="initial"
                 animate="animate"
                 exit="exit"
-                custom={transitionDirRef.current}
+                custom={desktopTransitionDirRef.current}
                 transition={reducedMotion ? reducedMotionTransition : viewTransition}
               >
                 <div className="w-full flex flex-col h-full">
                   <ChatHeader showGroupInfoButton={true} />
                   <MessageList />
                   {currentGroup.is_ai_private ? (
-                    <ObserverControlPanel groupId={currentGroup.id} topic={currentGroup.topic || currentGroup.description} />
+                    <LazyBoundary>
+                      <ObserverControlPanel groupId={currentGroup.id} topic={currentGroup.topic || currentGroup.description} />
+                    </LazyBoundary>
                   ) : (
                     <MessageInput />
                   )}
@@ -723,7 +803,7 @@ function AppContent({
                 initial="initial"
                 animate="animate"
                 exit="exit"
-                custom={transitionDirRef.current}
+                custom={desktopTransitionDirRef.current}
                 transition={reducedMotion ? reducedMotionTransition : viewTransition}
               >
                 <div className="text-center max-w-md px-6">
@@ -781,7 +861,7 @@ function AppContent({
       </div>
 
       {/* 移动端布局 */}
-      <div className="md:hidden relative h-full overflow-hidden" style={{ willChange: 'transform' }} {...swipeHandlers}>
+      <div className="md:hidden relative h-full overflow-hidden" style={{ willChange: swipeProgress > 0 ? 'transform' : 'auto' }} {...swipeHandlers}>
         <div
           className="absolute inset-0 pointer-events-none z-50"
           style={{
@@ -802,7 +882,7 @@ function AppContent({
               initial="initial"
               animate="animate"
               exit="exit"
-              custom={transitionDirRef.current}
+              custom={mobileTransitionDirRef.current}
               transition={reducedMotion ? reducedMotionTransition : viewTransition}
             >
               <ChatList onNewChat={() => setShowNewChatModal(true)} onBack={handleMobileBack} onSelectGroup={handleMobileSelectGroup} />
@@ -819,10 +899,12 @@ function AppContent({
               initial="initial"
               animate="animate"
               exit="exit"
-              custom={transitionDirRef.current}
+              custom={mobileTransitionDirRef.current}
               transition={reducedMotion ? reducedMotionTransition : viewTransition}
             >
-              <SettingsPage />
+              <LazyBoundary>
+                <SettingsPage />
+              </LazyBoundary>
             </motion.div>
           )}
 
@@ -836,13 +918,15 @@ function AppContent({
               initial="initial"
               animate="animate"
               exit="exit"
-              custom={transitionDirRef.current}
+              custom={mobileTransitionDirRef.current}
               transition={reducedMotion ? reducedMotionTransition : viewTransition}
             >
-              <AgentsPage
-                onOpenCreate={() => setShowAgentCreate(true)}
-                onSelectAgent={(agentId: string) => { setSelectedAgentId(agentId); navigateToView('agentChat'); }}
-              />
+              <LazyBoundary>
+                <AgentsPage
+                  onOpenCreate={() => setShowAgentCreate(true)}
+                  onSelectAgent={(agentId: string) => { setSelectedAgentId(agentId); navigateToView('agentChat'); }}
+                />
+              </LazyBoundary>
             </motion.div>
           )}
 
@@ -855,10 +939,12 @@ function AppContent({
               initial="initial"
               animate="animate"
               exit="exit"
-              custom={transitionDirRef.current}
+              custom={mobileTransitionDirRef.current}
               transition={reducedMotion ? reducedMotionTransition : viewTransition}
             >
-              <AgentChatView agentId={selectedAgentId} onBack={handleMobileBack} />
+              <LazyBoundary>
+                <AgentChatView agentId={selectedAgentId} onBack={handleMobileBack} />
+              </LazyBoundary>
             </motion.div>
           )}
 
@@ -872,7 +958,7 @@ function AppContent({
               initial="initial"
               animate="animate"
               exit="exit"
-              custom={transitionDirRef.current}
+              custom={mobileTransitionDirRef.current}
               transition={reducedMotion ? reducedMotionTransition : viewTransition}
             >
               <ChatHeader onBack={handleMobileBack} onToggleGroupInfo={() => navigateToView('groupInfo')} showGroupInfoButton={true} />
@@ -880,7 +966,9 @@ function AppContent({
                 <MessageList />
               </div>
               {currentGroup.is_ai_private ? (
-                <ObserverControlPanel groupId={currentGroup.id} topic={currentGroup.topic || currentGroup.description} />
+                <LazyBoundary>
+                  <ObserverControlPanel groupId={currentGroup.id} topic={currentGroup.topic || currentGroup.description} />
+                </LazyBoundary>
               ) : (
                 <MessageInput />
               )}
@@ -896,10 +984,12 @@ function AppContent({
               initial="initial"
               animate="animate"
               exit="exit"
-              custom={transitionDirRef.current}
+              custom={mobileTransitionDirRef.current}
               transition={reducedMotion ? reducedMotionTransition : viewTransition}
             >
-              <GroupInfoPage groupId={currentGroup.id} isOpen={true} onClose={() => navigateToView('chat')} />
+              <LazyBoundary>
+                <GroupInfoPage groupId={currentGroup.id} isOpen={true} onClose={() => navigateToView('chat')} />
+              </LazyBoundary>
             </motion.div>
           )}
         </AnimatePresence>
@@ -909,8 +999,19 @@ function AppContent({
         )}
       </div>
 
-      <AgentCreateModal isOpen={showAgentCreate} onClose={() => setShowAgentCreate(false)} />
-      <NewChatModal isOpen={showNewChatModal} onClose={() => setShowNewChatModal(false)} onSelectGroup={handleMobileSelectGroup} />
+      {showAgentCreate && (
+        <LazyBoundary>
+          <ErrorBoundary fallback={null}>
+            <AgentCreateModal isOpen={showAgentCreate} onClose={() => setShowAgentCreate(false)} />
+          </ErrorBoundary>
+        </LazyBoundary>
+      )}
+      <ErrorBoundary fallback={null}>
+        <NewChatModal isOpen={showNewChatModal} onClose={() => setShowNewChatModal(false)} onSelectGroup={handleMobileSelectGroup} />
+      </ErrorBoundary>
+      <ErrorBoundary fallback={null}>
+        <CommandPalette />
+      </ErrorBoundary>
     </div >
   );
 }
