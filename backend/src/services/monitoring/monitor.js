@@ -1,12 +1,10 @@
 /**
- * 系统监控与自动扩容机制
- * 实时监控CPU、内存、网络等关键指标，当负载超过阈值时自动触发扩容
- * 系统可用性≥99.9%，资源利用率控制在70%-80%
+ * 进程内资源采样与扩容建议。
+ * 当前没有真实扩容适配器或可用性 SLO 时间序列；相关状态保持未知。
  */
 
 import os from 'os';
 import { WebSocketPerformanceMonitor } from '../../websocket/performanceMonitor.js';
-import { default as aiLoadBalancer } from '../ai/loadBalancer.js';
 
 class SystemMonitor {
   constructor() {
@@ -15,6 +13,7 @@ class SystemMonitor {
     this.scalingThreshold = 80;
     this.scalingCooldown = 5 * 60 * 1000;
     this.lastScalingTime = null;
+    this.lastRecommendationTime = null;
     this.performanceMonitor = new WebSocketPerformanceMonitor();
     this._timers = [];
     this._wss = null;
@@ -66,11 +65,11 @@ class SystemMonitor {
       const timestamp = new Date().toISOString();
       const cpuUsage = this.getCpuUsage();
       const effectiveCpuUsage = cpuUsage === null
-        ? (this.metricsHistory.length > 0 ? this.metricsHistory[this.metricsHistory.length - 1].cpu?.usage ?? 0 : 0)
+        ? (this.metricsHistory.length > 0 ? this.metricsHistory[this.metricsHistory.length - 1].cpu?.usage ?? null : null)
         : cpuUsage;
       const memoryUsage = this.getMemoryUsage();
       const networkActivity = this.getNetworkActivity();
-      const databaseStatus = this.getDatabaseStatus();
+      const databaseStatus = await this.getDatabaseStatus();
       const websocketMetrics = this.performanceMonitor.getMetrics();
       const systemLoad = os.loadavg();
       const activeConnections = this.getActiveConnections();
@@ -106,7 +105,7 @@ class SystemMonitor {
       
       // 计算综合负载分数
       metrics.overallLoad = this.calculateOverallLoad(metrics);
-      metrics.requiresScaling = metrics.overallLoad >= this.scalingThreshold;
+      metrics.requiresScaling = metrics.overallLoad !== null && metrics.overallLoad >= this.scalingThreshold;
       metrics.meetsAvailabilityRequirement = this.checkAvailabilityRequirement(metrics);
       
       // 存储指标
@@ -196,9 +195,9 @@ class SystemMonitor {
       activeInterfaces,
       totalRequests: this._requestCounter.total,
       requestsPerSecond: Math.round(requestsPerSecond * 100) / 100,
-      rxBytes: 0,
-      txBytes: 0,
-      totalBytes: 0
+      rxBytes: null,
+      txBytes: null,
+      totalBytes: null
     };
   }
   
@@ -211,7 +210,8 @@ class SystemMonitor {
       const { isCloudDbEnabled } = await import('../../models/supabaseAdapter.js');
       const userIds = await listUserDatabases();
       return {
-        status: Array.isArray(userIds) ? 'healthy' : 'unavailable',
+        status: Array.isArray(userIds) ? 'listing_available' : 'unavailable',
+        evidence: 'list_user_databases',
         backend: process.env.SUPABASE_DB_URL ? 'supabase' : (process.env.MONGODB_URI ? 'mongodb' : 'lowdb'),
         cloudEnabled: !!isCloudDbEnabled(),
         userCount: Array.isArray(userIds) ? userIds.length : 0,
@@ -232,8 +232,8 @@ class SystemMonitor {
     const wsConnections = this._wss ? this._wss.clients.size : 0;
     return {
       websocket: wsConnections,
-      http: 0,
-      aiModels: Object.keys(this.models || {}).length || 4
+      http: null,
+      aiModels: null // No authoritative per-user model count is available in this process-wide view.
     };
   }
   
@@ -241,35 +241,14 @@ class SystemMonitor {
    * 获取AI模型状态
    */
   getAIModelStatus() {
-    try {
-      const stats = aiLoadBalancer.getModelStats();
-      const totalModels = Object.keys(stats).length;
-      if (totalModels === 0) {
-        return {
-          totalModels: 0,
-          healthyModels: 0,
-          unhealthyModels: 0,
-          overallHealth: 100
-        };
-      }
-      const healthyModels = Object.values(stats).filter(m => 
-        m.enabled && m.health === 'healthy' && m.circuitBreaker !== 'OPEN'
-      ).length;
-      return {
-        totalModels,
-        healthyModels,
-        unhealthyModels: totalModels - healthyModels,
-        overallHealth: healthyModels / totalModels * 100
-      };
-    } catch (error) {
-      return {
-        totalModels: 4,
-        healthyModels: 4,
-        unhealthyModels: 0,
-        overallHealth: 100,
-        note: '负载均衡器不可用，使用默认值'
-      };
-    }
+    return {
+      totalModels: null,
+      healthyModels: null,
+      unhealthyModels: null,
+      overallHealth: null,
+      status: 'unknown',
+      note: '缺少按用户模型目录关联的真实调用、费用和健康账本'
+    };
   }
   
   /**
@@ -286,47 +265,23 @@ class SystemMonitor {
    * 计算综合负载分数
    */
   calculateOverallLoad(metrics) {
-    // 加权平均计算综合负载
-    const weights = {
-      cpu: 0.3,
-      memory: 0.25,
-      connections: 0.2,
-      aiModels: 0.15,
-      database: 0.1
-    };
-    
-    let overallLoad = 0;
-    
-    overallLoad += (metrics.cpu.usage || 0) * weights.cpu;
-    
-    overallLoad += (metrics.memory.usage || 0) * weights.memory;
-    
-    const connectionLoad = Math.min(100, ((metrics.connections.websocket || 0) / 100) * 100);
-    overallLoad += connectionLoad * weights.connections;
-    
-    const aiLoad = 100 - (metrics.aiModels.overallHealth || 100);
-    overallLoad += aiLoad * weights.aiModels;
-    
-    const dbLoad = Math.min(100, ((metrics.database.size || 0) / 10000000) * 100);
-    overallLoad += dbLoad * weights.database;
-    
-    if (isNaN(overallLoad) || !isFinite(overallLoad)) overallLoad = 0;
-    
-    return Math.min(100, overallLoad);
+    const samples = [
+      { value: metrics.cpu?.usage, weight: 0.3 },
+      { value: metrics.memory?.usage, weight: 0.25 }
+    ].filter(sample => typeof sample.value === 'number' && Number.isFinite(sample.value));
+    if (!samples.length) return null;
+    // WebSocket count lacks an installed capacity limit; database size is not
+    // collected. Neither is a trustworthy saturation percentage.
+    const weight = samples.reduce((sum, sample) => sum + sample.weight, 0);
+    return Math.min(100, samples.reduce((sum, sample) => sum + sample.value * sample.weight, 0) / weight);
   }
   
   /**
    * 检查可用性要求（≥99.9%）
    */
   checkAvailabilityRequirement(metrics) {
-    // 简化检查：如果所有关键组件健康，则满足要求
-    const cpuOk = metrics.cpu.usage < 90;
-    const memoryOk = metrics.memory.usage < 90;
-    const dbOk = metrics.database.status === 'healthy';
-    const wsOk = (metrics.websocket.health?.deliveryRate || metrics.websocket.deliveryRate || 1.0) >= 0.999;
-    const aiOk = metrics.aiModels.overallHealth >= 80;
-    
-    return cpuOk && memoryOk && dbOk && wsOk && aiOk;
+    // A process snapshot cannot establish a 99.9% availability SLO.
+    return null;
   }
   
   /**
@@ -338,8 +293,8 @@ class SystemMonitor {
     
     if (latestMetrics.requiresScaling) {
       const now = Date.now();
-      if (this.lastScalingTime && now - this.lastScalingTime < this.scalingCooldown) {
-        console.log(`⏳ 扩容冷却中，下次可扩容时间: ${new Date(this.lastScalingTime + this.scalingCooldown).toISOString()}`);
+      if (this.lastRecommendationTime && now - this.lastRecommendationTime < this.scalingCooldown) {
+        console.log(`⏳ 扩容建议冷却中，下次评估时间: ${new Date(this.lastRecommendationTime + this.scalingCooldown).toISOString()}`);
         return;
       }
       
@@ -351,47 +306,14 @@ class SystemMonitor {
    * 触发自动扩容
    */
   async triggerAutoScaling(metrics) {
-    try {
-      console.log('🚀 检测到高负载，触发自动扩容...');
-      
-      // 记录扩容事件
-      await this.recordEvent('scaling_triggered', {
-        timestamp: new Date().toISOString(),
-        load: metrics.overallLoad,
-        threshold: this.scalingThreshold,
-        metrics: {
-          cpu: metrics.cpu.usage,
-          memory: metrics.memory.usage,
-          connections: metrics.connections.websocket
-        }
-      });
-      
-      // 模拟扩容操作
-      const scalingActions = this.determineScalingActions(metrics);
-      
-      scalingActions.forEach(action => {
-        console.log(`🔄 执行扩容操作: ${action.type} - ${action.description}`);
-        this.executeScalingAction(action);
-      });
-      
-      // 更新最后扩容时间
-      this.lastScalingTime = Date.now();
-      
-      // 记录扩容完成
-      await this.recordEvent('scaling_completed', {
-        timestamp: new Date().toISOString(),
-        actions: scalingActions.length,
-        loadBefore: metrics.overallLoad,
-        estimatedLoadAfter: metrics.overallLoad * 0.7 // 假设扩容后负载降低30%
-      });
-      
-    } catch (error) {
-      console.error('自动扩容失败:', error);
-      await this.recordEvent('scaling_failed', {
-        error: error.message,
-        timestamp: new Date().toISOString()
-      });
-    }
+    const actions = this.determineScalingActions(metrics);
+    await this.recordEvent('scaling_recommended', {
+      load: metrics.overallLoad,
+      threshold: this.scalingThreshold,
+      actions
+    });
+    this.lastRecommendationTime = Date.now();
+    return { executed: false, reason: 'no_scaling_adapter_configured', actions };
   }
   
   /**
@@ -442,7 +364,7 @@ class SystemMonitor {
     }
     
     // 默认操作：增加通用工作节点
-    if (actions.length === 0) {
+    if (actions.length === 0 && metrics.overallLoad >= this.scalingThreshold) {
       actions.push({
         type: 'horizontal_scaling',
         target: 'general_workers',
@@ -514,18 +436,18 @@ class SystemMonitor {
     if (this.metricsHistory.length === 0) {
       return {
         timestamp: new Date().toISOString(),
-        cpu: { usage: 0, cores: os.cpus().length, load: [0, 0, 0] },
-        memory: { usage: 0, total: os.totalmem(), free: os.freemem(), used: 0 },
-        network: { activeInterfaces: 0, rxBytes: 0, txBytes: 0, totalBytes: 0 },
+        cpu: { usage: null, cores: os.cpus().length, load: null },
+        memory: { usage: null, total: os.totalmem(), free: os.freemem(), used: null },
+        network: { activeInterfaces: null, rxBytes: null, txBytes: null, totalBytes: null },
         database: { status: 'initializing', size: 0, collections: {} },
-        websocket: { status: 'healthy', deliveryRate: 100, avgLatency: 0, maxLatency: 0, activeConnections: 0 },
-        connections: { websocket: 0, http: 0, total: 0 },
-        aiModels: { totalModels: 0, healthyModels: 0, unhealthyModels: 0, overallHealth: 100 },
+        websocket: { status: 'unknown', deliveryRate: null, avgLatency: null, maxLatency: null, activeConnections: 0 },
+        connections: { websocket: 0, http: null, total: null },
+        aiModels: this.getAIModelStatus(),
         fileProcessing: { active: 0, queued: 0, completed: 0, failed: 0 },
         system: { uptime: os.uptime(), platform: os.platform(), arch: os.arch(), hostname: os.hostname() },
-        overallLoad: 0,
-        requiresScaling: false,
-        meetsAvailabilityRequirement: true
+        overallLoad: null,
+        requiresScaling: null,
+        meetsAvailabilityRequirement: null
       };
     }
     return this.metricsHistory[this.metricsHistory.length - 1];
@@ -546,11 +468,12 @@ class SystemMonitor {
     const history = this.getMetricsHistory(10);
     
     // 计算平均负载
-    const avgLoad = history.length > 0 ? 
-      history.reduce((sum, m) => sum + m.overallLoad, 0) / history.length : 0;
+    const measuredLoads = history.map(m => m.overallLoad).filter(value => typeof value === 'number' && Number.isFinite(value));
+    const avgLoad = measuredLoads.length ?
+      measuredLoads.reduce((sum, value) => sum + value, 0) / measuredLoads.length : null;
     
     // 计算可用性
-    const availabilityScore = history.filter(m => m.meetsAvailabilityRequirement).length / history.length * 100;
+    const availabilityScore = null; // No uptime/error-budget time series is recorded yet.
     
     return {
       timestamp: new Date().toISOString(),
@@ -558,20 +481,21 @@ class SystemMonitor {
       summary: {
         avgLoad,
         availabilityScore,
-        meetsAvailabilityRequirement: availabilityScore >= 99.9,
-        requiresScaling: latestMetrics?.requiresScaling || false,
+        meetsAvailabilityRequirement: null,
+        requiresScaling: latestMetrics?.requiresScaling ?? null,
         lastScalingTime: this.lastScalingTime,
-        scalingCooldownActive: this.lastScalingTime && 
-          Date.now() - this.lastScalingTime < this.scalingCooldown
+        lastRecommendationTime: this.lastRecommendationTime,
+        scalingCooldownActive: this.lastRecommendationTime &&
+          Date.now() - this.lastRecommendationTime < this.scalingCooldown
       },
       thresholds: {
         scaling: this.scalingThreshold,
         availability: 99.9,
         cooldown: this.scalingCooldown
       },
-      recommendations: latestMetrics?.requiresScaling ? 
-        ['建议触发自动扩容', '优化资源分配', '考虑负载均衡'] : 
-        ['系统运行正常', '继续监控']
+      recommendations: latestMetrics?.requiresScaling ?
+        ['资源负载偏高；需要人工检查扩容方案'] :
+        ['服务等级可用性尚未建立有效观测；继续收集真实请求与错误数据']
     };
   }
   
@@ -579,23 +503,12 @@ class SystemMonitor {
    * 手动触发扩容（用于测试）
    */
   manualScale(target, action = 'horizontal_scaling') {
-    const metrics = this.getCurrentMetrics();
-    
-    const scalingAction = {
-      type: action,
-      target,
-      description: `手动触发的${action} - ${target}`,
-      priority: 'manual',
-      estimatedImpact: '手动扩容操作'
-    };
-    
-    this.executeScalingAction(scalingAction);
-    
     return {
-      success: true,
-      action: scalingAction,
+      success: false,
+      executed: false,
+      action: { type: action, target },
       timestamp: new Date().toISOString(),
-      message: '手动扩容已触发'
+      message: '未配置扩容适配器，未执行扩容'
     };
   }
 }

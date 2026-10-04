@@ -3,6 +3,7 @@ import { JSONFile } from 'lowdb/node';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
+import { randomUUID } from 'node:crypto';
 import { Mutex } from 'async-mutex';
 import { isMongoEnabled, getMongoDb, MongoLow } from './mongoAdapter.js';
 import { isSupabaseEnabled, PgLow, listAllKeys, getPool } from './supabaseAdapter.js';
@@ -74,10 +75,10 @@ class CustomLow extends Low {
     }
   }
 
-  async read() {
+  async read({ force = false } = {}) {
     const lastWrite = _writeTimestamps.get(this);
     const lastRead = _lastReadTimestamps.get(this);
-    if (lastWrite && lastRead && lastRead >= lastWrite && this.data) {
+    if (!force && lastWrite && lastRead && lastRead >= lastWrite && this.data) {
       return;
     }
 
@@ -92,10 +93,6 @@ class CustomLow extends Low {
           await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
           continue;
         }
-        if (err instanceof SyntaxError && err.message.includes('JSON') && this.data) {
-          console.warn(`JSON数据库读取失败，保留内存数据: ${err.message}`);
-          return;
-        }
         throw err;
       }
     }
@@ -105,15 +102,17 @@ class CustomLow extends Low {
 const BACKUP_INTERVAL_MS = 60 * 60 * 1000;
 const MAX_BACKUPS = 24;
 
-async function createBackup(dbPath) {
+export async function createBackup(dbPath) {
   try {
-    const backupDir = path.join(path.dirname(dbPath), 'backups');
+    // Keep each account's retention separate; the old shared directory let
+    // similarly timed backups overwrite one another and share a 24-file cap.
+    const backupDir = path.join(path.dirname(dbPath), 'backups', path.basename(dbPath, '.json'));
     await fs.mkdir(backupDir, { recursive: true });
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const backupPath = path.join(backupDir, `db-${timestamp}.json`);
+    const backupPath = path.join(backupDir, `db-${timestamp}-${randomUUID()}.json`);
     const data = await fs.readFile(dbPath, 'utf-8');
     JSON.parse(data);
-    await fs.writeFile(backupPath, data, 'utf-8');
+    await fs.writeFile(backupPath, data, { encoding: 'utf-8', flag: 'wx' });
     const files = await fs.readdir(backupDir);
     const backupFiles = files.filter(f => f.startsWith('db-') && f.endsWith('.json')).sort();
     while (backupFiles.length > MAX_BACKUPS) {
@@ -351,9 +350,7 @@ export async function initUserDatabase(userId) {
       await pgLow.read();
     } catch (err) {
       console.warn(`⚠️ Supabase 用户 ${userId} 数据读取失败: ${err.message}`);
-      if (process.env.NODE_ENV === 'production') throw err;
-      pgLow.data = JSON.parse(JSON.stringify(defaultUserData));
-      pgLow._degradedRead = true;
+      throw err;
     }
 
     if (!pgLow._degradedRead && pgLow.data.groups.length === 0) {
@@ -455,9 +452,7 @@ export async function getUserDb(userId) {
       db._degradedRead = false;
     } catch (err) {
       console.warn(`⚠️ Supabase 用户 ${userId} 数据读取失败: ${err.message}`);
-      if (process.env.NODE_ENV === 'production') throw err;
-      db.data = JSON.parse(JSON.stringify(defaultUserData));
-      db._degradedRead = true;
+      throw err;
     }
 
     let needsWrite = false;
@@ -505,9 +500,7 @@ export async function getUserDb(userId) {
       db._degradedRead = false;
     } catch (err) {
       console.warn(`⚠️ MongoDB 用户 ${userId} 数据读取失败: ${err.message}`);
-      if (process.env.NODE_ENV === 'production') throw err;
-      db.data = JSON.parse(JSON.stringify(defaultUserData));
-      db._degradedRead = true;
+      throw err;
     }
 
     let needsWrite = false;
@@ -573,17 +566,13 @@ export async function getUserDb(userId) {
         throw err;
       }
     } catch (recoverErr) {
-      if (process.env.NODE_ENV === 'production') {
-        throw new Error(`用户 ${userId} 数据库损坏且恢复失败: ${recoverErr.message}`);
-      }
-      console.warn(`⚠️ 用户 ${userId} 数据库恢复失败，使用默认数据（不回写）`);
+      console.error(`用户 ${userId} 数据库损坏且恢复失败，拒绝提供空白数据: ${recoverErr.message}`);
       try {
         const backupPath = dbPath + '.corrupted.' + Date.now();
         await fs.copyFile(dbPath, backupPath);
         console.log(`📦 损坏的用户数据库已备份到: ${backupPath}`);
       } catch {}
-      db.data = JSON.parse(JSON.stringify(defaultUserData));
-      db._degradedRead = true;
+      throw new Error(`用户 ${userId} 数据库损坏且恢复失败: ${recoverErr.message}`, { cause: recoverErr });
     }
   }
   
@@ -629,28 +618,31 @@ export async function getUserDb(userId) {
 export async function migrateExistingData() {
   try {
     await fs.access(legacyDbFile);
-    console.log('🔄 检测到旧版数据库文件，开始迁移...');
-    
-    const legacyData = await fs.readFile(legacyDbFile, 'utf-8');
-    const parsedData = JSON.parse(legacyData);
-    
-    const defaultUserDbPath = getUserDbPath('default');
-    try {
-      await fs.access(defaultUserDbPath);
-      console.log('⚠️ 默认用户数据库已存在，跳过迁移');
-    } catch (error) {
-      const adapter = new JSONFile(defaultUserDbPath);
-      const db = new CustomLow(adapter, parsedData);
-      await db.write();
-      console.log('✅ 旧数据已迁移到默认用户 (user-default)');
-      
-      const backupPath = path.join(dataDir, 'db.json.backup');
-      await fs.rename(legacyDbFile, backupPath);
-      console.log('📦 旧数据库文件已备份为: db.json.backup');
-    }
   } catch (error) {
-    console.log('ℹ️ 没有需要迁移的旧数据');
+    if (error.code === 'ENOENT') {
+      console.log('ℹ️ 没有需要迁移的旧数据');
+      return;
+    }
+    throw error;
   }
+  console.log('🔄 检测到旧版数据库文件，开始迁移...');
+  const legacyData = await fs.readFile(legacyDbFile, 'utf-8');
+  const parsedData = JSON.parse(legacyData);
+  const defaultUserDbPath = getUserDbPath('default');
+  try {
+    await fs.access(defaultUserDbPath);
+    console.log('⚠️ 默认用户数据库已存在，跳过迁移');
+    return;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  const adapter = new JSONFile(defaultUserDbPath);
+  const db = new CustomLow(adapter, parsedData);
+  await db.write();
+  console.log('✅ 旧数据已迁移到默认用户 (user-default)');
+  const backupPath = path.join(dataDir, 'db.json.backup');
+  await fs.rename(legacyDbFile, backupPath);
+  console.log('📦 旧数据库文件已备份为: db.json.backup');
 }
 
 export async function initDatabase() {
@@ -661,7 +653,7 @@ export async function initDatabase() {
       supabasePool = await getPool();
     } catch (err) {
       console.error('❌ Supabase 连接失败:', err.message);
-      if (process.env.NODE_ENV === 'production') throw err;
+      throw err;
     }
     if (supabasePool) {
       try {
@@ -671,10 +663,10 @@ export async function initDatabase() {
         return;
       } catch (err) {
         console.error('❌ Supabase 初始化失败:', err.message);
-        if (process.env.NODE_ENV === 'production') throw err;
+        throw err;
       }
     }
-    console.warn('⚠️ Supabase 不可用，回退到本地文件存储');
+    throw new Error('PostgreSQL 未能初始化，拒绝切换到另一份数据');
   }
 
   if (isMongoEnabled()) {
@@ -744,9 +736,8 @@ export async function listUserDatabases() {
     try {
       return await listAllKeys('user:');
     } catch (error) {
-      if (process.env.NODE_ENV === 'production') throw error;
       console.warn('Supabase listUserDatabases failed:', error.message);
-      return [];
+      throw error;
     }
   }
 
@@ -756,9 +747,8 @@ export async function listUserDatabases() {
       const docs = await mongoDb.collection('users_data').find({}, { projection: { userId: 1 } }).toArray();
       return docs.map(d => d.userId);
     } catch (error) {
-      if (process.env.NODE_ENV === 'production') throw error;
       console.warn('MongoDB listUserDatabases failed:', error.message);
-      return [];
+      throw error;
     }
   }
 

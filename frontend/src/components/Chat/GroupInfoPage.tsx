@@ -1,3 +1,4 @@
+import { useChatModelIds } from '../../stores/modelsStore';
 import { useState, useRef, useEffect, useMemo, lazy, Suspense, type ReactNode } from 'react';
 import { motion, AnimatePresence, useMotionValue, useTransform, animate } from 'framer-motion';
 
@@ -7,7 +8,7 @@ const LazyInsightRadar = lazy(() =>
 import { useGroupsStore } from '../../stores/groupsStore';
 import { usePersonasStore } from '../../stores/personasStore';
 import { useMessagesStore } from '../../stores/messagesStore';
-import { AI_NAMES, AI_COLORS, AI_AVATAR_LETTERS, AI_LIST, GroupFile } from '../../types';
+import { AI_NAMES, AI_COLORS, AI_AVATAR_LETTERS, GroupFile } from '../../types';
 import type { Message, GroupInsights, MemoryDigest } from '../../types';
 import { formatFileSize, getFileTypeIcon } from './AttachmentStack';
 import { api } from '../../services/api';
@@ -184,10 +185,13 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
   const deleteGroup = useGroupsStore((s) => s.deleteGroup);
   const addGroupMember = useGroupsStore((s) => s.addGroupMember);
   const removeGroupMember = useGroupsStore((s) => s.removeGroupMember);
+  const allAIs = useChatModelIds();
   const personas = usePersonasStore((s) => s.personas);
   const rawMessages = useMessagesStore((s) => s.messages[groupId]);
   const clearAllMessages = useMessagesStore((s) => s.clearAllMessages);
   const messages = rawMessages || EMPTY_MESSAGES;
+  const memorySourceRevision = useMemo(() => messages.map(message =>
+    `${message.id}:${message.edited_at || ''}`).join('|'), [messages]);
   const [activeTab, setActiveTab] = useState<TabType>('info');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchFilter, setSearchFilter] = useState<SearchFilterType>('all');
@@ -220,10 +224,16 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
   const [insights, setInsights] = useState<GroupInsights | null>(null);
   const [insightsDays, setInsightsDays] = useState<7 | 30>(7);
   const [loadingInsights, setLoadingInsights] = useState(false);
-  const [memoryDigest, setMemoryDigest] = useState<MemoryDigest | null>(null);
+  const [storedMemoryDigest, setStoredMemoryDigest] = useState<{ groupId: string; sourceRevision: string; value: MemoryDigest } | null>(null);
   const [loadingMemory, setLoadingMemory] = useState(false);
   const [memoryError, setMemoryError] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const memoryGroupIdRef = useRef(groupId);
+  memoryGroupIdRef.current = groupId;
+  const memorySourceRevisionRef = useRef(memorySourceRevision);
+  memorySourceRevisionRef.current = memorySourceRevision;
+  const memoryDigest = storedMemoryDigest?.groupId === groupId &&
+    storedMemoryDigest.sourceRevision === memorySourceRevision ? storedMemoryDigest.value : null;
   const reducedMotion = useReducedMotion();
   const handleCloseRef = useRef<() => void>(() => {});
 
@@ -275,11 +285,19 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
   }, [activeTab, groupId, isOpen]);
 
   useEffect(() => {
+    // A previous group's response must not populate the current group's panel.
+    memoryRequestIdRef.current += 1;
+    setStoredMemoryDigest(null);
+    setLoadingMemory(false);
+    setMemoryError(false);
+  }, [groupId, isOpen, memorySourceRevision]);
+
+  useEffect(() => {
     if (!isOpen || activeTab !== 'insights') return;
     if (memoryDigest || loadingMemory || memoryError) return;
     void loadMemoryDigest();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, activeTab, memoryDigest, loadingMemory, memoryError]);
+  }, [isOpen, activeTab, groupId, memoryDigest, loadingMemory, memoryError]);
 
   const handleClose = () => {
     if (isDirty) {
@@ -343,18 +361,27 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
 
   const loadMemoryDigest = async () => {
     const currentRequestId = ++memoryRequestIdRef.current;
+    const requestedGroupId = groupId;
+    const requestedSourceRevision = memorySourceRevision;
     setLoadingMemory(true);
     setMemoryError(false);
     try {
-      const result = await api.getMemoryDigest(8);
-      if (currentRequestId !== memoryRequestIdRef.current) return;
-      setMemoryDigest(result);
+      if (!group?.id) return;
+      const result = await api.getMemoryDigest(8, requestedGroupId);
+      if (currentRequestId !== memoryRequestIdRef.current ||
+        requestedGroupId !== memoryGroupIdRef.current ||
+        requestedSourceRevision !== memorySourceRevisionRef.current) return;
+      setStoredMemoryDigest({ groupId: requestedGroupId, sourceRevision: requestedSourceRevision, value: result });
     } catch (error) {
       console.error('加载记忆回顾失败:', error);
-      if (currentRequestId !== memoryRequestIdRef.current) return;
+      if (currentRequestId !== memoryRequestIdRef.current ||
+        requestedGroupId !== memoryGroupIdRef.current ||
+        requestedSourceRevision !== memorySourceRevisionRef.current) return;
       setMemoryError(true);
     } finally {
-      if (currentRequestId === memoryRequestIdRef.current) {
+      if (currentRequestId === memoryRequestIdRef.current &&
+        requestedGroupId === memoryGroupIdRef.current &&
+        requestedSourceRevision === memorySourceRevisionRef.current) {
         setLoadingMemory(false);
       }
     }
@@ -649,7 +676,6 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
 
   const getFileIcon = (type: string): ReactNode => getFileTypeIcon(type).svg(16);
 
-  const allAIs = [...AI_LIST].filter(id => id !== 'mimo_tts');
   const availableAIs = allAIs.filter(ai => !aiMembers.includes(ai));
   const isAIPrivateChat = group.is_ai_private === true || group.type === 'ai_private';
 
@@ -1380,7 +1406,7 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
                         className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-bg-surface2/60 transition-colors"
                       >
                         <svg className="w-4 h-4 text-accent flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" /></svg>
-                        <span className="text-sm font-medium text-text-primary">记忆回顾</span>
+                        <span className="text-sm font-medium text-text-primary">本群已保存的消息摘录</span>
                         {memoryDigest && memoryItems.length > 0 && (
                           <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-accent/10 text-accent">
                             {memoryItems.length}
@@ -1406,6 +1432,7 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
                             className="overflow-hidden"
                           >
                             <div className="px-3 pb-3 pt-2 border-t border-border-subtle">
+                              <div className="flex justify-end mb-2"><button className="text-xs text-accent hover:underline disabled:opacity-40" disabled={loadingMemory} onClick={() => void loadMemoryDigest()}>刷新摘录</button></div>
                               {loadingMemory ? (
                                 <div className="space-y-2">
                                   {Array.from({ length: 3 }).map((_, i) => (
@@ -1424,7 +1451,7 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
                                 </div>
                               ) : memoryItems.length === 0 ? (
                                 <p className="text-xs text-text-muted py-5 text-center leading-relaxed">
-                                  AI 还没有形成关于你们的长期记忆，多聊聊天吧
+                                  本群还没有可用的消息摘录。来源被修改或删除后，旧摘录会从这里消失。
                                 </p>
                               ) : (
                                 <>
@@ -1593,6 +1620,30 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
                 <h3 className="text-sm font-semibold text-text-primary mb-3">其他设置</h3>
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
+                    <div className="pr-4">
+                      <span className="text-sm text-text-secondary">空闲时主动聊天</span>
+                      <p className="text-xs text-text-muted">开启后，多位 AI 可在群聊空闲时自行发言并产生模型调用。</p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={group.autonomous_chat_enabled === true}
+                      aria-label="空闲时主动聊天"
+                      onClick={async () => {
+                        try {
+                          const enabled = group.autonomous_chat_enabled !== true;
+                          await api.updateGroupSettings(groupId, { autonomous_chat_enabled: enabled });
+                          updateGroupSettings(groupId, { autonomous_chat_enabled: enabled });
+                        } catch {
+                          showToast({ message: '主动聊天设置保存失败，请重试', type: 'error' });
+                        }
+                      }}
+                      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${group.autonomous_chat_enabled ? 'bg-accent' : 'bg-bg-surface2'}`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${group.autonomous_chat_enabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between">
                     <span className="text-sm text-text-secondary">消息通知</span>
                     <button
                       onClick={async () => {
@@ -1693,4 +1744,3 @@ export function GroupInfoPage({ groupId, isOpen, onClose }: GroupInfoPageProps) 
     </div>
   );
 }
-

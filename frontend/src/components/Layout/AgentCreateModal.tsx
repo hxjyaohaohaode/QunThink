@@ -1,3 +1,4 @@
+import { useModelsStore, requestError } from '../../stores/modelsStore';
 ﻿import { useState, useRef, useEffect } from 'react';
 import { useFocusTrap } from '../Common/useFocusTrap';
 import { useAgentsStore } from '../../stores/agentsStore';
@@ -29,6 +30,8 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
   const creatingAgent = useAgentsStore((s) => s.creatingAgent);
   const { showToast, Toast } = useToast();
 
+  const catalog = useModelsStore(s => s.catalog);
+  const [modelId, setModelId] = useState('');
   const [step, setStep] = useState(1);
   const [name, setName] = useState('');
   const [avatarFile, setAvatarFile] = useState<string | null>(null);
@@ -123,15 +126,16 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
     try {
       const created = await createAgent({
         name: name.trim(),
-        description: description.trim(),
+        description: description.trim() + (questions.length ? '\n配置偏好：' + questions.map(q => q.question + '：' + (answers[q.id] || '未指定')).join('；') : ''),
         openingMessage: openingMessage.trim(),
+        modelId: modelId || null,
         enableSuggestions,
         capabilities,
         avatarUrl: avatarFile || null,
       });
       setCreatedAgent(created);
     } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : '创建智能体失败';
+      const msg = requestError(error);
       showToast({ message: msg, type: 'error' });
       setStep(2);
     } finally {
@@ -277,6 +281,13 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
                 />
               </div>
 
+              <label className="block text-xs text-text-secondary">运行模型
+                <select aria-label="智能体运行模型" className="mt-2 w-full p-3 bg-bg-surface2 border border-border rounded-xl text-sm" value={modelId} onChange={e => setModelId(e.target.value)}>
+                  <option value="">使用默认对话模型</option>
+                  {catalog?.models.filter(m => m.ready && m.capabilities.includes('chat')).map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                </select>
+                <p className="mt-2 text-text-muted">模型可在模型中心添加。定时执行请在工作台创建任务；外部搜索与工具需另行接入。</p>
+              </label>
               <div className="flex items-center justify-between py-2">
                 <div>
                   <span className="text-sm text-text-primary">开启建议回复</span>

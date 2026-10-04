@@ -8,7 +8,7 @@
  *     - 所有本地 $ref（#/...）可解析到文档内部
  *     - 每个 path 至少包含一个 operation
  *     - operationId 全局唯一
- *   漂移交叉校验（仅警告，退出码 0）：
+ *   漂移交叉校验（失败退出码 1）：
  *     - 扫描 backend/src/routes/*.js 与 backend/src/index.js 的真实路由，
  *       与 openapi.paths 对比，输出：
  *       「实现有而文档缺失」「文档有而实现缺失」两类清单。
@@ -35,6 +35,7 @@ const indexJsPath = path.join(rootDir, 'backend', 'src', 'index.js');
 /** 路由文件 -> Express 挂载前缀（backend/src/index.js 中 app.use 的真实配置） */
 const ROUTER_MOUNT_PREFIXES = {
   'apiconfig.js': '/api/user',
+  'modelCatalog.js': '/api/user',
   'tts.js': '/api/tts'
 };
 const DEFAULT_PREFIX = '/api';
@@ -243,8 +244,9 @@ if (structuralErrors.length > 0) {
 console.log('\n✅ 结构校验通过（YAML 解析 / 顶层字段 / $ref 解析 / path 操作覆盖 / operationId 唯一）');
 
 if (driftWarnings.length > 0) {
-  console.warn('\n⚠️  发现文档与实现的漂移（仅警告，不影响退出码）：');
+  console.warn('\n❌ 发现文档与实现的漂移：');
   for (const w of driftWarnings) console.warn(w);
+  process.exit(1);
 } else {
   console.log('✅ 无漂移：文档与后端实现的路由清单完全一致');
 }

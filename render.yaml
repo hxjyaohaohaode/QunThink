@@ -1,6 +1,7 @@
 services:
   - type: web
     name: ai-chat-group-backend
+    autoDeployTrigger: checksPass
     env: node
     region: singapore
     plan: starter
@@ -37,6 +38,7 @@ services:
 
   - type: static
     name: ai-chat-group-frontend
+    autoDeployTrigger: checksPass
     region: singapore
     buildCommand: cd frontend && npm ci && npm run build
     staticPublishPath: ./frontend/dist

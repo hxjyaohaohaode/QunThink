@@ -1,3 +1,4 @@
+import { clearCurrentUserCache } from '../../utils/privateCache';
 ﻿import { useState, useEffect, useRef } from 'react';
 import { useThemeStore } from '../../stores/themeStore';
 import { useGroupsStore } from '../../stores/groupsStore';
@@ -7,23 +8,10 @@ import { UserProfileEditor } from './UserProfileEditor';
 import { FontSizeSelector } from './FontSizeToggle';
 import { useConfirm, useToast, ErrorBoundary } from '../Common';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
-import { AI_LIST, AI_NAMES } from '../../types';
-import { api } from '../../services/api';
+import { AI_NAMES } from '../../types';
+import { ModelCenter } from './ModelCenter';
+import { useModelsStore, useChatModelIds } from '../../stores/modelsStore';
 import { avatarBackgroundImageStyle } from '../Common/Avatar';
-
-interface ApiProviderConfig {
-  apiKey: string;
-  apiKeyConfigured?: boolean;
-  apiKeyMasked?: string;
-  baseUrl: string;
-}
-
-const API_VENDORS: { key: string; label: string; desc: string; color: string }[] = [
-  { key: 'deepseek', label: 'DeepSeek', desc: 'DeepSeek-V3 / R1 系列模型', color: '#4D6BFE' },
-  { key: 'zhipu', label: '智谱AI (GLM)', desc: 'GLM-4 / GLM-4V 系列模型', color: '#3B5FFF' },
-  { key: 'mimo', label: 'MiMo', desc: 'MiMo-TTS 语音模型', color: '#FF6A00' },
-  { key: 'qwen', label: '通义千问 (Qwen)', desc: 'Qwen-Max / Qwen-VL 系列模型', color: '#6C5CE7' },
-];
 
 export function SettingsPage() {
   const APP_VERSION = import.meta.env.VITE_APP_VERSION || '2.8.9';
@@ -47,22 +35,12 @@ export function SettingsPage() {
   const [showProfileEditor, setShowProfileEditor] = useState(false);
   const { canInstall, isInstalled, isStandalone, isOnline, install, getInstallGuidance, platform } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
-  const [apiConfig, setApiConfig] = useState<Record<string, ApiProviderConfig>>({});
-  const [apiConfigVisible, setApiConfigVisible] = useState<Record<string, boolean>>({});
-  const [expandedVendors, setExpandedVendors] = useState<Record<string, boolean>>({});
-  const [savingApiConfig, setSavingApiConfig] = useState(false);
-  const [apiConfigLoaded, setApiConfigLoaded] = useState(false);
-  const [apiConfigSaveError, setApiConfigSaveError] = useState(false);
-  const apiConfigOriginalRef = useRef<Record<string, ApiProviderConfig>>({});
-  // API配置测试状态
-  const [testingVendor, setTestingVendor] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<Record<string, { healthy: boolean; message: string; responseTime?: number } | undefined>>({});
-
   const aiMembers = Array.from(new Set(groups.flatMap(g => g.ai_members || [])));
-  const totalAIModels = AI_LIST.length;
-  const nonChatModels = ['mimo_tts', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'];
-  const chatAIMembers = aiMembers.filter(id => !nonChatModels.includes(id as string));
-  const notInGroups = AI_LIST.filter(id => !aiMembers.includes(id as string) && !nonChatModels.includes(id as string));
+  const chatIds = useChatModelIds();
+  const models = useModelsStore(s => s.catalog?.models);
+  const totalAIModels = models?.length || 0;
+  const chatAIMembers = aiMembers.filter(id => chatIds.includes(id));
+  const notInGroups = chatIds.filter(id => !aiMembers.includes(id as string) && chatIds.includes(id));
   const personaEntries = Object.entries(personas);
 
   useEffect(() => {
@@ -94,16 +72,6 @@ export function SettingsPage() {
     setIsDarkMode(theme === 'dark');
   }, [theme]);
 
-  useEffect(() => {
-    if (!apiConfigLoaded) {
-      api.getUserApiConfig().then((data) => {
-        if (data?.config && typeof data.config === 'object') {
-          setApiConfig(data.config);
-          apiConfigOriginalRef.current = JSON.parse(JSON.stringify(data.config));
-        }
-      }).catch(() => { }).finally(() => setApiConfigLoaded(true));
-    }
-  }, [apiConfigLoaded]);
 
   const toggleDarkMode = () => {
     setIsThemeChanging(true);
@@ -113,32 +81,15 @@ export function SettingsPage() {
     }, 300);
   };
 
-  const clearAll = () => {
-    try {
-      const keysToRemove = Object.keys(localStorage).filter(key =>
-        key.startsWith('chat_app_') || key.startsWith('ai-chat-') || key.startsWith('app_cache_') || key === 'messages-cache' || key === 'groups-cache'
-      );
-      keysToRemove.forEach(key => localStorage.removeItem(key));
-    } catch (e) {
-      console.warn('clearAll failed:', e);
-    }
-
-    try {
-      indexedDB.deleteDatabase('ai-chat-db');
-    } catch (e) {
-      console.warn('IndexedDB cleanup failed:', e);
-    }
-  };
-
   const handleClearData = async () => {
     const confirmed = await confirm({
-      title: '清空所有聊天数据',
-      description: '此操作将删除所有聊天记录和对话，且无法恢复。确定要继续吗？',
+      title: '清理本地缓存',
+      description: '仅清理当前浏览器缓存，服务器上的会话与文件会在下次加载时恢复。是否继续？',
       danger: true,
     });
     if (confirmed) {
-      clearAll();
-      showToast({ message: '数据已清空', type: 'success' });
+      await clearCurrentUserCache();
+      showToast({ message: '本地缓存已清理', type: 'success' });
     }
   };
 
@@ -162,70 +113,6 @@ export function SettingsPage() {
     transform: visibleSections.includes(index) ? 'translateY(0)' : 'translateY(16px)',
     transition: 'opacity 400ms cubic-bezier(0.0, 0.0, 0.2, 1), transform 400ms cubic-bezier(0.0, 0.0, 0.2, 1)',
   });
-
-  const handleApiConfigChange = (vendor: string, field: 'apiKey' | 'baseUrl', value: string) => {
-    setApiConfigSaveError(false);
-    setApiConfig(prev => ({
-      ...prev,
-      [vendor]: {
-        ...prev[vendor],
-        [field]: value,
-      },
-    }));
-  };
-
-  const toggleApiConfigVisibility = (vendor: string) => {
-    setApiConfigVisible(prev => ({ ...prev, [vendor]: !prev[vendor] }));
-  };
-
-  const toggleVendorExpand = (vendor: string) => {
-    setExpandedVendors(prev => ({ ...prev, [vendor]: !prev[vendor] }));
-  };
-
-  const handleSaveApiConfig = async () => {
-    setSavingApiConfig(true);
-    setApiConfigSaveError(false);
-    try {
-      const saved = await api.updateUserApiConfig(apiConfig);
-      const publicConfig = saved?.config || apiConfig;
-      setApiConfig(publicConfig);
-      apiConfigOriginalRef.current = JSON.parse(JSON.stringify(publicConfig));
-      showToast({ message: 'API配置已保存', type: 'success' });
-    } catch {
-      setApiConfigSaveError(true);
-      showToast({ message: '保存失败，请重试', type: 'error' });
-    } finally {
-      setSavingApiConfig(false);
-    }
-  };
-
-  const handleTestApiConfig = async (vendor: string) => {
-    const cfg = apiConfig[vendor] || { apiKey: '', baseUrl: '' };
-    setTestingVendor(vendor);
-    setTestResult(prev => ({ ...prev, [vendor]: undefined }));
-    try {
-      const result = await api.testUserApiConfig(vendor, cfg.apiKey, cfg.baseUrl);
-      if (result.healthy) {
-        setTestResult(prev => ({
-          ...prev,
-          [vendor]: { healthy: true, message: result.message || '连接成功', responseTime: result.responseTime }
-        }));
-        showToast({ message: `${vendor} 连接成功`, type: 'success' });
-      } else {
-        setTestResult(prev => ({
-          ...prev,
-          [vendor]: { healthy: false, message: result.error || '连接失败', responseTime: result.responseTime }
-        }));
-        showToast({ message: `${vendor} 连接失败：${result.error || '未知错误'}`, type: 'error' });
-      }
-    } catch (err: any) {
-      const msg = err?.response?.data?.error || err?.message || '测试失败';
-      setTestResult(prev => ({ ...prev, [vendor]: { healthy: false, message: msg } }));
-      showToast({ message: `${vendor} 测试失败：${msg}`, type: 'error' });
-    } finally {
-      setTestingVendor(null);
-    }
-  };
 
   return (
     <>
@@ -411,161 +298,7 @@ export function SettingsPage() {
               <FontSizeSelector />
             </div>
 
-            <div
-              ref={el => { sectionRefs.current[8] = el }}
-              style={getSectionStyle(8)}
-              className="px-4"
-            >
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider settings-theme-transition">API配置</h2>
-                <div className="flex items-center gap-2">
-                  {apiConfigSaveError && (
-                    <button
-                      onClick={() => {
-                        setApiConfig(JSON.parse(JSON.stringify(apiConfigOriginalRef.current)));
-                        setApiConfigSaveError(false);
-                      }}
-                      className="px-2 py-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 border border-amber-500/30 rounded-lg hover:bg-amber-500/5 transition-colors"
-                    >
-                      放弃更改
-                    </button>
-                  )}
-                  <button
-                    onClick={handleSaveApiConfig}
-                    disabled={savingApiConfig}
-                    className="px-3 py-1.5 text-xs font-medium text-white bg-accent rounded-lg hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors settings-theme-transition"
-                  >
-                    {savingApiConfig ? '保存中...' : '保存'}
-                  </button>
-                </div>
-              </div>
-              {apiConfigSaveError && (
-                <p className="text-xs text-amber-600 dark:text-amber-400 mb-2">配置尚未保存</p>
-              )}
-              <div className="space-y-2">
-                {API_VENDORS.map((vendor) => {
-                  const cfg = apiConfig[vendor.key] || { apiKey: '', baseUrl: '' };
-                  const showPw = apiConfigVisible[vendor.key] || false;
-                  const isExpanded = expandedVendors[vendor.key] || false;
-                  const isConfigured = Boolean(cfg.apiKeyConfigured || (cfg.apiKey && cfg.apiKey.trim()));
-
-                  return (
-                    <div key={vendor.key} className="bg-bg-surface border border-border-subtle rounded-xl overflow-hidden settings-theme-transition settings-card">
-                      <button
-                        onClick={() => toggleVendorExpand(vendor.key)}
-                        className="w-full flex items-center gap-2.5 p-3 settings-theme-transition"
-                      >
-                        <div
-                          className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0"
-                          style={{ backgroundColor: vendor.color }}
-                        >
-                          {vendor.label[0]}
-                        </div>
-                        <div className="flex-1 text-left min-w-0">
-                          <div className="flex items-center gap-1.5">
-                            <span className="text-xs font-medium text-text-primary settings-theme-transition">{vendor.label}</span>
-                            <span
-                              className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isConfigured ? 'bg-green-500' : 'bg-text-muted/30'}`}
-                            />
-                          </div>
-                          <span className="text-[10px] text-text-muted settings-theme-transition">{vendor.desc}</span>
-                        </div>
-                        <svg
-                          className={`w-3.5 h-3.5 text-text-muted transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
-                          fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}
-                        >
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </button>
-
-                      {isExpanded && (
-                        <div className="px-3 pb-3 space-y-2 border-t border-border-subtle/30 pt-2.5 settings-theme-transition">
-                          <div className="relative">
-                            <input
-                              type={showPw ? 'text' : 'password'}
-                              value={cfg.apiKey}
-                              onChange={(e) => handleApiConfigChange(vendor.key, 'apiKey', e.target.value)}
-                              placeholder={cfg.apiKeyMasked || (cfg.apiKeyConfigured ? '已配置（输入新值可覆盖）' : 'API Key')}
-                              autoComplete="off"
-                              className="w-full px-3 py-2 pr-10 bg-bg-surface2 border border-border-subtle rounded-[10px] text-xs outline-none text-text-primary placeholder-text-muted focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all settings-theme-transition"
-                            />
-                            <button
-                              onClick={() => toggleApiConfigVisibility(vendor.key)}
-                              className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 flex items-center justify-center rounded-md hover:bg-bg-surface3 text-text-muted hover:text-text-secondary transition-colors"
-                              title={showPw ? '隐藏' : '显示'}
-                            >
-                              {showPw ? (
-                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
-                              ) : (
-                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
-                              )}
-                            </button>
-                          </div>
-                          {cfg.apiKeyConfigured && !cfg.apiKey && (
-                            <button
-                              onClick={async () => {
-                                try {
-                                  const saved = await api.updateUserApiConfig({ [vendor.key]: { apiKey: '__CLEAR__', baseUrl: cfg.baseUrl } });
-                                  const publicConfig = saved?.config;
-                                  if (publicConfig) {
-                                    setApiConfig(prev => ({ ...prev, ...publicConfig }));
-                                    apiConfigOriginalRef.current = JSON.parse(JSON.stringify({ ...apiConfigOriginalRef.current, ...publicConfig }));
-                                  }
-                                  showToast({ message: '已清除该厂商的 API Key', type: 'success' });
-                                } catch {
-                                  showToast({ message: '清除失败，请重试', type: 'error' });
-                                }
-                              }}
-                              className="text-[10px] text-red-400 hover:text-red-300 transition-colors"
-                            >
-                              清除已保存的 API Key
-                            </button>
-                          )}
-                          <input
-                            type="text"
-                            value={cfg.baseUrl}
-                            onChange={(e) => handleApiConfigChange(vendor.key, 'baseUrl', e.target.value)}
-                            placeholder="留空使用默认，如 https://api.example.com/v1（无需 /chat/completions）"
-                            className="w-full px-3 py-2 bg-bg-surface2 border border-border-subtle rounded-[10px] text-xs outline-none text-text-primary placeholder-text-muted focus:border-accent focus:ring-2 focus:ring-accent/20 transition-all settings-theme-transition"
-                          />
-                          <div className="flex items-center gap-2 pt-1">
-                            <button
-                              onClick={() => handleTestApiConfig(vendor.key)}
-                              disabled={testingVendor === vendor.key}
-                              className="px-3 py-1.5 text-[11px] font-medium text-text-secondary border border-border-subtle rounded-[8px] hover:bg-bg-surface3 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5 settings-theme-transition"
-                            >
-                              {testingVendor === vendor.key ? (
-                                <>
-                                  <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v3m0 12v3m9-9h-3M6 12H3m15.364-6.364l-2.121 2.121M7.757 16.243l-2.121 2.121m12.728 0l-2.121-2.121M7.757 7.757L5.636 5.636" />
-                                  </svg>
-                                  测试中...
-                                </>
-                              ) : (
-                                <>
-                                  <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                                  </svg>
-                                  测试连接
-                                </>
-                              )}
-                            </button>
-                            {testResult[vendor.key] && (
-                              <span className={`text-[11px] flex items-center gap-1 ${testResult[vendor.key]!.healthy ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                                <span className={`w-1.5 h-1.5 rounded-full ${testResult[vendor.key]!.healthy ? 'bg-green-500' : 'bg-red-500'}`} />
-                                {testResult[vendor.key]!.healthy
-                                  ? `${testResult[vendor.key]!.message}${testResult[vendor.key]!.responseTime ? ` (${testResult[vendor.key]!.responseTime}ms)` : ''}`
-                                  : testResult[vendor.key]!.message}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+            <div className="px-4"><ModelCenter /></div>
 
             <div
               ref={el => { sectionRefs.current[3] = el }}

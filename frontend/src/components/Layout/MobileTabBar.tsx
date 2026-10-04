@@ -1,4 +1,4 @@
-type TabType = 'chats' | 'agents' | 'settings';
+type TabType = 'workspace' | 'chats' | 'agents' | 'settings';
 
 interface MobileTabBarProps {
   activeTab: TabType;
@@ -10,6 +10,7 @@ export function MobileTabBar({ activeTab, onTabChange, unreadCount = 0 }: Mobile
   return (
     <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-bg-surface border-t border-border/40" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
       <div className="flex items-center justify-around h-14">
+        <button onClick={() => onTabChange('workspace')} className={`flex-1 flex flex-col items-center justify-center gap-0.5 py-2 ${activeTab === 'workspace' ? 'text-accent' : 'text-text-muted'}`}><span className="text-2xl leading-6">⌘</span><span className="text-[10px] font-medium">工作台</span></button>
         <button
           onClick={() => onTabChange('chats')}
           className={`flex-1 flex flex-col items-center justify-center gap-0.5 py-2 transition-all duration-150 active:scale-95 ${activeTab === 'chats' ? 'text-accent' : 'text-text-muted'

@@ -1,8 +1,8 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-export type DesktopView = 'chat' | 'agents' | 'settings';
-export type MobileTab = 'chats' | 'agents' | 'settings';
+export type DesktopView = 'workspace' | 'chat' | 'agents' | 'settings';
+export type MobileTab = 'workspace' | 'chats' | 'agents' | 'settings';
 
 interface NavigationState {
   sidebarOpen: boolean;
@@ -37,8 +37,8 @@ export const useNavigationStore = create<NavigationState>()(
       commandPaletteOpen: false,
       scrollToMessageId: null,
       timeFormat: 'relative',
-      activeDesktopView: 'chat',
-      activeMobileTab: 'chats',
+      activeDesktopView: 'workspace',
+      activeMobileTab: 'workspace',
       isTransitioning: false,
 
       toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),

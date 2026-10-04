@@ -1,3 +1,4 @@
+import { currentUserId, UserScopedMap } from '../userScope.js';
 import { v4 as uuidv4 } from 'uuid';
 import { getUserDb, listUserDatabases, withWriteLock } from '../../models/db.js';
 import { callAIDebate, normalizeResponse, applyMessageLengthLimit } from '../ai/index.js';
@@ -5,9 +6,10 @@ import { broadcastToGroup, broadcastTypingStatus } from '../../websocket/index.j
 import { AI_PERSONAS } from '../../config/personas.js';
 import { getEffectivePersona as getSchedulerPersona, loadCustomPersonas } from '../scheduler/index.js';
 import { decryptText } from '../../utils/encryption.js';
+import { readableSourceMessages } from '../memory/persistentMemory.js';
 
-const activeDebates = new Map();
-const groupToUserMap = new Map();
+const activeDebates = new UserScopedMap();
+const groupToUserMap = new UserScopedMap();
 
 function decryptMessages(messages) {
   return messages.map(msg => {
@@ -39,7 +41,7 @@ if (process.env.NODE_ENV !== 'test') {
       if (context.startTime && now - context.startTime > maxDuration) {
         console.warn(`🧹 清理超时辩论: ${key}`);
         context.cancel = true;
-        activeDebates.delete(key);
+        activeDebates.deleteRaw(key);
       }
     }
   }, 30 * 60 * 1000);
@@ -90,29 +92,16 @@ function getEffectivePersona(aiId, userId = null) {
 }
 
 async function findGroupAndMessagesInAnyUserDb(groupId) {
-  const cachedUserId = groupToUserMap.get(groupId);
-  if (cachedUserId) {
-    const db = await getUserDb(cachedUserId);
+  const userId = currentUserId();
+  if (!userId) return null;
+  const db = await getUserDb(userId);
+  return withWriteLock(userId, async () => {
     await db.read();
     const group = db.data.groups.find(g => g.id === groupId);
-    if (group) {
-      const messages = decryptMessages(db.data.messages.filter(m => m.group_id === groupId));
-      return { db, userId: cachedUserId, group, messages };
-    }
-  }
-
-  const userIds = await listUserDatabases();
-  for (const userId of userIds) {
-    const db = await getUserDb(userId);
-    await db.read();
-    populateGroupCache(userId, db);
-    const group = db.data.groups.find(g => g.id === groupId);
-    if (group) {
-      const messages = decryptMessages(db.data.messages.filter(m => m.group_id === groupId));
-      return { db, userId, group, messages };
-    }
-  }
-  return null;
+    if (!group) return null;
+    const messages = (await readableSourceMessages(userId, db)).filter(m => m.group_id === groupId);
+    return { db, userId, group, messages: decryptMessages(messages) };
+  });
 }
 
 function allocateDebateRoles(aiMembers, rolePreferences = {}, selectedParticipants = null) {
@@ -331,29 +320,15 @@ function getDebatePhaseConfig(phase, roles) {
   }
 }
 
-const DEBATE_AI_NAMES_FALLBACK = {
-  deepseek: 'deepseek-chat',
-  deepseek_reasoner: 'deepseek-reasoner',
-  glm_air: 'GLM-4.5-Air',
-  glm_flash: 'GLM-4.7-Flash',
-  glm_flashx: 'GLM-4.7-FlashX',
-  mimo_flash: 'mimo-v2.5',
-  mimo_omni: 'mimo-v2-omni',
-  mimo_tts: 'mimo-v2-tts',
-  qwen_flash: 'Qwen3.5-Flash',
-  qwen_turbo: 'qwen-turbo'
-};
-
-const debateAiNames = (() => {
-  const merged = { ...DEBATE_AI_NAMES_FALLBACK };
-  for (const [aiId, persona] of Object.entries(AI_PERSONAS || {})) {
-    if (persona?.name) merged[aiId] = persona.name;
-  }
-  return merged;
-})();
-
 function buildDebateRolePrompt(persona, role, topic, phase, phaseConfig, recentMessages, allRoles) {
-  const aiNames = debateAiNames;
+  const ids = new Set([
+    ...(allRoles.proponents || []), ...(allRoles.opponents || []),
+    ...(allRoles.audience || []), allRoles.judge,
+    ...(recentMessages || []).map(message => message.sender_id)
+  ].filter(Boolean));
+  const aiNames = Object.fromEntries([...ids].map(id => [id,
+    getSchedulerPersona(id, currentUserId())?.name || AI_PERSONAS[id]?.name || id
+  ]));
 
   const roleNames = {
     proponent: '正方',
@@ -774,28 +749,16 @@ function broadcastDebateMessage(groupId, aiId, content, role, messageId) {
   });
 }
 
-async function getRecentMessages(groupId, limit = 50) {
-  const cachedUserId = groupToUserMap.get(groupId);
-  if (cachedUserId) {
-    const db = await getUserDb(cachedUserId);
+export async function getRecentDebateMessages(groupId, limit = 50) {
+  const userId = currentUserId();
+  if (!userId) return [];
+  const db = await getUserDb(userId);
+  return withWriteLock(userId, async () => {
     await db.read();
-    const messages = decryptMessages(db.data.messages
-      .filter(m => m.group_id === groupId)
-      .slice(-limit));
-    if (messages.length > 0) return messages;
-  }
-
-  const userIds = await listUserDatabases();
-  for (const userId of userIds) {
-    const db = await getUserDb(userId);
-    await db.read();
-    populateGroupCache(userId, db);
-    const messages = decryptMessages(db.data.messages
-      .filter(m => m.group_id === groupId)
-      .slice(-limit));
-    if (messages.length > 0) return messages;
-  }
-  return [];
+    if (!db.data.groups.some(group => group.id === groupId)) return [];
+    const messages = await readableSourceMessages(userId, db);
+    return decryptMessages(messages.filter(m => m.group_id === groupId).slice(-limit));
+  });
 }
 
 async function saveMessage(groupId, aiId, content, role) {
@@ -942,7 +905,7 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
           if (context.cancel) break;
 
           const role = phaseConfig.speakerRoles[speakerId];
-          const recentMessages = await getRecentMessages(groupId);
+          const recentMessages = await getRecentDebateMessages(groupId);
 
           const result = await generateDebateResponse(
             speakerId,
@@ -973,7 +936,7 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
           for (let interRound = 0; interRound < 2; interRound++) {
             if (context.cancel) break;
 
-            const recentMessages = await getRecentMessages(groupId);
+            const recentMessages = await getRecentDebateMessages(groupId);
             const recentAIMessages = recentMessages
               .filter(m => m.sender_type === 'ai' && spokenThisTurn.has(m.sender_id))
               .slice(-3);

@@ -193,7 +193,7 @@ axiosInstance.interceptors.response.use(
     if (import.meta.env.DEV) {
       console.log(`[API Response] ${response.config.method?.toUpperCase()} ${response.config.url} -> ${response.status}`);
     }
-    if (typeof response.data !== 'object' || response.data === null) {
+    if (response.status !== 204 && (typeof response.data !== 'object' || response.data === null)) {
       const error = new Error('服务器返回了非预期的响应格式，请稍后重试');
       return Promise.reject(error);
     }
@@ -216,8 +216,14 @@ axiosInstance.interceptors.response.use(
 
     const isNetworkError = !error.response && (error.code === 'ERR_NETWORK' || error.code === 'ECONNABORTED' || error.code === 'ERR_ABORTED');
     const isAbortedError = !error.response && error.code === 'ERR_ABORTED';
-    const isServerError = error.response && (error.response.status === 500 || error.response.status === 502 || error.response.status === 503);
+    // A missing foundation database is a deployment condition, not a brief
+    // outage. Retrying it only delays the actionable state and multiplies
+    // identical requests (including StrictMode's development remount).
+    const isServerError = error.response && error.response.data?.code !== 'FOUNDATION_UNAVAILABLE' &&
+      (error.response.status === 500 || error.response.status === 502 || error.response.status === 503);
     const isCsrfError = error.response?.status === 403 && error.response?.data?.error === 'CSRF token validation failed';
+    // A timeout does not prove that a write or a paid AI request was not accepted.
+    const canRetry = ['GET', 'HEAD', 'OPTIONS'].includes((config.method || 'GET').toUpperCase());
 
     if (isCsrfError && isMutatingMethod(config.method) && config.retryCount < 1) {
       config.retryCount++;
@@ -234,7 +240,7 @@ axiosInstance.interceptors.response.use(
     }
 
     // ERR_ABORTED 是浏览器取消请求（页面导航/刷新），应原地重试而非切换后端地址
-    if (isNetworkError && !isAbortedError && Array.isArray(config.baseUrlCandidates)) {
+    if (canRetry && isNetworkError && !isAbortedError && Array.isArray(config.baseUrlCandidates)) {
       const nextBaseUrlIndex = (config.activeBaseUrlIndex ?? 0) + 1;
       if (nextBaseUrlIndex < config.baseUrlCandidates.length) {
         config.activeBaseUrlIndex = nextBaseUrlIndex;
@@ -247,7 +253,7 @@ axiosInstance.interceptors.response.use(
       }
     }
 
-    if ((isNetworkError || isServerError) && config.retryCount < MAX_RETRIES) {
+    if (canRetry && !isAbortedError && (isNetworkError || isServerError) && config.retryCount < MAX_RETRIES) {
       config.retryCount++;
 
       const delayMs = RETRY_DELAY * Math.pow(2, config.retryCount - 1);
@@ -290,7 +296,7 @@ axiosInstance.interceptors.response.use(
     }
 
     if (typeof error.response.data === 'object' && error.response.data !== null && error.response.data.error) {
-      const detailedError = new Error(error.response.data.error);
+      const detailedError = Object.assign(new Error(error.response.data.error), { status: error.response.status });
       return Promise.reject(detailedError);
     }
 
@@ -321,12 +327,13 @@ export const api = {
     return response.data;
   },
 
-  createGroup: async (name: string, description: string, aiMembers?: string[], avatarUrl?: string) => {
+  createGroup: async (name: string, description: string, aiMembers?: string[], avatarUrl?: string, spaceCategory?: GroupCreateInput['space_category']) => {
     const payload: GroupCreateInput = {
       name,
       description,
       ai_members: aiMembers,
-      avatar_url: avatarUrl
+      avatar_url: avatarUrl,
+      space_category: spaceCategory
     };
     const response = await axiosInstance.post('/groups', payload);
     return response.data;
@@ -415,19 +422,21 @@ export const api = {
     contentType: 'text' | 'code' | 'file' | 'system' = 'text',
     replyTo?: string | string[],
     metadata?: Record<string, any>,
-    attachments?: { id: string; name: string; type: string; size: number; url?: string }[]
+    attachments?: { id: string; name: string; type: string; size: number; url?: string }[],
+    clientMessageId?: string
   ): Promise<Message> => {
     const normalizedReplyTo = Array.isArray(replyTo)
       ? (replyTo.length > 0 ? replyTo[0] : null)
       : (replyTo ?? null);
-    const payload: MessageCreateInput = {
+    const payload: MessageCreateInput & { clientMessageId?: string } = {
       content,
       content_type: contentType,
       reply_to: normalizedReplyTo,
       metadata,
-      attachments
+      attachments,
+      clientMessageId
     };
-    const response = await axiosInstance.post(`/groups/${groupId}/messages`, payload);
+    const response = await axiosInstance.post(`/groups/${groupId}/messages`, payload, clientMessageId ? { headers: { 'Idempotency-Key': clientMessageId } } : undefined);
     return response.data;
   },
 
@@ -671,8 +680,8 @@ export const api = {
     return response.data;
   },
 
-  getMemoryDigest: async (limit = 12): Promise<MemoryDigest> => {
-    const response = await axiosInstance.get('/memory/digest', { params: { limit } });
+  getMemoryDigest: async (limit = 12, groupId?: string): Promise<MemoryDigest> => {
+    const response = await axiosInstance.get('/memory/digest', { params: { limit, ...(groupId ? { groupId } : {}) } });
     return response.data;
   },
 
@@ -767,8 +776,13 @@ export const api = {
     return response.data;
   },
 
-  synthesizeSpeech: async (text: string, voice: string, tone?: string, messageId?: string) => {
-    const response = await axiosInstance.post('/tts/synthesize', { text, voice, tone, messageId });
+  synthesizeSpeech: async (text: string, voice: string, tone: string | undefined, messageId: string | undefined, clientRequestId: string) => {
+    const response = await axiosInstance.post('/tts/synthesize', { text, voice, tone, messageId, clientRequestId });
+    return response.data;
+  },
+
+  getTTSEffect: async (clientRequestId: string) => {
+    const response = await axiosInstance.get(`/tts/effects/${encodeURIComponent(clientRequestId)}`);
     return response.data;
   },
 
@@ -916,7 +930,7 @@ export const api = {
     return response.data;
   },
 
-  createAgent: async (data: { name: string; description: string; openingMessage: string; enableSuggestions: boolean; capabilities: { scheduled_tasks: boolean; web_search: boolean; multimodal: boolean }; avatarUrl?: string | null }) => {
+  createAgent: async (data: { name: string; description: string; openingMessage: string; enableSuggestions: boolean; capabilities: { scheduled_tasks: boolean; web_search: boolean; multimodal: boolean }; avatarUrl?: string | null; modelId?: string | null }) => {
     const response = await axiosInstance.post('/agents', data);
     return response.data;
   },

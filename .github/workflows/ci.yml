@@ -9,6 +9,20 @@ on:
 jobs:
   backend-check:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_test_only
+          POSTGRES_DB: qunthink_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d qunthink_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,6 +37,8 @@ jobs:
         run: node --check src/index.js
         working-directory: ./backend
       - name: Backend tests
+        env:
+          QUNTHINK_TEST_PG_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_ci
         run: npm test
         working-directory: ./backend
       - name: Backend production dependency audit
@@ -42,6 +58,9 @@ jobs:
           cache-dependency-path: ./frontend/package-lock.json
       - name: Install frontend dependencies
         run: npm ci
+        working-directory: ./frontend
+      - name: Frontend tests
+        run: npm test
         working-directory: ./frontend
       - name: Frontend type check and production build (tsc + vite)
         run: npm run build

@@ -11,6 +11,8 @@ import { annotateFile, annotateWithoutFile, generateMediaDescription, annotateAn
 import { safeLog } from '../utils/logger.js';
 import { getKey } from '../utils/keyManager.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { readableSourceGroups, readableSourceFiles, markFileDeleted,
+  sourceMutationUncertain } from '../services/memory/persistentMemory.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -282,13 +284,11 @@ function resolveStoredFilePath(fileRecord, currentUserId) {
   return safeFilePath;
 }
 
-async function getAccessibleFileRecord(req, fileId, groupId) {
+async function accessibleFileInDb(db, userId, fileId, groupId) {
   if (!groupId) {
     return { db: null, file: null, error: 'group_id is required', status: 400 };
   }
-  const db = await req.getUserDb();
-  await db.read();
-  const file = db.data.files.find(f => f.id === fileId);
+  const file = (db.data.files || []).find(f => f.id === fileId);
   if (!file) {
     return { db, file: null, error: 'File not found', status: 404 };
   }
@@ -298,11 +298,32 @@ async function getAccessibleFileRecord(req, fileId, groupId) {
   if (!file.group_id) {
     return { db, file: null, error: '文件缺少群组归属', status: 403 };
   }
+  const ownerId = file.owner_user_id || file.uploader_id;
+  if (ownerId && ownerId !== userId) {
+    return { db, file: null, error: '禁止访问其他账号的文件', status: 403 };
+  }
   const group = db.data.groups.find(g => g.id === file.group_id);
   if (!group) {
     return { db, file: null, error: '群组不存在', status: 404 };
   }
+  if (!(await readableSourceFiles(userId, db, [file])).length) {
+    return { db, file: null, error: '文件或群组已删除', status: 404 };
+  }
   return { db, file, group, status: 200 };
+}
+
+async function getAccessibleFileRecord(req, fileId, groupId) {
+  const db = await req.getUserDb();
+  await db.read();
+  return accessibleFileInDb(db, req.userId, fileId, groupId);
+}
+
+async function readAccessibleFile(req, res, fileId, groupId, respond) {
+  return withWriteLock(req.userId, async () => {
+    const result = await getAccessibleFileRecord(req, fileId, groupId);
+    if (!result.file) return res.status(result.status).json({ error: result.error });
+    return respond(result.file, result.db);
+  });
 }
 
 async function removeStoredFileFromDisk(fileRecord, currentUserId) {
@@ -382,7 +403,6 @@ router.post('/files/upload', (req, res, next) => {
   });
 }, asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
-  await db.read();
 
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ error: 'No file uploaded' });
@@ -396,6 +416,7 @@ router.post('/files/upload', (req, res, next) => {
   const { group_id } = req.body;
   const uploaderId = req.userId;
   const uploadedFiles = [];
+  const uploadedRecords = [];
 
   if (!uploaderId) {
     await cleanupUploadedBatch(req.files);
@@ -407,7 +428,18 @@ router.post('/files/upload', (req, res, next) => {
     return res.status(400).json({ error: 'group_id is required' });
   }
 
-  const group = db.data.groups.find(entry => entry.id === group_id);
+  let group;
+  try {
+    group = await withWriteLock(req.userId, async () => {
+      await db.read();
+      const current = db.data.groups.find(entry => entry.id === group_id);
+      return current && (await readableSourceGroups(req.userId, db, [current])).length
+        ? current : null;
+    });
+  } catch (error) {
+    await cleanupUploadedBatch(req.files);
+    throw error;
+  }
   if (!group) {
     await cleanupUploadedBatch(req.files);
     return res.status(404).json({ error: '群组不存在' });
@@ -522,13 +554,41 @@ router.post('/files/upload', (req, res, next) => {
       created_at: new Date().toISOString()
     };
 
-    db.data.files.push(fileRecord);
+    uploadedRecords.push(fileRecord);
     uploadedFiles.push(toFileResponse(fileRecord));
   }
 
-  await withWriteLock(req.userId, async () => {
-    await db.write();
-  });
+  let outcome;
+  try {
+    outcome = await withWriteLock(req.userId, async () => {
+      await db.read();
+      const current = db.data.groups.find(entry => entry.id === group_id);
+      if (!current || !(await readableSourceGroups(req.userId, db, [current])).length) {
+        return { status: 404, error: '群组不存在' };
+      }
+      if ((await readableSourceFiles(req.userId, db, uploadedRecords)).length !== uploadedRecords.length) {
+        return { status: 410, error: '文件标识已撤销，请重新上传' };
+      }
+      if (uploadedRecords.some(record => (db.data.files || []).some(file => file.id === record.id))) {
+        return { status: 409, error: '文件标识冲突，请重新上传' };
+      }
+      const previousFiles = db.data.files;
+      db.data.files = [...(previousFiles || []), ...uploadedRecords];
+      try { await db.write(); }
+      catch (error) {
+        db.data.files = previousFiles;
+        throw error;
+      }
+      return { saved: true };
+    });
+  } catch (error) {
+    await cleanupUploadedBatch(req.files);
+    throw error;
+  }
+  if (!outcome.saved) {
+    await cleanupUploadedBatch(req.files);
+    return res.status(outcome.status).json({ error: outcome.error });
+  }
 
   res.status(201).json(
     uploadedFiles.length === 1
@@ -540,34 +600,20 @@ router.post('/files/upload', (req, res, next) => {
 router.get('/files/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const groupId = typeof req.query.group_id === 'string' ? req.query.group_id : undefined;
-  const { file, error, status } = await getAccessibleFileRecord(req, id, groupId);
-  if (!file) {
-    return res.status(status).json({ error });
-  }
-
-  res.json(toFileResponse(file));
+  return readAccessibleFile(req, res, id, groupId, file => res.json(toFileResponse(file)));
 }));
 
 router.get('/files/:id/content', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const groupId = typeof req.query.group_id === 'string' ? req.query.group_id : undefined;
-  const { file, error, status } = await getAccessibleFileRecord(req, id, groupId);
-  if (!file) {
-    return res.status(status).json({ error });
-  }
-
-  res.json({ content: file.parsed_content });
+  return readAccessibleFile(req, res, id, groupId,
+    file => res.json({ content: file.parsed_content }));
 }));
 
 router.get('/files/:id/media-description', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const groupId = typeof req.query.group_id === 'string' ? req.query.group_id : undefined;
-  const { file, error, status } = await getAccessibleFileRecord(req, id, groupId);
-  if (!file) {
-    return res.status(status).json({ error });
-  }
-
-  res.json({
+  return readAccessibleFile(req, res, id, groupId, file => res.json({
     id: file.id,
     filename: file.filename,
     mime_type: file.mime_type,
@@ -575,13 +621,14 @@ router.get('/files/:id/media-description', asyncHandler(async (req, res) => {
     parsed_content: typeof file.parsed_content === 'string' ? file.parsed_content.substring(0, 500) : '',
     search_description: file.search_description || '',
     search_tags: file.search_tags || []
-  });
+  }));
 }));
 
 router.post('/files/:id/analyze', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const groupId = typeof req.body?.group_id === 'string' ? req.body.group_id : undefined;
-  const { db, file, error, status } = await getAccessibleFileRecord(req, id, groupId);
+  const { file, error, status } = await withWriteLock(req.userId,
+    () => getAccessibleFileRecord(req, id, groupId));
   if (!file) {
     return res.status(status).json({ error });
   }
@@ -602,22 +649,32 @@ router.post('/files/:id/analyze', asyncHandler(async (req, res) => {
         file.file_size,
         file.parsed_content
       );
-      file.media_description = mediaDescription;
-      await withWriteLock(req.userId, async () => {
-        await db.write();
-      });
     } else if (!mediaDescription && typeof file.parsed_content === 'string') {
       mediaDescription = file.parsed_content.substring(0, 500);
-      file.media_description = mediaDescription;
-      await withWriteLock(req.userId, async () => {
-        await db.write();
-      });
     }
 
+    // Analysis can take seconds. A group may be revoked while it runs; recheck
+    // the authoritative record under the account lock before saving or replying.
+    const current = await withWriteLock(req.userId, async () => {
+      const result = await getAccessibleFileRecord(req, id, groupId);
+      if (!result.file) return result;
+      if (mediaDescription && !result.file.media_description) {
+        const previous = result.file.media_description;
+        result.file.media_description = mediaDescription;
+        try { await result.db.write(); }
+        catch (writeError) {
+          result.file.media_description = previous;
+          throw writeError;
+        }
+      }
+      return result;
+    });
+    if (!current.file) return res.status(current.status).json({ error: current.error });
+
     res.json({
-      id: file.id,
-      filename: file.filename,
-      media_description: mediaDescription,
+      id: current.file.id,
+      filename: current.file.filename,
+      media_description: current.file.media_description || mediaDescription,
       status: 'success'
     });
   } catch (error) {
@@ -631,25 +688,24 @@ router.post('/files/:id/analyze', asyncHandler(async (req, res) => {
 router.get('/files/public/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const token = typeof req.query.token === 'string' ? req.query.token : '';
+  const groupId = typeof req.query.group_id === 'string' ? req.query.group_id : undefined;
 
   const tokenOwnerId = verifyDownloadToken(id, token);
   if (!tokenOwnerId) {
     return res.status(401).json({ error: '下载链接无效或已过期' });
   }
 
-  const db = await getUserDb(tokenOwnerId);
-  await db.read();
-  const file = db.data.files.find(f => f.id === id) || null;
-  if (!file) {
-    return res.status(404).json({ error: 'File not found' });
-  }
-
-  const safeFilePath = resolveStoredFilePath(file, tokenOwnerId);
-  if (!safeFilePath || !fs.existsSync(safeFilePath)) {
-    return res.status(404).json({ error: 'File not found on disk' });
-  }
-
-  sendFileDownload(res, file, safeFilePath);
+  return withWriteLock(tokenOwnerId, async () => {
+    const db = await getUserDb(tokenOwnerId);
+    await db.read();
+    const { file, error, status } = await accessibleFileInDb(db, tokenOwnerId, id, groupId);
+    if (!file) return res.status(status).json({ error });
+    const safeFilePath = resolveStoredFilePath(file, tokenOwnerId);
+    if (!safeFilePath || !fs.existsSync(safeFilePath)) {
+      return res.status(404).json({ error: 'File not found on disk' });
+    }
+    return sendFileDownload(res, file, safeFilePath);
+  });
 }));
 
 router.get('/files/:id/download', asyncHandler(async (req, res) => {
@@ -657,67 +713,62 @@ router.get('/files/:id/download', asyncHandler(async (req, res) => {
   const token = typeof req.query.token === 'string' ? req.query.token : '';
   const groupId = typeof req.query.group_id === 'string' ? req.query.group_id : undefined;
 
-  let file = null;
-  let effectiveOwner = req.userId;
-
   const tokenOwnerId = token ? verifyDownloadToken(id, token) : null;
-  if (tokenOwnerId) {
-    const db = await getUserDb(tokenOwnerId);
-    await db.read();
-    file = db.data.files.find(f => f.id === id) || null;
-    effectiveOwner = tokenOwnerId;
-    if (!file) {
-      return res.status(404).json({ error: 'File not found' });
-    }
-  } else {
-    const { file: record, error, status } = await getAccessibleFileRecord(req, id, groupId);
-    if (!record) {
-      return res.status(status).json({ error });
-    }
-    const ownerUserId = record.owner_user_id || record.uploader_id;
-    if (ownerUserId && ownerUserId !== req.userId) {
-      return res.status(403).json({ error: '禁止访问' });
-    }
-    file = record;
+  if (tokenOwnerId && tokenOwnerId !== req.userId) {
+    return res.status(403).json({ error: '禁止访问其他账号的文件' });
   }
-
-  const safeFilePath = resolveStoredFilePath(file, effectiveOwner);
-  if (!safeFilePath) {
-    return res.status(403).json({ error: '禁止访问' });
-  }
-
-  if (!fs.existsSync(safeFilePath)) {
-    return res.status(404).json({ error: 'File not found on disk' });
-  }
-
-  sendFileDownload(res, file, safeFilePath);
+  return readAccessibleFile(req, res, id, groupId, file => {
+    const safeFilePath = resolveStoredFilePath(file, req.userId);
+    if (!safeFilePath) return res.status(403).json({ error: '禁止访问' });
+    if (!fs.existsSync(safeFilePath)) {
+      return res.status(404).json({ error: 'File not found on disk' });
+    }
+    return sendFileDownload(res, file, safeFilePath);
+  });
 }));
 
 router.delete('/files/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const groupId = typeof req.body?.group_id === 'string' ? req.body.group_id : undefined;
-  const { db, file, error, status } = await getAccessibleFileRecord(req, id, groupId);
-  if (!file) {
-    return res.status(status).json({ error });
+  const outcome = await withWriteLock(req.userId, async () => {
+    const { db, file, error, status } = await getAccessibleFileRecord(req, id, groupId);
+    if (!file) return { error, status };
+    const ownerId = file.owner_user_id || file.uploader_id;
+    if (ownerId && ownerId !== req.userId) return { error: '禁止删除其他用户的文件', status: 403 };
+
+    await markFileDeleted(req.userId, db, file.group_id, id);
+    const previousFiles = db.data.files;
+    db.data.files = previousFiles.filter(entry => entry.id !== id);
+    try {
+      await db.write();
+    } catch (writeError) {
+      db.data.files = previousFiles;
+      throw sourceMutationUncertain(req.userId, writeError);
+    }
+    return { file };
+  });
+  if (!outcome.file) return res.status(outcome.status).json({ error: outcome.error });
+
+  try {
+    await removeStoredFileFromDisk(outcome.file, req.userId);
+  } catch (unlinkError) {
+    safeLog('warn', '文件记录已删除，但磁盘文件清理失败', { fileId: id, error: unlinkError?.message });
+    return res.status(202).json({ success: true, cleanup_pending: true });
   }
-
-  db.data.files = (db.data.files || []).filter(entry => entry.id !== id);
-  await withWriteLock(req.userId, async () => {
-    await db.write();
-  });
-
-  removeStoredFileFromDisk(file, req.userId).catch(unlinkError => {
-    safeLog('warn', '删除磁盘文件失败', { fileId: id, error: unlinkError?.message });
-  });
 
   res.json({ success: true });
 }));
 
 router.post('/files/reindex', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
-  await db.read();
-
-  const files = db.data.files || [];
+  const files = await withWriteLock(req.userId, async () => {
+    await db.read();
+    return (await readableSourceFiles(req.userId, db))
+      .filter(file =>
+        (!file.owner_user_id || file.owner_user_id === req.userId) &&
+        (!file.uploader_id || file.uploader_id === req.userId))
+      .map(file => ({ ...file }));
+  });
   const candidates = [];
 
   for (const file of files) {
@@ -734,13 +785,19 @@ router.post('/files/reindex', asyncHandler(async (req, res) => {
   const processReindexFile = async (file) => {
     let searchDescription = '';
     let searchTags = [];
+    let preparedMediaDescription;
 
     try {
       const safeFilePath = resolveStoredFilePath(file, req.userId);
       const fileExists = !!safeFilePath && fs.existsSync(safeFilePath);
       const textContent = typeof file.parsed_content === 'string' ? file.parsed_content : '';
       if (fileExists) {
-        const annotation = await annotateFile(safeFilePath, file.mime_type, file.filename, file.file_size, textContent);
+        const imageFile = /\.(?:jpe?g|png|gif|webp|bmp|svg|tiff?|ico|avif|heic|heif)$/i.test(file.filename);
+        const result = imageFile
+          ? await annotateAndDescribe(safeFilePath, file.mime_type, file.filename, file.file_size, textContent)
+          : { annotation: await annotateFile(safeFilePath, file.mime_type, file.filename, file.file_size, textContent) };
+        const annotation = result.annotation;
+        preparedMediaDescription = result.description;
         if (annotation) {
           searchDescription = annotation.description || '';
           searchTags = annotation.tags || [];
@@ -773,7 +830,9 @@ router.post('/files/reindex', asyncHandler(async (req, res) => {
       try {
         const safeFilePath2 = resolveStoredFilePath(file, req.userId);
         const fileExists2 = !!safeFilePath2 && fs.existsSync(safeFilePath2);
-        if (fileExists2) {
+        if (preparedMediaDescription !== undefined) {
+          file.media_description = preparedMediaDescription;
+        } else if (fileExists2) {
           file.media_description = await generateMediaDescription(
             safeFilePath2,
             file.mime_type,
@@ -807,11 +866,37 @@ router.post('/files/reindex', asyncHandler(async (req, res) => {
     Array.from({ length: Math.min(REINDEX_CONCURRENCY, candidates.length) }, () => reindexWorker())
   );
 
-  await withWriteLock(req.userId, async () => {
-    await db.write();
+  const reindexed = await withWriteLock(req.userId, async () => {
+    await db.read();
+    const liveFiles = await readableSourceFiles(req.userId, db);
+    const liveIds = new Set(liveFiles.map(file => file.id));
+    const updates = [];
+    for (const candidate of candidates) {
+      const current = (db.data.files || []).find(file => file.id === candidate.id);
+      if (!current || !liveIds.has(current.id) ||
+          current.group_id !== candidate.group_id ||
+          current.stored_filename !== candidate.stored_filename ||
+          current.created_at !== candidate.created_at ||
+          (current.owner_user_id || current.uploader_id || req.userId) !== req.userId) continue;
+      updates.push({ current, previous: {
+        search_description: current.search_description,
+        search_tags: current.search_tags,
+        media_description: current.media_description
+      }, candidate });
+      current.search_description = candidate.search_description;
+      current.search_tags = candidate.search_tags;
+      current.media_description = candidate.media_description;
+    }
+    if (!updates.length) return 0;
+    try { await db.write(); }
+    catch (error) {
+      for (const { current, previous } of updates) Object.assign(current, previous);
+      throw error;
+    }
+    return updates.length;
   });
 
-  res.json({ reindexed: candidates.length, total: files.length });
+  res.json({ reindexed, total: files.length });
 }));
 
 export default router;

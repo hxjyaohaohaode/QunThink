@@ -1,18 +1,18 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
-import { createReadStream } from 'fs';
-import crypto from 'crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import axios from 'axios';
-import { getDataDir, withWriteLock } from '../models/db.js';
+import { getDataDir, withWriteLock, clearUserDbCache } from '../models/db.js';
 import { validateBody, ttsSchema } from '../validators/index.js';
-import { getAIConfig, getUserApiConfigForModel, normalizeBaseUrl } from '../services/ai/index.js';
-import { getSafeExternalRequestOptions } from '../utils/safeExternalUrl.js';
-import { getKey } from '../utils/keyManager.js';
+import { defaultModelId, resolveModel } from '../services/ai/catalog.js';
+import { getSafeAiRequestOptions } from '../utils/safeExternalUrl.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { hasAudioContainer } from '../services/ai/audioValidation.js';
+import { revokeTtsForMessages, drainTtsPendingDeletes } from '../services/ttsDeletion.js';
+import { readableSourceMessages } from '../services/memory/persistentMemory.js';
 
 const router = express.Router();
-const MIMO_API_BASE_URL = (process.env.MIMO_API_BASE_URL || process.env.MIMO_BASE_URL || 'https://api.xiaomimimo.com/v1').replace(/\/$/, '');
 const AUDIO_MIME_TYPES = {
   wav: 'audio/wav',
   mp3: 'audio/mpeg',
@@ -23,87 +23,116 @@ const AUDIO_MIME_TYPES = {
 };
 
 const TTS_VOICES = [
-  { id: 'mimo_default', name: '默认音色', desc: 'MiMo 默认音色', gender: 'female', tone: 'default' },
-  { id: 'default_zh', name: '中文女声', desc: 'MiMo 中文女声', gender: 'female', tone: 'zh' },
-  { id: 'default_en', name: '英文女声', desc: 'MiMo 英文女声', gender: 'female', tone: 'en' }
+  { id: 'mimo_default', name: '模型音色', desc: '使用模型中心配置且已测试的音色', gender: 'unknown', tone: 'default' }
 ];
 
 const TTS_TONES = [
-  { id: 'normal', name: '正常', desc: '标准语调和语速', speed: 1.0, pitch: 1.0, emotion: 'neutral' },
-  { id: 'slow_gentle', name: '缓慢温柔', desc: '语速较慢，语调温柔', speed: 0.8, pitch: 0.9, emotion: 'gentle' },
-  { id: 'fast_excited', name: '快速兴奋', desc: '语速较快，充满活力', speed: 1.2, pitch: 1.1, emotion: 'excited' },
-  { id: 'calm', name: '平静舒缓', desc: '语速均匀，语调平稳', speed: 0.9, pitch: 1.0, emotion: 'calm' },
-  { id: 'emotional', name: '情感丰富', desc: '语调变化大，情感充沛', speed: 1.0, pitch: 1.2, emotion: 'emotional' }
+  { id: 'normal', name: '默认语调', desc: '使用已验证模型的默认语调', speed: 1.0, pitch: 1.0, emotion: 'neutral' }
 ];
 
 const TTS_DAILY_QUOTA = 50;
-const TTS_AUDIO_TOKEN_TTL_MS = 10 * 60 * 1000;
 const ORPHAN_TTS_TTL_MS = 24 * 60 * 60 * 1000;
 
-const ttsDailyUsage = new Map();
-let ttsAudioTokenSecret = null;
-
-function consumeTtsDailyQuota(userId) {
-  const today = new Date().toISOString().slice(0, 10);
-  let usage = ttsDailyUsage.get(userId);
-  if (!usage || usage.date !== today) {
-    usage = { date: today, count: 0 };
-    ttsDailyUsage.set(userId, usage);
-  }
-  if (usage.count >= TTS_DAILY_QUOTA) {
-    return false;
-  }
-  usage.count += 1;
-  return true;
+function synthesisHash(input) {
+  return createHash('sha256').update(JSON.stringify(input)).digest('hex');
 }
 
-function getTtsAudioTokenSecret() {
-  if (ttsAudioTokenSecret) {
-    return ttsAudioTokenSecret;
-  }
-  try {
-    const key = getKey();
-    if (key && key.length >= 32) {
-      ttsAudioTokenSecret = key;
-      return ttsAudioTokenSecret;
+async function readableTtsMessages(userId, db) {
+  return (await readableSourceMessages(userId, db)).filter(message =>
+    db.data.groups?.some(group => group.id === message.group_id));
+}
+
+function hasAccessibleAudio(data, audioUrl, readableMessages) {
+  const filename = path.basename(audioUrl || '');
+  const record = data.ttsAudioFiles?.find(audio => audio.filename === filename);
+  if (!record) return false;
+  return record.messageId
+    ? readableMessages.some(message => message.id === record.messageId &&
+      message.metadata?.tts?.audioUrl === `/api/tts/audio/${filename}`)
+    : Number.isSafeInteger(record.createdAt) && Date.now() - record.createdAt < ORPHAN_TTS_TTL_MS;
+}
+
+async function claimSynthesis(req, hash, modelId, messageId, sourceSnapshot) {
+  const db = await req.getUserDb();
+  return withWriteLock(req.userId, async () => {
+    await db.read();
+    if (messageId) {
+      const source = (await readableTtsMessages(req.userId, db)).find(message => message.id === messageId);
+      if (!source || !sameSource(source, sourceSnapshot)) return { sourceUnavailable: true };
     }
-  } catch (error) {
-    console.warn('[TTS] 读取音频令牌签名密钥失败，回退到派生密钥:', error?.message);
-  }
-  console.warn('[TTS] keyManager 未初始化，使用 DATA_DIR 派生的静态密钥签署音频访问令牌');
-  ttsAudioTokenSecret = crypto.createHash('sha256').update(`tts-audio-token:${getDataDir()}`).digest();
-  return ttsAudioTokenSecret;
+    db.data.ttsEffects ||= [];
+    const prior = db.data.ttsEffects.find(effect => effect.id === req.body.clientRequestId);
+    if (prior && prior.requestHash !== hash) return { conflict: true };
+    // A new browser session may have lost its UUID. Reuse unresolved work
+    // with the same input, even when the caller supplied a fresh UUID.
+    const unresolved = prior || [...db.data.ttsEffects].reverse().find(effect =>
+      effect.requestHash === hash && ['running', 'unknown'].includes(effect.status));
+    if (unresolved) {
+      if (unresolved.status === 'running' && Date.now() - unresolved.createdAt > 120000) {
+        unresolved.status = 'unknown';
+        unresolved.updatedAt = Date.now();
+        await db.write();
+      }
+      return { replay: structuredClone(unresolved) };
+    }
+    if (!modelId) return { missing: true };
+    const day = new Date().toISOString().slice(0, 10);
+    if (db.data.ttsEffects.filter(effect => effect.day === day).length >= TTS_DAILY_QUOTA) {
+      return { quotaExceeded: true };
+    }
+    db.data.ttsEffects.push({
+      id: req.body.clientRequestId, requestHash: hash, status: 'running',
+      modelId, day, createdAt: Date.now(), updatedAt: Date.now(), response: null
+    });
+    await db.write();
+    return { claimed: true };
+  });
 }
 
-function signTtsAudioToken(filename, expiresAt = Date.now() + TTS_AUDIO_TOKEN_TTL_MS) {
-  const signature = crypto.createHmac('sha256', getTtsAudioTokenSecret())
-    .update(`${filename}.${expiresAt}`)
-    .digest('base64url');
-  return `${expiresAt}.${signature}`;
+function sameSource(message, snapshot) {
+  return snapshot && message.content === snapshot.content &&
+    message.group_id === snapshot.groupId &&
+    (message.revision || null) === snapshot.revision &&
+    (message.edited_at || null) === snapshot.editedAt &&
+    (message.metadata?.tts?.audioUrl || null) === snapshot.audioUrl;
 }
 
-function verifyTtsAudioToken(filename, token) {
-  if (typeof token !== 'string' || token.length === 0) {
-    return false;
-  }
-  const separatorIndex = token.indexOf('.');
-  if (separatorIndex <= 0) {
-    return false;
-  }
-  const expiresAt = Number(token.slice(0, separatorIndex));
-  const signature = token.slice(separatorIndex + 1);
-  if (!Number.isSafeInteger(expiresAt) || Date.now() > expiresAt) {
-    return false;
-  }
-  const expected = crypto.createHmac('sha256', getTtsAudioTokenSecret())
-    .update(`${filename}.${expiresAt}`)
-    .digest('base64url');
-  const givenBuffer = Buffer.from(signature);
-  const expectedBuffer = Buffer.from(expected);
-  if (givenBuffer.length !== expectedBuffer.length) {
-    return false;
-  }
-  return crypto.timingSafeEqual(givenBuffer, expectedBuffer);
+async function markSynthesisUnknown(req, reason) {
+  const db = await req.getUserDb();
+  await withWriteLock(req.userId, async () => {
+    await db.read();
+    const effect = db.data.ttsEffects?.find(item => item.id === req.body.clientRequestId);
+    if (!effect) return;
+    // A write may commit and then lose its acknowledgement. The caller has
+    // already removed the audio file, so an observed success receipt cannot
+    // remain visible with a missing artifact.
+    if (effect.status === 'succeeded' && effect.response?.audio_url) {
+      const audioUrl = effect.response.audio_url;
+      const filename = path.basename(audioUrl);
+      const record = db.data.ttsAudioFiles?.find(audio => audio.filename === filename);
+      if (record?.messageId) {
+        const message = db.data.messages?.find(entry => entry.id === record.messageId);
+        if (message?.metadata?.tts?.audioUrl === audioUrl) {
+          const nextMetadata = { ...message.metadata };
+          delete nextMetadata.tts;
+          message.metadata = nextMetadata;
+        }
+      }
+      db.data.ttsAudioFiles = (db.data.ttsAudioFiles || []).filter(audio => audio.filename !== filename);
+      db.data.ttsPendingDeletes = [...new Set([...(db.data.ttsPendingDeletes || []), filename])];
+    }
+    effect.status = 'unknown';
+    effect.response = null;
+    effect.reason = reason;
+    effect.updatedAt = Date.now();
+    try { await db.write(); }
+    catch {
+      clearUserDbCache(req.userId);
+      throw Object.assign(new Error('语音效果记录写入结果不确定，请刷新后核验'), {
+        code: 'TTS_STATE_UNCERTAIN', statusCode: 503, isOperational: true
+      });
+    }
+  });
 }
 
 function scheduleOrphanTtsCleanup(audioPath) {
@@ -131,149 +160,200 @@ router.get('/voices', (req, res) => {
 
 router.post('/synthesize', validateBody(ttsSchema), asyncHandler(async (req, res) => {
   const { text, voice, tone, messageId } = req.body;
+  let sourceSnapshot = null;
   if (!text || typeof text !== 'string') {
     return res.status(400).json({ error: '文本内容不能为空' });
   }
   if (text.length > 5000) {
     return res.status(400).json({ error: '文本内容不能超过5000字符' });
   }
-  if (!consumeTtsDailyQuota(req.userId)) {
-    return res.status(429).json({ error: '今日语音合成次数已达上限，请明天再试' });
-  }
   const speechText = sanitizeTtsText(text);
 
   if (!speechText) {
     return res.status(400).json({ error: '文本内容不能为空' });
   }
-
-  const voiceConfig = TTS_VOICES.find(entry => entry.id === voice) || TTS_VOICES[0];
-  const toneConfig = TTS_TONES.find(entry => entry.id === tone) || TTS_TONES[0];
-  const audioId = `tts_${messageId || Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-
-  const audioResult = await callMiMoTTS(speechText, voiceConfig.id, toneConfig, req.userId);
-
-  if (!audioResult?.buffer?.length) {
-    throw new Error('未收到有效的音频数据');
-  }
-
-  const audioFormat = normalizeAudioFormat(audioResult.format);
-  const audioFilename = `${audioId}.${audioFormat}`;
-  const audioPath = path.join(ttsDir, audioFilename);
-  await fs.writeFile(audioPath, audioResult.buffer);
-
-  if (!messageId) {
-    scheduleOrphanTtsCleanup(audioPath);
-  }
-
-  const duration = estimateDuration(speechText, toneConfig.speed);
-  const audioUrl = buildAudioUrl(audioId, audioFormat);
-  const ttsMetadata = {
-    id: audioId,
-    audioUrl,
-    duration,
-    voiceId: voiceConfig.id,
-    toneId: toneConfig.id,
-    createdAt: new Date().toISOString(),
-    transcript: speechText,
-    format: audioFormat,
-    provider: audioResult.provider || 'mimo-v2.5-tts'
-  };
-
   if (messageId) {
-    await persistTtsMetadata(req, messageId, ttsMetadata);
+    const db = await req.getUserDb();
+    sourceSnapshot = await withWriteLock(req.userId, async () => {
+      await db.read();
+      const source = (await readableTtsMessages(req.userId, db)).find(message => message.id === messageId);
+      return source ? { content: source.content, groupId: source.group_id,
+        revision: source.revision || null, editedAt: source.edited_at || null,
+        audioUrl: source.metadata?.tts?.audioUrl || null } : null;
+    });
+    if (!sourceSnapshot) return res.status(404).json({ error: '关联消息不存在或无权访问' });
   }
+  const voiceConfig = voice ? TTS_VOICES.find(entry => entry.id === voice) : TTS_VOICES[0];
+  const toneConfig = tone ? TTS_TONES.find(entry => entry.id === tone) : TTS_TONES[0];
+  if (!voiceConfig || !toneConfig) return res.status(400).json({ error: '所选音色或语调未通过当前配置验证' });
+  const hash = synthesisHash({ speechText, voice: voiceConfig.id, tone: toneConfig.id, messageId: messageId || null });
+  let claim = await claimSynthesis(req, hash, null, messageId, sourceSnapshot);
+  let modelId;
+  let config;
+  if (claim.missing) {
+    modelId = await defaultModelId(req.userId, 'tts');
+    config = await resolveModel(req.userId, modelId, 'tts');
+    if (config.protocol !== 'openai') throw Object.assign(new Error('所选服务商协议不支持语音合成'), { status: 400 });
+    claim = await claimSynthesis(req, hash, modelId, messageId, sourceSnapshot);
+  }
+  if (claim.sourceUnavailable) return res.status(410).json({ error: '关联消息已撤回或修订' });
+  if (claim.conflict) return res.status(409).json({ error: '幂等键已用于不同的语音请求' });
+  if (claim.quotaExceeded) return res.status(429).json({ error: '今日语音合成次数已达上限，请明天再试' });
+  if (claim.replay) {
+    if (claim.replay.status === 'succeeded') {
+      const db = await req.getUserDb();
+      const accessible = await withWriteLock(req.userId, async () => {
+        await db.read();
+        return hasAccessibleAudio(db.data, claim.replay.response?.audio_url,
+          await readableTtsMessages(req.userId, db));
+      });
+      if (!accessible) {
+        return res.status(410).json({ error: '该次语音已被删除，不会重复合成' });
+      }
+      return res.json(claim.replay.response);
+    }
+    return res.status(202).json({ success: false, status: claim.replay.status,
+      requestId: claim.replay.id, possibleCharge: true,
+      error: '服务商结果尚未核验；同一请求不会自动再次调用' });
+  }
+  const audioId = `tts_${messageId || Date.now()}_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  let audioPath = null;
+  try {
+    const audioResult = await callMiMoTTS(speechText, voiceConfig.id, toneConfig, config);
+    if (!audioResult?.buffer?.length) throw new Error('未收到有效的音频数据');
+    const audioFormat = normalizeAudioFormat(audioResult.format);
+    if (!hasAudioContainer(audioResult.buffer, audioFormat)) {
+      throw new Error('语音服务返回了损坏或格式不符的音频');
+    }
+    const audioFilename = `${audioId}.${audioFormat}`;
+    audioPath = path.join(ttsDir, audioFilename);
+    await fs.writeFile(audioPath, audioResult.buffer);
+    const duration = estimateDuration(speechText, toneConfig.speed);
+    const audioUrl = buildAudioUrl(audioId, audioFormat);
+    const ttsMetadata = {
+      id: audioId, audioUrl, duration, voiceId: voiceConfig.id, toneId: toneConfig.id,
+      createdAt: new Date().toISOString(), transcript: speechText,
+      format: audioFormat, provider: audioResult.provider || config.providerId
+    };
+    const response = { success: true, audio_id: audioId, audio_url: audioUrl, duration,
+      voice: voiceConfig, tone: toneConfig, transcript: speechText,
+      format: audioFormat, requestId: req.body.clientRequestId };
+    const attached = await persistTtsMetadata(req, messageId, sourceSnapshot, ttsMetadata, audioFilename, response);
+    if (messageId && !attached) throw new Error('SOURCE_CHANGED_DURING_SYNTHESIS');
+    if (!messageId) scheduleOrphanTtsCleanup(audioPath);
+    return res.json(response);
+  } catch (error) {
+    if (audioPath) await fs.unlink(audioPath).catch(() => {});
+    console.warn('[TTS] 合成结果待核验', {
+      requestId: req.body.clientRequestId, modelId,
+      failureCode: error?.code || (error?.response?.status ? `HTTP_${error.response.status}` : 'UNCLASSIFIED')
+    });
+    await markSynthesisUnknown(req, error?.message === 'SOURCE_CHANGED_DURING_SYNTHESIS'
+      ? 'SOURCE_CHANGED_DURING_SYNTHESIS' : 'PROVIDER_OR_STORAGE_RESULT_UNCERTAIN');
+    return res.status(202).json({ success: false, status: 'unknown', requestId: req.body.clientRequestId,
+      possibleCharge: true, error: '语音结果未知或无可用成果，可能已产生服务商费用；请先核验，不要新建请求盲目重试' });
+  }
+}));
 
-  res.json({
-    success: true,
-    audio_id: audioId,
-    audio_url: audioUrl,
-    duration,
-    voice: voiceConfig,
-    tone: toneConfig,
-    transcript: speechText,
-    format: audioFormat,
-    audio_token: signTtsAudioToken(audioFilename)
+router.get('/effects/:requestId', asyncHandler(async (req, res) => {
+  const db = await req.getUserDb();
+  const result = await withWriteLock(req.userId, async () => {
+    await db.read();
+    const effect = db.data.ttsEffects?.find(item => item.id === req.params.requestId);
+    if (!effect) return null;
+    const accessible = effect.status === 'succeeded' && hasAccessibleAudio(db.data,
+      effect.response?.audio_url, await readableTtsMessages(req.userId, db));
+    return { effect: structuredClone(effect), accessible };
   });
+  const effect = result?.effect;
+  if (!effect) return res.status(404).json({ error: '合成请求不存在' });
+  const accessible = result.accessible;
+  const status = effect.status === 'succeeded' && !accessible ? 'deleted' : effect.status;
+  res.set('Cache-Control', 'no-store').json({ requestId: effect.id, status,
+    modelId: effect.modelId, possibleCharge: true,
+    response: accessible ? effect.response : null });
 }));
 
 router.get('/messages/:messageId', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
-  await db.read();
-
-  const message = db.data.messages.find(entry => entry.id === req.params.messageId);
-  if (!message?.metadata?.tts) {
+  const audio = await withWriteLock(req.userId, async () => {
+    await db.read();
+    const message = (await readableTtsMessages(req.userId, db))
+      .find(entry => entry.id === req.params.messageId);
+    return message?.metadata?.tts ? structuredClone(message.metadata.tts) : null;
+  });
+  if (!audio) {
     return res.status(404).json({ error: '未找到语音数据' });
   }
 
-  return res.json({
+  return res.set('Cache-Control', 'no-store').json({
     success: true,
-    audio: message.metadata.tts
+    audio
   });
 }));
 
 router.delete('/messages/:messageId', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
-  await db.read();
-
-  const message = db.data.messages.find(entry => entry.id === req.params.messageId);
-  if (!message) {
-    return res.status(404).json({ error: '消息不存在' });
-  }
-
-  const ttsMetadata = message.metadata?.tts;
-  if (!ttsMetadata?.audioUrl) {
-    return res.status(404).json({ error: '该消息没有可删除的语音' });
-  }
-
-  const filename = path.basename(ttsMetadata.audioUrl);
-  const audioPath = path.join(ttsDir, filename);
-  try {
-    await fs.unlink(audioPath);
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
+  const outcome = await withWriteLock(req.userId, async () => {
+    // Revoke the authoritative ownership before attempting the filesystem
+    // effect. A failed unlink leaves an inaccessible file for cleanup.
+    await db.read();
+    const message = (await readableTtsMessages(req.userId, db))
+      .find(entry => entry.id === req.params.messageId);
+    if (!message) return { status: 404, error: '消息不存在' };
+    const audioUrl = message.metadata?.tts?.audioUrl;
+    if (!audioUrl) return { status: 404, error: '该消息没有可删除的语音' };
+    const filename = path.basename(audioUrl);
+    const registered = db.data.ttsAudioFiles?.some(audio => audio.filename === filename && audio.messageId === message.id);
+    const legacy = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(message.id) &&
+      filename.startsWith(`tts_${message.id}_`) &&
+      /^tts_[\da-f-]{36}_[a-z0-9]{8}\.(wav|mp3|ogg|flac|aac|m4a)$/i.test(filename) &&
+      audioUrl === `/api/tts/audio/${filename}`;
+    if (!registered && !legacy) return { status: 409, error: '音频归属尚未核验，请勿删除其他文件' };
+    const previousMetadata = message.metadata;
+    const previousAudio = db.data.ttsAudioFiles;
+    const previousPending = db.data.ttsPendingDeletes;
+    revokeTtsForMessages(db.data, [message.id]);
+    const nextMetadata = { ...(message.metadata || {}) };
+    delete nextMetadata.tts;
+    message.metadata = nextMetadata;
+    try { await db.write(); }
+    catch (error) {
+      message.metadata = previousMetadata;
+      db.data.ttsAudioFiles = previousAudio;
+      db.data.ttsPendingDeletes = previousPending;
       throw error;
     }
-  }
-
-  const nextMetadata = { ...(message.metadata || {}) };
-  delete nextMetadata.tts;
-  message.metadata = nextMetadata;
-
-  await withWriteLock(req.userId, async () => {
-    await db.write();
+    return { filename };
   });
-
-  return res.json({ success: true });
+  if (!outcome.filename) return res.status(outcome.status).json({ error: outcome.error });
+  const pending = await drainTtsPendingDeletes(req.userId);
+  return res.json({ success: true, fileDeletionPending: pending > 0 });
 }));
 
-async function callMiMoTTS(text, voice, toneConfig, userId) {
-  const ttsConfig = getAIConfig('mimo_tts');
-  const userConfig = userId ? await getUserApiConfigForModel(userId, 'mimo_tts') : null;
-  const apiKey = userConfig?.apiKey || ttsConfig?.apiKey || process.env.MIMO_API_KEY;
-  const baseUrl = userConfig?.baseUrl
-    ? normalizeBaseUrl(userConfig.baseUrl)
-    : (ttsConfig?.endpoint || `${MIMO_API_BASE_URL}/chat/completions`).replace(/\/chat\/completions$/, '');
-  const endpoint = `${baseUrl}/chat/completions`;
-  // 对环境变量和用户自定义端点统一执行 SSRF/重定向防护。
-  // 不能只保护用户配置：MIMO_BASE_URL 也属于可部署时注入的网络边界。
-  const externalRequestOptions = await getSafeExternalRequestOptions(endpoint);
-
-  if (!apiKey) {
-    throw new Error('未配置 MIMO_API_KEY，无法调用 MiMo TTS');
+async function callMiMoTTS(text, voice, toneConfig, config) {
+  const apiKey = config.apiKey;
+  const endpoint = config.ttsMode === 'chat-audio' ? config.endpoint : config.baseUrl + '/audio/speech';
+  const externalRequestOptions = await getSafeAiRequestOptions(endpoint);
+  if (config.ttsMode !== 'chat-audio') {
+    const response = await axios.post(endpoint, {
+      model: config.model, input: text, voice: voice === 'mimo_default' ? (config.ttsVoice || 'alloy') : voice,
+      response_format: 'wav', speed: toneConfig?.speed || 1
+    }, { ...externalRequestOptions, headers: { Authorization: 'Bearer ' + apiKey }, responseType: 'arraybuffer', timeout: 90000, maxContentLength: 20 * 1024 * 1024 });
+    const type = response.headers['content-type'] || '';
+    if (!type.startsWith('audio/') && !type.includes('octet-stream')) throw new Error('语音服务未返回音频');
+    return buildAudioResult(Buffer.from(response.data).toString('base64'), 'wav', config.model);
   }
 
-  const maxRetries = 2;
-  let lastError = null;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
+  // A timeout may mean the provider completed and charged for synthesis. Do not
+  // retry without a provider-supported idempotency key and reconciliation path.
       const chatResponse = await axios.post(
         endpoint,
         {
-          model: 'mimo-v2.5-tts',
+          model: config.model,
           modalities: ['text', 'audio'],
           audio: {
-            voice: voice,
+            voice: voice === 'mimo_default' ? (config.ttsVoice || 'mimo_default') : voice,
             format: 'wav'
           },
           messages: [
@@ -303,7 +383,8 @@ async function callMiMoTTS(text, voice, toneConfig, userId) {
       if (directChoiceAudio?.data) {
         const directAudio = buildAudioResult(
           directChoiceAudio.data,
-          directChoiceAudio.format || directChoiceAudio.mime_type || 'wav'
+          directChoiceAudio.format || directChoiceAudio.mime_type || 'wav',
+          config.model
         );
         if (directAudio) {
           return directAudio;
@@ -312,7 +393,7 @@ async function callMiMoTTS(text, voice, toneConfig, userId) {
 
       const completionAudio = extractAudioPayload(chatResponse.data, chatResponse.headers);
       if (completionAudio) {
-        return completionAudio;
+        return { ...completionAudio, provider: config.model };
       }
 
       const fallbackText = chatResponse.data?.choices?.[0]?.message?.content;
@@ -320,29 +401,11 @@ async function callMiMoTTS(text, voice, toneConfig, userId) {
         throw new Error(`API返回了文本而非音频: ${fallbackText.substring(0, 100)}`);
       }
 
-      throw new Error('MiMo API 响应中未找到可播放的音频数据');
-    } catch (error) {
-      lastError = error;
-      if (attempt < maxRetries && (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' || error.message?.includes('timeout'))) {
-        console.log(`[TTS] 重试 ${attempt + 1}/${maxRetries}...`);
-        await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
-        continue;
-      }
-      throw error;
-    }
-  }
-  throw lastError;
+      throw new Error('语音服务响应中未找到可播放的音频数据');
 }
 
-function buildTonePrompt(toneConfig) {
-  const toneMap = {
-    slow_gentle: '请将下一条 assistant 消息用更慢、更温柔的语气转成语音。',
-    fast_excited: '请将下一条 assistant 消息用更快、更有活力的语气转成语音。',
-    calm: '请将下一条 assistant 消息用平静舒缓的语气转成语音。',
-    emotional: '请将下一条 assistant 消息用更丰富的情感和更明显的抑扬顿挫转成语音。'
-  };
-
-  return toneMap[toneConfig.id] || '请将下一条 assistant 消息自然、清晰地转成语音。';
+function buildTonePrompt() {
+  return '请将下一条 assistant 消息自然、清晰地转成语音。';
 }
 
 function sanitizeTtsText(input) {
@@ -404,7 +467,7 @@ function looksLikeBase64Audio(raw) {
   return compact.length > 128 && compact.length % 4 === 0 && /^[A-Za-z0-9+/=]+$/.test(compact);
 }
 
-function buildAudioResult(base64Data, format, provider = 'mimo-v2.5-tts') {
+function buildAudioResult(base64Data, format, provider = null) {
   if (!looksLikeBase64Audio(base64Data)) {
     return null;
   }
@@ -425,7 +488,7 @@ function extractAudioPayload(payload, headers = {}) {
       return {
         buffer: rawBuffer,
         format: normalizeAudioFormat(contentType),
-        provider: 'mimo-v2.5-tts'
+        provider: null
       };
     }
 
@@ -473,7 +536,7 @@ function extractAudioPayload(payload, headers = {}) {
       return {
         buffer: binaryBuffer,
         format: normalizeAudioFormat(candidate.format || contentType || 'wav'),
-        provider: 'mimo-v2.5-tts'
+        provider: null
       };
     }
 
@@ -489,84 +552,119 @@ function extractAudioPayload(payload, headers = {}) {
   return null;
 }
 
-async function persistTtsMetadata(req, messageId, ttsMetadata) {
+async function persistTtsMetadata(req, messageId, sourceSnapshot, ttsMetadata, audioFilename, response) {
   const db = await req.getUserDb();
   let found = false;
   await withWriteLock(req.userId, async () => {
     // 读、改、写必须处于同一锁内，避免并发AI回复覆盖TTS元数据。
     await db.read();
-    const message = db.data.messages.find(entry => entry.id === messageId);
-    if (!message) return;
-    found = true;
-    message.metadata = {
-      ...(message.metadata || {}),
-      tts: ttsMetadata
-    };
-    await db.write();
+    const effect = db.data.ttsEffects?.find(item => item.id === req.body.clientRequestId);
+    if (!effect || !['running', 'unknown'].includes(effect.status)) throw new Error('TTS_EFFECT_NOT_ACTIVE');
+    const previousEffect = structuredClone(effect);
+    const previousAudio = db.data.ttsAudioFiles;
+    let message = null;
+    let previousMetadata = null;
+    if (messageId) {
+      message = (await readableTtsMessages(req.userId, db)).find(entry => entry.id === messageId);
+      if (!message || !sameSource(message, sourceSnapshot)) return;
+      found = true;
+      previousMetadata = message.metadata;
+      message.metadata = { ...(message.metadata || {}), tts: ttsMetadata };
+    }
+    db.data.ttsAudioFiles = [...(db.data.ttsAudioFiles || []),
+      { filename: audioFilename, messageId: messageId || null, createdAt: Date.now() }];
+    effect.status = 'succeeded';
+    effect.updatedAt = Date.now();
+    effect.response = response;
+    try { await db.write(); }
+    catch (error) {
+      if (message) message.metadata = previousMetadata;
+      db.data.ttsAudioFiles = previousAudio;
+      Object.assign(effect, previousEffect);
+      clearUserDbCache(req.userId);
+      throw error;
+    }
   });
 
-  if (!found) {
-    console.warn(`[TTS] 未找到关联消息，跳过元数据持久化: ${messageId}`);
-    return false;
-  }
-  return true;
+  return !messageId || found;
 }
 
 router.get('/audio/:filename', asyncHandler(async (req, res) => {
-  const filename = path.basename(req.params.filename).replace(/[^a-zA-Z0-9._-]/g, '');
-  if (!filename) {
+  const filename = req.params.filename;
+  if (!/^[a-zA-Z0-9._-]+$/.test(filename) || path.basename(filename) !== filename) {
     return res.status(400).json({ error: '无效的文件名' });
   }
-
-  const token = typeof req.query.token === 'string' ? req.query.token : '';
-  const tokenValid = token ? verifyTtsAudioToken(filename, token) : false;
-  if (!tokenValid && !req.userId) {
+  if (!req.userId || typeof req.getUserDb !== 'function') {
     return res.status(401).json({ error: '未登录', requiresAuth: true });
   }
-
   const audioPath = path.join(ttsDir, filename);
   const resolvedPath = path.resolve(audioPath);
-  if (!resolvedPath.startsWith(path.resolve(ttsDir))) {
+  if (!resolvedPath.startsWith(path.resolve(ttsDir) + path.sep)) {
     return res.status(403).json({ error: '禁止访问' });
   }
-
-  let fileExists = false;
-  try {
-    await fs.access(audioPath);
-    fileExists = true;
-  } catch {
-    fileExists = false;
+  const db = await req.getUserDb();
+  const authorizedFile = await withWriteLock(req.userId, async () => {
+    await db.read();
+    const readableMessages = await readableTtsMessages(req.userId, db);
+    let record = db.data.ttsAudioFiles?.find(audio => audio.filename === filename);
+    if (!record) {
+      // Earlier versions stored only message metadata. Recover ownership only
+      // from a still-readable source with an exact server-issued filename.
+      const legacyMessage = readableMessages.find(message =>
+        /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(message.id) &&
+        filename.startsWith(`tts_${message.id}_`) &&
+        /^tts_[\da-f-]{36}_[a-z0-9]{8}\.(wav|mp3|ogg|flac|aac|m4a)$/i.test(filename) &&
+        message.metadata?.tts?.audioUrl === `/api/tts/audio/${filename}`);
+      if (!legacyMessage) return false;
+      record = { filename, messageId: legacyMessage.id, createdAt: Date.now() };
+      db.data.ttsAudioFiles ||= [];
+      db.data.ttsAudioFiles.push(record);
+      try { await db.write(); }
+      catch (error) {
+        db.data.ttsAudioFiles = db.data.ttsAudioFiles.filter(audio => audio !== record);
+        throw error;
+      }
+    }
+    if (!hasAccessibleAudio(db.data, `/api/tts/audio/${filename}`, readableMessages)) return null;
+    // Open while the account lock still protects the source check. A later
+    // source revocation cannot make a new request open this file.
+    try {
+      const handle = await fs.open(audioPath, 'r');
+      try {
+        const stat = await handle.stat();
+        if (!stat.isFile()) {
+          await handle.close();
+          return null;
+        }
+        return { handle, stat };
+      } catch (error) {
+        await handle.close().catch(() => {});
+        throw error;
+      }
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }
+  });
+  if (!authorizedFile) {
+    return res.status(404).json({ error: '音频文件不存在或无权访问' });
   }
-
-  if (!fileExists) {
-    return res.status(404).json({ error: '音频文件不存在' });
-  }
-
-  let stat;
-  try {
-    stat = await fs.stat(audioPath);
-  } catch {
-    return res.status(500).json({ error: '无法读取文件信息' });
-  }
-
-  if (!stat.isFile()) {
-    return res.status(404).json({ error: '音频文件不存在' });
-  }
-
-  const fileSize = stat.size;
+  const { handle } = authorizedFile;
+  const fileSize = authorizedFile.stat.size;
   const rangeHeader = req.headers.range;
   const contentType = getMimeType(path.extname(filename).slice(1));
 
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Type', contentType);
-  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.setHeader('Cache-Control', 'private, no-store');
 
   const streamAudio = (streamOptions, statusCode, extraHeaders) => {
     for (const [headerName, headerValue] of Object.entries(extraHeaders)) {
       res.setHeader(headerName, headerValue);
     }
     res.status(statusCode);
-    const audioStream = createReadStream(audioPath, streamOptions);
+    const audioStream = handle.createReadStream(streamOptions);
+    res.on('close', () => audioStream.destroy());
     audioStream.on('error', (streamError) => {
       console.error('TTS音频流读取失败:', streamError?.message);
       if (res.headersSent) {
@@ -604,6 +702,7 @@ router.get('/audio/:filename', asyncHandler(async (req, res) => {
       || start < 0 || start > end || start >= fileSize
     ) {
       res.setHeader('Content-Range', `bytes */${fileSize}`);
+      await handle.close();
       return res.status(416).json({ error: '请求的音频范围不满足' });
     }
 

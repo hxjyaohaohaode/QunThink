@@ -42,6 +42,7 @@ export interface GroupFile {
 }
 
 export interface Group {
+  space_category?: 'work' | 'social' | 'play';
   id: string;
   name: string;
   description: string;
@@ -54,6 +55,7 @@ export interface Group {
   background_url?: string | null;
   announcement?: string;
   notifications_enabled?: boolean;
+  autonomous_chat_enabled?: boolean;
   debate_mode: boolean;
   debate_level: number;
   debate_config?: {
@@ -149,6 +151,7 @@ export interface PaginatedMessagesResponse {
 }
 
 export interface GroupCreateInput {
+  space_category?: 'work' | 'social' | 'play';
   name: string;
   description?: string;
   ai_members?: string[];
@@ -166,6 +169,7 @@ export interface GroupSettingsInput {
   background_url?: string;
   announcement?: string;
   notifications_enabled?: boolean;
+  autonomous_chat_enabled?: boolean;
   pinned?: boolean;
   debate_mode?: boolean;
   debate_level?: number;

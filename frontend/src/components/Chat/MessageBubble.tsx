@@ -128,7 +128,8 @@ const MessageBubbleComponent = ({ message, onReply, showTimeDivider, isMultiSele
 
   const persistedTtsAudio = useMemo(() => {
     const rawTts = message.metadata?.tts as Record<string, unknown> | undefined;
-    if (!rawTts || typeof rawTts.audioUrl !== 'string') {
+    if (!rawTts || typeof rawTts.audioUrl !== 'string' ||
+      !/^\/api\/tts\/audio\/tts_[A-Za-z0-9_-]+\.(wav|mp3|ogg|flac|aac|m4a)$/.test(rawTts.audioUrl)) {
       return undefined;
     }
 
@@ -577,9 +578,9 @@ const MessageBubbleComponent = ({ message, onReply, showTimeDivider, isMultiSele
             )}
 
             {isUser && message.status === 'failed' && (
-              <div className="flex items-center gap-2">
-                <span className="text-red-500" style={{ fontSize: 'var(--chat-timestamp-font-size)' }}>发送失败</span>
-                <button
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-red-500" style={{ fontSize: 'var(--chat-timestamp-font-size)' }}>{typeof message.metadata?.send_error === 'string' ? message.metadata.send_error : '发送失败'}</span>
+                {message.metadata?.send_terminal !== true && <button
                   onClick={async (e) => {
                     e.stopPropagation();
                     if (currentGroup && message.tempId) {
@@ -590,7 +591,20 @@ const MessageBubbleComponent = ({ message, onReply, showTimeDivider, isMultiSele
                   style={{ fontSize: 'var(--chat-timestamp-font-size)' }}
                 >
                   重试
-                </button>
+                </button>}
+                {message.metadata?.send_terminal === true && <button
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    try {
+                      await navigator.clipboard.writeText(message.content);
+                      showToast({ message: '内容已复制，可作为新消息发送', type: 'success' });
+                    } catch {
+                      showToast({ message: '复制失败，请手动选择消息内容', type: 'error' });
+                    }
+                  }}
+                  className="text-blue-500 hover:text-blue-600 underline"
+                  style={{ fontSize: 'var(--chat-timestamp-font-size)' }}
+                >复制内容</button>}
                 <button
                   onClick={(e) => {
                     e.stopPropagation();

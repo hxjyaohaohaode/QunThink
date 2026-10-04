@@ -9,6 +9,14 @@ import filesRouter from '../../src/routes/files.js';
 import memoryRouter from '../../src/routes/memory.js';
 import ttsRouter from '../../src/routes/tts.js';
 import apiConfigRouter from '../../src/routes/apiconfig.js';
+import modelCatalogRouter from '../../src/routes/modelCatalog.js';
+import tasksRouter from '../../src/routes/tasks.js';
+import personalGoalsRouter from '../../src/routes/personalGoals.js';
+import personasRouter from '../../src/routes/personas.js';
+import agentsRouter from '../../src/routes/agents.js';
+import aiRouter from '../../src/routes/ai.js';
+import monitoringRouter from '../../src/routes/monitoring.js';
+import { errorHandler } from '../../src/middleware/errorHandler.js';
 import authMiddleware, { isAuthConfigured } from '../../src/middleware/auth.js';
 import { injectUserDb } from '../../src/middleware/userDb.js';
 import { getAuthDb } from '../../src/models/authDb.js';
@@ -105,11 +113,19 @@ export function createTestApp() {
   app.use(authMiddleware);
   app.use(injectUserDb);
   app.use('/api/user', apiConfigRouter);
+  app.use('/api/user', modelCatalogRouter);
+  app.use('/api', tasksRouter);
+  app.use('/api', personalGoalsRouter);
+  app.use('/api', personasRouter);
+  app.use('/api', agentsRouter);
+  app.use('/api', aiRouter);
+  app.use('/api', monitoringRouter);
   app.use('/api', groupsRouter);
   app.use('/api', messagesRouter);
   app.use('/api', filesRouter);
   app.use('/api', memoryRouter);
   app.use('/api/tts', ttsRouter);
+  app.use(errorHandler);
 
   return app;
 }

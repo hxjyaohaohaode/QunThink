@@ -1,3 +1,4 @@
+import { useChatModelIds, useModelsStore } from '../../stores/modelsStore';
 ﻿import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useGroupsStore } from '../../stores/groupsStore';
@@ -5,7 +6,7 @@ import { usePersonasStore } from '../../stores/personasStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useMessagesStore } from '../../stores/messagesStore';
 import { useAgentsStore } from '../../stores/agentsStore';
-import { AI_NAMES, AI_COLORS, AI_AVATAR_LETTERS, AI_LIST } from '../../types';
+import { AI_NAMES, AI_COLORS, AI_AVATAR_LETTERS } from '../../types';
 import { ErrorBoundary } from '../Common/ErrorBoundary';
 import { AIPersonaEditor } from './AIPersonaEditor';
 import { NewChatModal } from './NewChatModal';
@@ -24,9 +25,6 @@ dayjs.locale('zh-cn');
 
 type SidebarView = 'chats' | 'members';
 
-const NON_CHATTABLE_AI = ['mimo_tts', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'];
-const EDITABLE_AI_LIST: string[] = AI_LIST.filter(id => !NON_CHATTABLE_AI.includes(id));
-const CHATTABLE_AI_LIST: string[] = AI_LIST.filter(id => !NON_CHATTABLE_AI.includes(id));
 
 const GROUP_COLOR_PALETTE = ['#6C5CE7', '#00B894', '#E17055', '#0984E3', '#E84393', '#D63031', '#00CEC9', '#E8A33D'];
 
@@ -234,6 +232,8 @@ interface MemberItemProps {
 }
 
 function MemberItem({ aiId, personas, onPrivateChat, onEdit, reducedMotion }: MemberItemProps) {
+  const CHATTABLE_AI_LIST = useChatModelIds();
+  const EDITABLE_AI_LIST = CHATTABLE_AI_LIST;
   const [isVisible, setIsVisible] = useState(false);
   const customPersona = personas[aiId];
   const avatarColor = customPersona?.color || AI_COLORS[aiId];
@@ -264,7 +264,7 @@ function MemberItem({ aiId, personas, onPrivateChat, onEdit, reducedMotion }: Me
       style={animationStyle}
       onClick={() => isChattable && onPrivateChat(aiId)}
       title={isChattable
-        ? `点击与 ${AI_NAMES[aiId]} 私聊`
+        ? `点击与 ${customPersona?.name || AI_NAMES[aiId] || aiId} 私聊`
         : aiId === 'mimo_tts'
           ? `${AI_NAMES[aiId]} - 语音合成模型，不支持聊天`
           : `${AI_NAMES[aiId]} - 多模态标注专用模型，不支持聊天（仅用于附件内容识别）`
@@ -314,10 +314,13 @@ interface SidebarProps {
   collapsed?: boolean;
   onToggleCollapse?: () => void;
   onOpenAgents?: () => void;
+  onOpenWorkspace?: () => void;
   onNavigateToChat?: () => void;
 }
 
-export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onNavigateToChat }: SidebarProps) {
+export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onOpenWorkspace, onNavigateToChat }: SidebarProps) {
+  const models = useModelsStore(s => s.catalog?.models);
+  const AI_LIST = (models || []).map(m => m.id);
   const groups = useGroupsStore((s) => s.groups);
   const currentGroup = useGroupsStore((s) => s.currentGroup);
   const selectGroup = useGroupsStore((s) => s.selectGroup);
@@ -585,7 +588,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
       )}
       {/* Top Section: Logo + App name + Actions */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-border-subtle flex-shrink-0">
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 overflow-hidden">
+        <button onClick={onOpenWorkspace} aria-label="返回工作台" title="工作台" className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 overflow-hidden">
           <svg viewBox="0 0 200 200" className="w-7 h-7">
             <defs>
               <linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -602,9 +605,9 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
               <rect x="82" y="58" width="85" height="85" rx="20" fill="url(#logoGrad)" />
             </g>
           </svg>
-        </div>
+        </button>
         {!collapsed && (
-          <span className="text-[14px] font-semibold text-text-primary truncate">群想</span>
+          <button onClick={onOpenWorkspace} className="text-left truncate" title="返回工作台"><span className="block text-[14px] font-semibold text-text-primary">群想</span><span className="text-[10px] text-text-muted">工作台 ↗</span></button>
         )}
         {!collapsed && (
           <div className="flex items-center gap-0.5 ml-auto">
@@ -1054,4 +1057,3 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onN
     </div>
   );
 }
-

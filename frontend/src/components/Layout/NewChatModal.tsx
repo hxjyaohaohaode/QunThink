@@ -1,13 +1,12 @@
+import { useChatModelIds } from '../../stores/modelsStore';
 ﻿import { useState, useEffect, useRef } from 'react';
 import { useFocusTrap } from '../Common/useFocusTrap';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { usePersonasStore } from '../../stores/personasStore';
-import { AI_COLORS, AI_NAMES, AI_AVATAR_LETTERS, AI_LIST } from '../../types';
+import { AI_COLORS, AI_NAMES, AI_AVATAR_LETTERS } from '../../types';
 import { useToast } from '../Common';
 import { avatarBackgroundImageStyle } from '../Common/Avatar';
 
-const NON_CHATTABLE_AI = ['mimo_tts', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'];
-const CHATTABLE_AI_LIST: string[] = AI_LIST.filter(id => !NON_CHATTABLE_AI.includes(id));
 
 const GROUP_AVATAR_COLORS = [
   '#ef4444', '#f97316', '#f59e0b', '#84cc16', '#10b981',
@@ -24,6 +23,7 @@ interface NewChatModalProps {
 type ChatTab = 'private' | 'aiPrivate' | 'group';
 
 export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalProps) {
+  const CHATTABLE_AI_LIST = useChatModelIds(true);
   const createGroup = useGroupsStore((s) => s.createGroup);
   const getOrCreatePrivateChat = useGroupsStore((s) => s.getOrCreatePrivateChat);
   const createAIPrivateChat = useGroupsStore((s) => s.createAIPrivateChat);
@@ -604,4 +604,3 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
     </div>
   );
 }
-

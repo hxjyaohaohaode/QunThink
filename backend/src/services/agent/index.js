@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
-import axios from 'axios';
+import { defaultModelId, readCatalog, resolveModel } from '../ai/catalog.js';
+import { requestCompletion } from '../ai/transport.js';
 import { getUploadsDir, getUserDb, withWriteLock } from '../../models/db.js';
 import { callAI, callAIStream, normalizeResponse } from '../ai/index.js';
 import { parseFile } from '../fileParser/index.js';
@@ -7,18 +8,6 @@ import { annotateAndDescribe, generateMediaDescription } from '../fileAnnotation
 import { AI_PERSONAS } from '../../config/personas.js';
 import { safeLog } from '../../utils/logger.js';
 import path from 'path';
-
-const AVAILABLE_MODELS = [
-  { id: 'deepseek', name: 'deepseek-chat', strength: '逻辑推理、数据分析、编程技术' },
-  { id: 'deepseek_reasoner', name: 'deepseek-reasoner', strength: '深度推理、复杂问题分析、思维链推理' },
-  { id: 'mimo_flash', name: 'mimo-v2.5', strength: '快速响应、务实分析、效率优化' },
-  { id: 'mimo_omni', name: 'mimo-v2-omni', strength: '多模态分析、跨模态推理、全局理解' },
-  { id: 'glm_air', name: 'GLM-4.5-Air', strength: '人文历史、哲学思辨、文学艺术' },
-  { id: 'glm_flash', name: 'glm-4-flash', strength: '快速分析、要点提炼、高效沟通' },
-  { id: 'glm_flashx', name: 'glm-4-flashx', strength: '深度推理、扩展分析、增强理解' },
-  { id: 'qwen_flash', name: 'Qwen3.5-Flash', strength: '观点总结、框架构建、信息整合' },
-  { id: 'qwen_turbo', name: 'qwen-turbo', strength: '快速分析、高效处理、即时响应' }
-];
 
 function extractJSON(text) {
   if (!text) return null;
@@ -53,188 +42,42 @@ function extractJSON(text) {
   }
 }
 
-export async function createAgent(userId, name, description, openingMessage, enableSuggestions, capabilities, avatarUrl = null) {
-  if (!capabilities) capabilities = {};
-  const capabilitiesDesc = [];
-  if (capabilities.scheduled_tasks) capabilitiesDesc.push('定时任务（需要能按计划执行任务、设置提醒）');
-  if (capabilities.web_search) capabilitiesDesc.push('网络搜索（需要能搜索互联网获取最新信息）');
-  if (capabilities.multimodal) capabilitiesDesc.push('多模态（需要能处理图片、语音等多模态内容）');
-
-  const modelList = AVAILABLE_MODELS.map(m => `- ${m.id} (${m.name}): 擅长${m.strength}`).join('\n');
-
-  // ============================================
-  // 第一阶段：deepseek-v4-pro 主导架构设计（总导演）
-  // ============================================
-  const architectSystemPrompt = `你是一个顶级AI架构师和智能体编排专家。你的职责是：作为"总导演"，根据用户需求，从可用模型库中挑选最合适的模型组合，并设计完整的系统提示词。你会调用其他AI来协助你完成不同维度的分析。请严格按照JSON格式返回结果。`;
-
-  const architectPrompt = `请作为AI架构师（总导演），为用户描述的智能体需求设计一套完善的AI模型协作方案。
-
-## 用户需求
-- 智能体名称：${name}
-- 功能定位：${description}
-- 开场白：${openingMessage}
-- 已选能力：${capabilitiesDesc.length > 0 ? capabilitiesDesc.join('、') : '基础对话'}
-
-## 可用模型库（全部系统AI，必须从中选择）
-${modelList}
-
-## 设计要求（多AI协同筛选）
-你需要模拟一个多AI协同的筛选过程：
-
-1. **需求分析**：深度分析用户描述的功能定位，拆解出核心能力需求
-2. **模型选型**：从可用模型库中挑选2-4个模型，每个模型负责不同角色：
-   - 意图理解层：优先使用 deepseek_reasoner 等深度推理模型
-   - 主回复层：根据智能体专业领域选择最匹配的模型（如编程→deepseek，人文→glm_air，创意→mimo_omni，快速→qwen_flash）
-   - 特殊能力层：多模态需求→mimo_omni，搜索需求→glm_flashx
-   - 快速响应层：简单任务→glm_flash / qwen_turbo
-3. **角色分配**：明确每个模型的具体职责，避免冗余
-4. **协作流程**：设计模型间的调用顺序和协作方式
-
-## 返回JSON格式
-{
-  "model_roles": [
-    {"modelId": "模型ID", "role": "角色名", "description": "具体职责说明"}
-  ],
-  "model_selection_reasoning": "为什么选择这些模型组合的简要说明（50字内）",
-  "system_prompt": "完整的系统提示词（至少300字）"
+export function buildBaseAgentPrompt(name, description) {
+  return '你是' + name + '。你的任务是：' + description + '。请提供准确、清晰、可执行的帮助，区分事实和推测。可以主动提出下一步建议，但不能声称已执行未接入的外部工具、联网搜索或定时任务。';
 }
 
-## 注意事项
-- model_roles至少分配2个模型，最多4个模型
-- 必须从可用模型库中选择，不能使用不存在的模型ID
-- system_prompt必须包括：角色定位、专业领域、行为准则、回复风格、核心功能、主动引导策略
-- system_prompt中要求智能体在专业领域内主动提供深入帮助，灵活应对相关请求
-- 必须包含"主动引导策略"：在回复末尾主动提供1-2个延伸话题`;
-
-  let architectResponse;
+export async function createAgent(userId, name, description, openingMessage, enableSuggestions, capabilities, avatarUrl = null, selectedModelId = null) {
+  const modelId = selectedModelId || await defaultModelId(userId);
+  const config = await resolveModel(userId, modelId, 'chat');
+  const basePrompt = buildBaseAgentPrompt(name, description);
+  let systemPrompt = basePrompt;
+  let source = '根据用户说明创建';
   try {
-    architectResponse = await callAIStream(
-      'deepseek_reasoner',
-      { id: 'deepseek_reasoner', name: 'deepseek-reasoner' },
-      architectPrompt,
-      [],
-      'free_chat',
-      null, [], null, null, false, [],
-      architectSystemPrompt,
-      [], null, null, userId
-    );
-  } catch (error) {
-    safeLog('error', '[Agent创建] deepseek_reasoner架构师调用失败', { error: error.message });
-    architectResponse = null;
-  }
-
-  const parsed = extractJSON(architectResponse);
-
-  let modelRoles;
-  let modelSelectionReasoning = '';
-  let agentSystemPrompt;
-
-  if (parsed && parsed.model_roles && Array.isArray(parsed.model_roles) && parsed.model_roles.length > 0) {
-    modelRoles = parsed.model_roles.map(role => ({
-      modelId: role.modelId || 'deepseek',
-      role: role.role || '主对话',
-      description: role.description || ''
-    }));
-    modelSelectionReasoning = parsed.model_selection_reasoning || '';
-    agentSystemPrompt = parsed.system_prompt || `你是${name}。${description}。`;
-  } else {
-    // 回退：默认模型组合
-    modelRoles = [
-      { modelId: 'deepseek_reasoner', role: '意图理解', description: '深度分析用户意图，理解复杂需求' },
-      { modelId: 'deepseek', role: '主回复', description: '生成高质量专业回复' }
-    ];
-    agentSystemPrompt = `你是${name}，一个专业的AI助手。${description}。
-
-## 核心能力
-你擅长${description}，在这个领域内你能提供深入、专业、有价值的帮助。
-
-## 行为准则
-1. 在专业领域内主动提供深入分析和建议
-2. 回复准确、详细、有针对性，避免泛泛而谈
-3. 如果用户请求与你的专业领域相关但略微偏离核心功能，灵活应对并提供有价值的信息
-4. 只有完全无关的请求才礼貌引导回你的专业领域
-5. 在回复末尾主动提供1-2个相关延伸话题，引导用户深入探索
-
-## 回复风格
-专业、友好、高效，用自然的方式与用户交流，让每次对话都有收获。`;
-  }
-
-  // ============================================
-  // 第二阶段：多AI协同评审（各模型从自身角度评审方案）
-  // ============================================
-  // 用第二个AI（如 qwen_flash）从不同角度评审和优化 system_prompt
-  const reviewSystemPrompt = '你是一个智能体系统提示词评审专家。你的任务是检查并优化智能体的系统提示词，确保其完整、专业、实用。请直接输出优化后的完整系统提示词，不要添加其他说明。';
-
-  const reviewPrompt = `请评审并优化以下智能体的系统提示词：
-
-## 智能体信息
-- 名称：${name}
-- 功能定位：${description}
-- 开场白：${openingMessage}
-
-## 当前系统提示词
-${agentSystemPrompt}
-
-## 评审要求
-1. 检查角色定位是否清晰明确
-2. 检查专业领域描述是否准确深入
-3. 检查行为准则是否完整（是否包含主动引导策略）
-4. 检查回复风格描述是否恰当
-5. 如有缺失或不足，请补充优化
-6. 保持原有优秀内容，只做增量改进
-
-请直接输出优化后的完整系统提示词。`;
-
-  try {
-    const reviewResponse = await callAIStream(
-      'qwen_flash',
-      { id: 'qwen_flash', name: 'Qwen3.5-Flash' },
-      reviewPrompt,
-      [],
-      'free_chat',
-      null, [], null, null, false, [],
-      reviewSystemPrompt,
-      [], null, null, userId
-    );
-
-    if (reviewResponse && reviewResponse.trim().length > 100) {
-      const cleaned = normalizeResponse(reviewResponse).trim();
-      // 确保优化后的结果至少包含原有内容的长度
-      if (cleaned.length >= agentSystemPrompt.length * 0.7) {
-        agentSystemPrompt = cleaned;
-        safeLog('info', '[Agent创建] 多AI协同评审完成，system_prompt已优化');
-      }
+    const result = await requestCompletion(config, [
+      { role: 'system', content: '为用户创建一个实用的 AI 助手系统提示词。只返回 JSON，字段 system_prompt。不宣称已接入网络搜索、外部工具、操作系统或自动执行能力。' },
+      { role: 'user', content: JSON.stringify({ name, description, openingMessage, preferences: capabilities || {} }) }
+    ], { maxTokens: 1800, timeout: 30000 });
+    const parsed = extractJSON(result);
+    if (typeof parsed?.system_prompt === 'string' && parsed.system_prompt.length >= 30 && parsed.system_prompt.length <= 12000) {
+      systemPrompt = parsed.system_prompt; source = '由所选模型根据你的需求生成，可在设置中修改';
     }
-  } catch (error) {
-    safeLog('warn', '[Agent创建] 评审AI调用失败，使用原始system_prompt', { error: error.message });
-  }
-
+  } catch (error) { safeLog('warn', '[Agent创建] 使用用户说明创建基础提示词', { error: error.message }); }
   const agent = {
-    id: uuidv4(),
-    name,
-    avatar_url: avatarUrl,
-    description,
-    opening_message: openingMessage,
-    enable_suggestions: enableSuggestions !== undefined ? enableSuggestions : true,
-    capabilities,
-    model_roles: modelRoles,
-    system_prompt: agentSystemPrompt,
-    model_selection_reasoning: modelSelectionReasoning,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString()
+    id: uuidv4(), name, avatar_url: avatarUrl, description, opening_message: openingMessage,
+    enable_suggestions: enableSuggestions !== false,
+    capabilities: { ...capabilities, web_search: false, scheduled_tasks: false },
+    model_roles: [{ modelId, role: '主回复', description: '使用用户选择的模型' }],
+    system_prompt: systemPrompt, model_selection_reasoning: source,
+    created_at: new Date().toISOString(), updated_at: new Date().toISOString()
   };
-
   const db = await getUserDb(userId);
   await withWriteLock(userId, async () => {
-    await db.read();
-    db.data.agents.push(agent);
-    await db.write();
+    await db.read(); db.data.agents ||= []; db.data.agents.push(agent); await db.write();
   });
-
   return agent;
 }
 
-export async function generateAgentQuestions(name, description, openingMessage) {
+export async function generateAgentQuestions(name, description, openingMessage, userId) {
   const systemPrompt = '你是一个贴心的智能体配置助手。你的任务是：根据用户第一步填写的智能体信息，深入分析用户真实需求，生成2-3个高度个性化的追问。每个问题必须从用户描述中提取关键信息点，针对性地追问细节。绝不能泛泛而问。';
 
   const userPrompt = `用户正在创建智能体，以下是他们第一步填写的信息：
@@ -264,19 +107,20 @@ export async function generateAgentQuestions(name, description, openingMessage) 
 
 只返回JSON数组，不要任何其他文字。`;
 
-  const persona = { id: 'mimo_flash', name: 'mimo-v2.5' };
+  const modelId = await defaultModelId(userId).catch(() => null);
+  const persona = { id: modelId, name: '配置助手' };
 
   let response;
   try {
     response = await callAIStream(
-      'mimo_flash',
+      modelId,
       persona,
       userPrompt,
       [],
       'free_chat',
       null, [], null, null, false, [],
       systemPrompt,
-      [], null, null, null
+      [], null, null, userId
     );
   } catch (error) {
     safeLog('error', '[Agent问题生成] mimo_flash调用失败', { error: error.message });
@@ -437,10 +281,10 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
   const intentModel = modelRoles.find(r => r.role === '意图理解') || modelRoles[0];
   const replyModel = modelRoles.find(r => r.role === '主回复') || modelRoles[0];
 
-  const replyModelId = replyModel?.modelId || 'deepseek';
+  const replyModelId = replyModel?.modelId || await defaultModelId(userId);
   const replyPersona = AI_PERSONAS[replyModelId] || { id: replyModelId, name: replyModelId };
 
-  const formattedMessages = recentAgentMessages.map(m => ({
+  const formattedMessages = recentAgentMessages.filter(m => m.id !== userMsg.id).map(m => ({
     id: m.id,
     sender_type: m.sender_type === 'agent' ? 'ai' : 'user',
     sender_id: m.sender_type === 'agent' ? replyModelId : 'user',
@@ -610,7 +454,7 @@ ${historyContext}
 只返回JSON数组：["建议1","建议2","建议3"]`;
 
   try {
-    const suggestions = await callSuggestionAPI(systemPrompt, userPrompt);
+    const suggestions = await callSuggestionAPI(systemPrompt, userPrompt, userId);
     if (suggestions && suggestions.length > 0) {
       return suggestions;
     }
@@ -621,66 +465,12 @@ ${historyContext}
   return getDefaultSuggestions(agent, isInitial, userProfile);
 }
 
-async function callSuggestionAPI(systemPrompt, userPrompt) {
-  const configs = [
-    { key: process.env.GLM_API_KEY, endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4-flash' },
-    { key: process.env.MIMO_API_KEY, endpoint: process.env.MIMO_BASE_URL ? `${process.env.MIMO_BASE_URL}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions', model: 'mimo-v2.5' },
-    { key: process.env.QWEN_API_KEY, endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen3.5-flash' }
-  ];
-
-  const availableConfigs = configs.filter(c => c.key);
-  if (availableConfigs.length === 0) return null;
-
-  const callOne = async (config) => {
-    const response = await axios.post(
-      config.endpoint,
-      {
-        model: config.model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        temperature: 0.7,
-        max_tokens: 300,
-        stream: false
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${config.key}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 6000
-      }
-    );
-
-    const content = response.data?.choices?.[0]?.message?.content;
-    if (!content) return null;
-
-    const parsed = extractJSON(content);
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      const validSuggestions = parsed
-        .filter(s => typeof s === 'string' && s.trim().length > 0 && s.length <= 80)
-        .map(s => s.trim().replace(/^["'\d.\s)]+/, '').replace(/["']+$/, ''))
-        .slice(0, 3);
-      if (validSuggestions.length > 0) {
-        return validSuggestions;
-      }
-    }
-    return null;
-  };
-
-  for (const config of availableConfigs) {
-    try {
-      const result = await callOne(config);
-      if (result && Array.isArray(result) && result.length > 0) {
-        return result;
-      }
-    } catch {
-      // 当前供应商不可用，顺序回退到下一个
-    }
-  }
-
-  return null;
+async function callSuggestionAPI(systemPrompt, userPrompt, userId) {
+  const modelId = await defaultModelId(userId);
+  const config = await resolveModel(userId, modelId, 'chat');
+  const content = await requestCompletion(config, [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }], { maxTokens: 300, timeout: 10000 });
+  const parsed = extractJSON(content);
+  return Array.isArray(parsed) ? parsed.filter(s => typeof s === 'string' && s.trim() && s.length <= 80).slice(0, 3) : null;
 }
 
 function getDefaultSuggestions(agent, isInitial = true, userProfile = null) {
@@ -794,7 +584,7 @@ function getDefaultSuggestions(agent, isInitial = true, userProfile = null) {
   ];
 }
 
-export async function invokeAgentInGroup(userId, agentId, context) {
+export async function invokeAgentInGroup(userId, agentId, context, beforeDispatch = null) {
   const db = await getUserDb(userId);
   await db.read();
 
@@ -803,8 +593,8 @@ export async function invokeAgentInGroup(userId, agentId, context) {
     throw new Error('智能体不存在');
   }
 
-  const primaryModel = agent.model_roles[0];
-  const modelId = primaryModel?.modelId || 'deepseek';
+  const primaryModel = agent.model_roles?.find(r => r.role === '主回复') || agent.model_roles?.[0];
+  const modelId = primaryModel?.modelId || await defaultModelId(userId);
   const persona = AI_PERSONAS[modelId] || { id: modelId, name: modelId };
 
   const response = await callAIStream(
@@ -815,7 +605,7 @@ export async function invokeAgentInGroup(userId, agentId, context) {
     'free_chat',
     null, [], null, null, false, [],
     agent.system_prompt,
-    [], null, null, userId
+    [], null, null, userId, null, beforeDispatch
   );
 
   return response;

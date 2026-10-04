@@ -1,3 +1,6 @@
+import { purgeLegacyPrivateCaches } from './utils/privateCache';
+import { useModelsStore } from './stores/modelsStore';
+import { useTasksStore } from './stores/tasksStore';
 ﻿import { lazy, Suspense, useEffect, useLayoutEffect, useState, useRef, useCallback, type ReactNode, type TouchEvent as ReactTouchEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { Group } from './types';
@@ -25,6 +28,7 @@ import { useReducedMotion } from './hooks/useReducedMotion';
 import { useSwipeBack } from './components/Common/SwipeTransition';
 import { api, getDevUserId, onAuthExpired } from './services/api';
 import { initFontSize } from './stores/fontSizeStore';
+import { useAudioStore } from './stores/audioStore';
 import { setCacheUserId, getCacheUserId, clearAllCachesForUser, saveGroupsCache, savePersonasCache, saveProfileCache } from './utils/cacheUtils';
 import { setIndexedDBUserId, clearAllIndexedDBForUser } from './utils/indexedDB';
 
@@ -32,6 +36,7 @@ import { setIndexedDBUserId, clearAllIndexedDBForUser } from './utils/indexedDB'
 // workflows, group details and the private-observer controls are reached from
 // secondary views, so load them on demand instead of shipping every screen in
 // the initial JavaScript chunk.
+const WorkspacePage = lazy(() => import('./components/Layout/WorkspacePage').then(({ WorkspacePage }) => ({ default: WorkspacePage })));
 const SettingsPage = lazy(() => import('./components/Layout/SettingsPage').then(({ SettingsPage }) => ({ default: SettingsPage })));
 const AgentsPage = lazy(() => import('./components/Layout/AgentsPage').then(({ AgentsPage }) => ({ default: AgentsPage })));
 const AgentCreateModal = lazy(() => import('./components/Layout/AgentCreateModal').then(({ AgentCreateModal }) => ({ default: AgentCreateModal })));
@@ -39,9 +44,23 @@ const AgentChatView = lazy(() => import('./components/Layout/AgentChatView').the
 const ObserverControlPanel = lazy(() => import('./components/Chat/ObserverControlPanel').then(({ ObserverControlPanel }) => ({ default: ObserverControlPanel })));
 const GroupInfoPage = lazy(() => import('./components/Chat/GroupInfoPage').then(({ GroupInfoPage }) => ({ default: GroupInfoPage })));
 
-type MobileTab = 'chats' | 'agents' | 'settings';
+type MobileTab = 'workspace' | 'chats' | 'agents' | 'settings';
 type MobileView = 'main' | 'groupInfo' | 'chat' | 'agents' | 'agentChat';
-type AppPhase = 'splash' | 'auth' | 'app';
+type AppPhase = 'splash' | 'auth' | 'connection' | 'app';
+
+function ChatModelNotice({ group }: { group: Group }) {
+  const catalog = useModelsStore(state => state.catalog);
+  if (!catalog || !group.ai_members?.length) return null;
+  const verified = new Set(catalog.models.filter(model =>
+    model.ready && model.verifiedCapabilities?.includes('chat')).map(model => model.id));
+  const unavailable = group.ai_members.filter(id => !verified.has(id)).length;
+  if (!unavailable) return null;
+  const noneAvailable = unavailable === group.ai_members.length;
+  return <div role="status" className="border-b border-amber-300/30 bg-amber-50 px-4 py-2 text-xs text-amber-900 dark:bg-amber-900/20 dark:text-amber-100">
+    {noneAvailable ? '此会话的 AI 模型尚未通过连接和对话测试。消息会保存，AI 暂不会自动回复。' : `${unavailable} 个 AI 模型尚未通过连接和对话测试，暂不会自动回复。`}
+    请到工作台的模型中心配置并测试。
+  </div>;
+}
 
 /** 视图切换动画配置（全局共享） */
 const viewTransitionVariants = {
@@ -128,6 +147,7 @@ const defaultProfileState: UserProfile = {
 };
 
 function hydrateBootstrapData(userId: string, payload: BootstrapPayload) {
+  if (getCacheUserId() !== userId) useAudioStore.getState().clearAll();
   setCacheUserId(userId);
   setIndexedDBUserId(userId);
 
@@ -225,12 +245,18 @@ async function initializeUserData(userId: string) {
     console.warn('[App] Bootstrap endpoint failed, fallback stores used:', bootstrapError);
   }
 
+  await useModelsStore.getState().fetch();
   if (import.meta.env.DEV) {
     console.log(`[App] User data initialized for: ${userId}`);
   }
 }
 
 async function handleLogout() {
+  useAudioStore.getState().clearAll();
+  await purgeLegacyPrivateCaches();
+  useTasksStore.getState().cleanup();
+  useModelsStore.getState().cleanup();
+  usePersonasStore.getState().cleanup();
   const cachedUserId = getCacheUserId();
 
   destroyWebSocket();
@@ -325,11 +351,14 @@ function App() {
   const applyTheme = useUIStore((s) => s.applyTheme);
   useKeyboardShortcuts();
 
-  const [mobileTab, setMobileTab] = useState<MobileTab>('chats');
+  const mobileTab = useNavigationStore(s => s.activeMobileTab);
+  const setMobileTab = useNavigationStore(s => s.setActiveMobileTab);
   const [mobileView, setMobileView] = useState<MobileView>('main');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [appPhase, setAppPhase] = useState<AppPhase>('splash');
+  const [sessionCheckError, setSessionCheckError] = useState(false);
+  const [sessionCheckAttempt, setSessionCheckAttempt] = useState(0);
 
   const prevViewRef = useRef<MobileView>('main');
   const splashCompletedRef = useRef(false);
@@ -345,6 +374,7 @@ function App() {
     let cancelled = false;
 
     const bootstrapSession = async () => {
+      setSessionCheckError(false);
       try {
         const authStatus = await api.getAuthStatus();
         if (cancelled) return;
@@ -387,7 +417,8 @@ function App() {
         console.warn('[App] Session bootstrap failed:', error);
         if (!cancelled) {
           dataInitializedRef.current = false;
-          setIsAuthenticated(false);
+          if (isAuthFailure(error)) setIsAuthenticated(false);
+          else { setIsAuthenticated(null); setSessionCheckError(true); }
         }
       }
     };
@@ -396,7 +427,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [sessionCheckAttempt]);
 
   useEffect(() => {
     if (isAuthenticated === true) {
@@ -417,8 +448,10 @@ function App() {
         splashCompletedRef.current = true;
         setAppPhase('app');
       }
+    } else if (isAuthenticated === null && sessionCheckError && splashCompletedRef.current && appPhase !== 'connection') {
+      setAppPhase('connection');
     }
-  }, [isAuthenticated, appPhase]);
+  }, [isAuthenticated, appPhase, sessionCheckError]);
 
   useEffect(() => {
     const unsubscribe = onAuthExpired(async () => {
@@ -451,6 +484,8 @@ function App() {
   }, []);
 
   const handleMobileSelectGroup = useCallback((groupId: string) => {
+    useNavigationStore.getState().setActiveMobileTab('chats');
+    useNavigationStore.getState().setActiveDesktopView('chat');
     const { selectGroup } = useGroupsStore.getState();
     selectGroup(groupId);
     joinGroup(groupId);
@@ -507,6 +542,7 @@ function App() {
     }
   }, [navigateToView]);
 
+  useEffect(() => { if (mobileTab === 'workspace') setMobileView('main'); }, [mobileTab]);
   const shouldEnableSwipe = mobileView !== 'main' || mobileTab !== 'chats';
   const { handlers: swipeHandlers, swipeProgress } = useSwipeBack(handleMobileBack, { threshold: 100, enabled: shouldEnableSwipe });
 
@@ -519,7 +555,7 @@ function App() {
     } else if (authState === true) {
       setAppPhase('app');
     } else {
-      setAppPhase('auth');
+      setAppPhase('connection');
     }
   }, []);
 
@@ -532,6 +568,7 @@ function App() {
       }
       dataInitializedRef.current = true;
       hydrateBootstrapData(userId, response);
+      await useModelsStore.getState().fetch();
       persistSessionInfo(userId);
       splashCompletedRef.current = true;
       setIsAuthenticated(true);
@@ -560,6 +597,16 @@ function App() {
         />
       </ErrorBoundary>
     );
+  }
+
+  if (appPhase === 'connection') {
+    return <main className="min-h-screen flex items-center justify-center bg-bg-primary p-6">
+      <div className="max-w-md w-full rounded-2xl border border-border bg-bg-surface p-6 space-y-4" role="status">
+        <h1 className="text-lg font-semibold text-text-primary">{sessionCheckError ? '暂时无法确认登录状态' : '正在连接群想'}</h1>
+        <p className="text-sm text-text-secondary">{sessionCheckError ? '网络或服务暂不可用。账号状态尚未确认，草稿与缓存没有被清除；连接恢复后可以继续。' : '正在检查会话，请稍候。'}</p>
+        {sessionCheckError && <button className="rounded-xl bg-accent text-white px-4 py-2 text-sm" onClick={() => setSessionCheckAttempt(n => n + 1)}>重试连接</button>}
+      </div>
+    </main>;
   }
 
   return (
@@ -628,7 +675,9 @@ function AppContent({
 }: AppContentProps) {
   const setActiveDesktopView = useNavigationStore((s) => s.setActiveDesktopView);
   const reducedMotion = useReducedMotion();
-  const [showAgents, setShowAgents] = useState(false);
+  const activeDesktopView = useNavigationStore(s => s.activeDesktopView);
+  const showAgents = activeDesktopView === 'agents';
+  const setShowAgents = (show: boolean) => setActiveDesktopView(show ? 'agents' : 'chat');
   const [showAgentCreate, setShowAgentCreate] = useState(false);
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
@@ -742,12 +791,17 @@ function AppContent({
         <Sidebar
           collapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+          onOpenWorkspace={() => setActiveDesktopView('workspace')}
           onOpenAgents={() => { setActiveDesktopView('agents'); setShowAgents(true); }}
           onNavigateToChat={() => { setShowAgents(false); setActiveDesktopView('chat'); }}
         />
         <div className="flex-1 flex flex-col min-w-0 min-h-0 content-area bg-bg-surface">
           <AnimatePresence mode="wait">
-            {showAgents ? (
+            {activeDesktopView === 'workspace' ? (
+              <motion.div key="workspace" className="h-full min-h-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+                <LazyBoundary><WorkspacePage onOpenConversation={id => { setActiveDesktopView('chat'); handleMobileSelectGroup(id); }} /></LazyBoundary>
+              </motion.div>
+            ) : showAgents ? (
               <motion.div
                 key={selectedAgentId ? 'agent-chat' : 'agents-page'}
                 className="flex flex-col h-full"
@@ -785,6 +839,7 @@ function AppContent({
               >
                 <div className="w-full flex flex-col h-full">
                   <ChatHeader showGroupInfoButton={true} />
+                  <ChatModelNotice group={currentGroup} />
                   <MessageList />
                   {currentGroup.is_ai_private ? (
                     <LazyBoundary>
@@ -873,6 +928,11 @@ function AppContent({
 
         <AnimatePresence mode="wait">
           {/* Chat List (Main Tab) */}
+          {mobileTab === 'workspace' && (
+            <motion.div key="mobile-workspace" className="h-full min-h-0 pb-14" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+              <LazyBoundary><WorkspacePage onOpenConversation={handleMobileSelectGroup} /></LazyBoundary>
+            </motion.div>
+          )}
           {mobileView === 'main' && mobileTab === 'chats' && (
             <motion.div
               key="mobile-chat-list"
@@ -962,6 +1022,7 @@ function AppContent({
               transition={reducedMotion ? reducedMotionTransition : viewTransition}
             >
               <ChatHeader onBack={handleMobileBack} onToggleGroupInfo={() => navigateToView('groupInfo')} showGroupInfoButton={true} />
+              <ChatModelNotice group={currentGroup} />
               <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
                 <MessageList />
               </div>

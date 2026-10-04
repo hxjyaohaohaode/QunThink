@@ -91,6 +91,41 @@ test('API config save rejects malformed and loopback Base URLs before persistenc
   assert.equal(db.data.aiApiConfigs?.deepseek?.baseUrl || '', '');
 });
 
+test('legacy test never sends a stored or environment key to a changed public endpoint', async () => {
+  const { userId, token } = await createSession();
+  const request = supertest(createTestApp());
+  const cookie = `session_token=${token}`;
+  const stored = await request.put('/api/user/apiconfig').set('Cookie', cookie)
+    .send({ deepseek: { apiKey: 'sk-saved-secret', baseUrl: 'https://api.deepseek.com/v1' } });
+  assert.equal(stored.status, 200);
+  const changed = await request.post('/api/user/apiconfig/test').set('Cookie', cookie)
+    .send({ vendor: 'deepseek', baseUrl: 'https://example.org/v1' });
+  assert.equal(changed.status, 502);
+  assert.equal(changed.body.healthy, false);
+  assert.match(changed.body.error, /未配置API Key/);
+  assert.equal((await request.post('/api/user/apiconfig/test').set('Cookie', cookie)
+    .send({ vendor: 'deepseek', baseUrl: 'not a URL' })).status, 400);
+  const previousEnvironmentKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = 'sk-server-secret';
+  try {
+    const noSaved = await createSession();
+    const envChanged = await request.post('/api/user/apiconfig/test').set('Cookie', `session_token=${noSaved.token}`)
+      .send({ vendor: 'deepseek', baseUrl: 'https://example.org/v1' });
+    assert.equal(envChanged.status, 502);
+    assert.equal(envChanged.body.healthy, false);
+    assert.match(envChanged.body.error, /未配置API Key/);
+  } finally {
+    if (previousEnvironmentKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = previousEnvironmentKey;
+  }
+  const moved = await request.put('/api/user/apiconfig').set('Cookie', cookie)
+    .send({ deepseek: { baseUrl: 'https://example.org/v1' } });
+  assert.equal(moved.status, 200);
+  assert.equal(moved.body.config.deepseek.apiKeyConfigured, false);
+  const db = await getUserDb(userId); await db.read();
+  assert.equal(decryptStoredApiKey(db.data.aiApiConfigs.deepseek), '');
+});
+
 test('startup migration encrypts legacy plaintext API keys under the user write lock', async () => {
   const { userId } = await createSession();
   const db = await getUserDb(userId);

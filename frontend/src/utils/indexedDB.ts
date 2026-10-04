@@ -124,6 +124,26 @@ export async function saveMessagesToIndexedDB(messages: Message[]): Promise<bool
   }
 }
 
+export async function deleteMessageFromIndexedDB(messageId: string): Promise<void> {
+  try {
+    const result = await openDB();
+    if ('fallback' in result) {
+      result.fallback.delete(messageId);
+      return;
+    }
+    const tx = result.transaction(MESSAGE_STORE, 'readwrite');
+    tx.objectStore(MESSAGE_STORE).delete(messageId);
+    await new Promise<void>((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  } catch (error) {
+    console.warn('IndexedDB删除单条消息失败:', error);
+    notifyStorageError('delete_one', error);
+  }
+}
+
 export async function loadMessagesFromIndexedDB(groupId: string): Promise<Message[]> {
   let db: IDBDatabase | null = null;
   try {

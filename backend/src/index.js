@@ -1,4 +1,5 @@
-﻿import 'dotenv/config';
+import 'dotenv/config';
+import { getCatalogData } from './services/ai/catalog.js';
 import express from 'express';
 
 import { createServer } from 'http';
@@ -23,6 +24,12 @@ import agentsRouter from './routes/agents.js';
 import authRouter from './routes/auth.js';
 import smsRouter from './routes/sms.js';
 import apiConfigRouter from './routes/apiconfig.js';
+import modelCatalogRouter from './routes/modelCatalog.js';
+import tasksRouter from './routes/tasks.js';
+import personalGoalsRouter from './routes/personalGoals.js';
+import { closePersonalGoalRuntime, getPersonalGoalRuntime } from './foundations/personalWorkspace.js';
+import { startGoalBriefScheduler } from './foundations/goalBriefScheduler.js';
+import { startTaskScheduler, stopTaskScheduler } from './services/tasks.js';
 import authMiddleware, { isAuthConfigured } from './middleware/auth.js';
 import { injectUserDb } from './middleware/userDb.js';
 import { rateLimiter, messageRateLimiter, fileRateLimiter, aiRateLimiter, queryRateLimiter, authRateLimiter, cleanup as cleanupRateLimiter } from './middleware/rateLimiter.js';
@@ -74,6 +81,7 @@ const wss = new WebSocketServer({
 
 const isProduction = process.env.NODE_ENV === 'production';
 const PORT = process.env.PORT || 3002;
+let goalBriefScheduler = null;
 
 if (process.env.AUTH_MODE === 'dev' && isProduction) {
   console.error('\n🚨 CRITICAL SECURITY ERROR: AUTH_MODE=dev is not allowed in production!');
@@ -145,12 +153,15 @@ app.use((req, res, next) => {
   next();
 });
 
+// Beacon diagnostics have a much smaller body contract than file or message
+// APIs. Parse and cap them before the general JSON parser accepts 5 MB.
+app.use('/api/monitoring/errors', express.json({ limit: '8kb' }));
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
 // 限流必须先于其保护的路由注册（Express 按注册顺序匹配）。
 // /api/csrf-token 与 /api/auth/token 定义在后，若限流挂载在其后将永不生效。
-app.use('/api/auth', authRateLimiter);
+app.use('/api/auth', (req, res, next) => ['GET', 'HEAD', 'OPTIONS'].includes(req.method) ? queryRateLimiter(req, res, next) : authRateLimiter(req, res, next));
 app.use('/api/sms', authRateLimiter);
 // 消息端点：仅对写操作（POST/DELETE）限流；GET 拉取与已读回执走宽松的查询桶，
 // 避免列表刷新/已读上报流量把发送配额饿死（用户主动浏览不应惩罚自己的发送）
@@ -351,7 +362,7 @@ app.get('/api/bootstrap', async (req, res) => {
       user,
       groups: sanitizeGroupsForClient(db.data.groups || []),
       profile: db.data.userProfile || {},
-      personas: buildMergedPersonas(db.data.customPersonas || {}),
+      personas: buildMergedPersonas(db.data.customPersonas || {}, getCatalogData(db.data)),
       apiConfigs: toPublicApiConfigs(db.data.aiApiConfigs || {})
     });
   } catch (error) {
@@ -369,6 +380,9 @@ app.use('/api/memory', queryRateLimiter);
 app.use('/api/interaction', queryRateLimiter);
 
 app.use('/api/user', apiConfigRouter);
+app.use('/api/user', modelCatalogRouter);
+app.use('/api', tasksRouter);
+app.use('/api', personalGoalsRouter);
 app.use('/api', groupsRouter);
 app.use('/api', messagesRouter);
 app.use('/api', filesRouter);
@@ -397,36 +411,7 @@ initDatabase().then(async () => {
     console.log('📁 创建上传目录:', uploadsDir);
   }
 
-  console.log('\n🔑 ========== API密钥配置检查 ==========');
-  const requiredKeys = [
-    { key: 'DEEPSEEK_API_KEY', name: 'DeepSeek', env: process.env.DEEPSEEK_API_KEY },
-    { key: 'GLM_API_KEY', name: '智谱清言(GLM)', env: process.env.GLM_API_KEY },
-    { key: 'MIMO_API_KEY', name: 'MIMO', env: process.env.MIMO_API_KEY },
-    { key: 'QWEN_API_KEY', name: '千问(Qwen)', env: process.env.QWEN_API_KEY },
-  ];
-
-  let configuredCount = 0;
-  let misconfiguredCount = 0;
-
-  for (const { key, name, env } of requiredKeys) {
-    if (!env || env.startsWith('your_') || env.includes('_here')) {
-      console.warn(`  ❌ ${name} (${key}): 未配置或使用占位符`);
-      misconfiguredCount++;
-    } else {
-      console.log(`  ✅ ${name} (${key}): 已配置`);
-      configuredCount++;
-    }
-  }
-
-  if (misconfiguredCount === requiredKeys.length) {
-    console.error('\n⚠️  严重警告：所有AI API密钥均未配置！系统将只能使用模拟回复。');
-    console.error('   请在 backend/.env 文件中配置至少一个API密钥。\n');
-  } else if (misconfiguredCount > 0) {
-    console.warn(`\n⚠️  有 ${misconfiguredCount} 个API密钥未配置，对应AI将使用模拟回复。\n`);
-  } else {
-    console.log('\n✅ 所有API密钥已配置，AI对话功能完全可用！\n');
-  }
-  console.log('🔑 ==========================================\n');
+  console.log('模型连接由各用户的模型中心管理；未配置的模型会显示连接提示。');
 
   setupWebSocket(wss);
 
@@ -493,6 +478,29 @@ initDatabase().then(async () => {
   console.log(`🤖 AI自发对话已禁用 - AI将只在用户发言后回复`);
 
   startTTSCleanupScheduler();
+  await startTaskScheduler();
+
+  if (process.env.QUNTHINK_GOAL_BRIEF_SCHEDULER === '1') {
+    const runtime = getPersonalGoalRuntime();
+    if (!runtime?.pool) throw new Error('Goal brief scheduler requires QUNTHINK_FOUNDATIONS_RUNTIME_URL');
+    goalBriefScheduler = startGoalBriefScheduler({
+      ...runtime,
+      intervalMs: process.env.QUNTHINK_GOAL_BRIEF_POLL_MS || undefined,
+      usersPerTick: process.env.QUNTHINK_GOAL_BRIEF_USERS_PER_TICK || undefined,
+      runsPerUser: process.env.QUNTHINK_GOAL_BRIEF_RUNS_PER_USER || undefined,
+      listUserIds: async () => {
+        const authDb = getAuthDb();
+        await authDb.read();
+        return authDb.data.users.filter(user => user.active !== false).map(user => user.id);
+      },
+      onError: error => safeLog('error', '受限目标简报调度失败', { code: error?.code || 'UNKNOWN' }),
+      onTick: report => {
+        if (report?.advanced || report?.waiting || report?.errors) {
+          safeLog('info', '受限目标简报调度结果', report);
+        }
+      }
+    });
+  }
 
   server.on('error', (error) => {
     if (error.code === 'EADDRINUSE') {
@@ -509,7 +517,7 @@ initDatabase().then(async () => {
     console.log(`Server running on http://localhost:${PORT}`);
     console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
 
-    checkAllAIHealth().then(results => {
+    if (process.env.AI_HEALTH_PROBES === '1') checkAllAIHealth().then(results => {
       console.log('AI健康检查完成:', results);
     });
   });
@@ -521,13 +529,17 @@ initDatabase().then(async () => {
 });
 
 async function closeAllConnections() {
+  await goalBriefScheduler?.stop();
   await Promise.all([
     closeMongoConnection().catch(() => { }),
-    closeSupabaseConnection().catch(() => { })
+    closeSupabaseConnection().catch(() => { }),
+    closePersonalGoalRuntime().catch(() => { })
   ]);
 }
 
 function gracefulShutdown(signal) {
+  stopTaskScheduler();
+  void goalBriefScheduler?.stop();
   console.log(`${signal} received, shutting down gracefully...`);
   try { cleanupRateLimiter(); } catch {}
   server.close(() => {

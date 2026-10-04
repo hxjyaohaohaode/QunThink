@@ -4,15 +4,17 @@
  */
 
 import express from 'express';
-import { withWriteLock } from '../models/db.js';
+import { withWriteLock, clearUserDbCache } from '../models/db.js';
 import socialService from '../services/social/index.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { validateBody, smartLikeSchema, autoLikeSchema } from '../validators/index.js';
 import { sanitizeObject, COMMENT_SANITIZE_CONFIG } from '../utils/sanitize.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
+import { asyncHandler, createError } from '../middleware/errorHandler.js';
 import { decryptText } from '../utils/encryption.js';
+import { readableSourceMessages } from '../services/memory/persistentMemory.js';
 
 const router = express.Router();
+const DEFAULT_SMART_LIKE_CONFIG = Object.freeze({ ...socialService.smartLike.config });
 
 function toPublicMessageDetail(message) {
   if (!message) return null;
@@ -21,7 +23,7 @@ function toPublicMessageDetail(message) {
     try {
       content = decryptText(content);
     } catch {
-      content = message.content;
+      throw createError('消息内容无法解密', 503, 'MESSAGE_DECRYPT_UNAVAILABLE');
     }
   }
   return {
@@ -33,24 +35,92 @@ function toPublicMessageDetail(message) {
   };
 }
 
+// Keep the source ledger check, any subsequent content use, and mutation in
+// one account critical section. A restored user JSON must not revive content
+// after its independent deletion ledger has recorded a source revocation.
+async function withReadableMessages(req, reader) {
+  const db = await req.getUserDb();
+  return withWriteLock(req.userId, async () => {
+    await db.read();
+    const readable = await readableSourceMessages(req.userId, db);
+    const groupIds = new Set((db.data.groups || []).map(group => group.id));
+    return reader(db, readable.filter(message => groupIds.has(message.group_id)));
+  });
+}
+
+function analyticsSnapshot(messages) {
+  const ordered = [...messages].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const latestByGroup = new Map();
+  return ordered.map(message => {
+    const plain = toPublicMessageDetail(message);
+    const recent = latestByGroup.get(message.group_id);
+    const current = { ...message, content: plain.content,
+      likes: Array.isArray(message.likes) ? message.likes.length :
+        (Array.isArray(message.liked_by) ? message.liked_by.length : Number(message.likes) || 0) };
+    const metrics = socialService.analyzer.calculateSocialMetrics(current,
+      { recentMessages: recent ? [recent] : [] });
+    latestByGroup.set(message.group_id, current);
+    return { message, plain, metrics };
+  });
+}
+
+function withinRange(message, timeRange) {
+  if (timeRange === 'all') return true;
+  const hours = { '1h': 1, '24h': 24, '7d': 168 }[timeRange];
+  const created = new Date(message.created_at).getTime();
+  return Number.isFinite(created) && created > Date.now() - hours * 3600000;
+}
+
+function smartLikeConfig(db) {
+  return { ...DEFAULT_SMART_LIKE_CONFIG, ...(db.data.socialSmartLikeConfig || {}) };
+}
+
+function evaluateLike(db, message, contextMessages) {
+  // The legacy engine keeps a process-wide evaluation history, including
+  // sender IDs shared by preset AI accounts. Use a fresh evaluator and the
+  // account's own config so another account cannot influence this decision.
+  const engine = new socialService.smartLike.constructor();
+  engine.config = smartLikeConfig(db);
+  const plain = { ...message, content: toPublicMessageDetail(message).content };
+  const context = contextMessages.map(item => ({ ...item,
+    content: toPublicMessageDetail(item).content }));
+  return engine.evaluateMessage(plain, context,
+    { type: message.sender_type, id: message.sender_id });
+}
+
+function findCommentPath(comments, targetId, path = []) {
+  for (const comment of comments) {
+    if (comment.id === targetId) return [...path, comment];
+    const found = findCommentPath(comment.replies || [], targetId, [...path, comment]);
+    if (found) return found;
+  }
+  return null;
+}
+
 /**
  * 智能点赞评估
  * POST /api/social/evaluate-like
  * 评估消息是否应该获得自动点赞
  */
 router.post('/social/evaluate-like', validateBody(smartLikeSchema), asyncHandler(async (req, res) => {
-  const { message, contextMessages = [], senderInfo = {} } = req.body;
+  const { message, contextMessages = [] } = req.body;
 
-  if (!message || !message.content) {
+  if (!message || (!message.id && (typeof message.content !== 'string' || !message.content.trim()))) {
     return res.status(400).json({ error: '消息内容不能为空' });
   }
 
-  const evaluation = socialService.evaluateMessageForLike(message, contextMessages, senderInfo);
-
-  res.json({
-    success: true,
-    evaluation,
-    timestamp: new Date().toISOString()
+  return withReadableMessages(req, (db, readable) => {
+    let evaluation;
+    if (!message.id) evaluation = evaluateLike(db, message, contextMessages);
+    else {
+    const authoritative = readable.find(item => item.id === message.id);
+    if (!authoritative) return res.status(404).json({ error: '消息未找到' });
+    const context = readable.filter(item => item.group_id === authoritative.group_id &&
+      new Date(item.created_at) < new Date(authoritative.created_at))
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at)).slice(-5);
+    evaluation = evaluateLike(db, authoritative, context);
+    }
+    return res.json({ success: true, evaluation, timestamp: new Date().toISOString() });
   });
 }));
 
@@ -60,66 +130,41 @@ router.post('/social/evaluate-like', validateBody(smartLikeSchema), asyncHandler
  * 根据智能评估自动点赞消息
  */
 router.post('/social/auto-like', validateBody(autoLikeSchema), asyncHandler(async (req, res) => {
-  const db = await req.getUserDb();
-  await db.read();
-
   const { messageId, groupId } = req.body;
 
   if (!messageId || !groupId) {
     return res.status(400).json({ error: '消息ID和群组ID不能为空' });
   }
 
-  // 查找消息
-  const message = db.data.messages.find(m => m.id === messageId && m.group_id === groupId);
-  if (!message) {
-    return res.status(404).json({ error: '消息未找到' });
-  }
-
-  // 获取上下文消息（最近10条）
-  const contextMessages = db.data.messages
-    .filter(m => m.group_id === groupId)
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-    .slice(0, 10)
-    .reverse();
-
-  // 评估消息
-  const evaluation = socialService.evaluateMessageForLike(message, contextMessages, {
-    type: message.sender_type,
-    id: message.sender_id
-  });
-
-  let liked = false;
-  if (!Array.isArray(message.likes)) {
-    message.likes = Array.isArray(message.liked_by) ? [...message.liked_by] : [];
-  }
-  if (!Array.isArray(message.liked_by)) {
-    message.liked_by = [...message.likes];
-  }
-  let likeCount = message.likes.length;
-
-  // 如果评估建议点赞，则执行点赞
-  if (evaluation.shouldLike) {
-    if (!message.likes.includes('system_auto_like')) {
-      message.likes.push('system_auto_like');
-      message.liked_by = [...message.likes];
-      likeCount = message.likes.length;
-      liked = true;
-
-      await withWriteLock(req.userId, async () => {
+  return withReadableMessages(req, async (db, readable) => {
+    const message = readable.find(m => m.id === messageId && m.group_id === groupId);
+    if (!message || !db.data.groups?.some(group => group.id === groupId))
+      return res.status(404).json({ error: '消息未找到' });
+    const contextMessages = readable.filter(m => m.group_id === groupId)
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+      .slice(0, 10).reverse();
+    const evaluation = evaluateLike(db, message, contextMessages);
+    const previousLikes = message.likes;
+    const previousLikedBy = message.liked_by;
+    const likes = Array.isArray(message.likes) ? [...message.likes] :
+      (Array.isArray(message.liked_by) ? [...message.liked_by] : []);
+    const liked = Boolean(evaluation.shouldLike && !likes.includes('system_auto_like'));
+    if (liked) likes.push('system_auto_like');
+    if (liked) {
+      message.likes = likes;
+      message.liked_by = [...likes];
+      try {
         await db.write();
-      });
-
-      socialService.analyzeMessage(message, { recentMessages: contextMessages });
+      } catch {
+        message.likes = previousLikes;
+        message.liked_by = previousLikedBy;
+        clearUserDbCache(req.userId);
+        throw createError('自动点赞写入结果不确定，请刷新消息核验', 503, 'SOCIAL_WRITE_UNCERTAIN');
+      }
     }
-  }
-
-  res.json({
-    success: true,
-    liked,
-    likeCount,
-    evaluation,
-    message: liked ? '消息已获得自动点赞' : '消息未达到点赞阈值',
-    timestamp: new Date().toISOString()
+    return res.json({ success: true, liked, likeCount: likes.length, evaluation,
+      message: liked ? '消息已获得自动点赞' : '消息未达到点赞阈值',
+      timestamp: new Date().toISOString() });
   });
 }));
 
@@ -129,63 +174,46 @@ router.post('/social/auto-like', validateBody(autoLikeSchema), asyncHandler(asyn
  * 批量评估多条消息
  */
 router.post('/social/batch-evaluate', asyncHandler(async (req, res) => {
-  const { messages, groupId } = req.body;
+  const { messages, groupId } = req.body || {};
 
   if (!messages || !Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: '消息列表不能为空' });
   }
 
-  const db = await req.getUserDb();
-  await db.read();
-
-  // 获取群组的上下文消息
-  const groupMessages = db.data.messages
-    .filter(m => m.group_id === groupId)
-    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-
-  const messageIdIndexMap = new Map(groupMessages.map((m, idx) => [m.id, idx]));
-
-  const evaluations = [];
-  const recommendations = [];
-
-  for (const message of messages) {
-    // 获取该消息之前的上下文（最多5条）
-    const messageIndex = messageIdIndexMap.has(message.id) ? messageIdIndexMap.get(message.id) : -1;
-    const contextStart = Math.max(0, messageIndex - 5);
-    const contextMessages = groupMessages.slice(contextStart, messageIndex);
-
-    const evaluation = socialService.evaluateMessageForLike(
-      message,
-      contextMessages,
-      { type: message.sender_type, id: message.sender_id }
-    );
-
-    evaluations.push({
-      messageId: message.id,
-      evaluation
-    });
-
-    if (evaluation.shouldLike) {
-      recommendations.push({
-        messageId: message.id,
-        score: evaluation.score,
-        reasons: evaluation.reasons
-      });
-    }
+  if (typeof groupId !== 'string' || !groupId || messages.length > 100 ||
+      messages.some(item => typeof item?.id !== 'string') ||
+      new Set(messages.map(item => item.id)).size !== messages.length) {
+    return res.status(400).json({ error: '群组或消息列表无效' });
   }
-
-  res.json({
-    success: true,
-    totalMessages: messages.length,
-    evaluations,
-    recommendations: {
-      count: recommendations.length,
-      items: recommendations
-    },
-    summary: {
-      avgScore: evaluations.reduce((sum, item) => sum + item.evaluation.score, 0) / evaluations.length,
-      likeRecommendationRate: recommendations.length / messages.length
+  return withReadableMessages(req, (db, readable) => {
+    if (!db.data.groups?.some(group => group.id === groupId))
+      return res.status(404).json({ error: '群组未找到' });
+    const groupMessages = readable.filter(m => m.group_id === groupId)
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    const indexes = new Map(groupMessages.map((message, index) => [message.id, index]));
+    if (messages.some(item => !indexes.has(item.id)))
+      return res.status(404).json({ error: '部分消息不存在或无权访问' });
+    const evaluations = [];
+    const recommendations = [];
+    for (const requested of messages) {
+      const index = indexes.get(requested.id);
+      const message = groupMessages[index];
+      const contextMessages = groupMessages.slice(Math.max(0, index - 5), index);
+      const evaluation = evaluateLike(db, message, contextMessages);
+      evaluations.push({ messageId: message.id, evaluation });
+      if (evaluation.shouldLike) {
+        recommendations.push({ messageId: message.id, score: evaluation.score,
+          reasons: evaluation.reasons });
+      }
     }
+    return res.json({
+      success: true, totalMessages: messages.length, evaluations,
+      recommendations: { count: recommendations.length, items: recommendations },
+      summary: {
+        avgScore: evaluations.reduce((sum, item) => sum + item.evaluation.score, 0) / evaluations.length,
+        likeRecommendationRate: recommendations.length / messages.length
+      }
+    });
   });
 }));
 
@@ -202,13 +230,28 @@ router.get('/social/stats', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: '无效的时间范围' });
   }
 
-  const stats = socialService.getStats(timeRange);
-
-  res.json({
-    success: true,
-    timeRange,
-    stats,
-    timestamp: new Date().toISOString()
+  return withReadableMessages(req, (db, readable) => {
+    const items = analyticsSnapshot(readable.filter(message => withinRange(message, timeRange)));
+    const total = items.length;
+    const average = key => total ? items.reduce((sum, item) => sum + (item.metrics[key] || 0), 0) / total : 0;
+    const ai = items.filter(item => item.message.sender_type === 'ai').length;
+    const user = items.filter(item => item.message.sender_type === 'user').length;
+    const liked = items.filter(item => item.message.likes?.includes?.('system_auto_like')).length;
+    const stats = {
+      timeRange, dataBasis: 'current_readable_messages',
+      totalInteractions: total, aiInteractions: ai, userInteractions: user,
+      aiPercentage: total ? ai / total : 0, userPercentage: total ? user / total : 0,
+      avgMetrics: { engagement: average('engagementScore'), relevance: average('relevanceScore'),
+        sentiment: average('sentimentScore'), overall: average('overallScore') },
+      smartLikeStats: { totalEvaluations: null, autoLikes: liked, accuracy: null,
+        threshold: smartLikeConfig(db).threshold },
+      interactionTypes: {
+        likes: items.reduce((sum, item) => sum + (Array.isArray(item.message.likes) ? item.message.likes.length : 0), 0),
+        comments: items.reduce((sum, item) => sum + (item.message.comments?.length || 0), 0),
+        replies: items.filter(item => item.message.reply_to).length
+      }
+    };
+    return res.json({ success: true, timeRange, stats, timestamp: new Date().toISOString() });
   });
 }));
 
@@ -230,27 +273,14 @@ router.get('/social/top-messages', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: '限制参数必须在1-100之间' });
   }
 
-  const topMessages = socialService.getTopMessages(limitNum, metric);
-
-  // 获取完整的消息详情
-  const db = await req.getUserDb();
-  await db.read();
-
-  const messagesWithDetails = topMessages.map(item => {
-    const message = db.data.messages.find(m => m.id === item.messageId);
-    return {
-      ...item,
-      messageContent: toPublicMessageDetail(message)?.content ?? null,
-      messageDetails: toPublicMessageDetail(message)
-    };
-  });
-
-  res.json({
-    success: true,
-    metric,
-    limit: limitNum,
-    messages: messagesWithDetails,
-    timestamp: new Date().toISOString()
+  return withReadableMessages(req, (_db, readable) => {
+    const messagesWithDetails = analyticsSnapshot(readable).map(({ message, plain, metrics }) => ({
+      messageId: message.id, senderType: message.sender_type, senderId: message.sender_id,
+      score: metrics[metric], timestamp: message.created_at, metrics,
+      messageContent: plain.content, messageDetails: plain
+    })).sort((a, b) => b.score - a.score).slice(0, limitNum);
+    return res.json({ success: true, metric, limit: limitNum,
+      messages: messagesWithDetails, timestamp: new Date().toISOString() });
   });
 }));
 
@@ -267,13 +297,23 @@ router.get('/social/active-participants', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: '限制参数必须在1-50之间' });
   }
 
-  const activeParticipants = socialService.getActiveParticipants(limitNum);
-
-  res.json({
-    success: true,
-    limit: limitNum,
-    participants: activeParticipants,
-    timestamp: new Date().toISOString()
+  return withReadableMessages(req, (_db, readable) => {
+    const participants = new Map();
+    for (const item of analyticsSnapshot(readable)) {
+      const id = item.message.sender_id || 'unknown';
+      const key = JSON.stringify([item.message.sender_type, id]);
+      const current = participants.get(key) || { id, type: item.message.sender_type,
+        interactionCount: 0, totalScore: 0, lastActivity: item.message.created_at };
+      current.interactionCount++;
+      current.totalScore += item.metrics.overallScore || 0;
+      if (item.message.created_at > current.lastActivity) current.lastActivity = item.message.created_at;
+      participants.set(key, current);
+    }
+    const activeParticipants = [...participants.values()].map(item => ({ ...item,
+      avgScore: item.interactionCount ? item.totalScore / item.interactionCount : 0 }))
+      .sort((a, b) => b.interactionCount - a.interactionCount).slice(0, limitNum);
+    return res.json({ success: true, limit: limitNum, participants: activeParticipants,
+      timestamp: new Date().toISOString() });
   });
 }));
 
@@ -283,8 +323,12 @@ router.get('/social/active-participants', asyncHandler(async (req, res) => {
  * 获取当前智能点赞引擎的配置
  */
 router.get('/social/smart-like-config', asyncHandler(async (req, res) => {
-  const config = socialService.smartLike.config;
-  const stats = socialService.smartLike.getStats();
+  const config = await withReadableMessages(req, db => smartLikeConfig(db));
+  // The engine's process-wide history is not partitioned by account and may
+  // contain another account's message IDs. No durable per-account evaluation
+  // history exists yet, so report it as unavailable rather than leak it.
+  const stats = { totalEvaluations: null, likedCount: null, likeRate: null,
+    avgScore: null, config, recentActivity: [], available: false };
 
   res.json({
     success: true,
@@ -300,15 +344,14 @@ router.get('/social/smart-like-config', asyncHandler(async (req, res) => {
  * 更新智能点赞引擎的配置参数
  */
 router.put('/social/smart-like-config', asyncHandler(async (req, res) => {
-  const { config } = req.body;
+  const { config } = req.body || {};
 
-  if (!config || typeof config !== 'object') {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
     return res.status(400).json({ error: '配置参数不能为空' });
   }
 
   // 验证配置参数
   const validConfig = {};
-  const defaultConfig = socialService.smartLike.config;
 
   if (config.relevanceWeight !== undefined) {
     if (typeof config.relevanceWeight !== 'number' || config.relevanceWeight < 0 || config.relevanceWeight > 1) {
@@ -331,13 +374,23 @@ router.put('/social/smart-like-config', asyncHandler(async (req, res) => {
     validConfig.threshold = config.threshold;
   }
 
-  // 更新配置
-  const updatedConfig = socialService.smartLike.updateConfig(validConfig);
+  const { oldConfig, updatedConfig } = await withReadableMessages(req, async db => {
+    const oldConfig = smartLikeConfig(db);
+    const previous = db.data.socialSmartLikeConfig;
+    db.data.socialSmartLikeConfig = { ...(previous || {}), ...validConfig };
+    try { await db.write(); }
+    catch {
+      db.data.socialSmartLikeConfig = previous;
+      clearUserDbCache(req.userId);
+      throw createError('点赞配置写入结果不确定，请重新读取核验', 503, 'SOCIAL_WRITE_UNCERTAIN');
+    }
+    return { oldConfig, updatedConfig: smartLikeConfig(db) };
+  });
 
   res.json({
     success: true,
     message: '配置更新成功',
-    oldConfig: defaultConfig,
+    oldConfig,
     newConfig: updatedConfig,
     timestamp: new Date().toISOString()
   });
@@ -371,24 +424,32 @@ router.post('/social/reset', requireAdmin, asyncHandler(async (req, res) => {
  * 分析评论的上下文相关性
  */
 router.post('/social/comments/analyze', asyncHandler(async (req, res) => {
-  const sanitizedBody = sanitizeObject(req.body, COMMENT_SANITIZE_CONFIG);
-  const { comment, targetMessage, messageContext = [], commentThread = [] } = sanitizedBody;
+  const sanitizedBody = sanitizeObject(req.body || {}, COMMENT_SANITIZE_CONFIG);
+  const { comment, targetMessage, commentThread = [] } = sanitizedBody;
 
-  if (!comment || !targetMessage) {
-    return res.status(400).json({ error: '评论和目标消息不能为空' });
+  if (typeof comment?.content !== 'string' || !comment.content ||
+      typeof targetMessage?.id !== 'string' || !Array.isArray(commentThread)) {
+    return res.status(400).json({ error: '评论内容、目标消息ID或评论链无效' });
   }
-
-  const analysis = socialService.analyzeComment(
-    comment,
-    targetMessage,
-    messageContext,
-    commentThread
-  );
-
-  res.json({
-    success: true,
-    analysis,
-    timestamp: new Date().toISOString()
+  return withReadableMessages(req, (_db, readable) => {
+    const target = readable.find(item => item.id === targetMessage.id);
+    if (!target) return res.status(404).json({ error: '消息未找到' });
+    const messageContext = readable.filter(item => item.group_id === target.group_id &&
+      new Date(item.created_at) < new Date(target.created_at))
+      .sort((a, b) => new Date(a.created_at) - new Date(b.created_at)).slice(-5)
+      .map(item => ({ ...item, content: toPublicMessageDetail(item).content }));
+    let thread = [];
+    if (commentThread.length) {
+      const lastId = commentThread.at(-1)?.id;
+      thread = lastId && findCommentPath(socialService.buildCommentTree(target.comments || []), lastId);
+      if (!thread || thread.length !== commentThread.length ||
+          thread.some((item, index) => item.id !== commentThread[index]?.id)) {
+        return res.status(404).json({ error: '评论链未找到' });
+      }
+    }
+    const currentTarget = { ...target, content: toPublicMessageDetail(target).content };
+    const analysis = socialService.analyzeComment(comment, currentTarget, messageContext, thread);
+    return res.json({ success: true, analysis, timestamp: new Date().toISOString() });
   });
 }));
 
@@ -404,51 +465,19 @@ router.get('/social/comments/suggestions', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: '消息ID不能为空' });
   }
 
-  const db = await req.getUserDb();
-  await db.read();
-
-  const targetMessage = db.data.messages.find(m => m.id === messageId);
-  if (!targetMessage) {
-    return res.status(404).json({ error: '消息未找到' });
-  }
-
-  let commentThread = [];
-  if (parentCommentId) {
-    const messageComments = targetMessage.comments || [];
-    const commentTree = socialService.buildCommentTree(messageComments);
-
-    const findCommentPath = (comments, targetId, path = []) => {
-      for (const comment of comments) {
-        if (comment.id === targetId) {
-          return [...path, comment];
-        }
-
-        if (comment.replies && comment.replies.length > 0) {
-          const found = findCommentPath(comment.replies, targetId, [...path, comment]);
-          if (found) return found;
-        }
-      }
-      return null;
-    };
-
-    const path = findCommentPath(commentTree, parentCommentId);
-    if (path) {
-      commentThread = path;
+  return withReadableMessages(req, (_db, readable) => {
+    const targetMessage = readable.find(m => m.id === messageId);
+    if (!targetMessage) return res.status(404).json({ error: '消息未找到' });
+    let commentThread = [];
+    if (parentCommentId) {
+      const commentTree = socialService.buildCommentTree(targetMessage.comments || []);
+      commentThread = findCommentPath(commentTree, parentCommentId);
+      if (!commentThread) return res.status(404).json({ error: '父评论未找到' });
     }
-  }
-
-  const suggestions = socialService.generateCommentSuggestions(
-    targetMessage,
-    commentThread,
-    aiPersonality
-  );
-
-  res.json({
-    success: true,
-    messageId,
-    parentCommentId: parentCommentId || null,
-    suggestions,
-    timestamp: new Date().toISOString()
+    const plainTarget = { ...targetMessage, content: toPublicMessageDetail(targetMessage).content };
+    const suggestions = socialService.generateCommentSuggestions(plainTarget, commentThread, aiPersonality);
+    return res.json({ success: true, messageId, parentCommentId: parentCommentId || null,
+      suggestions, timestamp: new Date().toISOString() });
   });
 }));
 
@@ -464,29 +493,16 @@ router.get('/social/comments/tree', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: '消息ID不能为空' });
   }
 
-  const db = await req.getUserDb();
-  await db.read();
-
-  const targetMessage = db.data.messages.find(m => m.id === messageId);
-  if (!targetMessage) {
-    return res.status(404).json({ error: '消息未找到' });
-  }
-
-  const messageComments = targetMessage.comments || [];
-  const commentTree = socialService.buildCommentTree(messageComments);
-
-  const depthValidation = commentTree.map(comment =>
-    socialService.validateCommentDepth(comment.id, commentTree)
-  );
-
-  res.json({
-    success: true,
-    messageId,
-    totalComments: messageComments.length,
-    commentTree,
-    depthValidation,
-    maxDepth: socialService.commentAnalyzer.config.maxDepth,
-    timestamp: new Date().toISOString()
+  return withReadableMessages(req, (_db, readable) => {
+    const target = readable.find(m => m.id === messageId);
+    if (!target) return res.status(404).json({ error: '消息未找到' });
+    const messageComments = target.comments || [];
+    const commentTree = socialService.buildCommentTree(messageComments);
+    const depthValidation = commentTree.map(comment =>
+      socialService.validateCommentDepth(comment.id, commentTree));
+    return res.json({ success: true, messageId, totalComments: messageComments.length,
+      commentTree, depthValidation, maxDepth: socialService.commentAnalyzer.config.maxDepth,
+      timestamp: new Date().toISOString() });
   });
 }));
 

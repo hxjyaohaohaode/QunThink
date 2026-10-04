@@ -20,7 +20,7 @@ await initAuthDb();
 
 const request = supertest(createTestApp());
 
-async function createTestUser() {
+async function createTestUser(password = crypto.randomBytes(32).toString('hex')) {
   const db = getAuthDb();
   const userId = crypto.randomUUID();
   const phone = `138${String(Date.now()).slice(-8)}`;
@@ -28,7 +28,7 @@ async function createTestUser() {
   const user = {
     id: userId,
     username: `user_${phoneSuffix}_${Date.now().toString(36)}`,
-    password: hashPassword(crypto.randomBytes(32).toString('hex')),
+    password: hashPassword(password),
     nickname: `测试用户${phoneSuffix}`,
     phone,
     created_at: new Date().toISOString()
@@ -50,6 +50,25 @@ async function createTestUser() {
 
   return { user, token };
 }
+
+test('login and logout use a host-only session cookie for localhost or 127.0.0.1', async () => {
+  const password = 'BrowserTest2026!';
+  const { user } = await createTestUser(password);
+  const browser = supertest.agent(createTestApp());
+  const login = await browser.post('/api/auth/login-phone')
+    .send({ phone: user.phone, password });
+  assert.equal(login.status, 200);
+  const loginCookie = login.headers['set-cookie'].find(value => value.startsWith('session_token='));
+  assert.ok(loginCookie);
+  assert.doesNotMatch(loginCookie, /(?:^|;)\s*Domain=/i);
+  assert.equal((await browser.get('/api/auth/token')).status, 200);
+  const logout = await browser.post('/api/auth/logout');
+  assert.equal(logout.status, 200);
+  const clearCookie = logout.headers['set-cookie'].find(value => value.startsWith('session_token='));
+  assert.ok(clearCookie);
+  assert.doesNotMatch(clearCookie, /(?:^|;)\s*Domain=/i);
+  assert.equal((await browser.get('/api/auth/token')).status, 401);
+});
 
 test('session auth status reflects login requirement and authenticated session', async () => {
   const beforeLogin = await request.get('/api/auth/token');

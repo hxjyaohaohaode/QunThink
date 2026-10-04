@@ -5,6 +5,7 @@ import { loadCustomPersonas } from '../services/scheduler/index.js';
 import { validateBody, updatePersonaSchema } from '../validators/index.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { broadcastPersonaUpdate, broadcastPersonasSync } from '../websocket/index.js';
+import { getCatalogData, modelPersona } from '../services/ai/catalog.js';
 
 const router = express.Router();
 
@@ -27,9 +28,9 @@ function isKnownAiId(aiId) {
 
 async function resolveAiId(req, res) {
   const { aiId } = req.params;
-  if (isKnownAiId(aiId)) return aiId;
   const db = await req.getUserDb();
   await db.read();
+  if (getCatalogData(db.data).models.some(model => model.id === aiId)) return aiId;
   if (db.data.customPersonas && Object.hasOwn(db.data.customPersonas, aiId)) return aiId;
   res.status(404).json({ error: '未找到该AI' });
   return null;
@@ -116,9 +117,10 @@ function mergePersona(defaultPersona, customPersona = {}) {
   };
 }
 
-export function buildMergedPersonas(customPersonas = {}) {
+export function buildMergedPersonas(customPersonas = {}, catalog = null) {
   const merged = {};
-  for (const [aiId, defaultPersona] of Object.entries(AI_PERSONAS)) {
+  const defaults = catalog ? Object.fromEntries(catalog.models.map(m => [m.id, { ...AI_PERSONAS[m.id], ...modelPersona(m) }])) : AI_PERSONAS;
+  for (const [aiId, defaultPersona] of Object.entries(defaults)) {
     const custom = customPersonas[aiId] || {};
     merged[aiId] = mergePersona(defaultPersona, custom);
   }
@@ -129,7 +131,7 @@ router.get('/personas', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   await db.read();
   const customPersonas = db.data.customPersonas || {};
-  const merged = buildMergedPersonas(customPersonas);
+  const merged = buildMergedPersonas(customPersonas, getCatalogData(db.data));
 
   // 无缓存头 - 确保前端始终获取最新数据
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -140,63 +142,8 @@ router.get('/personas', asyncHandler(async (req, res) => {
   res.json({ success: true, personas: merged, _timestamp: Date.now() });
 }));
 
-router.put('/personas/:aiId', validateBody(updatePersonaSchema), asyncHandler(async (req, res) => {
-  const resolvedAiId = await resolveAiId(req, res);
-  if (!resolvedAiId) return;
-  const aiId = resolvedAiId;
-  const db = await req.getUserDb();
-  await db.read();
-  const updates = req.body;
-  if (!updates || typeof updates !== 'object') {
-    return res.status(400).json({ error: '更新数据不能为空' });
-  }
-  if (!db.data.customPersonas[aiId]) {
-    db.data.customPersonas[aiId] = {};
-  }
-  for (const key of Object.keys(updates)) {
-    if (PERSONA_ALLOWED_FIELDS.includes(key)) {
-      if (key === 'responseConfig' && updates.responseConfig) {
-        db.data.customPersonas[aiId].responseConfig = {
-          ...db.data.customPersonas[aiId].responseConfig,
-          ...updates.responseConfig
-        };
-      } else if (key === 'socialConfig' && updates.socialConfig) {
-        db.data.customPersonas[aiId].socialConfig = {
-          ...db.data.customPersonas[aiId].socialConfig,
-          ...updates.socialConfig
-        };
-      } else if (key === 'modelConfig' && updates.modelConfig) {
-        db.data.customPersonas[aiId].modelConfig = {
-          ...db.data.customPersonas[aiId].modelConfig,
-          ...updates.modelConfig
-        };
-      } else if (key === 'debateConfig' && updates.debateConfig) {
-        db.data.customPersonas[aiId].debateConfig = {
-          ...db.data.customPersonas[aiId].debateConfig,
-          ...updates.debateConfig
-        };
-      } else {
-        db.data.customPersonas[aiId][key] = updates[key];
-      }
-    }
-  }
-  await withWriteLock(req.userId, async () => {
-    await db.write();
-  });
-  // 立即重新加载调度器缓存（而非仅删除），确保下一次AI调用使用最新人设
-  await loadCustomPersonas(req.userId);
-  // 通过WebSocket广播人设更新，确保前端和其他进程立即感知变更
-  broadcastPersonaUpdate(aiId, req.userId).catch(err =>
-    console.error('广播人设更新失败:', err)
-  );
-  const custom = db.data.customPersonas[aiId];
-  const defaultPersona = AI_PERSONAS[aiId];
-  const merged = mergePersona(defaultPersona, custom);
-  res.json({ success: true, persona: merged });
-}));
-
 // PATCH /api/personas/:aiId - 实时部分更新人设（轻量级，快速生效）
-router.patch('/personas/:aiId', validateBody(updatePersonaSchema), asyncHandler(async (req, res) => {
+const updatePersonaHandler = asyncHandler(async (req, res) => {
   const { aiId } = req.params;
   const resolvedAiId = await resolveAiId(req, res);
   if (!resolvedAiId) return;
@@ -251,26 +198,29 @@ router.patch('/personas/:aiId', validateBody(updatePersonaSchema), asyncHandler(
 
   // 构建合并后的人设返回
   const custom = db.data.customPersonas[resolvedAiId];
-  const defaultPersona = AI_PERSONAS[resolvedAiId] || { id: resolvedAiId };
+  const defaultPersona = modelPersona(getCatalogData(db.data).models.find(m => m.id === resolvedAiId) || { id: resolvedAiId, name: resolvedAiId });
   const merged = mergePersona(defaultPersona, custom);
 
   // 确保响应不会被缓存
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.json({ success: true, persona: merged, _timestamp: Date.now() });
-}));
+});
+
+router.put('/personas/:aiId', validateBody(updatePersonaSchema), updatePersonaHandler);
+router.patch('/personas/:aiId', validateBody(updatePersonaSchema), updatePersonaHandler);
 
 router.put('/personas/:aiId/reset', asyncHandler(async (req, res) => {
   const resolvedAiId = await resolveAiId(req, res);
   if (!resolvedAiId) return;
   const db = await req.getUserDb();
-  await db.read();
-  delete db.data.customPersonas[resolvedAiId];
   await withWriteLock(req.userId, async () => {
+    await db.read();
+    if (db.data.customPersonas) delete db.data.customPersonas[resolvedAiId];
     await db.write();
   });
   // 立即重新加载调度器缓存，确保重置后下一次AI调用使用默认人设
   await loadCustomPersonas(req.userId);
-  const defaultPersona = AI_PERSONAS[resolvedAiId] || { id: resolvedAiId };
+  const defaultPersona = modelPersona(getCatalogData(db.data).models.find(m => m.id === resolvedAiId) || { id: resolvedAiId, name: resolvedAiId });
   const resetPersona = mergePersona(defaultPersona);
 
   // 通过WebSocket广播人设更新（重置为默认）

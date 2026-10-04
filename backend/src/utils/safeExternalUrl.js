@@ -113,3 +113,14 @@ export async function getSafeExternalRequestOptions(rawUrl) {
     httpsAgent
   };
 }
+
+// Opt-in by the server operator only (e.g. a local Ollama installation).
+// User payloads cannot expand this allowlist; redirects remain forbidden.
+export async function getSafeAiRequestOptions(rawUrl) {
+  const url = new URL(rawUrl);
+  const allowedOrigins = (process.env.AI_ALLOWED_LOCAL_ORIGINS || '').split(',').map(v => v.trim()).filter(Boolean);
+  if (allowedOrigins.includes(url.origin) && ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password) {
+    return { maxRedirects: 0, proxy: false };
+  }
+  return getSafeExternalRequestOptions(rawUrl);
+}

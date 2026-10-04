@@ -1,3 +1,4 @@
+import { mentionedModelIds } from '../mentions.js';
 ﻿import { v4 as uuidv4 } from 'uuid';
 import { getUserDb, listUserDatabases, updateGroupActivityById, withWriteLock } from '../../models/db.js';
 import { callAI, callAIStream, cancelStream, normalizeResponse, applyMessageLengthLimit } from '../ai/index.js';
@@ -11,9 +12,12 @@ import { getUserDb as getUserDbForFiles } from '../../models/db.js';
 import { generateMediaDescription } from '../fileAnnotation/index.js';
 import { parseFile } from '../fileParser/index.js';
 import path from 'path';
-const activeGroups = new Map();
-const autonomousTimers = new Map();
-const groupToUserMap = new Map();
+import { currentUserId, runAsUser, UserScopedMap } from '../userScope.js';
+import { getCatalogData, modelPersona, readCatalog } from '../ai/catalog.js';
+import { readableSourceGroups, readableSourceMessages } from '../memory/persistentMemory.js';
+const activeGroups = new UserScopedMap();
+const autonomousTimers = new UserScopedMap();
+const groupToUserMap = new UserScopedMap();
 const customPersonasCache = new Map();
 
 export async function loadCustomPersonas(userId) {
@@ -21,7 +25,11 @@ export async function loadCustomPersonas(userId) {
   try {
     const db = await getUserDb(userId);
     await db.read();
-    customPersonasCache.set(userId, db.data.customPersonas || {});
+    const catalogPersonas = Object.fromEntries(getCatalogData(db.data).models.map(model => [model.id, modelPersona(model)]));
+    for (const [id, custom] of Object.entries(db.data.customPersonas || {})) {
+      catalogPersonas[id] = { ...catalogPersonas[id], ...custom };
+    }
+    customPersonasCache.set(userId, catalogPersonas);
   } catch (e) {
     console.warn('[AI人设] 加载自定义人设失败:', e.message);
   }
@@ -52,6 +60,13 @@ const defaultResponseConfig = {
   maxResponsesPerConversation: 10,
   cooldownBetweenResponses: 2000
 };
+const MAX_AUTONOMOUS_MODEL_ATTEMPTS = 8;
+
+function modelAttemptLimit(aiId, userId) {
+  const configured = getEffectivePersona(aiId, userId)?.responseConfig?.maxResponsesPerConversation;
+  if (!Number.isInteger(configured) || configured < 0) return MAX_AUTONOMOUS_MODEL_ATTEMPTS;
+  return Math.min(configured, MAX_AUTONOMOUS_MODEL_ATTEMPTS);
+}
 
 const defaultSocialConfig = {
   maxMessageLength: 800,
@@ -66,7 +81,7 @@ const defaultSocialConfig = {
 };
 
 export function getEffectivePersona(aiId, userId = null) {
-  const defaultPersona = AI_PERSONAS[aiId];
+  const defaultPersona = AI_PERSONAS[aiId] || customPersonasCache.get(userId)?.[aiId];
   if (!defaultPersona) return null;
 
   const baseModelConfig = defaultPersona.modelConfig || defaultModelConfig;
@@ -106,7 +121,7 @@ export function populateGroupCache(userId, db) {
   }
 }
 
-async function generateRefusalMessage(aiId, userId = null, recentMessages = []) {
+async function generateRefusalMessage(aiId, userId = null, recentMessages = [], sourceGuard = null) {
   const persona = getEffectivePersona(aiId, userId);
   const name = persona?.name || aiId;
 
@@ -122,7 +137,8 @@ async function generateRefusalMessage(aiId, userId = null, recentMessages = []) 
 只输出你的理由，不要加引号或其他格式，20字以内。
 ${lastContent ? '对方说的是：' + lastContent : ''}`;
 
-    const rawRefusal = await callAIForRefusal(aiId, persona, refusalPrompt, [], 'refusal', null, [], null, [], false, [], userId);
+    if (sourceGuard && !(await sourceGuard())) return null;
+    const rawRefusal = await callAIForRefusal(aiId, persona, refusalPrompt, [], 'refusal', null, [], null, [], false, [], userId, null, sourceGuard);
     const refusalReason = normalizeRefusal(rawRefusal)?.trim();
 
     if (refusalReason && refusalReason.length > 0 && refusalReason.length <= 50) {
@@ -130,6 +146,9 @@ ${lastContent ? '对方说的是：' + lastContent : ''}`;
     }
   } catch (e) {
     console.warn('[AI拒绝] 生成拒绝理由失败:', e.message);
+    // A provider may have received the request even when its response is lost.
+    // Do not turn that unknown result into a fabricated, seemingly completed refusal.
+    return null;
   }
 
   return `${name}不想回答这个问题`;
@@ -139,50 +158,54 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function getRecentMessages(groupId, limit = 50, scopedUserId = null) {
-  if (scopedUserId) {
-    const db = await getUserDb(scopedUserId);
+async function getRecentMessages(groupId, limit = 50, scopedUserId = currentUserId()) {
+  const userId = scopedUserId || currentUserId();
+  if (!userId) return [];
+  const db = await getUserDb(userId);
+  return withWriteLock(userId, async () => {
     await db.read();
-    const messages = db.data.messages
-      .filter(m => m.group_id === groupId)
-      .slice(-limit);
-    if (messages.length > 0) return decryptMessages(messages);
-    return [];
-  }
-
-  const cachedUserId = groupToUserMap.get(groupId);
-  if (cachedUserId) {
-    const db = await getUserDb(cachedUserId);
-    await db.read();
-    const messages = db.data.messages
-      .filter(m => m.group_id === groupId)
-      .slice(-limit);
-    if (messages.length > 0) return decryptMessages(messages);
-  }
-
-  const userIds = await listUserDatabases();
-  for (const userId of userIds) {
-    const db = await getUserDb(userId);
-    await db.read();
-    populateGroupCache(userId, db);
-    const messages = db.data.messages
-      .filter(m => m.group_id === groupId)
-      .slice(-limit);
-    if (messages.length > 0) return decryptMessages(messages);
-  }
-  return [];
+    const messages = await readableSourceMessages(userId, db);
+    return decryptMessages(messages.filter(m => m.group_id === groupId).slice(-limit));
+  });
 }
 
 // 用户作用域解析：预置群使用固定 ID（如 group-presidential），跨用户必然碰撞。
 // 凡是携带调用者身份的链路必须用此函数，严禁回退到全库扫描。
 async function findGroupAndMessagesForUser(userId, groupId) {
   const db = await getUserDb(userId);
-  await db.read();
-  const group = db.data.groups.find(g => g.id === groupId);
-  if (!group) return null;
-  const messages = db.data.messages.filter(m => m.group_id === groupId);
-  groupToUserMap.set(groupId, userId);
-  return { db, userId, group, messages };
+  return withWriteLock(userId, async () => {
+    await db.read();
+    const group = (await readableSourceGroups(userId, db)).find(g => g.id === groupId);
+    if (!group) return null;
+    const messages = (await readableSourceMessages(userId, db)).filter(m => m.group_id === groupId);
+    groupToUserMap.set(groupId, userId);
+    return { db, userId, group, messages };
+  });
+}
+
+// Recheck under the same account lock used by source deletion. A restored user
+// snapshot can still contain a deleted row, so both durable source ledgers must
+// be consulted before dispatching or publishing a queued reply.
+async function queuedSourceReadableLocked(userId, db, groupId, sourceMessageId) {
+  if (!(await readableSourceGroups(userId, db)).some(group => group.id === groupId)) return false;
+  if (!sourceMessageId) return true;
+  return (await readableSourceMessages(userId, db)).some(message =>
+    message.id === sourceMessageId && message.group_id === groupId && message.sender_type === 'user');
+}
+
+async function queuedSourceReadable(userId, groupId, context) {
+  if (context.cancel) return false;
+  const db = await getUserDb(userId);
+  return withWriteLock(userId, async () => {
+    await db.read();
+    return !context.cancel && queuedSourceReadableLocked(userId, db, groupId, context.sourceMessageId);
+  });
+}
+
+async function automaticConversationAllowed(userId, groupId, context) {
+  if (!context.requireAutonomousSetting) return true;
+  const current = await findGroupAndMessagesForUser(userId, groupId);
+  return current?.group.autonomous_chat_enabled === true && !context.cancel && context.conversationActive;
 }
 
 function decryptMessages(messages) {
@@ -199,49 +222,12 @@ function decryptMessages(messages) {
 }
 
 async function findGroupInAnyUserDb(groupId) {
-  const cachedUserId = groupToUserMap.get(groupId);
-  if (cachedUserId) {
-    const db = await getUserDb(cachedUserId);
-    await db.read();
-    const group = db.data.groups.find(g => g.id === groupId);
-    if (group) return { db, userId: cachedUserId, group };
-  }
-
-  const userIds = await listUserDatabases();
-  for (const userId of userIds) {
-    const db = await getUserDb(userId);
-    await db.read();
-    populateGroupCache(userId, db);
-    const group = db.data.groups.find(g => g.id === groupId);
-    if (group) return { db, userId, group };
-  }
-  return null;
+  const userId = currentUserId();
+  return userId ? findGroupAndMessagesForUser(userId, groupId) : null;
 }
 
 async function findGroupAndMessagesInAnyUserDb(groupId) {
-  const cachedUserId = groupToUserMap.get(groupId);
-  if (cachedUserId) {
-    const db = await getUserDb(cachedUserId);
-    await db.read();
-    const group = db.data.groups.find(g => g.id === groupId);
-    if (group) {
-      const messages = db.data.messages.filter(m => m.group_id === groupId);
-      return { db, userId: cachedUserId, group, messages };
-    }
-  }
-
-  const userIds = await listUserDatabases();
-  for (const userId of userIds) {
-    const db = await getUserDb(userId);
-    await db.read();
-    populateGroupCache(userId, db);
-    const group = db.data.groups.find(g => g.id === groupId);
-    if (group) {
-      const messages = db.data.messages.filter(m => m.group_id === groupId);
-      return { db, userId, group, messages };
-    }
-  }
-  return null;
+  return findGroupInAnyUserDb(groupId);
 }
 
 export function startAutonomousChatTimer(groupId) {
@@ -265,7 +251,11 @@ export function startAutonomousChatTimer(groupId) {
       }
 
       const { group } = result;
-      if (!group || !group.ai_members || group.ai_members.length < 2) {
+      if (!group || group.autonomous_chat_enabled !== true) {
+        stopAutonomousChatTimer(groupId);
+        return;
+      }
+      if (!group.ai_members || group.ai_members.length < 2) {
         return;
       }
 
@@ -325,39 +315,40 @@ async function triggerSpontaneousChat(groupId, aiMembers) {
     return;
   }
 
-  let spontaneousUserId = null;
-  try {
-    const dbResult = await findGroupInAnyUserDb(groupId);
-    if (dbResult) spontaneousUserId = dbResult.userId;
-  } catch (e) { }
-
-  if (spontaneousUserId) {
-    await loadCustomPersonas(spontaneousUserId);
-  }
-
-  let maxConversationDepth = 6;
-  if (aiMembers && aiMembers.length > 0) {
-    const depths = aiMembers.map(aiId => {
-      const persona = getEffectivePersona(aiId, spontaneousUserId);
-      return persona?.responseConfig?.maxResponsesPerConversation || 6;
-    });
-    maxConversationDepth = depths.reduce((a, b) => Math.max(a, b), 6);
-  }
-
+  // Claim the per-account group slot before any await. Timer callbacks may
+  // overlap while loading group data or personas.
   const context = {
-    cancel: false,
-    conversationDepth: 0,
-    maxConversationDepth,
-    lastSpeakerId: null,
-    conversationActive: true,
-    isAutonomous: true
+    cancel: false, conversationDepth: 0, maxConversationDepth: 6,
+    lastSpeakerId: null, conversationActive: true,
+    requireAutonomousSetting: true, isAutonomous: true
   };
   activeGroups.set(chatKey, context);
 
   try {
+
+  let preflightUserId = null;
+  try {
+    const dbResult = await findGroupInAnyUserDb(groupId);
+    if (dbResult) preflightUserId = dbResult.userId;
+  } catch (e) { }
+
+  if (preflightUserId) {
+    await loadCustomPersonas(preflightUserId);
+  }
+
+  const catalog = preflightUserId ? await readCatalog(preflightUserId) : { models: [] };
+  const verifiedChat = new Set(catalog.models.filter(model =>
+    model.ready && model.verifiedCapabilities.includes('chat')).map(model => model.id));
+  aiMembers = aiMembers.filter(aiId => verifiedChat.has(aiId) && modelAttemptLimit(aiId, preflightUserId) > 0);
+  if (aiMembers.length < 2) return;
+
+  const maxConversationDepth = Math.min(6, Math.max(0,
+    ...(aiMembers || []).map(aiId => modelAttemptLimit(aiId, preflightUserId))));
+
+  context.maxConversationDepth = maxConversationDepth;
     const db = await findGroupInAnyUserDb(groupId);
-    if (!db) {
-      console.error(`[AI自发对话] 找不到群组 ${groupId}`);
+    if (!db || db.group.autonomous_chat_enabled !== true || context.cancel) {
+      console.info('[AI自发对话] 群组不可用、开关已关闭或运行已取消', { groupId });
       return;
     }
 
@@ -374,6 +365,8 @@ async function triggerSpontaneousChat(groupId, aiMembers) {
     } catch (e) { }
 
     const starterAi = aiMembers[Math.floor(Math.random() * aiMembers.length)];
+    context.starterAi = starterAi;
+    context.attemptsByModel = new Map([[starterAi, 1]]);
 
     broadcastTypingStatus(groupId, starterAi, true);
 
@@ -408,6 +401,7 @@ async function triggerSpontaneousChat(groupId, aiMembers) {
       broadcastStreamStart(groupId, starterAi, messageId);
 
       const onChunk = (chunk) => {
+        if (context.cancel) return;
         accumulatedContent += chunk;
         const now = Date.now();
         if (now - lastBroadcastTime >= broadcastThrottleMs) {
@@ -418,7 +412,10 @@ async function triggerSpontaneousChat(groupId, aiMembers) {
         }
       };
 
-      const rawContent = await callAIStream(starterAi, persona, promptMessage, recentMessages, 'free_chat', null, [], null, aiMembers, false, [], null, [], onChunk, streamId, spontaneousUserId);
+      const rawContent = await callAIStream(starterAi, persona, promptMessage, recentMessages, 'free_chat', null, [], null, aiMembers, false, [], null, [], onChunk, streamId, spontaneousUserId, null,
+        () => automaticConversationAllowed(spontaneousUserId, groupId, context));
+
+      if (context.cancel || !(await automaticConversationAllowed(spontaneousUserId, groupId, context))) return;
 
       if (accumulatedContent.length > lastBroadcastLength) {
         const incremental = accumulatedContent.substring(lastBroadcastLength);
@@ -450,7 +447,7 @@ async function triggerSpontaneousChat(groupId, aiMembers) {
         broadcastStreamEnd(groupId, starterAi, messageId, content, null, null);
         context.lastSpeakerId = starterAi;
 
-        console.log(`[AI自发对话] ${starterAi} 发起对话: ${content.substring(0, 50)}...`);
+        console.log('[AI自发对话] 已生成消息', { modelId: starterAi, contentLength: content.length });
       }
 
       broadcastTypingStatus(groupId, starterAi, false);
@@ -465,6 +462,38 @@ async function triggerSpontaneousChat(groupId, aiMembers) {
       activeGroups.delete(chatKey);
     }
   }
+}
+
+async function expandAgentCalls(content, userId, userAgents, sourceGuard) {
+  let finalContent = content;
+  let agentCallInfo = null;
+  const available = new Map((userAgents || []).map(agent => [agent.id, agent]));
+  let calls = 0;
+  for (const match of content.matchAll(/\[CALL_AGENT:([a-zA-Z0-9_-]+)\]/g)) {
+    const marker = match[0], agentId = match[1];
+    if (!finalContent.includes(marker)) continue;
+    if (!available.has(agentId)) {
+      finalContent = finalContent.replaceAll(marker, () => '[智能体不可用]');
+      continue;
+    }
+    // Generated text cannot set the number of paid nested calls. Repeated
+    // references to one agent reuse the same result within this message.
+    if (calls >= 1) {
+      finalContent = finalContent.replaceAll(marker, () => '[本条消息的智能体协作次数已达上限]');
+      continue;
+    }
+    if (!(await sourceGuard())) return null;
+    calls++;
+    try {
+      const response = await invokeAgentInGroup(userId, agentId, finalContent, sourceGuard);
+      finalContent = finalContent.replaceAll(marker, () => response || '');
+      agentCallInfo = { agentId, agentName: available.get(agentId).name || agentId };
+    } catch (error) {
+      console.warn('[AI消息] 智能体协作失败', { agentId, error: error.message });
+      finalContent = finalContent.replaceAll(marker, () => `[智能体${agentId}调用失败]`);
+    }
+  }
+  return { content: finalContent, agentCallInfo };
 }
 
 function parseReplyReference(content, recentMessages = []) {
@@ -1082,7 +1111,9 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
 
   const refusalProbability = persona.refusalProbability ?? 0;
   if (refusalProbability > 0 && Math.random() < refusalProbability) {
-    const refusalMsg = await generateRefusalMessage(aiId, userId, recentMessages);
+    if (!(await queuedSourceReadable(userId, groupId, context))) return null;
+    const refusalMsg = await generateRefusalMessage(aiId, userId, recentMessages,
+      () => queuedSourceReadable(userId, groupId, context));
     if (refusalMsg) {
       const refusalMessageId = uuidv4();
       const refusalMessage = {
@@ -1096,23 +1127,24 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
         created_at: new Date().toISOString()
       };
 
-      const dbResult = await findGroupAndMessagesInAnyUserDb(groupId);
-      if (dbResult) {
+      const dbResult = userId
+        ? await findGroupAndMessagesForUser(userId, groupId)
+        : await findGroupAndMessagesInAnyUserDb(groupId);
+      let saved = false;
+      if (dbResult && !context.cancel) {
         await withWriteLock(dbResult.userId, async () => {
           await dbResult.db.read();
+          if (context.cancel || !(await queuedSourceReadableLocked(dbResult.userId, dbResult.db, groupId, context.sourceMessageId))) return;
           dbResult.db.data.messages.push(refusalMessage);
           await dbResult.db.write();
+          saved = true;
+          broadcastToGroup(groupId, {
+            type: 'system_message', group_id: groupId, content: refusalMsg,
+            sender_id: aiId, metadata: { refusal: true }, timestamp: new Date().toISOString()
+          });
         });
       }
-
-      broadcastToGroup(groupId, {
-        type: 'system_message',
-        group_id: groupId,
-        content: refusalMsg,
-        sender_id: aiId,
-        metadata: { refusal: true },
-        timestamp: new Date().toISOString()
-      });
+      if (!saved) context.cancel = true;
     }
     return null;
   }
@@ -1148,6 +1180,10 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
   await sleep(delay);
 
   if (context.cancel) return null;
+  if (!(await queuedSourceReadable(userId, groupId, context))) {
+    context.cancel = true;
+    return null;
+  }
 
   broadcastTypingStatus(groupId, aiId, true);
 
@@ -1169,10 +1205,41 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
       userId
     );
 
+    // No await between the final source check and the provider dispatch.
+    if (!(await queuedSourceReadable(userId, groupId, context))) {
+      context.cancel = true;
+      broadcastTypingStatus(groupId, aiId, false);
+      return null;
+    }
+
     let accumulatedContent = '';
     let lastBroadcastTime = Date.now();
     let lastBroadcastLength = 0;
     const broadcastThrottleMs = 30;
+    const pendingChunks = new Set();
+
+    const publishChunk = (snapshot, isFinal) => {
+      const pending = (async () => {
+        const db = await getUserDb(userId);
+        await withWriteLock(userId, async () => {
+          await db.read();
+          if (context.cancel || !(await queuedSourceReadableLocked(userId, db, groupId, context.sourceMessageId))) {
+            context.cancel = true;
+            cancelStream(streamId);
+            return;
+          }
+          if (snapshot.length <= lastBroadcastLength) return;
+          const incremental = snapshot.substring(lastBroadcastLength);
+          broadcastStreamChunk(groupId, aiId, messageId, snapshot, isFinal, incremental);
+          lastBroadcastLength = snapshot.length;
+        });
+      })().catch(() => {
+        context.cancel = true;
+        cancelStream(streamId);
+      });
+      pendingChunks.add(pending);
+      pending.finally(() => pendingChunks.delete(pending));
+    };
 
     broadcastStreamStart(groupId, aiId, messageId);
 
@@ -1182,9 +1249,7 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
 
       const now = Date.now();
       if (now - lastBroadcastTime >= broadcastThrottleMs) {
-        const incremental = accumulatedContent.substring(lastBroadcastLength);
-        broadcastStreamChunk(groupId, aiId, messageId, accumulatedContent, false, incremental);
-        lastBroadcastLength = accumulatedContent.length;
+        publishChunk(accumulatedContent, false);
         lastBroadcastTime = now;
       }
     };
@@ -1207,18 +1272,24 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
       groupMembers,
       isPrivateChat,
       [],
-      null,
+      systemPrompt,
       [],
       onChunk,
       streamId,
       userId,
-      isPrivateChat ? null : userAgents
+      isPrivateChat ? null : userAgents,
+      async () => (await queuedSourceReadable(userId, groupId, context)) &&
+        automaticConversationAllowed(userId, groupId, context)
     );
 
+    await Promise.all(pendingChunks);
+    if (context.cancel || !(await queuedSourceReadable(userId, groupId, context))) return null;
+
     if (accumulatedContent.length > lastBroadcastLength) {
-      const incremental = accumulatedContent.substring(lastBroadcastLength);
-      broadcastStreamChunk(groupId, aiId, messageId, accumulatedContent, true, incremental);
+      publishChunk(accumulatedContent, true);
+      await Promise.all(pendingChunks);
     }
+    if (context.cancel) return null;
 
     let content = normalizeResponse(rawContent);
 
@@ -1227,7 +1298,13 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
       // 使用已流式推送的累积内容作为最终内容，避免前端显示空白消息
       // 如果连流式内容都为空，发送一个有意义的错误提示
       const fallbackContent = accumulatedContent.trim() || `[${persona?.name || aiId}] 暂时无法生成回复，请稍后再试。`;
-      broadcastStreamEnd(groupId, aiId, messageId, fallbackContent, null, null);
+      const db = await getUserDb(userId);
+      await withWriteLock(userId, async () => {
+        await db.read();
+        if (!context.cancel && await queuedSourceReadableLocked(userId, db, groupId, context.sourceMessageId)) {
+          broadcastStreamEnd(groupId, aiId, messageId, fallbackContent, null, null);
+        }
+      });
       return null;
     }
 
@@ -1247,7 +1324,18 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
   } catch (error) {
     console.error(`AI ${aiId} 生成消息失败:`, error.message);
     broadcastTypingStatus(groupId, aiId, false);
-    broadcastStreamEnd(groupId, aiId, messageId, '', null, null);
+    if (context.cancel) return null;
+    const content = (persona.name || aiId) + '：' + error.message;
+    if (userId) {
+      const db = await getUserDb(userId);
+      await withWriteLock(userId, async () => {
+        await db.read();
+        if (context.cancel || !(await queuedSourceReadableLocked(userId, db, groupId, context.sourceMessageId))) return;
+        db.data.messages.push({ id: messageId, group_id: groupId, sender_type: 'system', sender_id: aiId, content, content_type: 'system', metadata: { generation_error: true }, created_at: new Date().toISOString() });
+        await db.write();
+        broadcastToGroup(groupId, { type: 'message_stream_end', group_id: groupId, message_id: messageId, sender_type: 'system', sender_id: aiId, content, metadata: { generation_error: true }, timestamp: new Date().toISOString() });
+      });
+    }
     return null;
   }
 }
@@ -1256,10 +1344,11 @@ async function collectAttachmentDescriptions(groupId, userId) {
   const descriptions = [];
   try {
     const db = await getUserDbForFiles(userId);
-    await db.read();
-    const recentMessages = db.data.messages
-      .filter(m => m.group_id === groupId)
-      .slice(-20);
+    const recentMessages = await withWriteLock(userId, async () => {
+      await db.read();
+      return (await readableSourceMessages(userId, db))
+        .filter(m => m.group_id === groupId).slice(-20);
+    });
 
     for (const msg of recentMessages) {
       if (!msg.attachments || msg.attachments.length === 0) continue;
@@ -1303,8 +1392,11 @@ async function collectAttachmentDescriptions(groupId, userId) {
   return descriptions;
 }
 
-export async function queueAIMessages(groupId, userMessage, replyTo = null, scopedUserId = null) {
-  console.log(`[AI消息队列] 开始处理群组 ${groupId} 的消息: "${userMessage?.substring(0, 50)}..."`);
+export async function queueAIMessages(groupId, userMessage, replyTo = null, scopedUserId = null, sourceMessageId = null) {
+  if (scopedUserId && scopedUserId !== currentUserId()) {
+    return runAsUser(scopedUserId, () => queueAIMessages(groupId, userMessage, replyTo, scopedUserId, sourceMessageId));
+  }
+  console.log('[AI消息队列] 开始处理', { groupId, contentLength: typeof userMessage === 'string' ? userMessage.length : 0 });
 
   // 携带调用者身份时严格限定在该用户的库内解析（预置群 ID 跨用户重复，全库扫描必然串号）
   const result = scopedUserId
@@ -1314,12 +1406,25 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null, scop
     console.log(`[AI消息队列] 群组 ${groupId} 没有 AI 成员，跳过`);
     return;
   }
+  if (sourceMessageId && !result.messages.some(message =>
+    message.id === sourceMessageId && message.sender_type === 'user')) {
+    return { queued: 0, reason: 'source_deleted' };
+  }
 
-  const { db: userDb, group, userId } = result;
+  const { db: userDb, userId } = result;
+  const catalog = await readCatalog(userId);
+  const runnable = new Set(catalog.models.filter(model =>
+    model.ready && model.verifiedCapabilities.includes('chat')).map(model => model.id));
+  const group = { ...result.group,
+    ai_members: result.group.ai_members.filter(modelId => runnable.has(modelId)) };
+  if (group.ai_members.length === 0) {
+    console.log(`[AI消息队列] 群组 ${groupId} 没有已验证且可用的对话模型，跳过`);
+    return { queued: 0, reason: 'no_verified_chat_models' };
+  }
 
   await loadCustomPersonas(userId);
 
-  const isPrivateChat = group.is_ai_private === true || group.type === 'ai_private' || (group.is_private === true && group.ai_members && group.ai_members.length === 1 && group.type !== 'ai_private');
+  const isPrivateChat = group.is_ai_private === true || group.type === 'ai_private' || group.ai_members.length === 1;
 
   let userAgents = [];
   let userProfile = null;
@@ -1363,66 +1468,23 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null, scop
     console.log(`[AI消息队列] 群组 ${groupId} 已有活跃对话，已取消旧对话`);
   }
 
-  let maxConversationDepth = isPrivateChat ? 1 : 8;
-  if (!isPrivateChat && group.ai_members && group.ai_members.length > 0) {
-    const depths = group.ai_members.map(aiId => {
-      const persona = getEffectivePersona(aiId, userId);
-      return persona?.responseConfig?.maxResponsesPerConversation || 8;
-    });
-    maxConversationDepth = depths.reduce((a, b) => Math.max(a, b), 8);
-  }
+  const maxConversationDepth = isPrivateChat ? 1 : Math.max(0,
+    ...group.ai_members.map(aiId => modelAttemptLimit(aiId, userId)));
 
   const mentionedAIs = [];
   const mentionedByNames = {};
-  if (userMessage) {
-    const allMentionRegex = /@所有人/g;
-    const hasAllMention = allMentionRegex.test(userMessage);
-
-    if (hasAllMention) {
-      for (const aiId of group.ai_members) {
-        if (!mentionedAIs.includes(aiId)) {
-          mentionedAIs.push(aiId);
-          mentionedByNames[aiId] = userProfile?.nickname || '用户';
-        }
-      }
-    } else {
-      const mentionRegex = /@([a-zA-Z0-9_.\u4e00-\u9fff\s-]+)/g;
-      let match;
-      while ((match = mentionRegex.exec(userMessage)) !== null) {
-        const mentionText = match[1].trim();
-
-        for (const [aiId, aliases] of Object.entries(AI_MENTION_ALIASES)) {
-          if (aliases.some(alias => alias.toLowerCase() === mentionText.toLowerCase())) {
-            if (group.ai_members.includes(aiId) && !mentionedAIs.includes(aiId)) {
-              mentionedAIs.push(aiId);
-              mentionedByNames[aiId] = userProfile?.nickname || '用户';
-            }
-            break;
-          }
-        }
-
-        if (!mentionedAIs.length) {
-          for (const aiId of group.ai_members) {
-            const persona = getEffectivePersona(aiId, userId);
-            if (persona && persona.name && mentionText.toLowerCase() === persona.name.toLowerCase()) {
-              if (!mentionedAIs.includes(aiId)) {
-                mentionedAIs.push(aiId);
-                mentionedByNames[aiId] = userProfile?.nickname || '用户';
-              }
-              break;
-            }
-          }
-        }
-      }
-    }
+  for (const id of mentionedModelIds(userMessage, group.ai_members, id => getEffectivePersona(id, userId)?.name, AI_MENTION_ALIASES)) {
+    mentionedAIs.push(id); mentionedByNames[id] = userProfile?.nickname || '用户';
   }
 
   const context = {
     cancel: false,
+    sourceMessageId,
     conversationDepth: 0,
     maxConversationDepth,
     lastSpeakerId: null,
     conversationActive: !isPrivateChat,
+    requireAutonomousSetting: false,
     mentionedAIs,
     isPrivateChat,
     streamIds: new Map() // 真并发:每个 AI 独立的流ID
@@ -1456,11 +1518,13 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null, scop
     return a;
   };
 
-  orderedAiMembers = [...shuffle(mentioned), ...shuffle(notMentioned)];
+  orderedAiMembers = [...shuffle(mentioned), ...shuffle(notMentioned)]
+    .filter(aiId => modelAttemptLimit(aiId, userId) > 0);
 
   if (isPrivateChat) {
     orderedAiMembers = orderedAiMembers.slice(0, 1);
   }
+  context.attemptsByModel = new Map(orderedAiMembers.map(aiId => [aiId, 1]));
 
   const aiPromises = orderedAiMembers.map(async aiId => {
     const isMentioned = mentionedAIs.includes(aiId);
@@ -1486,26 +1550,10 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null, scop
       return null;
     }
 
-    let finalContent = cleanedContent;
-    let agentCallInfo = null;
-
-    const agentCallRegex = /\[CALL_AGENT:([a-zA-Z0-9_-]+)\]/g;
-    const agentCallMatches = [...finalContent.matchAll(agentCallRegex)];
-
-    if (agentCallMatches.length > 0) {
-      for (const match of agentCallMatches) {
-        const agentId = match[1];
-        try {
-          const agentResponse = await invokeAgentInGroup(userId, agentId, finalContent);
-          const agentName = userAgents.find(a => a.id === agentId)?.name || agentId;
-          finalContent = finalContent.replace(match[0], agentResponse || '');
-          agentCallInfo = { agentId, agentName };
-        } catch (e) {
-          console.warn(`[AI消息] 调用智能体 ${agentId} 失败:`, e.message);
-          finalContent = finalContent.replace(match[0], `[智能体${agentId}调用失败]`);
-        }
-      }
-    }
+    const expansion = await expandAgentCalls(cleanedContent, userId, userAgents,
+      () => queuedSourceReadable(userId, groupId, context));
+    if (!expansion) { context.cancel = true; return null; }
+    const { content: finalContent, agentCallInfo } = expansion;
 
     let effectiveReplyTo = replyToId || replyTo;
 
@@ -1529,18 +1577,25 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null, scop
       created_at: new Date().toISOString()
     };
 
+    let saved = false;
     await withWriteLock(userId, async () => {
       await userDb.read();
+      if (context.cancel || !(await queuedSourceReadableLocked(userId, userDb, groupId, sourceMessageId))) return;
       userDb.data.messages.push(message);
       updateGroupActivityById(userDb, groupId, message);
       await userDb.write();
+      saved = true;
+      broadcastStreamEnd(groupId, resultAiId, finalMessageId, finalContent, effectiveReplyTo, finalReplyToIds);
     });
-
-    broadcastStreamEnd(groupId, resultAiId, finalMessageId, finalContent, effectiveReplyTo, finalReplyToIds);
+    if (!saved) {
+      context.cancel = true;
+      return null;
+    }
 
     console.log(`[AI消息] ${resultAiId} 消息已广播，messageId: ${finalMessageId}, content_len: ${cleanedContent.length}`);
 
-    if (socialActions && socialActions.length > 0 && effectiveReplyTo) {
+    if (socialActions && socialActions.length > 0 && effectiveReplyTo &&
+        await queuedSourceReadable(userId, groupId, context)) {
       await processSocialActions(groupId, effectiveReplyTo, resultAiId, socialActions, userId);
     }
 
@@ -1554,8 +1609,15 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null, scop
     .filter(r => r.status === 'fulfilled' && r.value)
     .map(r => r.value);
 
-  if (successfulResults.length > 0 && !context.cancel && !isPrivateChat) {
-    await continueAIConversation(groupId, context, group.ai_members, userAgents, userProfile, userId);
+  // An ordinary group message authorizes one reply opportunity per selected AI.
+  // Repeated AI-to-AI rounds are a separate paid behavior controlled by the
+  // group's explicit autonomous-chat setting.
+  if (successfulResults.length > 0 && !context.cancel && !isPrivateChat && group.autonomous_chat_enabled === true) {
+    const currentGroup = await findGroupAndMessagesForUser(userId, groupId);
+    if (currentGroup?.group.autonomous_chat_enabled === true && !context.cancel) {
+      context.requireAutonomousSetting = true;
+      await continueAIConversation(groupId, context, group.ai_members, userAgents, userProfile, userId);
+    }
   }
 
   // 仅在当前上下文仍持有该 key 时删除，避免误删后继对话的上下文
@@ -1563,7 +1625,9 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null, scop
     activeGroups.delete(chatKey);
   }
 
-  if (!isPrivateChat) {
+  if (!context.cancel && !isPrivateChat && group.autonomous_chat_enabled === true &&
+      await queuedSourceReadable(userId, groupId, context) &&
+      (await findGroupAndMessagesForUser(userId, groupId))?.group.autonomous_chat_enabled === true) {
     startAutonomousChatTimer(groupId);
   }
 }
@@ -1580,47 +1644,8 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
     const mentionedByNames = {};
     if (!message || !message.content) return { mentionedAIs, mentionedByNames };
 
-    const allMentionRegex = /@所有人/g;
-    if (allMentionRegex.test(message.content)) {
-      for (const aiId of aiMembers) {
-        if (!mentionedAIs.includes(aiId)) {
-          mentionedAIs.push(aiId);
-          const senderPersona = getEffectivePersona(message.sender_id, userId);
-          mentionedByNames[aiId] = senderPersona?.name || message.sender_id;
-        }
-      }
-      return { mentionedAIs, mentionedByNames };
-    }
-
-    const mentionRegex = /@([a-zA-Z0-9_.\u4e00-\u9fff\s-]+)/g;
-    let match;
-    while ((match = mentionRegex.exec(message.content)) !== null) {
-      const mentionText = match[1].trim();
-      let matched = false;
-      for (const [aiId, aliases] of Object.entries(AI_MENTION_ALIASES)) {
-        if (aliases.some(alias => alias.toLowerCase() === mentionText.toLowerCase())) {
-          if (aiMembers.includes(aiId) && !mentionedAIs.includes(aiId)) {
-            mentionedAIs.push(aiId);
-            const senderPersona = getEffectivePersona(message.sender_id, userId);
-            mentionedByNames[aiId] = senderPersona?.name || message.sender_id;
-          }
-          matched = true;
-          break;
-        }
-      }
-      if (!matched) {
-        for (const aiId of aiMembers) {
-          const persona = getEffectivePersona(aiId, userId);
-          if (persona && persona.name && mentionText.toLowerCase() === persona.name.toLowerCase()) {
-            if (!mentionedAIs.includes(aiId)) {
-              mentionedAIs.push(aiId);
-              const senderPersona = getEffectivePersona(message.sender_id, userId);
-              mentionedByNames[aiId] = senderPersona?.name || message.sender_id;
-            }
-            break;
-          }
-        }
-      }
+    for (const id of mentionedModelIds(message.content, aiMembers, id => getEffectivePersona(id, userId)?.name, AI_MENTION_ALIASES)) {
+      mentionedAIs.push(id); mentionedByNames[id] = getEffectivePersona(message.sender_id, userId)?.name || message.sender_id;
     }
     return { mentionedAIs, mentionedByNames };
   }
@@ -1647,7 +1672,8 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
       // 拒绝概率仍保留(产生系统提示)
       const refusalProb = persona.refusalProbability ?? 0;
       if (refusalProb > 0 && Math.random() < refusalProb) {
-        const refusalMsg = await generateRefusalMessage(aiId, userId, recentMessages);
+        const refusalMsg = await generateRefusalMessage(aiId, userId, recentMessages,
+          () => queuedSourceReadable(userId, groupId, context));
         if (refusalMsg) {
           const refusalMessageId = uuidv4();
           const refusalMessage = {
@@ -1662,17 +1688,14 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
           };
           await withWriteLock(dbResult.userId, async () => {
             await dbResult.db.read();
+            if (context.cancel || !(await queuedSourceReadableLocked(dbResult.userId, dbResult.db, groupId, context.sourceMessageId))) return;
             dbResult.db.data.messages.push(refusalMessage);
             updateGroupActivityById(dbResult.db, groupId, refusalMessage);
             await dbResult.db.write();
-          });
-          broadcastToGroup(groupId, {
-            type: 'system_message',
-            group_id: groupId,
-            content: refusalMsg,
-            sender_id: aiId,
-            metadata: { refusal: true },
-            timestamp: new Date().toISOString()
+            broadcastToGroup(groupId, {
+              type: 'system_message', group_id: groupId, content: refusalMsg,
+              sender_id: aiId, metadata: { refusal: true }, timestamp: new Date().toISOString()
+            });
           });
         }
       }
@@ -1683,6 +1706,7 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
     const responseDelay = 300 + Math.random() * 1800;
     await sleep(responseDelay);
     if (context.cancel) return null;
+    if (!(await automaticConversationAllowed(userId, groupId, context))) return null;
 
     console.log(`[AI对话] ${aiId} 开始生成回应${isMentioned ? ' (被@)' : ''}`);
 
@@ -1700,27 +1724,10 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
       return null;
     }
 
-    let finalContent = cleanedContent;
-    let agentCallInfo = null;
-
-    const agentCallRegex = /\[CALL_AGENT:([a-zA-Z0-9_-]+)\]/g;
-    const agentCallMatches = [...finalContent.matchAll(agentCallRegex)];
-
-    if (agentCallMatches.length > 0) {
-      const convUserId = dbResult.userId;
-      for (const match of agentCallMatches) {
-        const agentId = match[1];
-        try {
-          const agentResponse = await invokeAgentInGroup(convUserId, agentId, finalContent);
-          const agentName = (userAgents || []).find(a => a.id === agentId)?.name || agentId;
-          finalContent = finalContent.replace(match[0], agentResponse || '');
-          agentCallInfo = { agentId, agentName };
-        } catch (e) {
-          console.warn(`[AI对话] 调用智能体 ${agentId} 失败:`, e.message);
-          finalContent = finalContent.replace(match[0], `[智能体${agentId}调用失败]`);
-        }
-      }
-    }
+    const expansion = await expandAgentCalls(cleanedContent, dbResult.userId, userAgents,
+      () => queuedSourceReadable(userId, groupId, context));
+    if (!expansion) { context.cancel = true; return null; }
+    const { content: finalContent, agentCallInfo } = expansion;
 
     const effectiveReplyTo = replyToId || suggestedReplyTo || lastAiMessage.id;
     const finalReplyToIds = replyToIds && replyToIds.length > 0 ? replyToIds : null;
@@ -1739,18 +1746,25 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
       created_at: new Date().toISOString()
     };
 
+    let saved = false;
     await withWriteLock(dbResult.userId, async () => {
       await dbResult.db.read();
+      if (context.cancel || !(await queuedSourceReadableLocked(dbResult.userId, dbResult.db, groupId, context.sourceMessageId))) return;
       dbResult.db.data.messages.push(message);
       updateGroupActivityById(dbResult.db, groupId, message);
       await dbResult.db.write();
+      saved = true;
+      broadcastStreamEnd(groupId, resultAiId, finalMessageId, finalContent, effectiveReplyTo, finalReplyToIds);
     });
-
-    broadcastStreamEnd(groupId, resultAiId, finalMessageId, finalContent, effectiveReplyTo, finalReplyToIds);
+    if (!saved) {
+      context.cancel = true;
+      return null;
+    }
 
     console.log(`[AI对话] ${resultAiId} 发送了消息: ${cleanedContent.substring(0, 50)}...`);
 
-    if (socialActions && socialActions.length > 0 && effectiveReplyTo) {
+    if (socialActions && socialActions.length > 0 && effectiveReplyTo &&
+        await queuedSourceReadable(userId, groupId, context)) {
       await processSocialActions(groupId, effectiveReplyTo, resultAiId, socialActions);
     }
 
@@ -1760,6 +1774,9 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
 
   // ============ 并发插话主循环 ============
   while (context.conversationActive && context.conversationDepth < context.maxConversationDepth && !context.cancel) {
+    if (!(await automaticConversationAllowed(userId, groupId, context))) break;
+    if (!aiMembers.some(aiId =>
+      (context.attemptsByModel?.get(aiId) || 0) < modelAttemptLimit(aiId, userId))) break;
     context.conversationDepth++;
     console.log(`[AI对话] 群组 ${groupId} 第 ${context.conversationDepth} 轮对话开始(并发模式)`);
 
@@ -1784,7 +1801,14 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
     const { mentionedAIs, mentionedByNames } = parseMentionsFromMessage(lastAiMessage);
 
     // 候选 AI:随机打乱顺序(彻底随机),被@的不额外排序——并发下谁先想好谁先说
-    const candidates = [...aiMembers].sort(() => Math.random() - 0.5);
+    const candidates = [...aiMembers]
+      .filter(aiId => (context.attemptsByModel?.get(aiId) || 0) < modelAttemptLimit(aiId, userId))
+      .sort(() => Math.random() - 0.5);
+    if (candidates.length === 0) break;
+    context.attemptsByModel ||= new Map();
+    for (const aiId of candidates) {
+      context.attemptsByModel.set(aiId, (context.attemptsByModel.get(aiId) || 0) + 1);
+    }
 
     console.log(`[AI对话] 并发候选: ${candidates.join(', ')}`);
 
@@ -1820,6 +1844,14 @@ export async function startAutonomousChat(groupId, topic = null) {
   const { db: userDb, group, userId: autonomousUserId } = result;
 
   await loadCustomPersonas(autonomousUserId);
+  const catalog = await readCatalog(autonomousUserId);
+  const verifiedChat = new Set(catalog.models.filter(model =>
+    model.ready && model.verifiedCapabilities.includes('chat')).map(model => model.id));
+  const aiMembers = group.ai_members.filter(aiId =>
+    verifiedChat.has(aiId) && modelAttemptLimit(aiId, autonomousUserId) > 0);
+  if (aiMembers.length < 2) {
+    return { success: false, error: '至少需要两个已验证且允许回复的 AI 模型' };
+  }
 
   let autonomousUserAgents = [];
   try {
@@ -1838,7 +1870,8 @@ export async function startAutonomousChat(groupId, topic = null) {
   const context = {
     cancel: false,
     conversationDepth: 0,
-    maxConversationDepth: 8,
+    maxConversationDepth: Math.min(6, Math.max(...aiMembers.map(aiId =>
+      modelAttemptLimit(aiId, autonomousUserId)))),
     lastSpeakerId: null,
     conversationActive: true,
     isAutonomous: true
@@ -1859,7 +1892,8 @@ export async function startAutonomousChat(groupId, topic = null) {
 
     console.log(`[AI自主对话] 话题: ${chatTopic}`);
 
-    const starterAi = group.ai_members[Math.floor(Math.random() * group.ai_members.length)];
+    const starterAi = aiMembers[Math.floor(Math.random() * aiMembers.length)];
+    context.attemptsByModel = new Map([[starterAi, 1]]);
 
     broadcastTypingStatus(groupId, starterAi, true);
 
@@ -1869,11 +1903,12 @@ export async function startAutonomousChat(groupId, topic = null) {
         persona,
         chatTopic,
         recentMessages,
-        group.ai_members
+        aiMembers
       );
 
       const messageId = uuidv4();
       const streamId = `stream_${groupId}_${starterAi}_${messageId}`;
+      context.streamId = streamId;
 
       let accumulatedContent = '';
       let lastBroadcastTime = Date.now();
@@ -1883,6 +1918,7 @@ export async function startAutonomousChat(groupId, topic = null) {
       broadcastStreamStart(groupId, starterAi, messageId);
 
       const onChunk = (chunk) => {
+        if (context.cancel) return;
         accumulatedContent += chunk;
         const now = Date.now();
         if (now - lastBroadcastTime >= broadcastThrottleMs) {
@@ -1893,7 +1929,11 @@ export async function startAutonomousChat(groupId, topic = null) {
         }
       };
 
-      const rawContent = await callAIStream(starterAi, persona, promptMessage, recentMessages, 'free_chat', null, [], null, group.ai_members, false, [], null, [], onChunk, streamId, autonomousUserId);
+      const rawContent = await callAIStream(starterAi, persona, promptMessage, recentMessages, 'free_chat', null, [], null, aiMembers, false, [], null, [], onChunk, streamId, autonomousUserId, null,
+        () => queuedSourceReadable(autonomousUserId, groupId, context));
+      if (!(await queuedSourceReadable(autonomousUserId, groupId, context))) {
+        return { success: false, error: '群组已删除或对话已停止' };
+      }
 
       if (accumulatedContent.length > lastBroadcastLength) {
         const incremental = accumulatedContent.substring(lastBroadcastLength);
@@ -1915,33 +1955,37 @@ export async function startAutonomousChat(groupId, topic = null) {
           created_at: new Date().toISOString()
         };
 
+        let saved = false;
         await withWriteLock(autonomousUserId, async () => {
           await userDb.read();
+          if (context.cancel || !(await queuedSourceReadableLocked(autonomousUserId, userDb, groupId, null))) return;
           userDb.data.messages.push(message);
           updateGroupActivityById(userDb, groupId, message);
           await userDb.write();
+          if (context.cancel) {
+            context.resultUnknown = true;
+            return;
+          }
+          saved = true;
+          broadcastStreamEnd(groupId, starterAi, messageId, content, null, null);
         });
 
-        broadcastStreamEnd(groupId, starterAi, messageId, content, null, null);
+        if (!saved) return {
+          success: false,
+          outcomeUnknown: context.resultUnknown === true,
+          error: context.resultUnknown
+            ? '已请求停止，但正在提交的回复结果待核验；请刷新消息列表'
+            : '群组已删除或对话已停止'
+        };
         context.lastSpeakerId = starterAi;
 
-        console.log(`[AI自主对话] ${starterAi} 发起对话: ${content.substring(0, 50)}...`);
+        console.log('[AI自主对话] 已生成消息', { modelId: starterAi, contentLength: content.length });
       }
 
       broadcastTypingStatus(groupId, starterAi, false);
     }
 
-    await continueAIConversation(groupId, context, group.ai_members, autonomousUserAgents, null, autonomousUserId);
-
-    if (activeGroups.get(chatKey) === context) {
-      activeGroups.delete(chatKey);
-    }
-
-    broadcastToGroup(groupId, {
-      type: 'autonomous_chat_stopped',
-      group_id: groupId,
-      timestamp: new Date().toISOString()
-    });
+    await continueAIConversation(groupId, context, aiMembers, autonomousUserAgents, null, autonomousUserId);
 
     return {
       success: true,
@@ -1951,11 +1995,6 @@ export async function startAutonomousChat(groupId, topic = null) {
 
   } catch (error) {
     console.error(`[AI自主对话] 错误:`, error);
-
-    if (activeGroups.get(chatKey) === context) {
-      activeGroups.delete(chatKey);
-    }
-
     broadcastToGroup(groupId, {
       type: 'autonomous_chat_error',
       group_id: groupId,
@@ -1964,6 +2003,16 @@ export async function startAutonomousChat(groupId, topic = null) {
     });
 
     return { success: false, error: error.message };
+  } finally {
+    if (context.starterAi) broadcastTypingStatus(groupId, context.starterAi, false);
+    if (activeGroups.get(chatKey) === context) {
+      activeGroups.delete(chatKey);
+      broadcastToGroup(groupId, {
+        type: 'autonomous_chat_stopped',
+        group_id: groupId,
+        timestamp: new Date().toISOString()
+      });
+    }
   }
 }
 
@@ -1978,6 +2027,7 @@ export function stopAutonomousChat(groupId) {
     if (context.streamId) {
       cancelStream(context.streamId);
     }
+    for (const streamId of context.streamIds?.values() || []) cancelStream(streamId);
 
     activeGroups.delete(chatKey);
     stopAutonomousChatTimer(groupId);
@@ -1994,6 +2044,18 @@ export function stopAutonomousChat(groupId) {
   stopAutonomousChatTimer(groupId);
 
   return { success: false, message: '没有正在进行的AI自主对话' };
+}
+
+export function stopAutomaticGroupConversation(groupId) {
+  const replyContext = activeGroups.get(`group:${groupId}`);
+  if (replyContext) {
+    replyContext.conversationActive = false;
+    if (replyContext.requireAutonomousSetting) {
+      replyContext.cancel = true;
+      for (const streamId of replyContext.streamIds?.values() || []) cancelStream(streamId);
+    }
+  }
+  stopAutonomousChat(groupId);
 }
 
 export function getAutonomousChatStatus(groupId) {
@@ -2346,6 +2408,11 @@ export async function startAIPrivateChat(groupId, topic = null) {
     isRunning: true,
     messageCount: 0,
     maxMessages: 50,
+    attemptCount: 0,
+    maxAttempts: 50,
+    consecutiveNoProgress: 0,
+    maxConsecutiveNoProgress: 3,
+    deadlineAt: Date.now() + 5 * 60 * 1000,
     topic: topic || getRandomTopic()
   };
   activeGroups.set(chatKey, context);
@@ -2358,17 +2425,25 @@ export async function startAIPrivateChat(groupId, topic = null) {
   });
 
   try {
-    while (!context.cancel && context.messageCount < context.maxMessages) {
+    while (!context.cancel && context.messageCount < context.maxMessages &&
+           context.attemptCount < context.maxAttempts &&
+           context.consecutiveNoProgress < context.maxConsecutiveNoProgress &&
+           Date.now() < context.deadlineAt) {
       const recentMessages = await getRecentMessages(groupId, 50);
 
       const shuffledMembers = [...aiMembers].sort(() => Math.random() - 0.5);
 
       for (const aiId of shuffledMembers) {
-        if (context.cancel) break;
+        if (context.cancel || context.messageCount >= context.maxMessages ||
+            context.attemptCount >= context.maxAttempts ||
+            context.consecutiveNoProgress >= context.maxConsecutiveNoProgress ||
+            Date.now() >= context.deadlineAt) break;
 
+        context.attemptCount++;
         const result = await generateAIResponse(aiId, groupId, context.topic, recentMessages, aiMembers, context, false, null, false, null, null, privateChatUserId);
 
-        if (context.cancel || !result) continue;
+        if (context.cancel) break;
+        if (!result) { context.consecutiveNoProgress++; continue; }
 
         const { content, suggestedReplyTo, messageId: streamMessageId } = result;
 
@@ -2379,6 +2454,7 @@ export async function startAIPrivateChat(groupId, topic = null) {
           if (streamMessageId) {
             broadcastStreamEnd(groupId, aiId, streamMessageId, '', null, null);
           }
+          context.consecutiveNoProgress++;
           continue;
         }
 
@@ -2413,6 +2489,7 @@ export async function startAIPrivateChat(groupId, topic = null) {
         }
 
         context.messageCount++;
+        context.consecutiveNoProgress = 0;
 
         const updatedRecent = await getRecentMessages(groupId, 50);
         recentMessages.length = 0;
@@ -2421,7 +2498,10 @@ export async function startAIPrivateChat(groupId, topic = null) {
         await sleep(500 + Math.random() * 1500);
       }
 
-      if (context.messageCount >= context.maxMessages || context.cancel) break;
+      if (context.messageCount >= context.maxMessages || context.cancel ||
+          context.attemptCount >= context.maxAttempts ||
+          context.consecutiveNoProgress >= context.maxConsecutiveNoProgress ||
+          Date.now() >= context.deadlineAt) break;
 
       await sleep(2000 + Math.random() * 3000);
     }
@@ -2440,7 +2520,11 @@ export async function startAIPrivateChat(groupId, topic = null) {
       groupId,
       status: 'success',
       message: 'AI私聊已完成',
-      totalMessages: context.messageCount
+      totalMessages: context.messageCount,
+      attempts: context.attemptCount,
+      stoppedByLimit: context.attemptCount >= context.maxAttempts ||
+        context.consecutiveNoProgress >= context.maxConsecutiveNoProgress ||
+        Date.now() >= context.deadlineAt
     };
 
   } catch (error) {
@@ -2486,6 +2570,8 @@ export function stopAIPrivateChat(groupId) {
   if (context) {
     context.cancel = true;
     context.isRunning = false;
+    for (const streamId of context.streamIds?.values() || []) cancelStream(streamId);
+    if (context.streamId) cancelStream(context.streamId);
 
     broadcastToGroup(groupId, {
       type: 'chat_status',

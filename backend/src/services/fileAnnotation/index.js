@@ -1,5 +1,6 @@
-import axios from 'axios';
-import { getAIConfig, normalizeBaseUrl } from '../ai/index.js';
+import { defaultModelId, resolveModel } from '../ai/catalog.js';
+import { requestCompletion } from '../ai/transport.js';
+import { currentUserId } from '../userScope.js';
 import { safeLog } from '../../utils/logger.js';
 import { getSafeExternalRequestOptions } from '../../utils/safeExternalUrl.js';
 import path from 'path';
@@ -13,18 +14,6 @@ const VISION_ANNOTATION_PROMPT = `请仔细观察这张图片并生成搜索标�
 格式严格如下（不要加markdown、换行或额外说明）：
 描述:xxx
 标签:关键字1,关键字2,关键字3`;
-
-const MEDIA_ANNOTATION_PROMPT = `请为以下{mediaType}文件生成搜索标注，用于在聊天系统中搜索。
-根据文件名和文件大小推断可能的{mediaType}内容。
-要求：
-1. 描述{mediaType}的可能内容类型、主题、用途（不超过40字）
-2. 提供3-8个搜索关键词标签，包括：内容类型、主题、情感、场景等
-格式严格如下（不要加其他内容）：
-描述:xxx
-标签:xxx,xxx,xxx
-
-文件名: {filename}
-文件大小: {fileSize}`;
 
 const TEXT_ANNOTATION_PROMPT = `请为以下文件内容生成搜索标注，用于在聊天系统中搜索。
 要求：
@@ -172,163 +161,23 @@ async function compressImageForAnnotation(filePath, mimeType) {
   }
 }
 
-function getFastAnnotationConfigs() {
-  const configs = [
-    { key: process.env.GLM_API_KEY, endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4-flash' },
-    { key: process.env.MIMO_API_KEY, endpoint: process.env.MIMO_BASE_URL ? `${normalizeBaseUrl(process.env.MIMO_BASE_URL)}/chat/completions` : 'https://api.xiaomimimo.com/v1/chat/completions', model: 'mimo-v2.5' },
-    { key: process.env.QWEN_API_KEY, endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen3.5-flash' },
-    { key: process.env.DEEPSEEK_API_KEY, endpoint: 'https://api.deepseek.com/chat/completions', model: 'deepseek-chat' }
-  ];
-  return configs.filter(c => c.key);
-}
-
 async function callFastAPI(messages, maxTokens = 120, timeout = 8000) {
-  const configs = getFastAnnotationConfigs();
-  if (configs.length === 0) return null;
-
-  for (const config of configs) {
-    try {
-      const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
-      const response = await axios.post(
-        config.endpoint,
-        {
-          model: config.model,
-          messages,
-          max_tokens: maxTokens,
-          temperature: 0.2,
-          stream: false
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${config.key}`,
-            'Content-Type': 'application/json'
-          },
-          timeout,
-          ...safeRequestOptions
-        }
-      );
-      const content = response.data?.choices?.[0]?.message?.content;
-      if (content && content.trim().length > 0) return content;
-    } catch (error) {
-      safeLog('warn', `快速标注API调用失败(${config.model})`, { error: error.message });
-    }
-  }
-  return null;
+  const userId = currentUserId();
+  if (!userId) return null;
+  try {
+    const id = await defaultModelId(userId);
+    const config = await resolveModel(userId, id, 'chat');
+    return await requestCompletion(config, messages, { maxTokens, timeout });
+  } catch { return null; }
 }
 
 async function annotateWithVision(filePath, mimeType, fileName) {
-  const dataUrl = await compressImageForAnnotation(filePath, mimeType);
-  if (!dataUrl) return null;
-
-  const visionModels = ['glm_4v_flash', 'qwen_vl_plus', 'mimo_omni', 'qwen_omni'];
-  const deadline = Date.now() + VISION_TOTAL_DEADLINE_MS;
-  for (const modelId of visionModels) {
-    if (Date.now() >= deadline) {
-      safeLog('warn', '视觉标注总耗时超过45s截止时间，提前返回null', { fileName });
-      return null;
-    }
-    const config = getAIConfig(modelId);
-    if (!config || !config.apiKey) continue;
-
-    try {
-      const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
-      const requestBody = {
-        model: config.model,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: VISION_ANNOTATION_PROMPT },
-              { type: 'image_url', image_url: { url: dataUrl } }
-            ]
-          }
-        ],
-        max_tokens: 150,
-        temperature: 0.2
-      };
-
-      const remainingMs = deadline - Date.now();
-      const response = await axios.post(config.endpoint, requestBody, {
-        headers: {
-          'Authorization': `Bearer ${config.apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: Math.max(1000, Math.min(15000, remainingMs)),
-        ...safeRequestOptions
-      });
-
-      const content = response.data?.choices?.[0]?.message?.content;
-      if (content) {
-        const parsed = parseAnnotationResponse(content);
-        if (parsed) return parsed;
-      }
-    } catch (error) {
-      safeLog('warn', `视觉标注失败(${modelId})`, { error: error.message, fileName });
-    }
-  }
-
-  const ext = path.extname(fileName).toLowerCase();
-  const baseName = path.basename(fileName, ext);
-  const fallbackPrompt = `请根据文件名推断图片内容并生成搜索标注。文件名: ${baseName}，格式: ${ext}。结合文件名中的关键词推断图片主题。格式严格如下：描述:xxx 标签:xxx,xxx,xxx`;
-  const fallbackContent = await callFastAPI([
-    { role: 'system', content: '你是一个文件搜索标注助手。根据文件名推断图片内容，生成搜索标注。标签要具体、有区分度。' },
-    { role: 'user', content: fallbackPrompt }
-  ], 120, 5000);
-
-  return fallbackContent ? parseAnnotationResponse(fallbackContent) : null;
+  const description = await generateImageDescription(filePath, mimeType, fileName);
+  return description ? { description, tags: [getFileTypeLabel(path.extname(fileName))], source: 'vision' } : null;
 }
 
 async function annotateWithMedia(fileName, fileSize, mediaType) {
-  const omniModels = ['qwen_omni'];
-  for (const modelId of omniModels) {
-    const config = getAIConfig(modelId);
-    if (!config || !config.apiKey) continue;
-
-    try {
-      const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
-      const prompt = MEDIA_ANNOTATION_PROMPT
-        .replace(/\{mediaType\}/g, mediaType)
-        .replace('{filename}', fileName)
-        .replace('{fileSize}', formatFileSize(fileSize));
-
-      const response = await axios.post(config.endpoint, {
-        model: config.model,
-        messages: [
-          { role: 'system', content: `你是一个文件搜索标注助手。根据文件名和大小推断${mediaType}内容，生成简洁准确的搜索标注。只输出标注结果，不要多余解释。` },
-          { role: 'user', content: prompt }
-        ],
-        max_tokens: 120,
-        temperature: 0.2
-      }, {
-        headers: {
-          Authorization: `Bearer ${config.apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 8000,
-        ...safeRequestOptions
-      });
-
-      const content = response.data?.choices?.[0]?.message?.content;
-      if (content) {
-        const parsed = parseAnnotationResponse(content);
-        if (parsed) return parsed;
-      }
-    } catch (error) {
-      safeLog('warn', `媒体标注失败(${modelId})`, { error: error.message });
-    }
-  }
-
-  const prompt = MEDIA_ANNOTATION_PROMPT
-    .replace(/\{mediaType\}/g, mediaType)
-    .replace('{filename}', fileName)
-    .replace('{fileSize}', formatFileSize(fileSize));
-
-  const content = await callFastAPI([
-    { role: 'system', content: `你是一个文件搜索标注助手。根据文件名和大小推断${mediaType}内容，生成简洁准确的搜索标注。只输出标注结果，不要多余解释。` },
-    { role: 'user', content: prompt }
-  ]);
-
-  return content ? parseAnnotationResponse(content) : null;
+  return { description: mediaType + '文件：' + fileName + '（' + formatFileSize(fileSize) + '）；尚未解析媒体内容', tags: [mediaType], source: 'metadata' };
 }
 
 async function annotateWithText(fileName, contentSnippet, ext) {
@@ -392,24 +241,6 @@ const VISION_DESCRIPTION_PROMPT = `请详细描述这张图片的内容，包括
 4. 图片传达的信息或情感
 请用自然语言详细描述，200字以内。`;
 
-const AUDIO_DESCRIPTION_PROMPT = `这是一个音频文件，请根据文件名和大小推断其可能的内容。
-文件名: {filename}
-文件大小: {fileSize}
-请描述这个音频可能包含的内容，包括：
-1. 可能的音频类型（音乐、语音、环境音等）
-2. 可能的主题或内容
-3. 可能的用途或场景
-请用自然语言描述，100字以内。`;
-
-const VIDEO_DESCRIPTION_PROMPT = `这是一个视频文件，请根据文件名和大小推断其可能的内容。
-文件名: {filename}
-文件大小: {fileSize}
-请描述这个视频可能包含的内容，包括：
-1. 可能的视频类型（电影片段、教程、动画等）
-2. 可能的主题或场景
-3. 可能的用途
-请用自然语言描述，100字以内。`;
-
 const TEXT_DESCRIPTION_PROMPT = `请为以下文件内容生成详细描述，用于让AI理解文件内容。
 文件名: {filename}
 文件类型: {filetype}
@@ -419,159 +250,25 @@ const TEXT_DESCRIPTION_PROMPT = `请为以下文件内容生成详细描述，�
 请描述文件的核心内容、关键信息和主要观点，200字以内。`;
 
 async function generateImageDescription(filePath, mimeType, fileName) {
-  const dataUrl = await compressImageForAnnotation(filePath, mimeType);
-  if (!dataUrl) return null;
-
-  const visionModels = ['glm_4v_flash', 'qwen_vl_plus', 'mimo_omni', 'qwen_omni'];
-  const deadline = Date.now() + VISION_TOTAL_DEADLINE_MS;
-  for (const modelId of visionModels) {
-    if (Date.now() >= deadline) {
-      safeLog('warn', '图片描述生成总耗时超过45s截止时间，提前返回null', { fileName });
-      return null;
-    }
-    const config = getAIConfig(modelId);
-    if (!config || !config.apiKey) continue;
-
-    try {
-      const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
-      const requestBody = {
-        model: config.model,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: VISION_DESCRIPTION_PROMPT },
-              { type: 'image_url', image_url: { url: dataUrl } }
-            ]
-          }
-        ],
-        max_tokens: 300,
-        temperature: 0.3
-      };
-
-      const remainingMs = deadline - Date.now();
-      const response = await axios.post(config.endpoint, requestBody, {
-        headers: {
-          'Authorization': `Bearer ${config.apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: Math.max(1000, Math.min(20000, remainingMs)),
-        ...safeRequestOptions
-      });
-
-      const content = response.data?.choices?.[0]?.message?.content;
-      if (content && content.trim().length > 0) return content.trim();
-    } catch (error) {
-      safeLog('warn', `图片内容描述生成失败(${modelId})`, { error: error.message, fileName });
-    }
-  }
-
-  const ext = path.extname(fileName).toLowerCase();
-  const baseName = path.basename(fileName, ext);
-  const sizeLabel = formatFileSize((await fs.stat(filePath)).size);
-  const fallbackPrompt = `请根据文件名推断这张图片的可能内容和用途。文件名: ${baseName}，格式: ${ext}，大小: ${sizeLabel}。请用自然语言简洁描述，50字以内。`;
-  const fallbackContent = await callFastAPI([
-    { role: 'system', content: '你是一个图片内容分析助手。根据文件名推断图片内容，生成简洁描述。' },
-    { role: 'user', content: fallbackPrompt }
-  ], 120, 5000);
-
-  return fallbackContent && fallbackContent.trim().length > 0 ? fallbackContent.trim() : null;
+  const userId = currentUserId();
+  if (!userId) return null;
+  try {
+    const id = await defaultModelId(userId, 'vision');
+    const config = await resolveModel(userId, id, 'vision');
+    const dataUrl = await compressImageForAnnotation(filePath, mimeType);
+    if (!dataUrl) return null;
+    return await requestCompletion(config, [{ role: 'user', content: [
+      { type: 'text', text: VISION_DESCRIPTION_PROMPT }, { type: 'image_url', image_url: { url: dataUrl } }
+    ] }], { maxTokens: 500, timeout: 30000 });
+  } catch (error) { safeLog('warn', '图片理解不可用', { fileName, error: error.message }); return null; }
 }
 
 async function generateAudioDescription(fileName, fileSize) {
-  const omniModels = ['qwen_omni'];
-  for (const modelId of omniModels) {
-    const config = getAIConfig(modelId);
-    if (!config || !config.apiKey) continue;
-
-    try {
-      const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
-      const prompt = AUDIO_DESCRIPTION_PROMPT
-        .replace('{filename}', fileName)
-        .replace('{fileSize}', formatFileSize(fileSize));
-
-      const response = await axios.post(config.endpoint, {
-        model: config.model,
-        messages: [
-          { role: 'system', content: '你是一个音频内容分析助手。根据文件信息推断音频内容，生成详细描述。' },
-          { role: 'user', content: prompt }
-        ],
-        max_tokens: 200,
-        temperature: 0.3
-      }, {
-        headers: {
-          Authorization: `Bearer ${config.apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 8000,
-        ...safeRequestOptions
-      });
-
-      const content = response.data?.choices?.[0]?.message?.content;
-      if (content && content.trim().length > 0) return content.trim();
-    } catch (error) {
-      safeLog('warn', `音频描述生成失败(${modelId})`, { error: error.message });
-    }
-  }
-
-  const prompt = AUDIO_DESCRIPTION_PROMPT
-    .replace('{filename}', fileName)
-    .replace('{fileSize}', formatFileSize(fileSize));
-
-  const content = await callFastAPI([
-    { role: 'system', content: '你是一个音频内容分析助手。根据文件信息推断音频内容，生成详细描述。' },
-    { role: 'user', content: prompt }
-  ], 200, 8000);
-
-  return content && content.trim().length > 0 ? content.trim() : null;
+  return '音频附件：' + fileName + '（' + formatFileSize(fileSize) + '）。当前未转录音频，无法确认其内容。';
 }
 
 async function generateVideoDescription(fileName, fileSize) {
-  const omniModels = ['qwen_omni'];
-  for (const modelId of omniModels) {
-    const config = getAIConfig(modelId);
-    if (!config || !config.apiKey) continue;
-
-    try {
-      const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
-      const prompt = VIDEO_DESCRIPTION_PROMPT
-        .replace('{filename}', fileName)
-        .replace('{fileSize}', formatFileSize(fileSize));
-
-      const response = await axios.post(config.endpoint, {
-        model: config.model,
-        messages: [
-          { role: 'system', content: '你是一个视频内容分析助手。根据文件信息推断视频内容，生成详细描述。' },
-          { role: 'user', content: prompt }
-        ],
-        max_tokens: 200,
-        temperature: 0.3
-      }, {
-        headers: {
-          Authorization: `Bearer ${config.apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 8000,
-        ...safeRequestOptions
-      });
-
-      const content = response.data?.choices?.[0]?.message?.content;
-      if (content && content.trim().length > 0) return content.trim();
-    } catch (error) {
-      safeLog('warn', `视频描述生成失败(${modelId})`, { error: error.message });
-    }
-  }
-
-  const prompt = VIDEO_DESCRIPTION_PROMPT
-    .replace('{filename}', fileName)
-    .replace('{fileSize}', formatFileSize(fileSize));
-
-  const content = await callFastAPI([
-    { role: 'system', content: '你是一个视频内容分析助手。根据文件信息推断视频内容，生成详细描述。' },
-    { role: 'user', content: prompt }
-  ], 200, 8000);
-
-  return content && content.trim().length > 0 ? content.trim() : null;
+  return '视频附件：' + fileName + '（' + formatFileSize(fileSize) + '）。当前未解析视频帧或音轨，无法确认其内容。';
 }
 
 async function generateTextDescription(fileName, contentSnippet, ext) {
@@ -590,7 +287,7 @@ async function generateTextDescription(fileName, contentSnippet, ext) {
   return content && content.trim().length > 0 ? content.trim() : null;
 }
 
-export async function generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent) {
+export async function generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent, imageDescription = undefined) {
   const ext = path.extname(fileName).toLowerCase();
   const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.tiff', '.tif', '.ico', '.avif', '.heic', '.heif'].includes(ext);
   const isAudio = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.amr', '.opus'].includes(ext);
@@ -602,7 +299,8 @@ export async function generateMediaDescription(filePath, mimeType, fileName, fil
   let description = null;
 
   if (isImage) {
-    description = await generateImageDescription(filePath, mimeType, fileName);
+    description = imageDescription === undefined
+      ? await generateImageDescription(filePath, mimeType, fileName) : imageDescription;
   } else if (isAudio) {
     description = await generateAudioDescription(fileName, fileSize);
     if (!description && hasTextContent) {
@@ -634,37 +332,7 @@ export async function generateMediaDescription(filePath, mimeType, fileName, fil
   return description;
 }
 
-async function refineImageAnnotation(annotation, fileName, fileSize) {
-  const sizeStr = fileSize > 1024 * 1024
-    ? `${(fileSize / (1024 * 1024)).toFixed(1)}MB` : `${(fileSize / 1024).toFixed(0)}KB`;
-  const ext = path.extname(fileName).toLowerCase();
-  const baseName = path.basename(fileName, ext);
-
-  const refinePrompt = `视觉模型给出了以下分析结果：
-描述: ${annotation.description}
-标签: ${annotation.tags.join(', ')}
-
-附加信息：
-文件名: ${baseName}
-文件格式: ${ext}
-文件大小: ${sizeStr}
-
-请结合文件名和视觉结果，修正或优化搜索标注：
-1. 如果文件名提供了额外线索（如"截图"、"产品图"、"会议"等），请融入描述中
-2. 优化标签，确保包含文件名中的核心关键词
-格式严格如下：
-描述:xxx
-标签:xxx,xxx,xxx`;
-
-  const content = await callFastAPI([
-    { role: 'system', content: '你是搜索标注精炼助手。结合视觉分析和文件名，产出更准确的标注。' },
-    { role: 'user', content: refinePrompt }
-  ], 150, 5000);
-
-  return content ? parseAnnotationResponse(content) : null;
-}
-
-export async function annotateFile(filePath, mimeType, fileName, fileSize, parsedContent) {
+export async function annotateFile(filePath, mimeType, fileName, fileSize, parsedContent, imageDescription = undefined) {
   const ext = path.extname(fileName).toLowerCase();
   const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.tiff', '.tif', '.ico', '.avif', '.heic', '.heif'].includes(ext);
   const isAudio = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.amr', '.opus'].includes(ext);
@@ -676,11 +344,9 @@ export async function annotateFile(filePath, mimeType, fileName, fileSize, parse
   let annotation = null;
 
   if (isImage) {
-    annotation = await annotateWithVision(filePath, mimeType, fileName);
-    if (annotation && annotation.description) {
-      const refined = await refineImageAnnotation(annotation, fileName, fileSize);
-      if (refined) annotation = refined;
-    }
+    annotation = imageDescription === undefined
+      ? await annotateWithVision(filePath, mimeType, fileName)
+      : imageDescription ? { description: imageDescription, tags: [getFileTypeLabel(ext)], source: 'vision' } : null;
   } else if (isAudio) {
     annotation = await annotateWithMedia(fileName, fileSize, '音频');
     if (!annotation && hasTextContent) {
@@ -715,6 +381,15 @@ export async function annotateFile(filePath, mimeType, fileName, fileSize, parse
 }
 
 export async function annotateAndDescribe(filePath, mimeType, fileName, fileSize, parsedContent) {
+  const ext = path.extname(fileName).toLowerCase();
+  if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.tiff', '.tif', '.ico', '.avif', '.heic', '.heif'].includes(ext)) {
+    const imageDescription = await generateImageDescription(filePath, mimeType, fileName);
+    const [annotation, description] = await Promise.all([
+      annotateFile(filePath, mimeType, fileName, fileSize, parsedContent, imageDescription),
+      generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent, imageDescription)
+    ]);
+    return { annotation, description };
+  }
   const [annotation, description] = await Promise.all([
     annotateFile(filePath, mimeType, fileName, fileSize, parsedContent),
     generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent)

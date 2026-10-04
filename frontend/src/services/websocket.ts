@@ -1,12 +1,15 @@
 import { useMessagesStore } from '../stores/messagesStore';
+import { useAudioStore } from '../stores/audioStore';
 import type { Message } from '../types';
 import { useUIStore } from '../stores/uiStore';
 import { useGroupsStore } from '../stores/groupsStore';
 import { usePersonasStore, PersonaConfig } from '../stores/personasStore';
-import { api, axiosInstance, notifyAuthExpired } from './api';
+import { api, axiosInstance, notifyAuthExpired, getDevUserId } from './api';
 import { getWebSocketUrl } from './runtimeConfig';
 import { getCacheUserId } from '../utils/cacheUtils';
 import { saveGroupsCache } from '../utils/cacheUtils';
+import { findMatchingLocalMessage } from './messageCorrelation';
+import { deleteMessageFromIndexedDB } from '../utils/indexedDB';
 
 interface WSIncomingMessage {
   type: string;
@@ -19,6 +22,7 @@ interface WSIncomingMessage {
   content?: string;
   content_type?: 'text' | 'code' | 'file' | 'system';
   id?: string;
+  client_message_id?: string;
   reply_to?: string;
   reply_to_ids?: string[];
   timestamp?: string;
@@ -52,6 +56,7 @@ interface WSIncomingMessage {
   is_done?: boolean;
   is_edited?: boolean;
   edited_at?: string;
+  audio_revoked?: boolean;
   messages?: WSIncomingMessage[];
   group?: Record<string, unknown>;
   aiId?: string;
@@ -310,7 +315,9 @@ export function connectWebSocket(groupId?: string) {
   uiStore.setConnectionStatus('connecting');
   clearConnectionTimer();
 
-  const wsUrl = getWebSocketUrl();
+  const endpoint = new URL(getWebSocketUrl());
+  if (import.meta.env.DEV && import.meta.env.VITE_AUTH_MODE === 'dev') endpoint.searchParams.set('userId', getDevUserId());
+  const wsUrl = endpoint.toString();
 
   if (import.meta.env.DEV) console.log('[WS] Connecting to:', wsUrl);
 
@@ -479,6 +486,12 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
 
   try {
     switch (message.type) {
+      case 'connected': {
+        subscribeAllGroups();
+        const current = useGroupsStore.getState().currentGroup;
+        if (current) joinGroup(current.id);
+        break;
+      }
       case 'new_message':
         if (message.group_id) {
           const senderId = message.sender_id || message.sender || '';
@@ -498,26 +511,25 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
               message.reply_to_ids
             );
           } else if (!existingMsgById) {
-            const isLocalUserMessage = message.sender_type === 'user' &&
-              currentMessages.some(m => m.sender_type === 'user' && m.status === 'sending' && !m.is_streaming);
+            const localMsg = message.sender_type === 'user'
+              ? findMatchingLocalMessage(currentMessages, message.client_message_id)
+              : undefined;
 
-            if (isLocalUserMessage) {
-              const localMsg = currentMessages.find(m => m.sender_type === 'user' && m.status === 'sending');
-              if (localMsg) {
-                messagesStore.addMessage(message.group_id, {
-                  id: msgId,
-                  group_id: message.group_id,
-                  sender_type: message.sender_type || 'system',
-                  sender_id: senderId,
-                  content: message.content || '',
-                  content_type: message.content_type || 'text',
-                  reply_to: message.reply_to,
-                  created_at: messageTimestamp,
-                  metadata: message.metadata,
-                  tempId: localMsg.tempId,
-                  status: 'sent'
-                });
-              }
+            if (localMsg) {
+              messagesStore.addMessage(message.group_id, {
+                id: msgId,
+                group_id: message.group_id,
+                sender_type: 'user',
+                sender_id: senderId,
+                content: message.content || '',
+                content_type: message.content_type || 'text',
+                reply_to: message.reply_to,
+                created_at: messageTimestamp,
+                metadata: message.metadata,
+                tempId: localMsg.tempId,
+                status: 'sent'
+              });
+              if (localMsg.tempId) void deleteMessageFromIndexedDB(localMsg.tempId);
             } else {
               messagesStore.addMessage(message.group_id, {
                 id: msgId,
@@ -732,9 +744,10 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
               message.message_id,
               message.content,
               message.reply_to,
-              message.reply_to_ids
-            );
-          } else {
+                message.reply_to_ids
+              );
+              if (message.sender_type === 'system') messagesStore.updateMessage(message.message_id, message.group_id, { sender_type: 'system', metadata: message.metadata });
+            } else {
             if (import.meta.env.DEV) console.log('[WS] message_stream_end - creating new message directly');
             const finalMessage: Message = {
               id: message.message_id,
@@ -774,10 +787,20 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
 
       case 'message_updated':
         if (message.group_id && message.message_id && message.content !== undefined) {
+          const existing = messagesStore.messages[message.group_id]?.find(item => item.id === message.message_id);
+          const incomingTime = Date.parse(message.edited_at || '');
+          const currentTime = Date.parse(existing?.edited_at || '');
+          if (Number.isFinite(incomingTime) && Number.isFinite(currentTime) && incomingTime < currentTime) break;
+          const metadata = { ...(existing?.metadata || {}) };
+          if (message.audio_revoked) {
+            delete metadata.tts;
+            useAudioStore.getState().removeTTSAudio(message.message_id);
+          }
           messagesStore.updateMessage(message.message_id, message.group_id, {
             content: message.content,
             is_edited: message.is_edited ?? true,
-            edited_at: message.edited_at || new Date().toISOString()
+            edited_at: message.edited_at || new Date().toISOString(),
+            ...(message.audio_revoked ? { metadata } : {})
           });
         }
         break;
@@ -977,13 +1000,6 @@ export function sendTypingStatus(groupId: string, aiId: string, status: boolean)
       ai: aiId,
       status
     }));
-  }
-}
-
-export function triggerAITypingIndicators(groupId: string, aiIds: string[]) {
-  const uiStore = useUIStore.getState();
-  for (const aiId of aiIds) {
-    uiStore.setTyping(groupId, aiId, true);
   }
 }
 

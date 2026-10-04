@@ -1,4 +1,5 @@
-﻿import { useState, useEffect, useRef } from 'react';
+import { clearCurrentUserCache } from '../../utils/privateCache';
+﻿import { useState, useEffect } from 'react';
 import { useFocusTrap } from '../Common/useFocusTrap';
 import { useThemeStore } from '../../stores/themeStore';
 import { useGroupsStore } from '../../stores/groupsStore';
@@ -8,24 +9,10 @@ import { AIPersonaEditor } from './AIPersonaEditor';
 import { UserProfileEditor } from './UserProfileEditor';
 import { FontSizeSelector } from './FontSizeToggle';
 import { useConfirm, useToast, ErrorBoundary } from '../Common';
-import { AI_LIST } from '../../types';
-import { api } from '../../services/api';
+import { ModelCenter } from './ModelCenter';
+import { useModelsStore, useChatModelIds } from '../../stores/modelsStore';
 import { useModalAnimation } from '../../hooks/useModalAnimation';
 import { avatarBackgroundImageStyle } from '../Common/Avatar';
-
-interface ApiProviderConfig {
-  apiKey: string;
-  apiKeyConfigured?: boolean;
-  apiKeyMasked?: string;
-  baseUrl: string;
-}
-
-const API_VENDORS: { key: string; label: string; desc: string; color: string }[] = [
-  { key: 'deepseek', label: 'DeepSeek', desc: 'DeepSeek-V3 / R1', color: '#4D6BFE' },
-  { key: 'zhipu', label: '智谱AI (GLM)', desc: 'GLM-4 / GLM-4V', color: '#3B5FFF' },
-  { key: 'mimo', label: 'MiMo', desc: 'MiMo-TTS 语音模型', color: '#FF6A00' },
-  { key: 'qwen', label: '通义千问 (Qwen)', desc: 'Qwen-Max / Qwen-VL', color: '#6C5CE7' },
-];
 
 type SettingsTab = 'api' | 'appearance' | 'personas' | 'profile' | 'about';
 
@@ -50,25 +37,15 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
   const [editingPersonaId, setEditingPersonaId] = useState<string | null>(null);
   const [showProfileEditor, setShowProfileEditor] = useState(false);
 
-  const [apiConfig, setApiConfig] = useState<Record<string, ApiProviderConfig>>({});
-  const [apiConfigVisible, setApiConfigVisible] = useState<Record<string, boolean>>({});
-  const [expandedVendors, setExpandedVendors] = useState<Record<string, boolean>>({});
-  const [savingApiConfig, setSavingApiConfig] = useState(false);
-  const [apiConfigLoaded, setApiConfigLoaded] = useState(false);
-  const [apiConfigSaveError, setApiConfigSaveError] = useState(false);
-  const apiConfigOriginalRef = useRef<Record<string, ApiProviderConfig>>({});
-  // API配置测试状态
-  const [testingVendor, setTestingVendor] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<Record<string, { healthy: boolean; message: string; responseTime?: number } | undefined>>({});
-
   const [expandedPersona, setExpandedPersona] = useState<string | null>(null);
   const { isVisible, close: handleClose, overlayClass, contentClass } = useModalAnimation(isOpen, onClose);
   const overlayTrapRef = useFocusTrap<HTMLDivElement>(isVisible);
 
-  const NON_CHATTABLE_AI = ['mimo_tts', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'];
+  const chatIds = useChatModelIds();
+  const models = useModelsStore(s => s.catalog?.models);
   const aiMembers = Array.from(new Set(groups.flatMap(g => g.ai_members || [])));
-  const totalAIModels = AI_LIST.length;
-  const chatAIMembers = aiMembers.filter(id => !NON_CHATTABLE_AI.includes(id as string));
+  const totalAIModels = models?.length || 0;
+  const chatAIMembers = aiMembers.filter(id => chatIds.includes(id));
   const personaEntries = Object.entries(personas);
 
   useEffect(() => {
@@ -77,16 +54,6 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
     }
   }, [isOpen, fetchProfile]);
 
-  useEffect(() => {
-    if (isOpen && !apiConfigLoaded) {
-      api.getUserApiConfig().then((data) => {
-        if (data?.config && typeof data.config === 'object') {
-          setApiConfig(data.config);
-          apiConfigOriginalRef.current = JSON.parse(JSON.stringify(data.config));
-        }
-      }).catch(() => { }).finally(() => setApiConfigLoaded(true));
-    }
-  }, [isOpen, apiConfigLoaded]);
 
   useEffect(() => {
     if (isOpen) {
@@ -103,94 +70,19 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
     return () => window.removeEventListener('keydown', handleEsc);
   }, [isOpen, onClose]);
 
-  const handleApiConfigChange = (vendor: string, field: 'apiKey' | 'baseUrl', value: string) => {
-    setApiConfigSaveError(false);
-    setApiConfig(prev => ({ ...prev, [vendor]: { ...prev[vendor], [field]: value } }));
-  };
-
-  const toggleApiConfigVisibility = (vendor: string) => {
-    setApiConfigVisible(prev => ({ ...prev, [vendor]: !prev[vendor] }));
-  };
-
-  const toggleVendorExpand = (vendor: string) => {
-    setExpandedVendors(prev => ({ ...prev, [vendor]: !prev[vendor] }));
-  };
-
-  const handleSaveApiConfig = async () => {
-    setSavingApiConfig(true);
-    setApiConfigSaveError(false);
-    try {
-      const saved = await api.updateUserApiConfig(apiConfig);
-      const publicConfig = saved?.config || apiConfig;
-      setApiConfig(publicConfig);
-      apiConfigOriginalRef.current = JSON.parse(JSON.stringify(publicConfig));
-      showToast({ message: 'API配置已保存', type: 'success' });
-    } catch {
-      setApiConfigSaveError(true);
-      showToast({ message: '保存失败，请重试', type: 'error' });
-    } finally {
-      setSavingApiConfig(false);
-    }
-  };
-
-  const handleTestApiConfig = async (vendor: string) => {
-    const cfg = apiConfig[vendor] || { apiKey: '', baseUrl: '' };
-    setTestingVendor(vendor);
-    // 清除该厂商之前的测试结果
-    setTestResult(prev => ({ ...prev, [vendor]: undefined }));
-    try {
-      const result = await api.testUserApiConfig(vendor, cfg.apiKey, cfg.baseUrl);
-      if (result.healthy) {
-        setTestResult(prev => ({
-          ...prev,
-          [vendor]: { healthy: true, message: result.message || '连接成功', responseTime: result.responseTime }
-        }));
-        showToast({ message: `${vendor} 连接成功`, type: 'success' });
-      } else {
-        setTestResult(prev => ({
-          ...prev,
-          [vendor]: { healthy: false, message: result.error || '连接失败', responseTime: result.responseTime }
-        }));
-        showToast({ message: `${vendor} 连接失败：${result.error || '未知错误'}`, type: 'error' });
-      }
-    } catch (err: any) {
-      const msg = err?.response?.data?.error || err?.message || '测试失败';
-      setTestResult(prev => ({ ...prev, [vendor]: { healthy: false, message: msg } }));
-      showToast({ message: `${vendor} 测试失败：${msg}`, type: 'error' });
-    } finally {
-      setTestingVendor(null);
-    }
-  };
-
   const handleThemeModeSelect = (mode: 'light' | 'dark' | 'system') => {
     if (theme !== mode) setTheme(mode);
   };
 
-  const clearAll = () => {
-    try {
-      const keysToRemove = Object.keys(localStorage).filter(key =>
-        key.startsWith('chat_app_') || key.startsWith('ai-chat-') || key.startsWith('app_cache_') || key === 'messages-cache' || key === 'groups-cache'
-      );
-      keysToRemove.forEach(key => localStorage.removeItem(key));
-    } catch (e) {
-      console.warn('clearAll failed:', e);
-    }
-    try {
-      indexedDB.deleteDatabase('ai-chat-db');
-    } catch (e) {
-      console.warn('IndexedDB cleanup failed:', e);
-    }
-  };
-
   const handleClearData = async () => {
     const confirmed = await confirm({
-      title: '清空所有聊天数据',
-      description: '此操作将删除所有聊天记录和对话，且无法恢复。确定要继续吗？',
+      title: '清理本地缓存',
+      description: '仅清理当前浏览器缓存，服务器上的会话与文件会在下次加载时恢复。是否继续？',
       danger: true,
     });
     if (confirmed) {
-      clearAll();
-      showToast({ message: '数据已清空', type: 'success' });
+      await clearCurrentUserCache();
+      showToast({ message: '本地缓存已清理', type: 'success' });
     }
   };
 
@@ -199,7 +91,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
   const tabs: { key: SettingsTab; label: string; icon: JSX.Element }[] = [
     {
       key: 'api',
-      label: 'API 配置',
+      label: '模型中心',
       icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" /></svg>,
     },
     {
@@ -224,171 +116,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
     },
   ];
 
-  const renderApiSection = () => (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-sm font-semibold text-text-primary">API 配置</h3>
-          <p className="text-[11px] text-text-muted mt-0.5">配置各AI服务商的API密钥和自定义地址</p>
-        </div>
-        <div className="flex items-center gap-2">
-          {apiConfigSaveError && (
-            <button
-              onClick={() => {
-                setApiConfig(JSON.parse(JSON.stringify(apiConfigOriginalRef.current)));
-                setApiConfigSaveError(false);
-              }}
-              className="px-3 py-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 border border-amber-500/30 rounded-lg hover:bg-amber-500/5 transition-colors"
-            >
-              放弃更改
-            </button>
-          )}
-          <button
-            onClick={handleSaveApiConfig}
-            disabled={savingApiConfig}
-            className="px-4 py-1.5 text-xs font-medium text-white bg-accent rounded-lg hover:bg-accent-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            {savingApiConfig ? '保存中...' : '保存配置'}
-          </button>
-        </div>
-      </div>
-      {apiConfigSaveError && (
-        <p className="text-xs text-amber-600 dark:text-amber-400 -mt-2">配置尚未保存</p>
-      )}
-      <div className="space-y-2">
-        {API_VENDORS.map((vendor) => {
-          const cfg = apiConfig[vendor.key] || { apiKey: '', baseUrl: '' };
-          const showPw = apiConfigVisible[vendor.key] || false;
-          const isExpanded = expandedVendors[vendor.key] || false;
-          const isConfigured = Boolean(cfg.apiKeyConfigured || (cfg.apiKey && cfg.apiKey.trim()));
-
-          return (
-            <div
-              key={vendor.key}
-              className="border border-border-subtle rounded-xl overflow-hidden bg-bg-surface2/50"
-            >
-              <button
-                onClick={() => toggleVendorExpand(vendor.key)}
-                className="w-full flex items-center gap-3 px-4 py-3 hover:bg-bg-surface3/50 transition-colors"
-              >
-                <div
-                  className="w-8 h-8 rounded-lg flex items-center justify-center text-white text-xs font-bold flex-shrink-0"
-                  style={{ backgroundColor: vendor.color }}
-                >
-                  {vendor.label[0]}
-                </div>
-                <div className="flex-1 text-left min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-text-primary">{vendor.label}</span>
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isConfigured ? 'bg-green-500' : 'bg-text-muted/30'}`}
-                      title={isConfigured ? '已配置' : '未配置'}
-                    />
-                  </div>
-                  <span className="text-[11px] text-text-muted">{vendor.desc}</span>
-                </div>
-                <svg
-                  className={`w-4 h-4 text-text-muted transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
-                  fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
-
-              {isExpanded && (
-                <div className="px-4 pb-3 space-y-2.5 border-t border-border-subtle/50 pt-3">
-                  <div>
-                    <label className="text-[11px] font-medium text-text-secondary mb-1 block">API Key</label>
-                    <div className="relative">
-                      <input
-                        type={showPw ? 'text' : 'password'}
-                        value={cfg.apiKey}
-                        onChange={(e) => handleApiConfigChange(vendor.key, 'apiKey', e.target.value)}
-                        placeholder={cfg.apiKeyMasked || (cfg.apiKeyConfigured ? '已配置（输入新值可覆盖）' : '输入 API Key')}
-                        autoComplete="off"
-                        className="w-full px-3 py-2 pr-10 bg-bg-surface border border-border-subtle rounded-lg text-xs outline-none text-text-primary placeholder-text-muted focus:border-accent focus:ring-1 focus:ring-accent/20 transition-all"
-                      />
-                      <button
-                        onClick={() => toggleApiConfigVisibility(vendor.key)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded hover:bg-bg-surface2 text-text-muted hover:text-text-secondary transition-colors"
-                        title={showPw ? '隐藏' : '显示'}
-                      >
-                        {showPw ? (
-                          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
-                        ) : (
-                          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" /><circle cx="12" cy="12" r="3" /></svg>
-                        )}
-                      </button>
-                    </div>
-                    {cfg.apiKeyConfigured && !cfg.apiKey && (
-                      <button
-                        onClick={async () => {
-                          try {
-                            const saved = await api.updateUserApiConfig({ [vendor.key]: { apiKey: '__CLEAR__', baseUrl: cfg.baseUrl } });
-                            const publicConfig = saved?.config;
-                            if (publicConfig) {
-                              setApiConfig(prev => ({ ...prev, ...publicConfig }));
-                            }
-                            showToast({ message: '已清除该厂商的 API Key', type: 'success' });
-                          } catch {
-                            showToast({ message: '清除失败，请重试', type: 'error' });
-                          }
-                        }}
-                        className="mt-1 text-[10px] text-red-400 hover:text-red-300 transition-colors"
-                      >
-                        清除已保存的 API Key
-                      </button>
-                    )}
-                  </div>
-                  <div>
-                    <label className="text-[11px] font-medium text-text-secondary mb-1 block">Base URL</label>
-                    <input
-                      type="text"
-                      value={cfg.baseUrl}
-                      onChange={(e) => handleApiConfigChange(vendor.key, 'baseUrl', e.target.value)}
-                      placeholder="留空使用默认，如 https://api.example.com/v1（无需 /chat/completions）"
-                      className="w-full px-3 py-2 bg-bg-surface border border-border-subtle rounded-lg text-xs outline-none text-text-primary placeholder-text-muted focus:border-accent focus:ring-1 focus:ring-accent/20 transition-all"
-                    />
-                  </div>
-                  <div className="flex items-center gap-2 pt-1">
-                    <button
-                      onClick={() => handleTestApiConfig(vendor.key)}
-                      disabled={testingVendor === vendor.key}
-                      className="px-3 py-1.5 text-[11px] font-medium text-text-secondary border border-border-subtle rounded-lg hover:bg-bg-surface3 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1.5"
-                    >
-                      {testingVendor === vendor.key ? (
-                        <>
-                          <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v3m0 12v3m9-9h-3M6 12H3m15.364-6.364l-2.121 2.121M7.757 16.243l-2.121 2.121m12.728 0l-2.121-2.121M7.757 7.757L5.636 5.636" />
-                          </svg>
-                          测试中...
-                        </>
-                      ) : (
-                        <>
-                          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                          </svg>
-                          测试连接
-                        </>
-                      )}
-                    </button>
-                    {testResult[vendor.key] && (
-                      <span className={`text-[11px] flex items-center gap-1 ${testResult[vendor.key]!.healthy ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${testResult[vendor.key]!.healthy ? 'bg-green-500' : 'bg-red-500'}`} />
-                        {testResult[vendor.key]!.healthy
-                          ? `${testResult[vendor.key]!.message}${testResult[vendor.key]!.responseTime ? ` (${testResult[vendor.key]!.responseTime}ms)` : ''}`
-                          : testResult[vendor.key]!.message}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
+  const renderApiSection = () => <ModelCenter />;
 
   const renderAppearanceSection = () => (
     <div className="space-y-5">
@@ -465,7 +193,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
           const isExpanded = expandedPersona === id;
           const personaTyped = persona as any;
           const isEnabled = personaTyped?.responseConfig?.enabled !== false;
-          const isNonChat = NON_CHATTABLE_AI.includes(id);
+          const isNonChat = !chatIds.includes(id);
           const isEditable = id !== 'mimo_tts';
 
           return (

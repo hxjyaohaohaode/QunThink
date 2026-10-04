@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { api } from '../../services/api';
 import { MessageTTSAudio } from '../../types';
 
@@ -13,7 +13,7 @@ interface TTSVoice {
   id: string;
   name: string;
   desc: string;
-  gender: 'male' | 'female';
+  gender: 'male' | 'female' | 'unknown';
   tone: string;
 }
 
@@ -27,17 +27,11 @@ interface TTSTone {
 }
 
 const DEFAULT_VOICES: TTSVoice[] = [
-  { id: 'mimo_default', name: '默认音色', desc: 'MiMo 默认音色', gender: 'female', tone: 'default' },
-  { id: 'default_zh', name: '中文女声', desc: 'MiMo 中文女声', gender: 'female', tone: 'zh' },
-  { id: 'default_en', name: '英文女声', desc: 'MiMo 英文女声', gender: 'female', tone: 'en' }
+  { id: 'mimo_default', name: '模型音色', desc: '使用模型中心配置且已测试的音色', gender: 'unknown', tone: 'default' }
 ];
 
 const DEFAULT_TONES: TTSTone[] = [
-  { id: 'normal', name: '正常', desc: '标准语调和语速', speed: 1.0, pitch: 1.0, emotion: 'neutral' },
-  { id: 'slow_gentle', name: '缓慢温柔', desc: '语速较慢，语调温柔', speed: 0.8, pitch: 0.9, emotion: 'gentle' },
-  { id: 'fast_excited', name: '快速兴奋', desc: '语速较快，充满活力', speed: 1.2, pitch: 1.1, emotion: 'excited' },
-  { id: 'calm', name: '平静舒缓', desc: '语速均匀，语调平稳', speed: 0.9, pitch: 1.0, emotion: 'calm' },
-  { id: 'emotional', name: '情感丰富', desc: '语调变化大，情感充沛', speed: 1.0, pitch: 1.2, emotion: 'emotional' }
+  { id: 'normal', name: '默认语调', desc: '使用已验证模型的默认语调', speed: 1.0, pitch: 1.0, emotion: 'neutral' }
 ];
 
 export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: TTSSynthesizeModalProps) {
@@ -48,6 +42,7 @@ export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: 
   const [isSynthesizing, setIsSynthesizing] = useState(false);
   const [isLoadingConfig, setIsLoadingConfig] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const requestRef = useRef<{ signature: string; id: string } | null>(null);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -103,8 +98,12 @@ export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: 
   const handleSynthesize = useCallback(async () => {
     setIsSynthesizing(true);
     setError(null);
+    const signature = JSON.stringify([text, selectedVoice, selectedTone, messageId]);
+    if (requestRef.current?.signature !== signature) {
+      requestRef.current = { signature, id: crypto.randomUUID() };
+    }
     try {
-      const result = await api.synthesizeSpeech(text, selectedVoice, selectedTone, messageId);
+      const result = await api.synthesizeSpeech(text, selectedVoice, selectedTone, messageId, requestRef.current.id);
 
       if (result.success) {
         const audio: MessageTTSAudio = {
@@ -120,14 +119,34 @@ export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: 
         onSynthesized(audio);
         onClose();
       } else {
-        setError('语音合成失败');
+        if (result.requestId && requestRef.current) {
+          requestRef.current = { signature, id: result.requestId };
+        }
+        setError(`${result.error || `语音请求 ${result.status || '未知'}`}；请求号 ${requestRef.current.id}`);
       }
     } catch (err: any) {
-      setError(err.response?.data?.error || '语音合成失败，请稍后重试');
+      setError(err.response?.data?.error || `连接中断，结果可能未知。请用同一请求号查询或重试：${requestRef.current?.id}`);
     } finally {
       setIsSynthesizing(false);
     }
   }, [text, selectedVoice, selectedTone, messageId, onSynthesized, onClose]);
+
+  const checkSynthesis = useCallback(async () => {
+    if (!requestRef.current) return;
+    try {
+      const effect = await api.getTTSEffect(requestRef.current.id);
+      if (effect.status === 'succeeded' && effect.response) {
+        const result = effect.response;
+        onSynthesized({ id: result.audio_id, audioUrl: result.audio_url,
+          duration: result.duration, voiceId: result.voice?.id || selectedVoice, toneId: result.tone?.id || selectedTone,
+          createdAt: new Date().toISOString(), transcript: result.transcript || text,
+          format: result.format });
+        onClose();
+      } else {
+        setError(`请求 ${requestRef.current.id} 当前状态：${effect.status}。结果未知时可能已计费，请先核对服务商账单。`);
+      }
+    } catch (err: any) { setError(err.response?.data?.error || '状态查询失败，请稍后重试'); }
+  }, [onSynthesized, onClose, selectedVoice, selectedTone, text]);
 
   const isLongText = text.length > 500;
 
@@ -211,6 +230,7 @@ export function TTSSynthesizeModal({ text, messageId, onClose, onSynthesized }: 
         {error && (
           <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/30 rounded-xl text-sm text-red-600 dark:text-red-400">
             {error}
+            {requestRef.current && <button type="button" className="block mt-2 underline" onClick={() => void checkSynthesis()}>查询这次合成的状态</button>}
           </div>
         )}
 

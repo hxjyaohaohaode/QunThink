@@ -1,12 +1,37 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
-import { triggerAITypingIndicators } from '../services/websocket';
-import { saveMessagesToIndexedDB, loadMessagesFromIndexedDB, clearAllMessagesFromIndexedDB, clearOldMessagesFromIndexedDB } from '../utils/indexedDB';
+import { saveMessagesToIndexedDB, loadMessagesFromIndexedDB, deleteMessageFromIndexedDB, clearAllMessagesFromIndexedDB, clearOldMessagesFromIndexedDB } from '../utils/indexedDB';
 import { useGroupsStore } from './groupsStore';
+import { useAudioStore } from './audioStore';
 import type { Comment, MessageAttachment, Message } from '../types';
 
 const sendingGroups = new Map<string, boolean>();
 const pendingMessages = new Map<string, { tempId: string, groupId: string }>();
+
+function sendFailure(error: unknown): { message: string; terminal: boolean } {
+  const status = (error as { status?: number } | null)?.status;
+  if (status === 410) return { message: '原消息已删除，不能重试这次发送。内容仍保留，请复制后作为新消息发送。', terminal: true };
+  if (status === 409) return { message: '发送标识与已有消息冲突，不能重试这次发送。内容仍保留，请复制后作为新消息发送。', terminal: true };
+  return { message: error instanceof Error ? error.message : String(error), terminal: false };
+}
+
+function reconcileDeliveredMessage(groupId: string, messages: Message[], tempId: string, delivered: Message): Message[] {
+  let matched = false;
+  const next: Message[] = [];
+  for (const current of messages) {
+    if (current.tempId === tempId || current.id === delivered.id) {
+      if (!matched) {
+        next.push({ ...current, ...delivered, tempId, status: 'sent' });
+        matched = true;
+      }
+    } else {
+      next.push(current);
+    }
+  }
+  if (!matched) next.push({ ...delivered, tempId, status: 'sent' });
+  persistMessages(groupId, next);
+  return next;
+}
 
 interface PaginationState {
   hasMore: boolean;
@@ -217,13 +242,16 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
           const messages = response.messages || [];
           const hasMore = response.hasMore || false;
           const oldestMessageId = messages.length > 0 ? messages[0].id : null;
+          const confirmedClientIds = new Set(messages.map(message => (message as Message & { client_message_id?: string }).client_message_id).filter((id): id is string => !!id));
 
           lastMessageFetchAt.set(groupId, Date.now());
           set(state => {
+            const failedDrafts = (state.messages[groupId] || []).filter(message => message.status === 'failed' && message.tempId && !confirmedClientIds.has(message.tempId));
+            const merged = [...messages, ...failedDrafts].sort((a, b) => a.created_at.localeCompare(b.created_at));
             const newState = {
               messages: {
                 ...state.messages,
-                [groupId]: messages
+                [groupId]: merged
               },
               pagination: {
                 ...state.pagination,
@@ -234,6 +262,7 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
             evictLeastRecentlyUsedMessages(newState as any);
             return newState;
           });
+          for (const clientId of confirmedClientIds) void deleteMessageFromIndexedDB(clientId);
           if (messages.length > 0) {
             saveMessagesToIndexedDB(messages);
           }
@@ -318,7 +347,7 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
     sendingGroups.set(groupId, true);
     set(state => ({ sending: { ...state.sending, [groupId]: true }, error: null }));
 
-    const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    const tempId = `temp_${crypto.randomUUID()}`;
     const tempMessage: Message = {
       id: tempId,
       group_id: groupId,
@@ -337,64 +366,59 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
     pendingMessages.set(tempId, { tempId, groupId });
 
     try {
-      const message = await api.sendMessage(groupId, content, 'text', replyTo, undefined, attachments);
+      const message = await api.sendMessage(groupId, content, 'text', replyTo, undefined, attachments, tempId);
 
-      // 只更新status和真实ID，不替换整个消息内容，避免与WebSocket new_message广播竞态导致闪烁
       set(state => ({
         messages: {
           ...state.messages,
-          [groupId]: (state.messages[groupId] || []).map(m => {
-            if (m.tempId === tempId) {
-              return {
-                ...m,
-                id: message.id || m.id,
-                status: 'sent' as const,
-                created_at: message.created_at || m.created_at,
-                reply_to: message.reply_to || m.reply_to,
-                attachments: message.attachments || m.attachments
-              };
-            }
-            return m;
-          })
+          [groupId]: reconcileDeliveredMessage(groupId, state.messages[groupId] || [], tempId, message)
         },
         sending: { ...state.sending, [groupId]: false }
       }));
 
       pendingMessages.delete(tempId);
-
-      const groupsStore = useGroupsStore.getState();
-      const group = groupsStore.groups?.find(g => g.id === groupId);
-      if (group?.ai_members && group.ai_members.length > 0) {
-        triggerAITypingIndicators(groupId, group.ai_members);
-      }
+      await deleteMessageFromIndexedDB(tempId);
 
       return { success: true, tempId };
     } catch (error) {
+      const failure = sendFailure(error);
       set(state => ({
         messages: {
           ...state.messages,
-          [groupId]: (state.messages[groupId] || []).map(m =>
-            m.tempId === tempId ? { ...m, status: 'failed' } : m
-          )
+          [groupId]: (() => {
+            const next = (state.messages[groupId] || []).map(m =>
+              m.tempId === tempId ? { ...m, status: 'failed' as const, metadata: { ...m.metadata, send_error: failure.message, send_terminal: failure.terminal } } : m
+            );
+            persistMessages(groupId, next);
+            return next;
+          })()
         },
-        error: error instanceof Error ? error.message : String(error),
+        error: failure.message,
         sending: { ...state.sending, [groupId]: false }
       }));
 
       pendingMessages.delete(tempId);
-      return { success: false, tempId, error: error instanceof Error ? error.message : String(error) };
+      const failed = get().messages[groupId]?.find(m => m.tempId === tempId);
+      if (failed) await saveMessagesToIndexedDB([failed]);
+      return { success: false, tempId, error: failure.message };
     } finally {
       sendingGroups.delete(groupId);
     }
   },
 
   retryMessage: async (groupId: string, tempId: string) => {
+    if (sendingGroups.get(groupId)) return { success: false, error: '消息正在发送中' };
     const state = get();
     const failedMessage = (state.messages[groupId] || []).find(m => m.tempId === tempId);
 
     if (!failedMessage) {
       return { success: false, error: '消息不存在' };
     }
+    if (failedMessage.metadata?.send_terminal === true) {
+      return { success: false, error: String(failedMessage.metadata.send_error || '这次发送不能重试，请复制内容后重新发送') };
+    }
+
+    sendingGroups.set(groupId, true);
 
     set(state => ({
       messages: {
@@ -408,42 +432,51 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
     }));
 
     try {
-      const message = await api.sendMessage(groupId, failedMessage.content, 'text', failedMessage.reply_to, undefined, failedMessage.attachments);
+      const message = await api.sendMessage(groupId, failedMessage.content, 'text', failedMessage.reply_to, undefined, failedMessage.attachments, tempId);
 
       set(state => ({
         messages: {
           ...state.messages,
-          [groupId]: (state.messages[groupId] || []).map(m =>
-            m.tempId === tempId ? { ...m, ...message, status: 'sent', tempId: m.tempId } : m
-          )
+          [groupId]: reconcileDeliveredMessage(groupId, state.messages[groupId] || [], tempId, message)
         },
         sending: { ...state.sending, [groupId]: false }
       }));
+
+      await deleteMessageFromIndexedDB(tempId);
 
       return { success: true };
     } catch (error) {
+      const failure = sendFailure(error);
       set(state => ({
         messages: {
           ...state.messages,
-          [groupId]: (state.messages[groupId] || []).map(m =>
-            m.tempId === tempId ? { ...m, status: 'failed' } : m
-          )
+          [groupId]: (() => {
+            const next = (state.messages[groupId] || []).map(m =>
+              m.tempId === tempId ? { ...m, status: 'failed' as const, metadata: { ...m.metadata, send_error: failure.message, send_terminal: failure.terminal } } : m
+            );
+            persistMessages(groupId, next);
+            return next;
+          })()
         },
-        error: error instanceof Error ? error.message : String(error),
+        error: failure.message,
         sending: { ...state.sending, [groupId]: false }
       }));
 
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
+      const failed = get().messages[groupId]?.find(m => m.tempId === tempId);
+      if (failed) await saveMessagesToIndexedDB([failed]);
+      return { success: false, error: failure.message };
+    } finally {
+      sendingGroups.delete(groupId);
     }
   },
 
   removeFailedMessage: (groupId: string, tempId: string) => {
-    set(state => ({
-      messages: {
-        ...state.messages,
-        [groupId]: (state.messages[groupId] || []).filter(m => m.tempId !== tempId)
-      }
-    }));
+    set(state => {
+      const next = (state.messages[groupId] || []).filter(m => m.tempId !== tempId);
+      persistMessages(groupId, next);
+      return { messages: { ...state.messages, [groupId]: next } };
+    });
+    void deleteMessageFromIndexedDB(tempId);
   },
 
   deleteMessage: async (messageId: string, groupId: string) => {
@@ -489,6 +522,7 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
   editMessage: async (messageId: string, groupId: string, content: string) => {
     try {
       const updatedMessage = await api.editMessage(messageId, content);
+      if (!updatedMessage.metadata?.tts) useAudioStore.getState().removeTTSAudio(messageId);
 
       set(state => ({
         messages: {
@@ -498,6 +532,7 @@ export const useMessagesStore = create<MessagesState>((set, get) => ({
               ? {
                 ...m,
                 content: updatedMessage.content || content,
+                metadata: updatedMessage.metadata,
                 is_edited: true,
                 edited_at: updatedMessage.edited_at || new Date().toISOString()
               }

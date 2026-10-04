@@ -1,3 +1,5 @@
+import { getCatalogData } from '../services/ai/catalog.js';
+import { buildMergedPersonas } from '../routes/personas.js';
 import { AI_LIST } from '../config/personas.js';
 import { cancelGroupGeneration } from '../services/scheduler/index.js';
 import { getAuthDb } from '../models/authDb.js';
@@ -5,6 +7,7 @@ import { getUserDb } from '../models/db.js';
 import { safeLog } from '../utils/logger.js';
 import wsPerformanceMonitor from './performanceMonitor.js';
 import crypto from 'crypto';
+import { currentUserId, runAsUser } from '../services/userScope.js';
 
 const clients = new Map();
 const groupSubscriptions = new Map();
@@ -404,6 +407,10 @@ export function setupWebSocket(wss) {
 
     safeLog('info', `WebSocket client connected: ${clientId}, user: ${userId}`);
 
+    // The HTTP upgrade precedes async session verification. Tell the client
+    // when authentication is finished so early subscriptions can be replayed.
+    ws.send(JSON.stringify({ type: 'connected' }));
+
     ws.on('message', async (data) => {
       try {
         // 业务层限制单条消息最大1MB（wss层maxPayload为10MB），先判Buffer长度再做字符串转换
@@ -430,7 +437,7 @@ export function setupWebSocket(wss) {
             return;
           }
         }
-        handleMessage(clientId, message);
+        await runAsUser(currentClient.userId, () => handleMessage(clientId, message));
       } catch (error) {
         safeLog('error', 'WebSocket message error', { error: error?.message || error });
       }
@@ -615,7 +622,7 @@ function broadcastTyping(clientId, message) {
   const subscribers = groupSubscriptions.get(group_id);
 
   subscribers.forEach(subscriberId => {
-    if (subscriberId !== clientId) {
+    if (subscriberId !== clientId && clients.get(subscriberId)?.userId === client.userId) {
       sendToClient(subscriberId, {
         type: status ? 'ai_typing' : 'ai_typing_stop',
         group_id,
@@ -626,7 +633,8 @@ function broadcastTyping(clientId, message) {
   });
 }
 
-export function broadcastToGroup(groupId, message) {
+export function broadcastToGroup(groupId, message, userId = currentUserId()) {
+  if (!userId) return;
   const subscribers = groupSubscriptions.get(groupId);
   // 高频广播日志降级为debug，避免流式输出时日志爆炸
   safeLog('debug', `[Broadcast] Group ${groupId}, type: ${message.type}, message_id: ${message.id || message.message_id || 'N/A'}, subscribers: ${subscribers?.size || 0}`);
@@ -636,7 +644,7 @@ export function broadcastToGroup(groupId, message) {
   }
 
   subscribers.forEach(clientId => {
-    sendToClient(clientId, message);
+    if (clients.get(clientId)?.userId === userId) sendToClient(clientId, message);
   });
 }
 
@@ -718,7 +726,7 @@ export function broadcastTypingStatus(groupId, aiId, isTyping) {
 }
 
 export function broadcastTypingStatusWithTimeout(groupId, aiId, isTyping, timeoutMs = 30000) {
-  const timeoutKey = `${groupId}_${aiId}`;
+  const timeoutKey = JSON.stringify([currentUserId(), groupId, aiId]);
 
   if (typingTimeouts.has(timeoutKey)) {
     clearTimeout(typingTimeouts.get(timeoutKey));
@@ -750,7 +758,7 @@ export async function broadcastPersonaUpdate(aiId, userId) {
     const db = await getUserDb(userId);
     await db.read();
     const customPersonas = db.data.customPersonas || {};
-    const merged = buildMergedPersonas(customPersonas);
+    const merged = buildMergedPersonas(customPersonas, getCatalogData(db.data));
     const persona = merged[aiId];
     if (!persona) return;
 

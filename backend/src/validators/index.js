@@ -27,9 +27,10 @@ const validateQuery = (schema) => (req, res, next) => {
 };
 
 const groupCreateInputShape = {
-  name: z.string().min(1).max(100),
+  name: z.string().trim().min(1).max(100),
   description: z.string().max(500).optional(),
-  ai_members: z.array(z.string()).optional(),
+  ai_members: z.array(z.string().min(1).max(80)).max(30).optional(),
+  space_category: z.enum(['work', 'social', 'play']).optional(),
   is_private: z.boolean().optional(),
   ai_member: z.string().optional(),
   avatar_url: z.string().min(1).optional(),
@@ -50,7 +51,7 @@ const pinGroupSchema = z.object({
 });
 
 const sendMessageSchema = z.object({
-  content: z.string().min(1).max(10000),
+  content: z.string().min(1).max(10000).refine(v => v.trim().length > 0, '消息不能为空白'),
   content_type: z.enum(['text', 'code', 'file', 'system']).optional(),
   reply_to: z.string().min(1, '回复ID不能为空字符串').optional().nullable(),
   metadata: z.record(z.string(), z.unknown()).optional(),
@@ -184,13 +185,12 @@ const updateProfileSchema = z.object({
 });
 
 const ttsSchema = z.object({
+  clientRequestId: z.string().uuid(),
   text: z.string().min(1).max(5000),
   voice: z.string().max(50).optional(),
   tone: z.string().max(50).optional(),
-  speed: z.number().min(0.5).max(2).optional(),
-  groupId: z.string().optional(),
   messageId: z.string().uuid().optional()
-});
+}).strict();
 
 const smsSendSchema = z.object({
   phone: z.string().regex(/^1[3-9]\d{9}$/, '手机号格式不正确')

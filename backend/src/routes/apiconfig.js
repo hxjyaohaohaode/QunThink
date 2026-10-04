@@ -168,6 +168,14 @@ router.put('/apiconfig', asyncHandler(async (req, res) => {
         }
       }
       if (sanitized[vendor].baseUrl !== undefined) {
+        const oldEndpoint = db.data.aiApiConfigs[vendor].baseUrl
+          ? normalizeEndpoint(db.data.aiApiConfigs[vendor].baseUrl) : VENDOR_DEFAULT_ENDPOINTS[vendor];
+        const newEndpoint = sanitized[vendor].baseUrl
+          ? normalizeEndpoint(sanitized[vendor].baseUrl) : VENDOR_DEFAULT_ENDPOINTS[vendor];
+        if (oldEndpoint !== newEndpoint && !sanitized[vendor].apiKey) {
+          db.data.aiApiConfigs[vendor].apiKey = '';
+          db.data.aiApiConfigs[vendor].apiKeyEncrypted = false;
+        }
         db.data.aiApiConfigs[vendor].baseUrl = sanitized[vendor].baseUrl;
       }
     }
@@ -194,18 +202,26 @@ router.post('/apiconfig/test', asyncHandler(async (req, res) => {
   // 优先使用请求体中的临时配置（用户可能尚未保存就测试）
   let apiKey = typeof req.body.apiKey === 'string' ? req.body.apiKey.trim() : '';
   let baseUrl = typeof req.body.baseUrl === 'string' ? req.body.baseUrl.trim() : '';
+  let temporaryEndpoint = null;
+  if (baseUrl) {
+    try { temporaryEndpoint = normalizeEndpoint(baseUrl); }
+    catch { return res.status(400).json({ success: false, healthy: false, error: 'Base URL 格式无效' }); }
+  }
 
-  // 若请求体未提供，则回退到用户已保存的配置
+  // Saved secrets are bound to their saved endpoint. A temporary URL must
+  // supply its own key; otherwise a public attacker URL could receive it.
   if (!apiKey || !baseUrl) {
     const db = await req.getUserDb();
     await db.read();
     const saved = (db.data.aiApiConfigs || {})[vendor] || {};
-    if (!apiKey) apiKey = decryptStoredApiKey(saved);
+    const savedEndpoint = saved.baseUrl ? normalizeEndpoint(saved.baseUrl) : VENDOR_DEFAULT_ENDPOINTS[vendor];
+    const requestedEndpoint = temporaryEndpoint || savedEndpoint;
+    if (!apiKey && requestedEndpoint === savedEndpoint) apiKey = decryptStoredApiKey(saved);
     if (!baseUrl) baseUrl = (saved.baseUrl || '').trim();
   }
 
-  // 若仍未获取到 apiKey，则回退到系统默认（环境变量）
-  if (!apiKey) {
+  // Environment keys are scoped to the canonical vendor endpoint only.
+  if (!apiKey && (!baseUrl || temporaryEndpoint === VENDOR_DEFAULT_ENDPOINTS[vendor])) {
     const envKeyMap = {
       deepseek: process.env.DEEPSEEK_API_KEY,
       zhipu: process.env.GLM_API_KEY,

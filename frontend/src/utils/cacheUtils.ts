@@ -12,6 +12,8 @@ let currentCacheUserId: string | null = null;
 const memoryMirrors = new Map<string, CacheData<unknown>>();
 const inFlightWrites = new Map<string, Promise<boolean>>();
 const pendingWriteData = new Map<string, unknown>();
+const keyRevisions = new Map<string, number>();
+let cacheGeneration = 0;
 
 function isCacheExpired(cache: CacheData<unknown>): boolean {
   const expiryMs = CACHE_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
@@ -37,9 +39,11 @@ function writeMemoryMirror<T>(key: string, data: T): void {
 }
 
 function clearMemoryMirrors(): void {
+  cacheGeneration++;
   memoryMirrors.clear();
   inFlightWrites.clear();
   pendingWriteData.clear();
+  keyRevisions.clear();
 }
 
 function handleQuotaPressure(failedKey: string): void {
@@ -65,13 +69,17 @@ function handleQuotaPressure(failedKey: string): void {
 }
 
 async function writeEncryptedCache<T>(key: string, data: T): Promise<boolean> {
-  writeMemoryMirror(key, data);
+  const storageKey = getFullKey(key);
+  const generation = cacheGeneration;
+  const revision = keyRevisions.get(storageKey) || 0;
+  const stillCurrent = () => generation === cacheGeneration && revision === (keyRevisions.get(storageKey) || 0);
+  writeMemoryMirror(storageKey, data);
 
   // 写入进行中又有新数据到达：记录最新值，当前写入完成后补写一次，
   // 保证 localStorage 最终状态与最后一次写入一致（否则会被旧数据覆盖）。
-  const inFlight = inFlightWrites.get(key);
+  const inFlight = inFlightWrites.get(storageKey);
   if (inFlight) {
-    pendingWriteData.set(key, data as unknown);
+    pendingWriteData.set(storageKey, data as unknown);
     return inFlight;
   }
 
@@ -79,6 +87,7 @@ async function writeEncryptedCache<T>(key: string, data: T): Promise<boolean> {
     let payload: unknown = data;
     let result = false;
     for (;;) {
+      if (!stillCurrent()) return false;
       const cacheData: CacheData<unknown> = {
         data: payload,
         timestamp: Date.now(),
@@ -88,15 +97,17 @@ async function writeEncryptedCache<T>(key: string, data: T): Promise<boolean> {
       if (isCryptoAvailable()) {
         try {
           const encrypted = await encryptData(JSON.stringify(cacheData));
+          if (!stillCurrent()) return false;
           if (encrypted) {
             try {
-              localStorage.setItem(getFullKey(key), ENCRYPTED_MARKER + encrypted);
+              localStorage.setItem(storageKey, ENCRYPTED_MARKER + encrypted);
               result = true;
             } catch (quotaError) {
               console.warn('加密缓存写入失败（配额），清理后重试:', quotaError);
               handleQuotaPressure(key);
               try {
-                localStorage.setItem(getFullKey(key), ENCRYPTED_MARKER + encrypted);
+                if (!stillCurrent()) return false;
+                localStorage.setItem(storageKey, ENCRYPTED_MARKER + encrypted);
                 result = true;
               } catch (retryError) {
                 console.warn('加密缓存重试写入失败:', retryError);
@@ -107,24 +118,27 @@ async function writeEncryptedCache<T>(key: string, data: T): Promise<boolean> {
           console.warn('加密缓存写入失败:', e);
         }
       }
-      const next = pendingWriteData.get(key);
+      const next = pendingWriteData.get(storageKey);
       if (next === undefined) {
         break;
       }
-      pendingWriteData.delete(key);
+      pendingWriteData.delete(storageKey);
       payload = next;
     }
     return result;
   };
 
-  const writePromise = (async () => {
+  let writePromise!: Promise<boolean>;
+  writePromise = (async () => {
     try {
       return await runWrite();
     } finally {
-      inFlightWrites.delete(key);
-      if (pendingWriteData.has(key)) {
-        const nextData = pendingWriteData.get(key);
-        pendingWriteData.delete(key);
+      if (inFlightWrites.get(storageKey) === writePromise) {
+        inFlightWrites.delete(storageKey);
+      }
+      if (stillCurrent() && pendingWriteData.has(storageKey)) {
+        const nextData = pendingWriteData.get(storageKey);
+        pendingWriteData.delete(storageKey);
         if (nextData !== undefined) {
           void writeEncryptedCache(key, nextData);
         }
@@ -132,7 +146,7 @@ async function writeEncryptedCache<T>(key: string, data: T): Promise<boolean> {
     }
   })();
 
-  inFlightWrites.set(key, writePromise);
+  inFlightWrites.set(storageKey, writePromise);
   return writePromise;
 }
 
@@ -218,7 +232,7 @@ export function saveCache<T>(key: string, data: T): boolean {
 }
 
 export function loadCache<T>(key: string): T | null {
-  return readMemoryMirror<T>(key);
+  return readMemoryMirror<T>(getFullKey(key));
 }
 
 export function isCacheEncrypted(key: string): boolean {
@@ -231,9 +245,13 @@ export function isCacheEncrypted(key: string): boolean {
 }
 
 export function removeCache(key: string): void {
-  memoryMirrors.delete(key);
+  const storageKey = getFullKey(key);
+  keyRevisions.set(storageKey, (keyRevisions.get(storageKey) || 0) + 1);
+  memoryMirrors.delete(storageKey);
+  inFlightWrites.delete(storageKey);
+  pendingWriteData.delete(storageKey);
   try {
-    localStorage.removeItem(getFullKey(key));
+    localStorage.removeItem(storageKey);
   } catch (e) {
     console.warn('localStorage remove failed:', e);
   }
@@ -373,12 +391,14 @@ export async function saveCacheAsync<T>(key: string, data: T): Promise<boolean> 
 }
 
 export async function loadCacheAsync<T>(key: string): Promise<T | null> {
-  const mirrored = readMemoryMirror<T>(key);
+  const storageKey = getFullKey(key);
+  const generation = cacheGeneration;
+  const revision = keyRevisions.get(storageKey) || 0;
+  const mirrored = readMemoryMirror<T>(storageKey);
   if (mirrored !== null) {
     return mirrored;
   }
 
-  const storageKey = getFullKey(key);
   try {
     const raw = localStorage.getItem(storageKey);
     if (!raw) return null;
@@ -386,6 +406,9 @@ export async function loadCacheAsync<T>(key: string): Promise<T | null> {
     if (isEncrypted(raw)) {
       const encryptedContent = raw.slice(ENCRYPTED_MARKER.length);
       const decrypted = await decryptData(encryptedContent);
+      if (generation !== cacheGeneration || revision !== (keyRevisions.get(storageKey) || 0)) return null;
+      const newerMirror = readMemoryMirror<T>(storageKey);
+      if (newerMirror !== null) return newerMirror;
       if (decrypted) {
         try {
           const cache: CacheData<T> = JSON.parse(decrypted);
@@ -400,7 +423,7 @@ export async function loadCacheAsync<T>(key: string): Promise<T | null> {
             return null;
           }
 
-          writeMemoryMirror(key, cache.data);
+          writeMemoryMirror(storageKey, cache.data);
           return cache.data;
         } catch (parseError) {
           console.warn('解密数据解析失败:', parseError);
@@ -425,7 +448,7 @@ export async function loadCacheAsync<T>(key: string): Promise<T | null> {
         return null;
       }
 
-      writeMemoryMirror(key, cache.data);
+      writeMemoryMirror(storageKey, cache.data);
       return cache.data;
     } catch (e) {
       try {

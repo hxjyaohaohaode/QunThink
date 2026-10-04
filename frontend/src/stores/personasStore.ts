@@ -88,29 +88,12 @@ interface PersonasState {
 }
 
 function deduplicatePersonas(personas: Record<string, PersonaConfig>): Record<string, PersonaConfig> {
-  const seenNames = new Map<string, string>();
-  const result: Record<string, PersonaConfig> = {};
-
-  for (const [id, persona] of Object.entries(personas)) {
-    const name = persona.name || id;
-    const existingId = seenNames.get(name);
-
-    if (existingId && existingId !== id) {
-      if (import.meta.env.DEV) {
-        console.warn(`[Personas] 发现重复的AI角色: "${name}" (ID: ${existingId} 和 ${id})，保留 ${existingId}`);
-      }
-      continue;
-    }
-
-    seenNames.set(name, id);
-    result[id] = persona;
-  }
-
-  return result;
+  return personas; // Identity is the stable ID; equal display names are valid.
 }
 
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let editLockCount = 0;
+let epoch = 0;
 
 function startAutoRefresh() {
   if (refreshTimer) return;
@@ -171,6 +154,7 @@ export const usePersonasStore = create<PersonasState>((set, get) => ({
   error: null,
 
   fetchPersonas: async () => {
+    const generation = epoch, user = getCacheUserId();
     startAutoRefresh();
 
     const syncCached = loadPersonasCache<Record<string, PersonaConfig>>();
@@ -182,6 +166,7 @@ export const usePersonasStore = create<PersonasState>((set, get) => ({
 
     try {
       const data = await api.getPersonas();
+      if (generation !== epoch || user !== getCacheUserId()) return;
 
       const currentPersonas = get().personas;
       const mergedPersonas: Record<string, PersonaConfig> = {};
@@ -196,9 +181,10 @@ export const usePersonasStore = create<PersonasState>((set, get) => ({
       }
 
       const dedupedPersonas = deduplicatePersonas(mergedPersonas);
-      set({ personas: dedupedPersonas, loading: false });
+      set({ personas: dedupedPersonas, loading: false, error: null });
       savePersonasCache(dedupedPersonas);
     } catch (error) {
+      if (generation !== epoch || user !== getCacheUserId()) return;
       console.error('Failed to fetch personas:', error);
       set({ error: error instanceof Error ? error.message : '获取角色配置失败', loading: false });
       if (!syncCached || Object.keys(syncCached).length === 0) {
@@ -211,8 +197,10 @@ export const usePersonasStore = create<PersonasState>((set, get) => ({
   },
 
   updatePersona: async (aiId: string, config: Partial<PersonaConfig>) => {
+    const generation = epoch, user = getCacheUserId();
     try {
       const updated = await api.updatePersona(aiId, config);
+      if (generation !== epoch || user !== getCacheUserId()) return;
       set(state => {
         const newPersonas = {
           ...state.personas,
@@ -246,8 +234,10 @@ export const usePersonasStore = create<PersonasState>((set, get) => ({
   },
 
   resetPersona: async (aiId: string) => {
+    const generation = epoch, user = getCacheUserId();
     try {
       const reset = await api.resetPersona(aiId);
+      if (generation !== epoch || user !== getCacheUserId()) return;
       set(state => {
         const newPersonas = {
           ...state.personas,
@@ -265,6 +255,7 @@ export const usePersonasStore = create<PersonasState>((set, get) => ({
   },
 
   cleanup: () => {
+    epoch++;
     if (refreshTimer) {
       clearInterval(refreshTimer);
       refreshTimer = null;

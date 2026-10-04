@@ -70,7 +70,7 @@ class AILoadBalancer {
 
     this.initializeModels();
 
-    if (process.env.NODE_ENV !== 'test') {
+    if (process.env.NODE_ENV !== 'test' && process.env.AI_HEALTH_PROBES === '1') {
       const initialHealthCheckTimer = setTimeout(() => this.performInitialHealthChecks(), 5000);
       if (typeof initialHealthCheckTimer.unref === 'function') {
         initialHealthCheckTimer.unref();

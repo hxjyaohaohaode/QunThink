@@ -1,7 +1,8 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { withWriteLock } from '../models/db.js';
-import { createAgent, generateAgentQuestions, chatWithAgent, invokeAgentInGroup, generateSuggestions } from '../services/agent/index.js';
+import { createAgent, buildBaseAgentPrompt, generateAgentQuestions, chatWithAgent, invokeAgentInGroup, generateSuggestions } from '../services/agent/index.js';
+import { resolveModel } from '../services/ai/catalog.js';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -135,7 +136,7 @@ router.post('/agents', asyncHandler(async (req, res) => {
   if (lengthError) {
     return res.status(400).json({ error: lengthError });
   }
-  const agent = await createAgent(userId, name, description, openingMessage, enableSuggestions, capabilities, avatarUrl || null);
+  const agent = await createAgent(userId, name, description, openingMessage, enableSuggestions, capabilities, avatarUrl || null, req.body.modelId || null);
   res.json(agent);
 }));
 
@@ -148,7 +149,7 @@ router.post('/agents/generate-questions', asyncHandler(async (req, res) => {
   if (lengthError) {
     return res.status(400).json({ error: lengthError });
   }
-  const questions = await generateAgentQuestions(name, description, openingMessage);
+  const questions = await generateAgentQuestions(name, description, openingMessage, req.userId);
   res.json(questions);
 }));
 
@@ -156,6 +157,8 @@ router.put('/agents/:agentId', asyncHandler(async (req, res) => {
   const userId = requireUserId(req);
   const { agentId } = req.params;
   const sanitizedBody = sanitizeObject(req.body, AGENT_SANITIZE_CONFIG);
+  const modelId = req.body.modelId;
+  if (modelId !== undefined) await resolveModel(userId, modelId, 'chat');
   const { name, description, openingMessage, enableSuggestions, capabilities } = sanitizedBody;
   if (name !== undefined && !isValidLength(name, 1, 100)) {
     return res.status(400).json({ error: 'name 必须为1-100个字符的字符串' });
@@ -175,24 +178,14 @@ router.put('/agents/:agentId', asyncHandler(async (req, res) => {
       throw notFoundError('Agent not found');
     }
     const agent = db.data.agents[agentIndex];
-    const capabilitiesChanged = capabilities !== undefined && JSON.stringify(capabilities) !== JSON.stringify(agent.capabilities);
     if (name !== undefined) agent.name = name;
     if (description !== undefined) agent.description = description;
     if (openingMessage !== undefined) agent.opening_message = openingMessage;
     if (enableSuggestions !== undefined) agent.enable_suggestions = enableSuggestions;
-    if (capabilities !== undefined) agent.capabilities = capabilities;
-    if (capabilitiesChanged) {
-      const regenerated = await createAgent(
-        userId,
-        agent.name,
-        agent.description,
-        agent.opening_message,
-        agent.enable_suggestions,
-        agent.capabilities
-      );
-      agent.model_roles = regenerated.model_roles;
-      agent.system_prompt = regenerated.system_prompt;
-    }
+    if (capabilities !== undefined) agent.capabilities = { ...capabilities, web_search: false, scheduled_tasks: false };
+    if (modelId !== undefined) agent.model_roles = [{ modelId, role: '主回复', description: '使用用户选择的模型' }];
+    // Updating an agent must not create a second agent or acquire this lock again.
+    if (name !== undefined || description !== undefined) agent.system_prompt = buildBaseAgentPrompt(agent.name, agent.description);
     agent.updated_at = new Date().toISOString();
     updatedAgent = agent;
     await db.write();

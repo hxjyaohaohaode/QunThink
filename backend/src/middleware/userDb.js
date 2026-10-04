@@ -1,4 +1,5 @@
 import { getUserDb } from '../models/db.js';
+import { runAsUser } from '../services/userScope.js';
 
 export function injectUserDb(req, res, next) {
   const requestPath = req.path || req.originalUrl?.split('?')[0] || '';
@@ -17,7 +18,7 @@ export function injectUserDb(req, res, next) {
     return getUserDb(userId);
   };
 
-  next();
+  runAsUser(userId, next);
 }
 
 export function requireGroupMembership(req, res, next) {

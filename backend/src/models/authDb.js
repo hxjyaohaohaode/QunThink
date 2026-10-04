@@ -6,6 +6,7 @@ import fs from 'fs/promises';
 import crypto from 'crypto';
 import { isMongoEnabled, getMongoDb, MongoLow } from './mongoAdapter.js';
 import { isSupabaseEnabled, PgLow } from './supabaseAdapter.js';
+import { prepareLocalMemoryRegistry } from '../services/memory/installation.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -133,6 +134,14 @@ export async function initAuthDb() {
   }
 
   await cleanupExpiredSessions();
+
+  const memoryRoot = process.env.MEMORY_DELETION_DIR || path.join(dataDir, 'memory-deletions');
+  const memoryRegistry = await prepareLocalMemoryRegistry(authDb, {
+    dataDir: path.resolve(dataDir), root: path.resolve(memoryRoot)
+  });
+  if (!memoryRegistry.ready) {
+    console.warn(`[Memory] 独立删除账本需要迁移，受账本保护的来源读取与删除暂不可用: ${memoryRegistry.reason}`);
+  }
 
   if (!globalThis.__authSessionPruneTimer) {
     const timer = setInterval(() => {

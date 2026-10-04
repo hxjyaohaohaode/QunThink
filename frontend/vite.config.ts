@@ -131,24 +131,7 @@ export default defineConfig({
               cacheableResponse: { statuses: [0, 200] }
             }
           },
-          {
-            urlPattern: /\/api\/tts\/audio\//i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'tts-audio-cache',
-              expiration: { maxEntries: 50, maxAgeSeconds: 60 * 60 * 24 * 7 },
-              cacheableResponse: { statuses: [0, 200] }
-            }
-          },
-          {
-            urlPattern: /\/api\/files\/.*\/download/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'file-download-cache',
-              expiration: { maxEntries: 30, maxAgeSeconds: 60 * 60 * 24 * 3 },
-              cacheableResponse: { statuses: [0, 200] }
-            }
-          }
+          { urlPattern: /\/api\//i, handler: 'NetworkOnly' }
         ]
       },
       devOptions: {
@@ -170,7 +153,7 @@ export default defineConfig({
               return 'react-core';
             }
             if (id.includes('react-router-dom') || id.includes('zustand') || id.includes('framer-motion') || id.includes('react-virtuoso')) {
-              return 'ui-libs';
+              return 'react-core';
             }
             if (id.includes('react-markdown') || id.includes('remark-gfm') || id.includes('rehype-sanitize') || id.includes('prismjs')) {
               return 'markdown';

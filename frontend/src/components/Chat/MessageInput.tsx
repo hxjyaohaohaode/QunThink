@@ -3,17 +3,14 @@ import { useGroupsStore } from '../../stores/groupsStore';
 import { useMessagesStore } from '../../stores/messagesStore';
 import { useUIStore } from '../../stores/uiStore';
 import { api } from '../../services/api';
-import { AI_NAMES, AI_COLORS, AI_LIST } from '../../types';
+import { AI_NAMES, AI_COLORS } from '../../types';
+import { useModelsStore } from '../../stores/modelsStore';
+import { usePersonasStore } from '../../stores/personasStore';
 import type { MessageAttachment, UploadedFile } from '../../types';
 import { stopGeneration } from '../../services/websocket';
 import { AnimatedButton } from '../Common/AnimatedButton';
 import { AttachmentStack } from './AttachmentStack';
-
-const AI_LIST_DETAIL = AI_LIST.map(id => ({
-  id,
-  name: AI_NAMES[id] || id,
-  color: AI_COLORS[id] || '#6b7280'
-}));
+import { getCacheUserId, loadCacheAsync, saveCacheAsync } from '../../utils/cacheUtils';
 
 interface LastMessageMeta {
   id: string;
@@ -21,13 +18,13 @@ interface LastMessageMeta {
   senderId: string;
 }
 
-function buildQuickReplyChips(meta: LastMessageMeta | null, aiMembers: string[] | undefined): string[] {
+function buildQuickReplyChips(meta: LastMessageMeta | null, aiMembers: string[] | undefined, nameForId: (id: string) => string): string[] {
   if (!meta || meta.senderType !== 'ai') return [];
   const candidates = (aiMembers || []).filter(id => id && id !== meta.senderId);
   const chips = ['展开说说', '换个角度'];
   if (candidates.length > 0) {
     const picked = candidates[Math.floor(Math.random() * candidates.length)];
-    chips.push(`@${AI_NAMES[picked] || picked} 你怎么看`);
+    chips.push(`@${nameForId(picked)} 你怎么看`);
   }
   chips.push('问个问题');
   return chips;
@@ -88,6 +85,9 @@ export function MessageInput() {
   const [justSentMessage, setJustSentMessage] = useState(false);
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [showSendSuccess, setShowSendSuccess] = useState(false);
+  const [draftReadyScope, setDraftReadyScope] = useState<string | null>(null);
+  const [draftSaveFailed, setDraftSaveFailed] = useState(false);
+  const [replySelectionNotice, setReplySelectionNotice] = useState<string | null>(null);
   const [isClosing, setIsClosing] = useState(false);
   const successTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
   const MAX_CHARS = 5000;
@@ -115,6 +115,12 @@ export function MessageInput() {
   }, []);
 
   const currentGroup = useGroupsStore((s) => s.currentGroup);
+  const cacheUserId = getCacheUserId();
+  const draftKey = cacheUserId && currentGroup?.id
+    ? `message_draft_${cacheUserId}_${currentGroup.id}`
+    : null;
+  const catalogModels = useModelsStore((s) => s.catalog?.models);
+  const personas = usePersonasStore((s) => s.personas);
   const chatStatus = useGroupsStore((s) => s.chatStatus);
   const sendMessage = useMessagesStore((s) => s.sendMessage);
   const replyingTo = useUIStore((s) => s.replyingTo);
@@ -129,14 +135,17 @@ export function MessageInput() {
   const sendErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mentionContextRef = useRef<{ cursorPos: number; value: string }>({ cursorPos: 0, value: '' });
   const currentGroupIdRef = useRef<string | null>(currentGroup?.id ?? null);
+  const draftScopeRef = useRef<string | null>(null);
+  const previousReplyIdRef = useRef<string | null>(null);
+  currentGroupIdRef.current = currentGroup?.id ?? null;
 
+  // 每个账号、会话分别恢复文本草稿。恢复完成前禁用输入，避免异步读取覆盖新输入。
   useEffect(() => {
-    currentGroupIdRef.current = currentGroup?.id ?? null;
-  }, [currentGroup?.id]);
-
-  // 切换群组时清空草稿、附件与引用状态，避免上一群组内容带入新会话
-  useEffect(() => {
+    let active = true;
+    draftScopeRef.current = null;
+    setDraftReadyScope(null);
     setInput('');
+    setDraftSaveFailed(false);
     setAttachments([]);
     setUploading(false);
     setSendError(null);
@@ -146,14 +155,51 @@ export function MessageInput() {
     setMentionFilter('');
     composingRef.current = false;
     clearReplyingTo();
-  }, [currentGroup?.id, clearReplyingTo]);
-
-  const currentGroupAIs = useMemo(() => {
-    if (!currentGroup?.ai_members || currentGroup.ai_members.length === 0) {
-      return AI_LIST_DETAIL;
+    if (draftKey) {
+      void loadCacheAsync<string>(draftKey).then((saved) => {
+        if (!active || !cacheUserId || getCacheUserId() !== cacheUserId) return;
+        draftScopeRef.current = draftKey;
+        setInput(typeof saved === 'string' ? saved.slice(0, MAX_CHARS) : '');
+        setDraftReadyScope(draftKey);
+      });
     }
-    return AI_LIST_DETAIL.filter(ai => currentGroup.ai_members.includes(ai.id));
-  }, [currentGroup?.ai_members]);
+    return () => {
+      active = false;
+      draftScopeRef.current = null;
+    };
+  }, [draftKey, cacheUserId, clearReplyingTo]);
+
+  useEffect(() => {
+    if (!draftKey || draftReadyScope !== draftKey || draftScopeRef.current !== draftKey || composingRef.current) return;
+    void saveCacheAsync(draftKey, input).then((saved) => {
+      if (draftScopeRef.current === draftKey) setDraftSaveFailed(!saved);
+    });
+  }, [draftKey, draftReadyScope, input]);
+
+  useEffect(() => {
+    const nextReplyId = replyingTo[0] || null;
+    if (previousReplyIdRef.current && nextReplyId && previousReplyIdRef.current !== nextReplyId) {
+      setReplySelectionNotice('当前仅支持引用一条消息，已切换为刚选择的消息');
+    } else if (!nextReplyId) {
+      setReplySelectionNotice(null);
+    }
+    previousReplyIdRef.current = nextReplyId;
+  }, [replyingTo]);
+
+  const modelDetails = useMemo(() => (catalogModels || [])
+    .filter(model => model.enabled && model.capabilities.includes('chat'))
+    .map(model => ({
+      id: model.id,
+      name: personas[model.id]?.name || model.name || AI_NAMES[model.id] || model.id,
+      color: personas[model.id]?.color || model.color || AI_COLORS[model.id] || '#6b7280'
+    })), [catalogModels, personas]);
+  const nameForId = (id: string) => modelDetails.find(model => model.id === id)?.name || personas[id]?.name || AI_NAMES[id] || id;
+  const colorForId = (id: string) => modelDetails.find(model => model.id === id)?.color || personas[id]?.color || AI_COLORS[id] || '#999';
+  const currentGroupAIs = useMemo(() => {
+    if (!currentGroup?.ai_members?.length) return modelDetails;
+    return currentGroup.ai_members.map(id => modelDetails.find(model => model.id === id))
+      .filter((model): model is NonNullable<typeof model> => Boolean(model));
+  }, [currentGroup?.ai_members, modelDetails]);
 
   const isAnyAITyping = currentGroup
     ? Object.values(rawGroupTyping || {}).some(v => v === true)
@@ -209,7 +255,7 @@ export function MessageInput() {
     quickReplyCacheRef.current = {
       key: quickReplyKey,
       chips: lastNonStreamingMeta
-        ? buildQuickReplyChips(lastNonStreamingMeta, currentGroup?.ai_members)
+        ? buildQuickReplyChips(lastNonStreamingMeta, currentGroup?.ai_members, nameForId)
         : []
     };
   }
@@ -409,11 +455,18 @@ export function MessageInput() {
   const handleCompositionEnd = (e: React.CompositionEvent<HTMLTextAreaElement>) => {
     composingRef.current = false;
     const value = e.currentTarget?.value ?? '';
+    const finalValue = value.slice(0, MAX_CHARS);
     if (value.length > MAX_CHARS) {
-      setInput(value.slice(0, MAX_CHARS));
+      setInput(finalValue);
       flashSendError(`已超出${MAX_CHARS}字符限制，内容已截断`);
     } else {
-      setInput(value);
+      setInput(finalValue);
+    }
+    // 最后一次输入事件可能与组合结束值相同，React 不会再次触发保存 effect。
+    if (draftKey && draftScopeRef.current === draftKey) {
+      void saveCacheAsync(draftKey, finalValue).then((saved) => {
+        if (draftScopeRef.current === draftKey) setDraftSaveFailed(!saved);
+      });
     }
   };
 
@@ -511,7 +564,7 @@ export function MessageInput() {
   }, [uploadSelectedFiles]);
 
   const insertMention = (aiId: string) => {
-    const ai = AI_LIST_DETAIL.find(a => a.id === aiId);
+    const ai = modelDetails.find(a => a.id === aiId);
     const displayName = ai ? ai.name : aiId;
 
     const cursorPos = textareaRef.current?.selectionStart || input.length;
@@ -573,13 +626,19 @@ export function MessageInput() {
 
   const handleSend = useCallback(async () => {
     if (sendingRef.current) return;
-    if (!currentGroup || (!input.trim() && readyAttachments.length === 0) || isSending || hasPendingUploads || uploading) return;
+    if (!currentGroup || (draftKey && draftReadyScope !== draftKey) || (!input.trim() && readyAttachments.length === 0) || isSending || hasPendingUploads || uploading) return;
+    if (replyingTo.length > 1) {
+      setSendError('当前仅支持引用一条消息，请重新选择');
+      return;
+    }
 
     setSendError(null);
     clearTimeout(successTimeoutRef.current);
     sendingRef.current = true;
     setJustSentMessage(true);
 
+    const sendingGroupId = currentGroup.id;
+    const sendingDraftKey = draftKey;
     const contentToSend = input.trim();
     try {
       // 不再使用 Promise.race 超时：超时后原 promise 仍会完成并造成二次清空/双发风险。
@@ -591,25 +650,36 @@ export function MessageInput() {
         readyAttachments.length > 0 ? readyAttachments : undefined
       );
       if (result.success) {
-        setInput('');
-        setAttachments([]);
-        setLastFailedContent(null);
-        clearReplyingTo();
-        setShowSendSuccess(true);
-        successTimeoutRef.current = setTimeout(() => setShowSendSuccess(false), 1500);
+        if (sendingDraftKey) {
+          void saveCacheAsync(sendingDraftKey, '').then((saved) => {
+            if (draftScopeRef.current === sendingDraftKey) setDraftSaveFailed(!saved);
+          });
+        }
+        if (currentGroupIdRef.current === sendingGroupId) {
+          setInput('');
+          setAttachments([]);
+          setLastFailedContent(null);
+          clearReplyingTo();
+          setShowSendSuccess(true);
+          successTimeoutRef.current = setTimeout(() => setShowSendSuccess(false), 1500);
+        }
       } else {
-        setLastFailedContent(contentToSend);
-        setSendError(result.error || '发送失败，请检查网络连接');
-        setJustSentMessage(false);
+        if (currentGroupIdRef.current === sendingGroupId) {
+          setLastFailedContent(contentToSend);
+          setSendError(result.error || '发送失败，请检查网络连接');
+          setJustSentMessage(false);
+        }
       }
     } catch (error) {
-      setLastFailedContent(contentToSend);
-      setSendError('发送失败，请检查网络连接');
-      setJustSentMessage(false);
+      if (currentGroupIdRef.current === sendingGroupId) {
+        setLastFailedContent(contentToSend);
+        setSendError('发送失败，请检查网络连接');
+        setJustSentMessage(false);
+      }
     } finally {
       sendingRef.current = false;
     }
-  }, [currentGroup, hasPendingUploads, input, readyAttachments, replyingTo, sendMessage, isSending, clearReplyingTo, uploading]);
+  }, [currentGroup, draftKey, draftReadyScope, hasPendingUploads, input, readyAttachments, replyingTo, sendMessage, isSending, clearReplyingTo, uploading]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
@@ -667,21 +737,21 @@ export function MessageInput() {
         {isUserPrivateChat && (
           <div className="flex items-center gap-2 mb-2 px-3 py-1.5 bg-accent-subtle rounded-lg">
             <svg className="w-4 h-4 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z" /></svg>
-            <span className="text-xs text-accent">与 {AI_NAMES[currentGroup?.ai_members?.[0] || ''] || 'AI'} 的私聊</span>
+            <span className="text-xs text-accent">与 {nameForId(currentGroup?.ai_members?.[0] || 'AI')} 的私聊</span>
           </div>
         )}
         <>
           {replyToMessages.length > 0 && (
             <div className="flex flex-col gap-1 mb-3">
-              {replyToMessages.map((msg, idx) => (
+              {replyToMessages.map((msg) => (
                 <div key={msg!.id} className="flex items-center gap-2 px-3 py-2 bg-bg-surface2 rounded-xl border-l-2 border-l-accent">
                   <div
                     className="w-1 h-8 rounded-full"
-                    style={{ backgroundColor: AI_COLORS[msg!.sender_id || 'system'] || '#999' }}
+                    style={{ backgroundColor: colorForId(msg!.sender_id || 'system') }}
                   />
                   <div className="flex-1 min-w-0">
                     <div className="text-caption text-text-muted">
-                      引用 {idx + 1} · {AI_NAMES[msg!.sender_id || 'system'] || msg!.sender_id || '未知'}
+                      引用 · {nameForId(msg!.sender_id || '未知')}
                     </div>
                     <div className="text-caption text-text-secondary truncate">
                       {(msg!.content || '').substring(0, 40)}{(msg!.content || '').length > 40 ? '...' : ''}
@@ -695,15 +765,10 @@ export function MessageInput() {
                   </button>
                 </div>
               ))}
-              {replyToMessages.length > 1 && (
-                <button
-                  onClick={clearReplyingTo}
-                  className="self-end text-[10px] text-text-muted hover:text-red-500 transition-colors px-1"
-                >
-                  清除全部引用
-                </button>
-              )}
             </div>
+          )}
+          {replySelectionNotice && (
+            <div role="status" className="mb-2 px-3 text-xs text-text-secondary">{replySelectionNotice}</div>
           )}
 
           {sendError && (
@@ -779,7 +844,7 @@ export function MessageInput() {
             <div className={`relative flex-1 ${connectionStatus === 'disconnected' ? 'border-red-500 ring-2 ring-red-200 rounded-2xl' : ''}`}>
               <textarea
                 ref={textareaRef}
-                value={input}
+                value={draftKey && draftReadyScope !== draftKey ? '' : input}
                 onChange={handleInputChange}
                 onPaste={handlePaste}
                 onKeyDown={handleKeyDown}
@@ -791,8 +856,8 @@ export function MessageInput() {
                 onBlur={() => {
                   setIsInputFocused(false);
                 }}
-                placeholder={isAIPrivateChat ? "输入旁白内容，引导AI对话方向..." : (isUserPrivateChat ? "输入消息..." : (currentGroup ? "输入消息，@提及 AI 成员..." : "选择一个群组开始聊天"))}
-                disabled={!currentGroup || isSending}
+                placeholder={draftKey && draftReadyScope !== draftKey ? '正在恢复此会话草稿...' : (isAIPrivateChat ? "输入旁白内容，引导AI对话方向..." : (isUserPrivateChat ? "输入消息..." : (currentGroup ? "输入消息，@提及 AI 成员..." : "选择一个群组开始聊天")))}
+                disabled={!currentGroup || isSending || Boolean(draftKey && draftReadyScope !== draftKey)}
                 className={`w-full bg-bg-surface2 border rounded-2xl px-4 py-3 text-body text-text-primary placeholder:text-text-muted resize-none focus:outline-none disabled:opacity-50 transition-all duration-200 ${isInputFocused
                   ? 'border-accent ring-2 ring-accent/20'
                   : 'border-border-subtle'
@@ -890,8 +955,8 @@ export function MessageInput() {
               variant="primary"
               size="md"
               onClick={handleSend}
-              disabled={!currentGroup || (!input.trim() && readyAttachments.length === 0) || isSending || uploading || hasPendingUploads || connectionStatus === 'disconnected'}
-              className={`w-10 h-10 rounded-full !min-w-0 !md:min-w-0 flex items-center justify-center ${(!currentGroup || (!input.trim() && readyAttachments.length === 0) || isSending || uploading || hasPendingUploads || connectionStatus === 'disconnected') ? 'opacity-50' : ''} ${showSendSuccess ? 'animate-send-success' : ''}`}
+              disabled={!currentGroup || Boolean(draftKey && draftReadyScope !== draftKey) || (!input.trim() && readyAttachments.length === 0) || isSending || uploading || hasPendingUploads || connectionStatus === 'disconnected'}
+              className={`w-10 h-10 rounded-full !min-w-0 !md:min-w-0 flex items-center justify-center ${(!currentGroup || Boolean(draftKey && draftReadyScope !== draftKey) || (!input.trim() && readyAttachments.length === 0) || isSending || uploading || hasPendingUploads || connectionStatus === 'disconnected') ? 'opacity-50' : ''} ${showSendSuccess ? 'animate-send-success' : ''}`}
             >
               {isSending || uploading || hasPendingUploads ? (
                 <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
@@ -913,6 +978,9 @@ export function MessageInput() {
               网络已断开，消息可能无法发送
             </div>
           )}
+          {draftSaveFailed && (
+            <div role="alert" className="text-xs text-red-500 px-4 pb-1">此浏览器的加密草稿保存失败；刷新页面前请复制输入内容。</div>
+          )}
           <div className="px-4 pb-1 flex items-center justify-between">
             <div className={`text-xs transition-colors ${isOverLimit ? 'text-red-500 font-semibold' : isNearLimit ? 'text-orange-500' : 'text-text-muted'}`}>
               {charCount}/{MAX_CHARS}
@@ -923,6 +991,9 @@ export function MessageInput() {
               </div>
             )}
           </div>
+          {currentGroup && cacheUserId && (
+            <div className="px-4 text-[10px] text-text-muted">文本草稿仅保存在此浏览器当前账号的加密缓存中，7 天后过期；附件需重新选择。</div>
+          )}
         </>
       </div>
     </div>

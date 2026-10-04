@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
 import { MessageTTSAudio } from '../types';
 
 interface AudioStore {
@@ -15,15 +14,19 @@ interface AudioStore {
   setTTSLoading: (messageId: string, isLoading: boolean) => void;
   setTTSAudio: (messageId: string, audio: MessageTTSAudio) => void;
   removeTTSAudio: (messageId: string) => void;
+  clearAll: () => void;
   getTTSAudio: (messageId: string) => MessageTTSAudio | undefined;
   isTTSLoading: (messageId: string) => boolean;
 }
 
-const TTS_STORAGE_KEY = 'tts-audios-store';
-const MAX_PERSISTED_TTS_AUDIOS = 30;
+const MAX_CACHED_TTS_AUDIOS = 30;
+
+// Audio metadata and transcripts belong to the signed-in account. Older
+// versions wrote them into a shared localStorage key without account scope.
+try { if (typeof window !== 'undefined') window.localStorage.removeItem('tts-audios-store'); }
+catch { /* Storage may be disabled. No private audio is written there again. */ }
 
 export const useAudioStore = create<AudioStore>()(
-  persist(
     (set, get) => ({
       playingAudios: {},
       currentAudioId: null,
@@ -97,13 +100,13 @@ export const useAudioStore = create<AudioStore>()(
           };
 
           const ids = Object.keys(nextTtsAudios);
-          if (ids.length > MAX_PERSISTED_TTS_AUDIOS) {
+          if (ids.length > MAX_CACHED_TTS_AUDIOS) {
             const getTimestamp = (id: string) => {
               const parsed = new Date(nextTtsAudios[id].createdAt).getTime();
               return Number.isNaN(parsed) ? 0 : parsed;
             };
             ids.sort((a, b) => getTimestamp(a) - getTimestamp(b));
-            for (const staleId of ids.slice(0, ids.length - MAX_PERSISTED_TTS_AUDIOS)) {
+            for (const staleId of ids.slice(0, ids.length - MAX_CACHED_TTS_AUDIOS)) {
               delete nextTtsAudios[staleId];
             }
           }
@@ -135,6 +138,9 @@ export const useAudioStore = create<AudioStore>()(
         });
       },
 
+      clearAll: () => set({ playingAudios: {}, currentAudioId: null,
+        ttsAudios: {}, ttsLoadingStates: {} }),
+
       getTTSAudio: (messageId: string) => {
         return get().ttsAudios[messageId];
       },
@@ -142,12 +148,5 @@ export const useAudioStore = create<AudioStore>()(
       isTTSLoading: (messageId: string) => {
         return get().ttsLoadingStates[messageId] || false;
       }
-    }),
-    {
-      name: TTS_STORAGE_KEY,
-      partialize: (state) => ({
-        ttsAudios: state.ttsAudios
-      })
-    }
-  )
+    })
 );

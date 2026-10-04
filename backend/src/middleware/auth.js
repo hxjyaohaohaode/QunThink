@@ -41,7 +41,6 @@ async function refreshSessionIfNeeded(session, req, res) {
       const isProduction = process.env.NODE_ENV === 'production';
       res.cookie('session_token', session.token, {
         httpOnly: true,
-        domain: isProduction ? undefined : 'localhost',
         path: '/',
         sameSite: isProduction ? 'none' : 'lax',
         // Express res.cookie 的 maxAge 单位是毫秒。

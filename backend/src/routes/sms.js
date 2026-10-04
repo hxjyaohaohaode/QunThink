@@ -18,7 +18,6 @@ const verifyFailureRecords = new Map();
 function buildSessionCookieOptions() {
   return {
     httpOnly: true,
-    domain: isProduction ? undefined : 'localhost',
     path: '/',
     sameSite: isProduction ? 'none' : 'lax',
     maxAge: SESSION_MAX_AGE,

@@ -1,14 +1,28 @@
 import { memo, useState, useEffect } from 'react';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 import { AI_COLORS, AI_NAMES } from '../../types';
+import { useModelsStore } from '../../stores/modelsStore';
+import { usePersonasStore } from '../../stores/personasStore';
+
+function useModelDisplay() {
+  const models = useModelsStore(s => s.catalog?.models);
+  const personas = usePersonasStore(s => s.personas);
+  return (id: string) => {
+    const model = models?.find(item => item.id === id);
+    return {
+      name: personas[id]?.name || model?.name || AI_NAMES[id] || id,
+      color: personas[id]?.color || model?.color || AI_COLORS[id] || AI_COLORS.system
+    };
+  };
+}
 
 interface TypingIndicatorProps {
   aiId: string;
 }
 
 export const TypingIndicator = memo(function TypingIndicator({ aiId }: TypingIndicatorProps) {
-  const color = AI_COLORS[aiId] || AI_COLORS.system;
-  const name = AI_NAMES[aiId] || aiId;
+  const display = useModelDisplay();
+  const { color, name } = display(aiId);
   const reducedMotion = useReducedMotion();
   const [elapsed, setElapsed] = useState(0);
 
@@ -64,6 +78,7 @@ export const TypingIndicator = memo(function TypingIndicator({ aiId }: TypingInd
 
 export const MultiTypingIndicator = memo(function MultiTypingIndicator({ aiIds }: { aiIds: string[] }) {
   const reducedMotion = useReducedMotion();
+  const display = useModelDisplay();
 
   if (aiIds.length === 0) return null;
   
@@ -76,8 +91,7 @@ export const MultiTypingIndicator = memo(function MultiTypingIndicator({ aiIds }
       <div className="flex items-center gap-3 p-3 bg-bg-surface2 rounded-2xl max-w-[300px]">
         <div className="flex -space-x-2">
           {aiIds.slice(0, 4).map((aiId, index) => {
-            const color = AI_COLORS[aiId] || AI_COLORS.system;
-            const name = AI_NAMES[aiId] || aiId;
+            const { color, name } = display(aiId);
             return (
               <div
                 key={aiId}
@@ -102,7 +116,7 @@ export const MultiTypingIndicator = memo(function MultiTypingIndicator({ aiIds }
         <div className="flex items-center gap-2 flex-1">
           <span className="text-sm text-text-secondary">
             {aiIds.length === 2 
-              ? `${AI_NAMES[aiIds[0]] || aiIds[0]} 和 ${AI_NAMES[aiIds[1]] || aiIds[1]} 正在输入`
+              ? `${display(aiIds[0]).name} 和 ${display(aiIds[1]).name} 正在输入`
               : `${aiIds.length} 位 AI 正在输入`
             }
           </span>

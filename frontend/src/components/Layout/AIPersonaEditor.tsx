@@ -1,4 +1,4 @@
-﻿import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useFocusTrap } from '../Common/useFocusTrap';
 import {
   ModelConfig,
@@ -10,7 +10,8 @@ import {
   pausePersonasAutoRefresh,
   resumePersonasAutoRefresh,
 } from '../../stores/personasStore';
-import { AI_COLORS, AI_NAMES, AI_LIST } from '../../types';
+import { AI_COLORS, AI_NAMES } from '../../types';
+import { useModelsStore } from '../../stores/modelsStore';
 import { useToast } from '../Common';
 import { useModalAnimation } from '../../hooks/useModalAnimation';
 
@@ -161,6 +162,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
   const { isVisible, close: handleClose, overlayClass, contentClass, sheetClass } = useModalAnimation(isOpen, onClose);
   const overlayTrapRef = useFocusTrap<HTMLDivElement>(isVisible);
   const personas = usePersonasStore((s) => s.personas);
+  const catalogModels = useModelsStore((s) => s.catalog?.models);
   const fetchPersonas = usePersonasStore((s) => s.fetchPersonas);
   const updatePersona = usePersonasStore((s) => s.updatePersona);
   const resetPersona = usePersonasStore((s) => s.resetPersona);
@@ -188,8 +190,10 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
   const formRef = useRef<PersonaConfig>(defaultPersona);
 
   const currentPersona = personas[aiId];
-  const title = useMemo(() => AI_NAMES[aiId] || currentPersona?.name || aiId, [aiId, currentPersona?.name]);
-  const defaultColor = AI_COLORS[aiId] || '#6b7280';
+  const catalogModel = catalogModels?.find(model => model.id === aiId);
+  const title = currentPersona?.name || catalogModel?.name || AI_NAMES[aiId] || aiId;
+  const defaultColor = catalogModel?.color || AI_COLORS[aiId] || '#6b7280';
+  const relationshipModels = (catalogModels || []).filter(model => model.enabled && model.capabilities.includes('chat') && model.id !== aiId);
 
   useEffect(() => {
     if (isOpen) {
@@ -583,15 +587,14 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
                   配置当前AI与其他AI成员的关系。关系会影响AI的发言意愿和互动方式:对友好关系的AI倾向支持附和,对立关系的AI倾向反驳质疑。
                 </p>
                 <div className="grid gap-3 md:grid-cols-2">
-                  {[...AI_LIST]
-                    .filter(id => id !== aiId && AI_NAMES[id])
-                    .map(otherId => {
-                      const otherName = AI_NAMES[otherId] || otherId;
+                  {relationshipModels.map(otherModel => {
+                      const otherId = otherModel.id;
+                      const otherName = personas[otherId]?.name || otherModel.name || otherId;
                       const rel = form.relationships?.[otherId] || { affinity: 0, stance: 'neutral' as const, note: '' };
                       return (
                         <div key={otherId} className="rounded-xl border border-border-subtle bg-bg-surface p-3 space-y-2">
                           <div className="flex items-center gap-2">
-                            <div className="w-3 h-3 rounded-full" style={{ backgroundColor: AI_COLORS[otherId] || '#6b7280' }} />
+                            <div className="w-3 h-3 rounded-full" style={{ backgroundColor: personas[otherId]?.color || otherModel.color || '#6b7280' }} />
                             <span className="text-sm font-medium text-text-primary">{otherName}</span>
                           </div>
                           <div>
@@ -659,7 +662,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
                       );
                     })}
                 </div>
-                {[...AI_LIST].filter(id => id !== aiId && AI_NAMES[id]).length === 0 && (
+                {relationshipModels.length === 0 && (
                   <p className="text-xs text-text-muted text-center py-4">当前没有可配置关系的AI成员</p>
                 )}
               </div>
@@ -673,26 +676,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
                 <p className="mb-2 text-[11px] text-text-muted leading-relaxed">{modelParamDescriptions.maxTokens}</p>
                 <input type="range" min={128} max={8192} step={128} value={form.modelConfig?.maxTokens || 1500} onChange={(event) => setModelConfig('maxTokens', Number(event.target.value))} className="w-full accent-[var(--accent)]" />
               </div>
-              <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4">
-                <div className="mb-2 flex items-center justify-between text-xs text-text-secondary"><span>温度</span><span>{(form.modelConfig?.temperature || 0).toFixed(2)}</span></div>
-                <p className="mb-2 text-[11px] text-text-muted leading-relaxed">{modelParamDescriptions.temperature}</p>
-                <input type="range" min={0} max={1.5} step={0.05} value={form.modelConfig?.temperature || 0} onChange={(event) => setModelConfig('temperature', Number(event.target.value))} className="w-full accent-[var(--accent)]" />
-              </div>
-              <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4">
-                <div className="mb-2 flex items-center justify-between text-xs text-text-secondary"><span>Top P</span><span>{(form.modelConfig?.topP || 0).toFixed(2)}</span></div>
-                <p className="mb-2 text-[11px] text-text-muted leading-relaxed">{modelParamDescriptions.topP}</p>
-                <input type="range" min={0} max={1} step={0.05} value={form.modelConfig?.topP || 0} onChange={(event) => setModelConfig('topP', Number(event.target.value))} className="w-full accent-[var(--accent)]" />
-              </div>
-              <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4">
-                <div className="mb-2 flex items-center justify-between text-xs text-text-secondary"><span>频率惩罚</span><span>{(form.modelConfig?.frequencyPenalty || 0).toFixed(2)}</span></div>
-                <p className="mb-2 text-[11px] text-text-muted leading-relaxed">{modelParamDescriptions.frequencyPenalty}</p>
-                <input type="range" min={0} max={2} step={0.05} value={form.modelConfig?.frequencyPenalty || 0} onChange={(event) => setModelConfig('frequencyPenalty', Number(event.target.value))} className="w-full accent-[var(--accent)]" />
-              </div>
-              <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4">
-                <div className="mb-2 flex items-center justify-between text-xs text-text-secondary"><span>存在惩罚</span><span>{(form.modelConfig?.presencePenalty || 0).toFixed(2)}</span></div>
-                <p className="mb-2 text-[11px] text-text-muted leading-relaxed">{modelParamDescriptions.presencePenalty}</p>
-                <input type="range" min={0} max={2} step={0.05} value={form.modelConfig?.presencePenalty || 0} onChange={(event) => setModelConfig('presencePenalty', Number(event.target.value))} className="w-full accent-[var(--accent)]" />
-              </div>
+              <p className="rounded-2xl border border-border-subtle p-4 text-xs text-text-secondary leading-relaxed">服务商、实际模型 ID、温度与协议参数统一在模型中心设置。此处的输出上限会受模型中心上限约束。</p>
               <div className="rounded-2xl border border-border-subtle bg-bg-surface2 p-4 md:col-span-2">
                 <div className="mb-2 flex items-center gap-2 text-sm text-text-primary">
                   <input type="checkbox" checked={form.responseConfig?.enabled ?? true} onChange={(event) => setResponseConfig('enabled', event.target.checked)} />

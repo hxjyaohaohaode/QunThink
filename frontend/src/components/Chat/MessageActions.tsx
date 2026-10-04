@@ -4,6 +4,8 @@ import { useGroupsStore } from '../../stores/groupsStore';
 import { useUIStore } from '../../stores/uiStore';
 import { api } from '../../services/api';
 import { useToast } from '../Common';
+import { useTasksStore } from '../../stores/tasksStore';
+import { useNavigationStore } from '../../stores/navigationStore';
 
 interface MessageActionsProps {
   messageId: string;
@@ -176,6 +178,11 @@ export const MessageActions = React.memo(function MessageActions({
         </svg>
       </ActionButton>
 
+      <ActionButton title="创建任务" onClick={() => {
+        useTasksStore.getState().setDraft({ prompt: content, groupId: currentGroup?.id || null });
+        useNavigationStore.getState().setActiveDesktopView('workspace');
+        useNavigationStore.getState().setActiveMobileTab('workspace');
+      }}><span className="text-sm">↗</span></ActionButton>
       <ActionButton onClick={handleReply} title={isReplying ? '取消引用' : '回复引用'} active={isReplying} activeColor="text-accent">
         <svg className="w-4 h-4 md:w-3.5 md:h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />

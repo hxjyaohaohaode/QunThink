@@ -133,14 +133,14 @@ export const useUIStore = create<UIState>()(
       },
 
       setReplyingTo: (messageIds: string[]) => {
-        set({ replyingTo: messageIds });
+        set({ replyingTo: messageIds.length > 0 ? [messageIds[messageIds.length - 1]] : [] });
       },
 
       addReplyingTo: (messageId: string) => {
         set(state => ({
           replyingTo: state.replyingTo.includes(messageId)
             ? state.replyingTo
-            : [...state.replyingTo, messageId]
+            : [messageId]
         }));
       },
 

@@ -22,7 +22,7 @@ interface AgentsState {
   creatingAgent: boolean;
   fetchAgents: () => Promise<void>;
   selectAgent: (agentId: string) => void;
-  createAgent: (data: { name: string; description: string; openingMessage: string; enableSuggestions: boolean; capabilities: { scheduled_tasks: boolean; web_search: boolean; multimodal: boolean }; avatarUrl?: string | null }) => Promise<Agent>;
+  createAgent: (data: { name: string; description: string; openingMessage: string; enableSuggestions: boolean; capabilities: { scheduled_tasks: boolean; web_search: boolean; multimodal: boolean }; avatarUrl?: string | null; modelId?: string | null }) => Promise<Agent>;
   updateAgent: (agentId: string, data: AgentUpdateData) => Promise<void>;
   deleteAgent: (agentId: string) => Promise<void>;
   fetchAgentMessages: (agentId: string) => Promise<void>;

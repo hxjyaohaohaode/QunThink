@@ -4,7 +4,7 @@
  */
 
 import express from 'express';
-import aiLoadBalancer from '../services/ai/loadBalancer.js';
+import { readCatalog } from '../services/ai/catalog.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 
@@ -12,18 +12,25 @@ const router = express.Router();
 
 router.use('/ai', requireAdmin);
 
+const retiredControl = (_req, res) => res.status(410).json({
+  success: false,
+  error: '此接口只修改旧进程内状态，不能控制真实模型调用；请在模型中心管理并测试连接。',
+  replacement: '/api/user/model-catalog'
+});
+
 /**
  * 获取所有AI模型状态
  * GET /api/ai/models
  */
 router.get('/ai/models', asyncHandler(async (req, res) => {
-  const modelStats = aiLoadBalancer.getModelStats();
+  const catalog = await readCatalog(req.userId);
 
   res.json({
     success: true,
     timestamp: new Date().toISOString(),
-    models: modelStats,
-    totalModels: Object.keys(modelStats).length
+    source: 'user_model_catalog',
+    models: Object.fromEntries(catalog.models.map(model => [model.id, model])),
+    totalModels: catalog.models.length
   });
 }));
 
@@ -32,12 +39,12 @@ router.get('/ai/models', asyncHandler(async (req, res) => {
  * GET /api/ai/performance
  */
 router.get('/ai/performance', asyncHandler(async (req, res) => {
-  const performanceReport = aiLoadBalancer.getPerformanceReport();
-
   res.json({
     success: true,
     timestamp: new Date().toISOString(),
-    ...performanceReport
+    status: 'unavailable',
+    source: 'no_authoritative_usage_ledger',
+    reason: '当前没有可核验的跨服务调用与费用账本，不能计算成功率或延迟达标情况。'
   });
 }));
 
@@ -47,9 +54,10 @@ router.get('/ai/performance', asyncHandler(async (req, res) => {
  */
 router.get('/ai/models/:modelId', asyncHandler(async (req, res) => {
   const { modelId } = req.params;
-  const modelStats = aiLoadBalancer.getModelStats();
+  const catalog = await readCatalog(req.userId);
+  const model = catalog.models.find(item => item.id === modelId);
 
-  if (!modelStats[modelId]) {
+  if (!model) {
     return res.status(404).json({
       success: false,
       error: '模型不存在'
@@ -60,7 +68,8 @@ router.get('/ai/models/:modelId', asyncHandler(async (req, res) => {
     success: true,
     timestamp: new Date().toISOString(),
     modelId,
-    ...modelStats[modelId]
+    source: 'user_model_catalog',
+    ...model
   });
 }));
 
@@ -68,113 +77,37 @@ router.get('/ai/models/:modelId', asyncHandler(async (req, res) => {
  * 启用/禁用AI模型
  * PUT /api/ai/models/:modelId/enabled
  */
-router.put('/ai/models/:modelId/enabled', asyncHandler(async (req, res) => {
-  const { modelId } = req.params;
-  const { enabled } = req.body;
-
-  if (typeof enabled !== 'boolean') {
-    return res.status(400).json({
-      success: false,
-      error: 'enabled参数必须为布尔值'
-    });
-  }
-
-  const result = aiLoadBalancer.setModelEnabled(modelId, enabled);
-
-  res.json({
-    success: true,
-    timestamp: new Date().toISOString(),
-    ...result
-  });
-}));
+router.put('/ai/models/:modelId/enabled', retiredControl);
 
 /**
  * 更新模型配置
  * PUT /api/ai/models/:modelId/config
  */
-router.put('/ai/models/:modelId/config', asyncHandler(async (req, res) => {
-  const { modelId } = req.params;
-  const { config } = req.body;
-
-  if (!config || typeof config !== 'object') {
-    return res.status(400).json({
-      success: false,
-      error: '配置参数不能为空'
-    });
-  }
-
-  const result = aiLoadBalancer.updateModelConfig(modelId, config);
-
-  res.json({
-    success: true,
-    timestamp: new Date().toISOString(),
-    ...result
-  });
-}));
+router.put('/ai/models/:modelId/config', retiredControl);
 
 /**
  * 执行健康检查
  * POST /api/ai/health-check
  */
-router.post('/ai/health-check', asyncHandler(async (req, res) => {
-  console.log('🔄 手动触发AI模型健康检查...');
-
-  await aiLoadBalancer.performHealthChecks();
-
-  const modelStats = aiLoadBalancer.getModelStats();
-  const healthyModels = Object.values(modelStats).filter(m =>
-    m.health === 'healthy' && m.enabled
-  ).length;
-  const totalModels = Object.values(modelStats).filter(m => m.enabled).length;
-
-  res.json({
-    success: true,
-    timestamp: new Date().toISOString(),
-    message: '健康检查完成',
-    summary: {
-      healthyModels,
-      totalModels,
-      healthRatio: totalModels > 0 ? healthyModels / totalModels : 0
-    },
-    models: modelStats
-  });
-}));
+router.post('/ai/health-check', retiredControl);
 
 /**
  * 重置模型断路器
  * POST /api/ai/models/:modelId/reset-circuit-breaker
  */
-router.post('/ai/models/:modelId/reset-circuit-breaker', asyncHandler(async (req, res) => {
-  const { modelId } = req.params;
-
-  const resetResult = aiLoadBalancer.resetCircuitBreaker(modelId);
-  if (!resetResult) {
-    return res.status(404).json({
-      success: false,
-      error: '模型断路器不存在'
-    });
-  }
-
-  res.json({
-    success: true,
-    timestamp: new Date().toISOString(),
-    message: `模型 ${modelId} 断路器已重置`,
-    circuitBreaker: resetResult
-  });
-}));
+router.post('/ai/models/:modelId/reset-circuit-breaker', retiredControl);
 
 /**
  * 获取性能要求
  * GET /api/ai/requirements
  */
 router.get('/ai/requirements', asyncHandler(async (req, res) => {
-  const { PERFORMANCE_REQUIREMENTS } = await import('../services/ai/loadBalancer.js');
-
   res.json({
     success: true,
     timestamp: new Date().toISOString(),
-    requirements: PERFORMANCE_REQUIREMENTS,
-    description: 'AI模型性能要求：调用成功率≥99%，API响应时间≤1.5秒，模型输出内容相关性评分≥4.0/5'
+    status: 'not_validated',
+    requirements: null,
+    description: '尚无基于真实调用与费用账本校验的服务等级目标。'
   });
 }));
 

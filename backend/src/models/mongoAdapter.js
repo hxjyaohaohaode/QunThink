@@ -60,11 +60,13 @@ export class MongoLow {
     this.data = JSON.parse(JSON.stringify(defaultData));
     this.defaultData = defaultData;
     this._lastAccess = Date.now();
+    this._revision = 0;
   }
 
   async read() {
     try {
       const doc = await this.collection.findOne(this.filter);
+      this._revision = Number(doc?.revision || 0);
       if (doc && doc.data) {
         this.data = doc.data;
       } else {
@@ -72,24 +74,33 @@ export class MongoLow {
       }
     } catch (err) {
       console.warn('MongoLow read failed:', err.message);
-      if (process.env.NODE_ENV === 'production') throw err;
-      this.data = JSON.parse(JSON.stringify(this.defaultData));
+      throw err;
     }
   }
 
   async write() {
     try {
-      await this.collection.updateOne(
-        this.filter,
-        {
-          $set: {
-            ...this.filter,
-            data: this.data,
-            updatedAt: new Date()
-          }
-        },
-        { upsert: true }
+      const versionFilter = this._revision === 0
+        ? { $or: [{ revision: 0 }, { revision: { $exists: false } }] }
+        : { revision: this._revision };
+      const updated = await this.collection.updateOne(
+        { ...this.filter, ...versionFilter },
+        { $set: { data: this.data, updatedAt: new Date() }, $inc: { revision: 1 } }
       );
+      if (updated.matchedCount === 1) {
+        this._revision += 1;
+        return;
+      }
+      if (this._revision === 0) {
+        try {
+          await this.collection.insertOne({ ...this.filter, data: this.data, revision: 1, updatedAt: new Date() });
+          this._revision = 1;
+          return;
+        } catch (error) {
+          if (error.code !== 11000) throw error;
+        }
+      }
+      throw Object.assign(new Error('数据已在其他进程更新，请刷新后重试'), { status: 409, code: 'REVISION_CONFLICT' });
     } catch (err) {
       console.warn('MongoLow write failed:', err.message);
       throw err;

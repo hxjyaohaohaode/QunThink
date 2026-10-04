@@ -61,6 +61,12 @@ tags:
     description: 用户自定义 API 配置
   - name: Ai
     description: AI 模型运行时管理
+  - name: Models
+    description: 用户模型目录、服务商与协议配置
+  - name: Tasks
+    description: 持久化任务、主动执行和结果
+  - name: Goals
+    description: PostgreSQL 个人空间目标与持久运行契约；当前不提供 Worker 执行
 
 security:
   - cookieAuth: []
@@ -70,7 +76,7 @@ paths:
   # ------------------------------------------------------------------ System
   /api/health:
     get:
-      tags: [System]
+      tags: [ System ]
       operationId: getHealth
       summary: 健康检查（含存储层连通性，60s 缓存）
       security: []
@@ -89,7 +95,7 @@ paths:
                 $ref: '#/components/schemas/HealthResponse'
   /api/csrf-token:
     get:
-      tags: [System]
+      tags: [ System ]
       operationId: getCsrfToken
       summary: 获取 CSRF 令牌
       security: []
@@ -102,7 +108,7 @@ paths:
                 $ref: '#/components/schemas/CsrfTokenResponse'
   /api/bootstrap:
     get:
-      tags: [System]
+      tags: [ System ]
       operationId: getBootstrap
       summary: 首屏启动数据聚合（用户/群组/画像/人设/API配置）
       responses:
@@ -120,7 +126,7 @@ paths:
   # -------------------------------------------------------------------- Auth
   /api/auth/token:
     get:
-      tags: [Auth]
+      tags: [ Auth ]
       operationId: getAuthTokenStatus
       summary: 查询会话状态
       security: []
@@ -133,7 +139,7 @@ paths:
                 $ref: '#/components/schemas/SessionStatusResponse'
   /api/auth/login-phone:
     post:
-      tags: [Auth]
+      tags: [ Auth ]
       operationId: loginWithPhone
       summary: 手机号 + 密码登录（生产认证链路）
       security: []
@@ -160,7 +166,7 @@ paths:
                 $ref: '#/components/schemas/ApiError'
   /api/auth/register-sms:
     post:
-      tags: [Auth]
+      tags: [ Auth ]
       operationId: registerBySms
       summary: 短信验证码注册（生产注册链路）
       description: |
@@ -196,7 +202,7 @@ paths:
                 $ref: '#/components/schemas/ApiError'
   /api/auth/register:
     post:
-      tags: [Auth]
+      tags: [ Auth ]
       operationId: devRegisterUser
       summary: '[dev-only] 用户名密码注册'
       x-dev-only: true
@@ -228,7 +234,7 @@ paths:
                 $ref: '#/components/schemas/ApiError'
   /api/auth/logout:
     post:
-      tags: [Auth]
+      tags: [ Auth ]
       operationId: logout
       summary: 登出并清除会话 Cookie
       responses:
@@ -240,7 +246,7 @@ paths:
                 $ref: '#/components/schemas/SuccessEnvelope'
   /api/auth/me:
     get:
-      tags: [Auth]
+      tags: [ Auth ]
       operationId: getCurrentUser
       summary: 获取当前登录用户
       responses:
@@ -250,7 +256,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [user]
+                required: [ user ]
                 properties:
                   user:
                     $ref: '#/components/schemas/AuthUser'
@@ -260,7 +266,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [user, requiresAuth]
+                required: [ user, requiresAuth ]
                 properties:
                   user:
                     nullable: true
@@ -270,7 +276,7 @@ paths:
   # --------------------------------------------------------------------- Sms
   /api/sms/send:
     post:
-      tags: [Sms]
+      tags: [ Sms ]
       operationId: sendSmsCode
       summary: 发送短信验证码
       security: []
@@ -304,7 +310,7 @@ paths:
                 $ref: '#/components/schemas/ApiError'
   /api/sms/verify:
     post:
-      tags: [Sms]
+      tags: [ Sms ]
       operationId: verifySmsCode
       summary: 校验短信验证码（不注册）
       security: []
@@ -340,7 +346,7 @@ paths:
   # ------------------------------------------------------------------ Groups
   /api/groups:
     get:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: listGroups
       summary: 获取群组列表
       parameters:
@@ -362,7 +368,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
     post:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: createGroup
       summary: 创建群组
       requestBody:
@@ -388,7 +394,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
   /api/groups/{id}:
     get:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: getGroup
       summary: 获取群组详情
       parameters:
@@ -403,7 +409,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: deleteGroup
       summary: 删除群组
       parameters:
@@ -419,7 +425,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/groups/{id}/settings:
     put:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: updateGroupSettings
       summary: 更新群组设置（名称/头像/背景/公告/置顶/辩论配置等）
       parameters:
@@ -437,7 +443,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, group]
+                required: [ success, group ]
                 properties:
                   success: { type: boolean, const: true }
                   group:
@@ -448,7 +454,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/groups/{id}/debate:
     put:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: updateDebateMode
       summary: 开关辩论模式并设置辩论强度
       parameters:
@@ -472,7 +478,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/groups/{id}/pin:
     put:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: pinGroup
       summary: 置顶/取消置顶
       parameters:
@@ -496,7 +502,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/groups/{id}/members:
     post:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: addGroupMember
       summary: 添加 AI 成员
       parameters:
@@ -520,7 +526,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/groups/{id}/members/{aiId}:
     delete:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: removeGroupMember
       summary: 移除 AI 成员
       parameters:
@@ -540,7 +546,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/groups/{id}/upload-background:
     post:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: uploadGroupBackground
       summary: 上传群背景图（multipart，字段名 background）
       parameters:
@@ -551,7 +557,7 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [background]
+              required: [ background ]
               properties:
                 background:
                   type: string
@@ -570,7 +576,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/groups/{id}/background:
     get:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: getGroupBackground
       summary: 获取群背景图
       parameters:
@@ -587,7 +593,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/groups/{id}/files:
     get:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: listGroupFiles
       summary: 获取群文件列表
       parameters:
@@ -599,7 +605,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, files]
+                required: [ success, files ]
                 properties:
                   success: { type: boolean, const: true }
                   files:
@@ -609,7 +615,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     post:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: legacyCreateGroupFile
       summary: '[已废弃守卫] 群文件上传入口（固定返回 400 引导）'
       deprecated: true
@@ -624,7 +630,7 @@ paths:
                 $ref: '#/components/schemas/ApiError'
   /api/groups/{id}/files/{fileId}:
     delete:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: deleteGroupFile
       summary: 从群组移除文件记录
       parameters:
@@ -645,7 +651,7 @@ paths:
 
   /api/groups/{id}/insights:
     get:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: getGroupInsights
       summary: 群聊洞察中心（发言分布/活跃度/社交互动/情感趋势）
       parameters:
@@ -660,7 +666,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, group_id, window_days, totals, per_ai, activity_daily, sentiment_trend, participation_ratio]
+                required: [ success, group_id, window_days, totals, per_ai, activity_daily, sentiment_trend, participation_ratio ]
                 properties:
                   success: { type: boolean }
                   group_id: { type: string }
@@ -685,7 +691,7 @@ paths:
                         ai_id: { type: string }
                         name: { type: string }
                         count: { type: integer }
-                        last_active: { type: [string, 'null'], format: date-time }
+                        last_active: { type: [ string, 'null' ], format: date-time }
                   activity_daily:
                     type: array
                     items:
@@ -707,7 +713,7 @@ paths:
 
   /api/groups/{groupId}/messages/read-batch:
     post:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: markMessagesReadBatch
       summary: 批量标记消息已读
       parameters:
@@ -721,7 +727,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [messageIds]
+              required: [ messageIds ]
               properties:
                 messageIds:
                   type: array
@@ -744,7 +750,7 @@ paths:
   # ------------------------------------------------------- Formal Debate
   /api/groups/{id}/formal-debate/start:
     post:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: startFormalDebate
       summary: 启动正式辩论
       parameters:
@@ -772,7 +778,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/groups/{id}/formal-debate/stop:
     post:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: stopFormalDebate
       summary: 停止正式辩论
       parameters:
@@ -789,7 +795,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/groups/{id}/formal-debate/status:
     get:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: getFormalDebateStatus
       summary: 查询正式辩论状态
       parameters:
@@ -804,7 +810,7 @@ paths:
                 additionalProperties: true
   /api/groups/{id}/formal-debate/allocate-roles:
     post:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: allocateFormalDebateRoles
       summary: 分配辩论角色
       parameters:
@@ -828,7 +834,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/groups/{id}/formal-debate/audience-comment:
     post:
-      tags: [Groups]
+      tags: [ Groups ]
       operationId: triggerAudienceComment
       summary: 触发观众席点评
       parameters:
@@ -856,7 +862,7 @@ paths:
   # ------------------------------------------------------------ PrivateChat
   /api/private-chat/{aiId}:
     post:
-      tags: [PrivateChat]
+      tags: [ PrivateChat ]
       operationId: openUserPrivateChat
       summary: 打开（或创建）与指定 AI 的一对一私聊
       parameters:
@@ -881,7 +887,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/ai-private-chat:
     post:
-      tags: [PrivateChat]
+      tags: [ PrivateChat ]
       operationId: createAiPrivateChat
       summary: 创建 AI-AI 私聊会话
       requestBody:
@@ -905,7 +911,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/ai-private-chats:
     get:
-      tags: [PrivateChat]
+      tags: [ PrivateChat ]
       operationId: listAiPrivateChats
       summary: 获取 AI-AI 私聊会话列表
       responses:
@@ -920,7 +926,7 @@ paths:
                   additionalProperties: true
   /api/ai-private-chats/{id}:
     delete:
-      tags: [PrivateChat]
+      tags: [ PrivateChat ]
       operationId: deleteAiPrivateChat
       summary: 删除 AI-AI 私聊会话
       parameters:
@@ -940,7 +946,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/ai-private-chats/{id}/start:
     post:
-      tags: [PrivateChat]
+      tags: [ PrivateChat ]
       operationId: startAiPrivateChat
       summary: 启动 AI-AI 私聊对话
       parameters:
@@ -967,7 +973,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/ai-private-chats/{id}/status:
     get:
-      tags: [PrivateChat]
+      tags: [ PrivateChat ]
       operationId: getAiPrivateChatStatus
       summary: 查询 AI-AI 私聊状态
       parameters:
@@ -985,7 +991,7 @@ paths:
                 additionalProperties: true
   /api/ai-private-chats/{id}/continue:
     post:
-      tags: [PrivateChat]
+      tags: [ PrivateChat ]
       operationId: continueAiPrivateChat
       summary: 继续 AI-AI 私聊对话
       parameters:
@@ -1005,7 +1011,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/ai-private-chats/{id}/stop:
     post:
-      tags: [PrivateChat]
+      tags: [ PrivateChat ]
       operationId: stopAiPrivateChat
       summary: 停止 AI-AI 私聊对话
       parameters:
@@ -1025,7 +1031,7 @@ paths:
   # ---------------------------------------------------------------- Messages
   /api/groups/{groupId}/messages:
     get:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: listMessages
       summary: 分页获取群消息
       parameters:
@@ -1049,7 +1055,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
     post:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: sendMessage
       summary: 发送消息（触发 AI 回复链路）
       parameters:
@@ -1072,7 +1078,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: clearGroupMessages
       summary: 清空群消息
       parameters:
@@ -1089,7 +1095,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/groups/{groupId}/messages/{messageId}/read:
     post:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: markMessageRead
       summary: 标记消息已读
       parameters:
@@ -1105,7 +1111,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, messageId, read]
+                required: [ success, messageId, read ]
                 properties:
                   success: { type: boolean, const: true }
                   messageId: { type: string }
@@ -1114,7 +1120,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/messages/{id}:
     put:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: editMessage
       summary: 编辑消息内容
       parameters:
@@ -1137,7 +1143,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: deleteMessage
       summary: 删除单条消息
       parameters:
@@ -1153,7 +1159,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/messages/batch-delete:
     post:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: batchDeleteMessages
       summary: 批量删除消息
       requestBody:
@@ -1174,7 +1180,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/messages/{id}/like:
     post:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: likeMessage
       summary: 点赞消息
       parameters:
@@ -1191,7 +1197,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: unlikeMessage
       summary: 取消点赞
       parameters:
@@ -1207,7 +1213,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/messages/{id}/dislike:
     post:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: dislikeMessage
       summary: 点踩消息
       parameters:
@@ -1222,7 +1228,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: undislikeMessage
       summary: 取消点踩
       parameters:
@@ -1238,7 +1244,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/comments:
     post:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: createComment
       summary: 创建评论（支持嵌套回复）
       requestBody:
@@ -1254,7 +1260,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [comment]
+                required: [ comment ]
                 properties:
                   comment:
                     $ref: '#/components/schemas/Comment'
@@ -1262,7 +1268,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/search:
     get:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: searchAll
       summary: 全域搜索（群组/消息/文件/Agent/人设/评论/成员/媒体）
       parameters:
@@ -1283,7 +1289,7 @@ paths:
           schema: { type: integer, default: 20, maximum: 50 }
         - in: query
           name: quickFilter
-          schema: { type: string, enum: [images, files, links, media] }
+          schema: { type: string, enum: [ images, files, links, media ] }
         - in: query
           name: dateFrom
           schema: { type: string, format: date }
@@ -1301,7 +1307,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/groups/{groupId}/autonomous-chat/start:
     post:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: startAutonomousChat
       summary: 启动群自主对话（AI 自发讨论）
       parameters:
@@ -1330,7 +1336,7 @@ paths:
                 additionalProperties: true
   /api/groups/{groupId}/autonomous-chat/stop:
     post:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: stopAutonomousChat
       summary: 停止群自主对话
       parameters:
@@ -1345,7 +1351,7 @@ paths:
                 additionalProperties: true
   /api/groups/{groupId}/autonomous-chat/status:
     get:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: getAutonomousChatStatus
       summary: 查询群自主对话状态
       parameters:
@@ -1360,7 +1366,7 @@ paths:
                 additionalProperties: true
   /api/groups/{groupId}/private-chat/start:
     post:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: startGroupAiPrivateChat
       summary: 在群内启动 AI 私聊支线
       parameters:
@@ -1391,7 +1397,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/groups/{groupId}/private-chat/stop:
     post:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: stopGroupAiPrivateChat
       summary: 停止群内 AI 私聊支线
       parameters:
@@ -1406,7 +1412,7 @@ paths:
                 additionalProperties: true
   /api/groups/{groupId}/private-chat/status:
     get:
-      tags: [Messages]
+      tags: [ Messages ]
       operationId: getGroupAiPrivateChatStatus
       summary: 查询群内 AI 私聊支线状态
       parameters:
@@ -1423,7 +1429,7 @@ paths:
   # ------------------------------------------------------------------- Files
   /api/files/upload:
     post:
-      tags: [Files]
+      tags: [ Files ]
       operationId: uploadFiles
       summary: 上传文件（单文件返回 {file}，多文件返回 {files}）
       requestBody:
@@ -1432,7 +1438,7 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [group_id, files]
+              required: [ group_id, files ]
               properties:
                 group_id:
                   type: string
@@ -1463,7 +1469,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/files/{id}:
     get:
-      tags: [Files]
+      tags: [ Files ]
       operationId: getFileRecord
       summary: 获取文件元数据
       parameters:
@@ -1483,7 +1489,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
-      tags: [Files]
+      tags: [ Files ]
       operationId: deleteFile
       summary: 删除文件
       parameters:
@@ -1506,7 +1512,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/files/{id}/content:
     get:
-      tags: [Files]
+      tags: [ Files ]
       operationId: getFileContent
       summary: 获取文件解析后的文本内容
       parameters:
@@ -1526,7 +1532,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/files/{id}/media-description:
     get:
-      tags: [Files]
+      tags: [ Files ]
       operationId: getFileMediaDescription
       summary: 获取文件媒体描述
       parameters:
@@ -1546,7 +1552,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/files/{id}/analyze:
     post:
-      tags: [Files]
+      tags: [ Files ]
       operationId: analyzeFile
       summary: 触发文件深度分析
       parameters:
@@ -1563,7 +1569,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/files/{id}/download:
     get:
-      tags: [Files]
+      tags: [ Files ]
       operationId: downloadFile
       summary: 下载文件（带签名 token 校验）
       parameters:
@@ -1589,7 +1595,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/files/public/{id}:
     get:
-      tags: [Files]
+      tags: [ Files ]
       operationId: downloadFilePublic
       summary: 公开签名下载（免会话，token 内编码属主，10分钟时效）
       security: []
@@ -1614,7 +1620,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/files/reindex:
     post:
-      tags: [Files]
+      tags: [ Files ]
       operationId: reindexFiles
       summary: 为缺失检索标注的文件补建索引
       responses:
@@ -1624,7 +1630,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [reindexed, total]
+                required: [ reindexed, total ]
                 properties:
                   reindexed: { type: integer }
                   total: { type: integer }
@@ -1632,7 +1638,7 @@ paths:
   # --------------------------------------------------------------------- Tts
   /api/tts/voices:
     get:
-      tags: [Tts]
+      tags: [ Tts ]
       operationId: getTtsVoices
       summary: 获取可用音色与语气列表
       responses:
@@ -1644,9 +1650,9 @@ paths:
                 $ref: '#/components/schemas/TtsVoicesResponse'
   /api/tts/synthesize:
     post:
-      tags: [Tts]
+      tags: [ Tts ]
       operationId: synthesizeSpeech
-      summary: 文本转语音（每日配额限制）
+      summary: 文本转语音（持久幂等键、每日配额、未知效果查询）
       requestBody:
         required: true
         content:
@@ -1662,15 +1668,61 @@ paths:
                 $ref: '#/components/schemas/TtsSynthesizeResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '202':
+          description: 供应商结果运行中或未知，可能已计费；同键或同输入的未核验新键不会再次调用，返回原请求号
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, status, requestId, possibleCharge]
+                properties:
+                  success: { type: boolean, const: false }
+                  status: { type: string, enum: [running, unknown] }
+                  requestId: { type: string, format: uuid }
+                  possibleCharge: { type: boolean }
+                  error: { type: string }
+        '409':
+          description: 幂等键已用于不同输入
+        '410':
+          description: 原成果已删除，相同幂等键不会再执行
         '429':
           description: 今日合成次数已达上限
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+  /api/tts/effects/{requestId}:
+    get:
+      tags: [ Tts ]
+      operationId: getTtsEffect
+      summary: 查询当前账号语音合成请求的持久状态
+      parameters:
+        - in: path
+          name: requestId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 状态及已确认的成果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requestId, status, modelId, possibleCharge]
+                properties:
+                  requestId: { type: string, format: uuid }
+                  status: { type: string, enum: [running, unknown, succeeded, deleted] }
+                  modelId: { type: string }
+                  possibleCharge: { type: boolean }
+                  response:
+                    oneOf:
+                      - $ref: '#/components/schemas/TtsSynthesizeResponse'
+                      - type: 'null'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/tts/messages/{messageId}:
     get:
-      tags: [Tts]
+      tags: [ Tts ]
       operationId: getMessageTtsAudio
       summary: 获取消息已持久化的语音元数据
       parameters:
@@ -1689,7 +1741,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiError'
     delete:
-      tags: [Tts]
+      tags: [ Tts ]
       operationId: deleteMessageTtsAudio
       summary: 删除消息语音及音频文件
       parameters:
@@ -1705,18 +1757,14 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/tts/audio/{filename}:
     get:
-      tags: [Tts]
+      tags: [ Tts ]
       operationId: getTtsAudioFile
-      summary: 获取音频文件（需签名 token）
+      summary: 仅音频所属账号登录后可读取
       parameters:
         - in: path
           name: filename
           required: true
           schema: { type: string }
-        - in: query
-          name: token
-          schema: { type: string }
-          description: 签名音频令牌
       responses:
         '200':
           description: 音频流
@@ -1733,7 +1781,7 @@ paths:
   # ------------------------------------------------------------------ Social
   /api/social/evaluate-like:
     post:
-      tags: [Social]
+      tags: [ Social ]
       operationId: evaluateLike
       summary: 智能点赞评估（单条）
       requestBody:
@@ -1754,7 +1802,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/social/auto-like:
     post:
-      tags: [Social]
+      tags: [ Social ]
       operationId: autoLike
       summary: 对指定消息执行自动点赞
       requestBody:
@@ -1775,7 +1823,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/social/batch-evaluate:
     post:
-      tags: [Social]
+      tags: [ Social ]
       operationId: batchEvaluate
       summary: 批量评估消息并给出推荐
       requestBody:
@@ -1797,7 +1845,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/social/stats:
     get:
-      tags: [Social]
+      tags: [ Social ]
       operationId: getSocialStats
       summary: 社交互动统计
       parameters:
@@ -1814,7 +1862,7 @@ paths:
                 additionalProperties: true
   /api/social/top-messages:
     get:
-      tags: [Social]
+      tags: [ Social ]
       operationId: getTopMessages
       summary: 热门消息榜
       parameters:
@@ -1834,7 +1882,7 @@ paths:
                 additionalProperties: true
   /api/social/active-participants:
     get:
-      tags: [Social]
+      tags: [ Social ]
       operationId: getActiveParticipants
       summary: 活跃参与者
       parameters:
@@ -1851,7 +1899,7 @@ paths:
                 additionalProperties: true
   /api/social/smart-like-config:
     get:
-      tags: [Social]
+      tags: [ Social ]
       operationId: getSmartLikeConfig
       summary: 获取智能点赞配置
       responses:
@@ -1863,7 +1911,7 @@ paths:
                 type: object
                 additionalProperties: true
     put:
-      tags: [Social]
+      tags: [ Social ]
       operationId: updateSmartLikeConfig
       summary: 更新智能点赞配置
       requestBody:
@@ -1885,7 +1933,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/social/reset:
     post:
-      tags: [Social]
+      tags: [ Social ]
       operationId: resetSocialData
       summary: 重置社交数据（管理员）
       responses:
@@ -1900,7 +1948,7 @@ paths:
           $ref: '#/components/responses/Forbidden'
   /api/social/comments/analyze:
     post:
-      tags: [Social]
+      tags: [ Social ]
       operationId: analyzeComments
       summary: 评论语义分析
       requestBody:
@@ -1922,7 +1970,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/social/comments/suggestions:
     get:
-      tags: [Social]
+      tags: [ Social ]
       operationId: getSuggestedReplies
       summary: 获取评论回复建议
       parameters:
@@ -1942,7 +1990,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/social/comments/tree:
     get:
-      tags: [Social]
+      tags: [ Social ]
       operationId: getCommentTree
       summary: 获取消息评论树（含深度校验）
       parameters:
@@ -1962,11 +2010,92 @@ paths:
           $ref: '#/components/responses/BadRequest'
 
   # ------------------------------------------------------------------ Memory
+  /api/memory:
+    get:
+      tags: [ Memory ]
+      operationId: listUserMemories
+      summary: 列出当前账号可读的持久记忆
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 30 }
+        - name: offset
+          in: query
+          description: 按记录时间与 ID 稳定排序后的零基分页位置
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: 已过滤遗忘与失效来源的记忆
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /api/memory/{memoryId}:
+    get:
+      tags: [ Memory ]
+      operationId: getUserMemory
+      summary: 获取当前账号可读的单条持久记忆
+      parameters:
+        - name: memoryId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 记忆与来源状态
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/memory/{memoryId}/correct:
+    post:
+      tags: [ Memory ]
+      operationId: correctUserMemory
+      summary: 按修订号更正用户显式保存的记忆
+      parameters:
+        - name: memoryId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ content, expectedRevision ]
+              properties:
+                content: { type: string, minLength: 1, maxLength: 5000 }
+                expectedRevision: { type: integer, minimum: 0 }
+      responses:
+        '200':
+          description: 新修订
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        '409':
+          description: 旧修订或来源摘录不可直接改写
+  /api/memory/{memoryId}/forget:
+    post:
+      tags: [ Memory ]
+      operationId: forgetUserMemory
+      summary: 遗忘单条记忆并停止后续检索
+      parameters:
+        - name: memoryId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 遗忘状态
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
   /api/memory/store:
     post:
-      tags: [Memory]
+      tags: [ Memory ]
       operationId: storeMemory
-      summary: 存储单条记忆
+      summary: 保存当前用户声明的持久笔记，不自动确认为业务事实
       requestBody:
         required: true
         content:
@@ -1985,18 +2114,25 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/memory/store-messages:
     post:
-      tags: [Memory]
+      tags: [ Memory ]
       operationId: storeConversationMemory
-      summary: 从消息列表批量提取记忆
+      summary: 从当前账号消息保存未核验的来源摘录
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              additionalProperties: true
+              required: [groupId, messageIds]
+              properties:
+                groupId: { type: string, minLength: 1 }
+                messageIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items: { type: string, minLength: 1 }
       responses:
-        '200':
+        '201':
           description: 存储结果
           content:
             application/json:
@@ -2005,7 +2141,7 @@ paths:
                 additionalProperties: true
   /api/memory/retrieve:
     post:
-      tags: [Memory]
+      tags: [ Memory ]
       operationId: retrieveMemory
       summary: 按查询检索记忆
       requestBody:
@@ -2026,16 +2162,19 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/memory/retrieve-for-conversation:
     post:
-      tags: [Memory]
+      tags: [ Memory ]
       operationId: retrieveForConversation
-      summary: 为会话上下文检索相关记忆
+      summary: 只从当前群仍有效的消息来源摘录中检索，不混入个人或其他群记忆
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              additionalProperties: true
+              required: [groupId]
+              properties:
+                groupId: { type: string, minLength: 1 }
+                limit: { type: integer, minimum: 1, maximum: 30, default: 5 }
       responses:
         '200':
           description: 检索结果
@@ -2046,16 +2185,24 @@ paths:
                 additionalProperties: true
   /api/memory/reference:
     post:
-      tags: [Memory]
+      tags: [ Memory ]
       operationId: referenceMemory
-      summary: 标记记忆被引用
+      summary: 校验当前群来源并返回可引用的消息摘录，不记录引用次数
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              additionalProperties: true
+              required: [memoryId, context]
+              properties:
+                memoryId: { type: string, minLength: 1 }
+                context:
+                  type: object
+                  required: [groupId, content]
+                  properties:
+                    groupId: { type: string, minLength: 1 }
+                    content: { type: string, minLength: 1 }
       responses:
         '200':
           description: 引用结果
@@ -2066,7 +2213,7 @@ paths:
                 additionalProperties: true
   /api/memory/stats:
     get:
-      tags: [Memory]
+      tags: [ Memory ]
       operationId: getMemoryStats
       summary: 记忆库统计
       responses:
@@ -2079,13 +2226,17 @@ paths:
                 additionalProperties: true
   /api/memory/digest:
     get:
-      tags: [Memory]
+      tags: [ Memory ]
       operationId: getMemoryDigest
-      summary: 记忆回顾摘要（重要度×新鲜度加权Top记忆）
+      summary: 当前账号持久且来源仍有效的最近记忆
       parameters:
         - name: limit
           in: query
           schema: { type: integer, minimum: 1, maximum: 30, default: 12 }
+        - name: groupId
+          in: query
+          description: 群资料页仅查看该群有效消息来源的记忆摘录
+          schema: { type: string }
       responses:
         '200':
           description: 摘要列表
@@ -2093,7 +2244,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, total, memories]
+                required: [ success, total, memories ]
                 properties:
                   success: { type: boolean }
                   total: { type: integer }
@@ -2107,17 +2258,16 @@ paths:
                         content: { type: string }
                         category: { type: string }
                         timestamp: { type: string, format: date-time }
-                        importance: { type: number }
-                        access_count: { type: integer }
-                        score: { type: number }
+                        evidence: { type: string }
+                        confirmedFact: { type: boolean }
   /api/memory/performance:
     get:
-      tags: [Memory]
+      tags: [ Memory ]
       operationId: getMemoryPerformance
-      summary: 记忆系统性能指标
+      summary: 旧性能指标尚无可信测量，当前返回 501
       responses:
-        '200':
-          description: 性能数据
+        '501':
+          description: 旧指标未接入持久服务
           content:
             application/json:
               schema:
@@ -2125,7 +2275,7 @@ paths:
                 additionalProperties: true
   /api/memory/clear:
     post:
-      tags: [Memory]
+      tags: [ Memory ]
       operationId: clearMemory
       summary: 清空记忆（管理员）
       responses:
@@ -2140,21 +2290,21 @@ paths:
           $ref: '#/components/responses/Forbidden'
   /api/memory/config:
     get:
-      tags: [Memory]
+      tags: [ Memory ]
       operationId: getMemoryConfig
-      summary: 获取记忆系统配置
+      summary: 旧记忆配置未接入持久服务，当前返回 501
       responses:
-        '200':
-          description: 当前配置
+        '501':
+          description: 旧配置未接入持久服务
           content:
             application/json:
               schema:
                 type: object
                 additionalProperties: true
     put:
-      tags: [Memory]
+      tags: [ Memory ]
       operationId: updateMemoryConfig
-      summary: 更新记忆系统配置
+      summary: 旧记忆配置未接入持久服务，当前返回 501
       requestBody:
         required: true
         content:
@@ -2163,8 +2313,8 @@ paths:
               type: object
               additionalProperties: true
       responses:
-        '200':
-          description: 配置更新结果
+        '501':
+          description: 旧配置未接入持久服务
           content:
             application/json:
               schema:
@@ -2174,9 +2324,9 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/memory/auto-store-important:
     post:
-      tags: [Memory]
+      tags: [ Memory ]
       operationId: autoStoreImportantMemories
-      summary: 从群消息中自动存储重要记忆
+      summary: 旧自动提取未接入可追踪来源，当前返回 501
       requestBody:
         required: true
         content:
@@ -2186,8 +2336,8 @@ paths:
               additionalProperties: true
               description: 字段以实现为准（groupId 等）
       responses:
-        '200':
-          description: 存储结果
+        '501':
+          description: 自动提取未接入持久服务
           content:
             application/json:
               schema:
@@ -2197,7 +2347,7 @@ paths:
   # ------------------------------------------------------------- Interaction
   /api/interaction/logs:
     get:
-      tags: [Interaction]
+      tags: [ Interaction ]
       operationId: listInteractionLogs
       summary: 分页获取互动日志
       parameters:
@@ -2217,7 +2367,7 @@ paths:
                 additionalProperties: true
   /api/interaction/stats:
     get:
-      tags: [Interaction]
+      tags: [ Interaction ]
       operationId: getInteractionStats
       summary: 互动统计
       responses:
@@ -2230,7 +2380,7 @@ paths:
                 additionalProperties: true
   /api/interaction/participation:
     get:
-      tags: [Interaction]
+      tags: [ Interaction ]
       operationId: getParticipationAnalysis
       summary: 话题参与度分析
       responses:
@@ -2243,7 +2393,7 @@ paths:
                 additionalProperties: true
   /api/interaction/quality:
     get:
-      tags: [Interaction]
+      tags: [ Interaction ]
       operationId: getInteractionQuality
       summary: 互动质量评估
       responses:
@@ -2256,7 +2406,7 @@ paths:
                 additionalProperties: true
   /api/interaction/export:
     get:
-      tags: [Interaction]
+      tags: [ Interaction ]
       operationId: exportInteractionLogs
       summary: 导出互动日志
       parameters:
@@ -2273,7 +2423,7 @@ paths:
                 additionalProperties: true
   /api/interaction/status:
     get:
-      tags: [Interaction]
+      tags: [ Interaction ]
       operationId: getInteractionStatus
       summary: 互动记录器状态
       responses:
@@ -2286,7 +2436,7 @@ paths:
                 additionalProperties: true
   /api/interaction/log:
     post:
-      tags: [Interaction]
+      tags: [ Interaction ]
       operationId: logInteraction
       summary: 记录一条互动事件
       requestBody:
@@ -2295,14 +2445,14 @@ paths:
           application/json:
             schema:
               type: object
-              required: [eventType, participantType]
+              required: [ eventType, participantType ]
               properties:
                 eventType:
                   type: string
-                  enum: [like, comment, reply, message, topic_change, file_share, custom]
+                  enum: [ like, comment, reply, message, topic_change, file_share, custom ]
                 participantType:
                   type: string
-                  enum: [ai, user, system]
+                  enum: [ ai, user, system ]
               additionalProperties: true
       responses:
         '200':
@@ -2318,20 +2468,19 @@ paths:
   # -------------------------------------------------------------- Monitoring
   /api/monitoring/errors:
     post:
-      tags: [Monitoring]
+      tags: [ Monitoring ]
       operationId: reportClientError
-      summary: 上报前端错误
-      security: []
+      summary: 已登录用户上报短文本前端错误；额外字段不保存
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [type]
+              required: [ type, message ]
               properties:
-                type: { type: string }
-                message: { type: string }
+                type: { type: string, enum: [ react_error, runtime_error, unhandled_promise_rejection ] }
+                message: { type: string, maxLength: 1000 }
               additionalProperties: true
       responses:
         '200':
@@ -2342,9 +2491,11 @@ paths:
                 $ref: '#/components/schemas/SuccessEnvelope'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '429':
+          description: 当前用户一分钟内上报次数过多
   /api/client-errors:
     get:
-      tags: [Monitoring]
+      tags: [ Monitoring ]
       operationId: getClientErrors
       summary: 拉取当前用户客户端错误
       responses:
@@ -2354,7 +2505,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, errors, count]
+                required: [ success, errors, count ]
                 properties:
                   success: { type: boolean, const: true }
                   errors:
@@ -2365,9 +2516,9 @@ paths:
                   count: { type: integer }
   /api/metrics:
     get:
-      tags: [Monitoring]
+      tags: [ Monitoring ]
       operationId: getServerMetrics
-      summary: 服务器运行指标
+      summary: 管理员读取服务器运行指标
       responses:
         '200':
           description: 指标数据
@@ -2378,9 +2529,9 @@ paths:
                 additionalProperties: true
   /api/status:
     get:
-      tags: [Monitoring]
+      tags: [ Monitoring ]
       operationId: getSystemStatus
-      summary: 系统状态报告
+      summary: 管理员读取系统状态报告
       responses:
         '200':
           description: 状态报告
@@ -2391,9 +2542,9 @@ paths:
                 additionalProperties: true
   /api/scaling/history:
     get:
-      tags: [Monitoring]
+      tags: [ Monitoring ]
       operationId: getScalingHistory
-      summary: 扩容历史
+      summary: 管理员读取当前进程内的扩容建议历史（未执行、未持久化）
       responses:
         '200':
           description: 历史记录
@@ -2404,12 +2555,12 @@ paths:
                 additionalProperties: true
   /api/scaling/trigger:
     post:
-      tags: [Monitoring]
+      tags: [ Monitoring ]
       operationId: triggerAutoScaling
-      summary: 触发自动扩容评估
+      summary: 管理员记录扩容建议（当前未配置执行适配器）
       responses:
-        '200':
-          description: 触发结果
+        '501':
+          description: 仅记录建议，未执行扩容
           content:
             application/json:
               schema:
@@ -2417,20 +2568,20 @@ paths:
                 additionalProperties: true
   /api/scaling/manual:
     post:
-      tags: [Monitoring]
+      tags: [ Monitoring ]
       operationId: manualScalingRequest
-      summary: 提交手动扩容建议（单进程部署仅记录）
+      summary: 管理员提交手动扩容建议（仅当前进程记录）
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [action, target]
+              required: [ action, target ]
               properties:
                 action: { type: string }
                 target: { type: string }
-                amount: { type: number }
+                amount: { type: integer, minimum: 1, maximum: 100 }
       responses:
         '200':
           description: 记录结果
@@ -2445,7 +2596,7 @@ paths:
   # ----------------------------------------------------------------- Profile
   /api/profile:
     get:
-      tags: [Profile]
+      tags: [ Profile ]
       operationId: getUserProfile
       summary: 获取用户画像
       responses:
@@ -2455,14 +2606,14 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, profile]
+                required: [ success, profile ]
                 properties:
                   success: { type: boolean, const: true }
                   profile:
                     type: object
                     additionalProperties: true
     put:
-      tags: [Profile]
+      tags: [ Profile ]
       operationId: updateUserProfile
       summary: 更新用户画像
       requestBody:
@@ -2481,7 +2632,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, profile]
+                required: [ success, profile ]
                 properties:
                   success: { type: boolean, const: true }
                   profile:
@@ -2493,7 +2644,7 @@ paths:
   # --------------------------------------------------------------- Personas
   /api/personas:
     get:
-      tags: [Personas]
+      tags: [ Personas ]
       operationId: getPersonas
       summary: 获取合并后的全部 AI 人设
       responses:
@@ -2503,7 +2654,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, personas]
+                required: [ success, personas ]
                 properties:
                   success: { type: boolean, const: true }
                   personas:
@@ -2512,7 +2663,7 @@ paths:
                   _timestamp: { type: integer }
   /api/personas/{aiId}:
     put:
-      tags: [Personas]
+      tags: [ Personas ]
       operationId: updatePersonaPut
       summary: 全量更新 AI 人设
       parameters:
@@ -2530,7 +2681,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, persona]
+                required: [ success, persona ]
                 properties:
                   success: { type: boolean, const: true }
                   persona:
@@ -2539,7 +2690,7 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
     patch:
-      tags: [Personas]
+      tags: [ Personas ]
       operationId: updatePersonaPatch
       summary: 局部更新 AI 人设（轻量级，快速生效）
       parameters:
@@ -2557,7 +2708,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, persona]
+                required: [ success, persona ]
                 properties:
                   success: { type: boolean, const: true }
                   persona:
@@ -2567,7 +2718,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/personas/{aiId}/reset:
     put:
-      tags: [Personas]
+      tags: [ Personas ]
       operationId: resetPersona
       summary: 重置 AI 人设为默认
       parameters:
@@ -2579,7 +2730,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, persona]
+                required: [ success, persona ]
                 properties:
                   success: { type: boolean, const: true }
                   persona:
@@ -2591,7 +2742,7 @@ paths:
   # ------------------------------------------------------------------ Agents
   /api/agents:
     get:
-      tags: [Agents]
+      tags: [ Agents ]
       operationId: listAgents
       summary: 获取智能体列表
       responses:
@@ -2604,7 +2755,7 @@ paths:
                 items:
                   $ref: '#/components/schemas/Agent'
     post:
-      tags: [Agents]
+      tags: [ Agents ]
       operationId: createAgent
       summary: 创建智能体
       requestBody:
@@ -2624,7 +2775,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/agents/generate-questions:
     post:
-      tags: [Agents]
+      tags: [ Agents ]
       operationId: generateAgentQuestions
       summary: 为智能体配置生成引导问题
       requestBody:
@@ -2645,7 +2796,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/agents/{agentId}:
     get:
-      tags: [Agents]
+      tags: [ Agents ]
       operationId: getAgent
       summary: 获取智能体详情
       parameters:
@@ -2660,7 +2811,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     put:
-      tags: [Agents]
+      tags: [ Agents ]
       operationId: updateAgent
       summary: 更新智能体（capabilities 变更会重建模型角色）
       parameters:
@@ -2691,7 +2842,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
-      tags: [Agents]
+      tags: [ Agents ]
       operationId: deleteAgent
       summary: 删除智能体及其会话
       parameters:
@@ -2703,14 +2854,14 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success]
+                required: [ success ]
                 properties:
                   success: { type: boolean }
         '404':
           $ref: '#/components/responses/NotFound'
   /api/agents/{agentId}/messages:
     get:
-      tags: [Agents]
+      tags: [ Agents ]
       operationId: listAgentMessages
       summary: 分页获取智能体会话消息
       parameters:
@@ -2731,7 +2882,7 @@ paths:
                 additionalProperties: true
   /api/agents/{agentId}/chat:
     post:
-      tags: [Agents]
+      tags: [ Agents ]
       operationId: chatWithAgent
       summary: 与智能体对话
       parameters:
@@ -2742,7 +2893,7 @@ paths:
           application/json:
             schema:
               type: object
-              required: [message]
+              required: [ message ]
               properties:
                 message: { type: string }
               additionalProperties: true
@@ -2760,7 +2911,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/agents/{agentId}/chat-with-files:
     post:
-      tags: [Agents]
+      tags: [ Agents ]
       operationId: chatWithAgentAndFiles
       summary: 携带文件与智能体对话（multipart）
       parameters:
@@ -2771,7 +2922,7 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [message]
+              required: [ message ]
               properties:
                 message: { type: string }
                 files:
@@ -2794,7 +2945,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/agents/{agentId}/suggestions:
     get:
-      tags: [Agents]
+      tags: [ Agents ]
       operationId: getAgentSuggestions
       summary: 获取智能体建议问题
       parameters:
@@ -2811,7 +2962,7 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/agents/{agentId}/invoke:
     post:
-      tags: [Agents]
+      tags: [ Agents ]
       operationId: invokeAgent
       summary: 以结构化输入调用智能体
       parameters:
@@ -2839,7 +2990,7 @@ paths:
   # --------------------------------------------------------------- ApiConfig
   /api/user/apiconfig:
     get:
-      tags: [ApiConfig]
+      tags: [ ApiConfig ]
       operationId: getUserApiConfig
       summary: 获取用户自定义 API 配置（密钥脱敏）
       responses:
@@ -2849,14 +3000,14 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, config]
+                required: [ success, config ]
                 properties:
                   success: { type: boolean, const: true }
                   config:
                     type: object
                     additionalProperties: true
     put:
-      tags: [ApiConfig]
+      tags: [ ApiConfig ]
       operationId: updateUserApiConfig
       summary: |
         保存用户自定义 API 配置。apiKey 为 write-only：
@@ -2877,7 +3028,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [success, config]
+                required: [ success, config ]
                 properties:
                   success: { type: boolean, const: true }
                   config:
@@ -2887,7 +3038,7 @@ paths:
           $ref: '#/components/responses/BadRequest'
   /api/user/apiconfig/test:
     post:
-      tags: [ApiConfig]
+      tags: [ ApiConfig ]
       operationId: testUserApiConfig
       summary: 测试用户自定义 API 配置可用性
       requestBody:
@@ -2898,7 +3049,7 @@ paths:
               properties:
                 vendor:
                   type: string
-                  enum: [deepseek, zhipu, mimo, qwen]
+                  enum: [ deepseek, zhipu, mimo, qwen ]
                 apiKey: { type: string }
                 baseUrl: { type: string }
       responses:
@@ -2915,12 +3066,12 @@ paths:
   # ---------------------------------------------------------------------- Ai
   /api/ai/models:
     get:
-      tags: [Ai]
+      tags: [ Ai ]
       operationId: listAiModels
-      summary: 获取 AI 模型运行状态
+      summary: 读取管理员自己的真实模型目录
       responses:
         '200':
-          description: 模型状态映射
+          description: 模型目录映射；不含未经采集的运行健康指标
           content:
             application/json:
               schema:
@@ -2928,12 +3079,12 @@ paths:
                 additionalProperties: true
   /api/ai/performance:
     get:
-      tags: [Ai]
+      tags: [ Ai ]
       operationId: getAiPerformance
-      summary: AI 调用性能报告
+      summary: AI 调用性能观测状态
       responses:
         '200':
-          description: 性能报告
+          description: 目前无权威调用与费用账本，返回 unavailable
           content:
             application/json:
               schema:
@@ -2941,14 +3092,14 @@ paths:
                 additionalProperties: true
   /api/ai/models/{modelId}:
     get:
-      tags: [Ai]
+      tags: [ Ai ]
       operationId: getAiModelStats
-      summary: 获取单个模型统计
+      summary: 获取单个已配置模型
       parameters:
         - $ref: '#/components/parameters/ModelIdParam'
       responses:
         '200':
-          description: 模型统计
+          description: 模型目录信息及经测试的能力
           content:
             application/json:
               schema:
@@ -2958,9 +3109,9 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/ai/models/{modelId}/enabled:
     put:
-      tags: [Ai]
+      tags: [ Ai ]
       operationId: setModelEnabled
-      summary: 启用/禁用模型
+      summary: 已退役；改用 /api/user/model-catalog
       parameters:
         - $ref: '#/components/parameters/ModelIdParam'
       requestBody:
@@ -2969,12 +3120,12 @@ paths:
           application/json:
             schema:
               type: object
-              required: [enabled]
+              required: [ enabled ]
               properties:
                 enabled: { type: boolean }
       responses:
-        '200':
-          description: 操作结果
+        '410':
+          description: 旧接口不会影响实际调用，拒绝写入
           content:
             application/json:
               schema:
@@ -2984,9 +3135,9 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/ai/models/{modelId}/config:
     put:
-      tags: [Ai]
+      tags: [ Ai ]
       operationId: updateModelConfig
-      summary: 更新模型运行配置
+      summary: 已退役；改用 /api/user/model-catalog
       parameters:
         - $ref: '#/components/parameters/ModelIdParam'
       requestBody:
@@ -2997,8 +3148,8 @@ paths:
               type: object
               additionalProperties: true
       responses:
-        '200':
-          description: 操作结果
+        '410':
+          description: 旧接口不会影响实际调用，拒绝写入
           content:
             application/json:
               schema:
@@ -3008,12 +3159,12 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/ai/health-check:
     post:
-      tags: [Ai]
+      tags: [ Ai ]
       operationId: runAiHealthCheck
-      summary: 触发全量模型健康检查
+      summary: 已退役；逐模型测试请使用 /api/user/model-catalog/test
       responses:
-        '200':
-          description: 健康检查汇总
+        '410':
+          description: 拒绝旧接口产生未归账的收费调用
           content:
             application/json:
               schema:
@@ -3021,14 +3172,14 @@ paths:
                 additionalProperties: true
   /api/ai/models/{modelId}/reset-circuit-breaker:
     post:
-      tags: [Ai]
+      tags: [ Ai ]
       operationId: resetModelCircuitBreaker
-      summary: 重置模型熔断器
+      summary: 已退役；旧进程内熔断器未参与真实调用
       parameters:
         - $ref: '#/components/parameters/ModelIdParam'
       responses:
-        '200':
-          description: 重置结果
+        '410':
+          description: 旧接口不会影响实际调用，拒绝写入
           content:
             application/json:
               schema:
@@ -3038,17 +3189,538 @@ paths:
           $ref: '#/components/responses/NotFound'
   /api/ai/requirements:
     get:
-      tags: [Ai]
+      tags: [ Ai ]
       operationId: getAiRequirements
-      summary: 获取 AI 性能要求声明
+      summary: 获取 AI 性能目标验证状态
       responses:
         '200':
-          description: 性能要求
+          description: 尚未建立真实服务等级观测
           content:
             application/json:
               schema:
                 type: object
                 additionalProperties: true
+  /api/user/model-catalog:
+    get:
+      operationId: getModelCatalog
+      summary: 读取当前用户模型目录（不返回密钥）
+      tags:
+        - Models
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelCatalog"
+        "400":
+          description: 请求无效
+        "401":
+          description: 需要登录
+        "404":
+          description: 资源不属于当前用户或不存在
+        "409":
+          description: 配置版本冲突、任务运行中或模型被引用
+        "429":
+          description: 达到执行次数或请求限制
+    put:
+      operationId: saveModelCatalog
+      summary: 校验并保存模型目录，revision 必须匹配
+      tags:
+        - Models
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ModelCatalogInput"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelCatalog"
+        "400":
+          description: 请求无效
+        "401":
+          description: 需要登录
+        "404":
+          description: 资源不属于当前用户或不存在
+        "409":
+          description: 配置版本冲突、任务运行中或模型被引用
+        "429":
+          description: 达到执行次数或请求限制
+  /api/user/model-catalog/test:
+    post:
+      operationId: testCatalogModel
+      summary: 调用保存的模型做一次连通性测试，可能计费
+      tags:
+        - Models
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                modelId:
+                  type: string
+                  maxLength: 80
+                capability:
+                  type: string
+                  enum: [chat, tts]
+                  default: chat
+              required:
+                - modelId
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  healthy:
+                    type: boolean
+                  capability:
+                    type: string
+                    enum: [chat, tts]
+                  model:
+                    type: string
+                  responseTime:
+                    type: number
+                required:
+                  - healthy
+                  - capability
+                  - model
+                  - responseTime
+        "400":
+          description: 请求无效
+        "401":
+          description: 需要登录
+        "404":
+          description: 资源不属于当前用户或不存在
+        "409":
+          description: 配置版本冲突、任务运行中或模型被引用
+        "429":
+          description: 达到执行次数或请求限制
+  /api/user/model-catalog/discover:
+    post:
+      operationId: discoverProviderModels
+      summary: 读取保存的服务商模型列表，可在添加模型前使用
+      tags:
+        - Models
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                providerId:
+                  type: string
+                  maxLength: 80
+              required:
+                - providerId
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  models:
+                    type: array
+                    items:
+                      type: string
+                required:
+                  - models
+        "400":
+          description: 请求无效
+        "401":
+          description: 需要登录
+        "404":
+          description: 资源不属于当前用户或不存在
+        "409":
+          description: 配置版本冲突、任务运行中或模型被引用
+        "429":
+          description: 达到执行次数或请求限制
+  /api/tasks:
+    get:
+      operationId: listWorkspaceTasks
+      summary: 读取当前用户的任务和最近执行结果
+      tags:
+        - Tasks
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkspaceTask"
+        "400":
+          description: 请求无效
+        "401":
+          description: 需要登录
+        "404":
+          description: 资源不属于当前用户或不存在
+        "409":
+          description: 配置版本冲突、任务运行中或模型被引用
+        "429":
+          description: 达到执行次数或请求限制
+    post:
+      operationId: createWorkspaceTask
+      summary: 创建待办或明确授权的主动任务
+      tags:
+        - Tasks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkspaceTaskInput"
+      responses:
+        "201":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceTask"
+        "400":
+          description: 请求无效
+        "401":
+          description: 需要登录
+        "404":
+          description: 资源不属于当前用户或不存在
+        "409":
+          description: 配置版本冲突、任务运行中或模型被引用
+        "429":
+          description: 达到执行次数或请求限制
+  /api/tasks/{taskId}:
+    patch:
+      operationId: updateWorkspaceTask
+      summary: 修改任务状态、暂停或停止执行
+      tags:
+        - Tasks
+      parameters: &a1
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WorkspaceTaskPatch"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceTask"
+        "400":
+          description: 请求无效
+        "401":
+          description: 需要登录
+        "404":
+          description: 资源不属于当前用户或不存在
+        "409":
+          description: 配置版本冲突、任务运行中或模型被引用
+        "429":
+          description: 达到执行次数或请求限制
+    delete:
+      operationId: deleteWorkspaceTask
+      summary: 删除已停止的任务及其结果
+      tags:
+        - Tasks
+      parameters: *a1
+      responses:
+        "204":
+          description: 已删除
+        "404":
+          description: 任务不存在
+        "409":
+          description: 请先停止运行中的任务
+  /api/tasks/{taskId}/run:
+    post:
+      operationId: runWorkspaceTask
+      summary: 生成一次待验收的 AI 草稿并等待结果，可能计费
+      tags:
+        - Tasks
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceTask"
+        "400":
+          description: 请求无效
+        "401":
+          description: 需要登录
+        "404":
+          description: 资源不属于当前用户或不存在
+        "409":
+          description: 配置版本冲突、任务运行中或模型被引用
+        "429":
+          description: 达到执行次数或请求限制
+  /api/tasks/{taskId}/accept:
+    post:
+      operationId: acceptWorkspaceTaskResult
+      summary: 当前用户验收本次生成的草稿；来源变化时拒绝
+      tags:
+        - Tasks
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                run_id:
+                  type: string
+                  format: uuid
+              required: [run_id]
+              additionalProperties: false
+      responses:
+        "200":
+          description: 验收记录已保存
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceTask"
+        "400":
+          description: 运行标识无效
+        "404":
+          description: 任务不存在或不属于当前用户
+        "409":
+          description: 成果不是当前运行的草稿或来源已变化
+  /api/tasks/{taskId}/resolve-unknown:
+    post:
+      operationId: resolveUnknownWorkspaceTaskRun
+      summary: 人工处理重启后结果未知的运行；允许重试前须确认重复调用与费用风险
+      tags:
+        - Tasks
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                decision:
+                  enum: [allow_retry, abandon]
+              required: [decision]
+              additionalProperties: false
+      responses:
+        "200":
+          description: 用户决定及执行记录已保存
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceTask"
+        "400":
+          description: 决定无效
+        "404":
+          description: 任务不存在或不属于当前用户
+        "409":
+          description: 当前任务没有待处理的未知结果
+
+  /api/goals:
+    get:
+      tags: [Goals]
+      operationId: listPersonalGoals
+      summary: 读取当前登录者的个人目标
+      description: 仅会话认证；需要已部署 PostgreSQL foundation v2，响应 executionAvailable 为 false。
+      responses:
+        '200': { description: 个人目标列表 }
+        '401': { description: 需要有效会话 }
+        '503': { description: PostgreSQL 运行连接未配置或迁移未完成 }
+    post:
+      tags: [Goals]
+      operationId: createPersonalGoal
+      summary: 创建持久目标及必需验收条件
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PersonalGoalInput' }
+      responses:
+        '201': { description: 新目标；目标 ID 由服务端按会话和幂等键派生 }
+        '200': { description: 同键同内容重放 }
+        '400': { description: 输入无效或缺幂等键 }
+        '401': { description: 需要有效会话 }
+        '409': { description: 同键不同内容 }
+        '503': { description: PostgreSQL foundation 不可用 }
+  /api/goals/{goalId}:
+    parameters: [ { $ref: '#/components/parameters/PersonalGoalId' } ]
+    get:
+      tags: [Goals]
+      operationId: getPersonalGoal
+      summary: 读取目标、验收条件和运行状态
+      responses:
+        '200': { description: 目标及运行状态 }
+        '401': { description: 需要有效会话 }
+        '404': { description: 目标不属于当前个人空间 }
+        '503': { description: PostgreSQL foundation 不可用 }
+  /api/goals/{goalId}/briefs:
+    parameters: [ { $ref: '#/components/parameters/PersonalGoalId' } ]
+    post:
+      tags: [Goals]
+      operationId: requestPersonalGoalBrief
+      summary: 显式授权并执行零费用的受限个人目标简报
+      description: 仅执行 internal.goal_brief.v1。简报是待用户核对的产物，不能作为目标完成验收证据；相同幂等键可查询并推进原运行。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses:
+        '201': { description: 授权与运行已创建；artifactId 可能仍为空，须按运行状态恢复 }
+        '200': { description: 同一请求重放及进度核对 }
+        '400': { description: 缺少幂等键或请求无效 }
+        '401': { description: 需要有效会话 }
+        '404': { description: 目标不属于当前个人空间 }
+        '409': { description: 幂等冲突或目标状态不允许 }
+        '503': { description: PostgreSQL foundation 不可用 }
+  /api/goals/{goalId}/runs:
+    parameters: [ { $ref: '#/components/parameters/PersonalGoalId' } ]
+    post:
+      tags: [Goals]
+      operationId: createPersonalGoalRun
+      summary: 为目标建立待领取的持久运行及步骤
+      description: 仅创建 queued 运行；当前没有自动 Worker 或工具执行。
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PersonalRunInput' }
+      responses:
+        '201': { description: 新建运行 }
+        '200': { description: 同键同内容重放 }
+        '400': { description: 步骤输入无效 }
+        '401': { description: 需要有效会话 }
+        '404': { description: 目标不存在 }
+        '409': { description: 幂等冲突或目标状态不允许 }
+        '503': { description: PostgreSQL foundation 不可用 }
+  /api/goals/{goalId}/runs/{runId}:
+    parameters: &personalRunPath
+      - { $ref: '#/components/parameters/PersonalGoalId' }
+      - { $ref: '#/components/parameters/PersonalRunId' }
+    get:
+      tags: [Goals]
+      operationId: getPersonalGoalRun
+      summary: 读取运行、步骤、效果和验收状态
+      responses:
+        '200': { description: 当前持久状态 }
+        '401': { description: 需要有效会话 }
+        '404': { description: 运行或目标不属于当前用户 }
+        '503': { description: PostgreSQL foundation 不可用 }
+  /api/goals/{goalId}/runs/{runId}/brief:
+    parameters: *personalRunPath
+    get:
+      tags: [Goals]
+      operationId: readPersonalGoalBrief
+      summary: 读取已完成的受限简报正文、来源和内容哈希
+      description: 仅当前登录者的个人空间及目标、运行、产物均可读时返回；未完成或验签失败不返回正文。
+      responses:
+        '200': { description: 简报正文、哈希和来源修订 }
+        '401': { description: 需要有效会话 }
+        '404': { description: 简报尚未形成或不属于当前目标与运行 }
+        '409': { description: 产物完整性或来源核对失败 }
+        '503': { description: PostgreSQL foundation 不可用 }
+  /api/goals/{goalId}/runs/{runId}/pause:
+    parameters: *personalRunPath
+    post:
+      tags: [Goals]
+      operationId: pausePersonalGoalRun
+      summary: 暂停运行；已发外部效果须继续核验
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses: &personalRunTransitionResponses
+        '200': { description: 新运行状态或幂等回执 }
+        '400': { description: 缺幂等键或输入无效 }
+        '401': { description: 需要有效会话 }
+        '404': { description: 运行不存在 }
+        '409': { description: 状态或幂等冲突 }
+        '503': { description: PostgreSQL foundation 不可用 }
+  /api/goals/{goalId}/runs/{runId}/resume:
+    parameters: *personalRunPath
+    post:
+      tags: [Goals]
+      operationId: resumePersonalGoalRun
+      summary: 重新核对目标修订和未知效果后恢复
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses: *personalRunTransitionResponses
+  /api/goals/{goalId}/runs/{runId}/cancel:
+    parameters: *personalRunPath
+    post:
+      tags: [Goals]
+      operationId: cancelPersonalGoalRun
+      summary: 取消新动作；未知外部效果保留
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses: *personalRunTransitionResponses
+  /api/goals/{goalId}/runs/{runId}/accept:
+    parameters: *personalRunPath
+    post:
+      tags: [Goals]
+      operationId: acceptPersonalRunEvidence
+      summary: 当前验收者将检查绑定到同运行的当前产物修订
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PersonalAcceptanceInput' }
+      responses: *personalRunTransitionResponses
+  /api/goals/{goalId}/runs/{runId}/complete:
+    parameters: *personalRunPath
+    post:
+      tags: [Goals]
+      operationId: completePersonalGoalRun
+      summary: 仅全部步骤、效果及当前产物验收通过时完成运行
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      responses: *personalRunTransitionResponses
+  /api/goals/{goalId}/complete:
+    parameters: [ { $ref: '#/components/parameters/PersonalGoalId' } ]
+    post:
+      tags: [Goals]
+      operationId: completePersonalGoal
+      summary: 以同修订已验收运行完成目标
+      parameters: [ { $ref: '#/components/parameters/IdempotencyKey' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [runId]
+              additionalProperties: false
+              properties:
+                runId: { type: string }
+      responses: *personalRunTransitionResponses
 
 components:
   securitySchemes:
@@ -3066,6 +3738,21 @@ components:
         令牌通过 GET /api/csrf-token 获取，且须与 Cookie 中的
         CSRF 值一致（double-submit 模式）
   parameters:
+    IdempotencyKey:
+      in: header
+      name: Idempotency-Key
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 128 }
+    PersonalGoalId:
+      in: path
+      name: goalId
+      required: true
+      schema: { type: string }
+    PersonalRunId:
+      in: path
+      name: runId
+      required: true
+      schema: { type: string }
     GroupIdAsId:
       in: path
       name: id
@@ -3140,35 +3827,89 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
   schemas:
+    PersonalGoalInput:
+      type: object
+      required: [outcome, checks]
+      additionalProperties: false
+      properties:
+        outcome: { type: string, minLength: 1, maxLength: 10000 }
+        constraints:
+          type: array
+          maxItems: 100
+          items: { type: string, minLength: 1, maxLength: 2000 }
+        checks:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: object
+            required: [key, description, required]
+            additionalProperties: false
+            properties:
+              key: { type: string, minLength: 1, maxLength: 128 }
+              description: { type: string, minLength: 1, maxLength: 2000 }
+              required: { type: boolean }
+        budgetLimitMicros:
+          type: string
+          pattern: '^(0|[1-9][0-9]{0,19})$'
+    PersonalRunInput:
+      type: object
+      required: [steps]
+      additionalProperties: false
+      properties:
+        steps:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            required: [key, action, inputRefs, maxAttempts]
+            additionalProperties: false
+            properties:
+              key: { type: string, minLength: 1, maxLength: 128 }
+              action: { type: string, minLength: 1, maxLength: 2000 }
+              inputRefs:
+                type: array
+                maxItems: 100
+                items: { type: string, minLength: 1, maxLength: 128 }
+              maxAttempts: { type: integer, minimum: 1, maximum: 10 }
+    PersonalAcceptanceInput:
+      type: object
+      required: [checkKey, artifactId, artifactRevision]
+      additionalProperties: false
+      properties:
+        checkKey: { type: string, minLength: 1, maxLength: 128 }
+        artifactId: { type: string, minLength: 1, maxLength: 128 }
+        artifactRevision: { type: integer, minimum: 0 }
     ApiError:
       type: object
-      required: [error]
+      required: [ error ]
       properties:
         error:
           type: string
     SuccessEnvelope:
       type: object
-      required: [success]
+      required: [ success ]
       properties:
         success:
           type: boolean
           const: true
     HealthResponse:
       type: object
-      required: [status, timestamp]
+      required: [ status, timestamp ]
       properties:
         status:
           type: string
-          enum: [ok, degraded]
+          enum: [ ok, degraded ]
         timestamp:
           type: string
           format: date-time
         database:
           type: string
-          enum: [connected, error]
+          enum: [ connected, error ]
     CsrfTokenResponse:
       type: object
-      required: [enabled]
+      required: [ enabled ]
       properties:
         enabled: { type: boolean }
         csrfToken:
@@ -3176,17 +3917,17 @@ components:
           nullable: true
     SessionStatusResponse:
       type: object
-      required: [enabled]
+      required: [ enabled ]
       properties:
         enabled: { type: boolean }
         valid: { type: boolean }
         mode:
           type: string
-          enum: [session, token]
+          enum: [ session, token ]
         message: { type: string }
     AuthUser:
       type: object
-      required: [id, username]
+      required: [ id, username ]
       properties:
         id: { type: string }
         username: { type: string }
@@ -3194,7 +3935,7 @@ components:
         phone: { type: string }
     AuthResponse:
       type: object
-      required: [success, user]
+      required: [ success, user ]
       properties:
         success:
           type: boolean
@@ -3203,7 +3944,7 @@ components:
           $ref: '#/components/schemas/AuthUser'
     PhoneInput:
       type: object
-      required: [phone]
+      required: [ phone ]
       additionalProperties: false
       properties:
         phone:
@@ -3211,7 +3952,7 @@ components:
           pattern: '^1[3-9][0-9]{9}$'
     PhoneLoginInput:
       type: object
-      required: [phone, password]
+      required: [ phone, password ]
       additionalProperties: false
       properties:
         phone:
@@ -3220,7 +3961,7 @@ components:
         password: { type: string }
     SmsVerifyInput:
       type: object
-      required: [phone, code]
+      required: [ phone, code ]
       additionalProperties: false
       properties:
         phone:
@@ -3231,7 +3972,7 @@ components:
           pattern: '^[0-9]{4,8}$'
     SmsRegisterInput:
       type: object
-      required: [phone, password, code]
+      required: [ phone, password, code ]
       additionalProperties: false
       properties:
         phone:
@@ -3250,7 +3991,7 @@ components:
           maxLength: 50
     DevRegisterInput:
       type: object
-      required: [username, password]
+      required: [ username, password ]
       properties:
         username:
           type: string
@@ -3262,14 +4003,14 @@ components:
         nickname: { type: string }
     BootstrapResponse:
       type: object
-      required: [success, user, groups]
+      required: [ success, user, groups ]
       properties:
         success:
           type: boolean
           const: true
         user:
           type: object
-          required: [id]
+          required: [ id ]
           properties:
             id: { type: string }
             username: { type: string }
@@ -3289,7 +4030,7 @@ components:
           additionalProperties: true
     GroupFile:
       type: object
-      required: [id, group_id, name, url, size, type, uploaded_at]
+      required: [ id, group_id, name, url, size, type, uploaded_at ]
       properties:
         id: { type: string }
         group_id: { type: string }
@@ -3317,13 +4058,13 @@ components:
         description: { type: string }
         type:
           type: string
-          enum: [preset, custom, private, ai_private]
+          enum: [ preset, custom, private, ai_private ]
         is_private: { type: boolean }
         is_ai_private: { type: boolean }
         pinned: { type: boolean }
-        avatar_url: { type: [string, 'null'] }
-        avatar_color: { type: [string, 'null'] }
-        background_url: { type: [string, 'null'] }
+        avatar_url: { type: [ string, 'null' ] }
+        avatar_color: { type: [ string, 'null' ] }
+        background_url: { type: [ string, 'null' ] }
         announcement: { type: string }
         notifications_enabled: { type: boolean }
         debate_mode: { type: boolean }
@@ -3339,7 +4080,7 @@ components:
         last_message_at:
           type: string
           format: date-time
-        last_message_preview: { type: [string, 'null'] }
+        last_message_preview: { type: [ string, 'null' ] }
         topic: { type: string }
         is_active: { type: boolean }
         files:
@@ -3373,7 +4114,7 @@ components:
         max_rounds: { type: integer }
     GroupCreateInput:
       type: object
-      required: [name]
+      required: [ name ]
       additionalProperties: false
       properties:
         name:
@@ -3386,12 +4127,18 @@ components:
         ai_members:
           type: array
           items: { type: string }
+          maxItems: 30
         is_private: { type: boolean }
         ai_member: { type: string }
         avatar_url: { type: string, minLength: 1 }
         avatar_color:
-          type: [string, 'null']
+          type: [ string, 'null' ]
           maxLength: 32
+        space_category:
+          enum:
+            - work
+            - social
+            - play
     GroupSettingsInput:
       type: object
       additionalProperties: true
@@ -3401,10 +4148,10 @@ components:
           minLength: 1
           maxLength: 100
         description: { type: string }
-        avatar_url: { type: [string, 'null'] }
-        avatar_color: { type: [string, 'null'] }
+        avatar_url: { type: [ string, 'null' ] }
+        avatar_color: { type: [ string, 'null' ] }
         background_url:
-          type: [string, 'null']
+          type: [ string, 'null' ]
           description: 仅允许本站 /api/groups/{id}/background 形态或置空
         announcement:
           type: string
@@ -3419,7 +4166,7 @@ components:
           description: 允许嵌套键 mode/topic/roles/max_rounds/time_limit
     DebateUpdateInput:
       type: object
-      required: [debate_mode]
+      required: [ debate_mode ]
       additionalProperties: false
       properties:
         debate_mode: { type: boolean }
@@ -3429,18 +4176,18 @@ components:
           maximum: 3
     PinInput:
       type: object
-      required: [pinned]
+      required: [ pinned ]
       additionalProperties: false
       properties:
         pinned: { type: boolean }
     MemberAddInput:
       type: object
-      required: [aiId]
+      required: [ aiId ]
       properties:
         aiId: { type: string }
     MessageAttachment:
       type: object
-      required: [id, name, type, size]
+      required: [ id, name, type, size ]
       properties:
         id: { type: string }
         name: { type: string, maxLength: 256 }
@@ -3462,13 +4209,13 @@ components:
         group_id: { type: string }
         sender_type:
           type: string
-          enum: [user, ai, system]
+          enum: [ user, ai, system ]
         sender_id: { type: string }
         content: { type: string }
         content_type:
           type: string
-          enum: [text, code, file, system]
-        reply_to: { type: [string, 'null'] }
+          enum: [ text, code, file, system ]
+        reply_to: { type: [ string, 'null' ] }
         attachments:
           type: array
           items:
@@ -3495,7 +4242,7 @@ components:
           format: date-time
     MessageCreateInput:
       type: object
-      required: [content]
+      required: [ content ]
       additionalProperties: false
       properties:
         content:
@@ -3504,9 +4251,9 @@ components:
           maxLength: 10000
         content_type:
           type: string
-          enum: [text, code, file, system]
+          enum: [ text, code, file, system ]
         reply_to:
-          type: [string, 'null']
+          type: [ string, 'null' ]
           description: 被回复消息 ID，不可为空字符串
         metadata:
           type: object
@@ -3518,7 +4265,7 @@ components:
             $ref: '#/components/schemas/MessageAttachment'
     EditMessageInput:
       type: object
-      required: [content]
+      required: [ content ]
       additionalProperties: false
       properties:
         content:
@@ -3527,7 +4274,7 @@ components:
           maxLength: 10000
     BatchDeleteInput:
       type: object
-      required: [message_ids, group_id]
+      required: [ message_ids, group_id ]
       additionalProperties: false
       properties:
         message_ids:
@@ -3537,7 +4284,7 @@ components:
         group_id: { type: string }
     PaginatedMessagesResponse:
       type: object
-      required: [messages, hasMore]
+      required: [ messages, hasMore ]
       properties:
         messages:
           type: array
@@ -3546,7 +4293,7 @@ components:
         hasMore: { type: boolean }
     LikeStateResponse:
       type: object
-      required: [likes, liked_by, likes_count]
+      required: [ likes, liked_by, likes_count ]
       properties:
         likes:
           type: array
@@ -3557,7 +4304,7 @@ components:
         likes_count: { type: integer }
     DislikeStateResponse:
       type: object
-      required: [disliked_by, dislikes]
+      required: [ disliked_by, dislikes ]
       properties:
         disliked_by:
           type: array
@@ -3565,7 +4312,7 @@ components:
         dislikes: { type: integer }
     CommentCreateInput:
       type: object
-      required: [message_id, content]
+      required: [ message_id, content ]
       additionalProperties: false
       properties:
         message_id: { type: string }
@@ -3573,11 +4320,11 @@ components:
           type: string
           minLength: 1
           maxLength: 2000
-        parent_id: { type: [string, 'null'] }
-        reply_to: { type: [string, 'null'] }
+        parent_id: { type: [ string, 'null' ] }
+        reply_to: { type: [ string, 'null' ] }
     Comment:
       type: object
-      required: [id, message_id, sender_type, content, created_at]
+      required: [ id, message_id, sender_type, content, created_at ]
       properties:
         id: { type: string }
         message_id: { type: string }
@@ -3585,7 +4332,7 @@ components:
         reply_to: { type: string }
         sender_type:
           type: string
-          enum: [user, ai, system]
+          enum: [ user, ai, system ]
         sender_id: { type: string }
         content: { type: string }
         created_at:
@@ -3594,7 +4341,7 @@ components:
         depth: { type: integer }
     SearchResult:
       type: object
-      required: [total, query]
+      required: [ total, query ]
       additionalProperties: true
       properties:
         groups:
@@ -3662,9 +4409,9 @@ components:
           format: date-time
         parse_status:
           type: string
-          enum: [success, error]
-        parse_error: { type: [string, 'null'] }
-        annotate_error: { type: [string, 'null'] }
+          enum: [ success, error ]
+        parse_error: { type: [ string, 'null' ] }
+        annotate_error: { type: [ string, 'null' ] }
         search_description: { type: string }
         search_tags:
           type: array
@@ -3675,14 +4422,14 @@ components:
           description: 带签名下载令牌的下载地址
     FileUploadResponse:
       type: object
-      required: [file]
+      required: [ file ]
       properties:
         success: { type: boolean }
         file:
           $ref: '#/components/schemas/UploadedFile'
     FileBatchUploadResponse:
       type: object
-      required: [files]
+      required: [ files ]
       properties:
         success: { type: boolean }
         files:
@@ -3691,7 +4438,7 @@ components:
             $ref: '#/components/schemas/UploadedFile'
     TtsVoicesResponse:
       type: object
-      required: [voices, tones]
+      required: [ voices, tones ]
       properties:
         voices:
           type: array
@@ -3705,9 +4452,13 @@ components:
             additionalProperties: true
     TtsSynthesizeInput:
       type: object
-      required: [text]
+      required: [ text, clientRequestId ]
       additionalProperties: false
       properties:
+        clientRequestId:
+          type: string
+          format: uuid
+          description: 同一次合成请求的稳定幂等键；结果未知时用同一键查询，不得创建新键盲目重试
         text:
           type: string
           minLength: 1
@@ -3718,23 +4469,19 @@ components:
         tone:
           type: string
           maxLength: 50
-        speed:
-          type: number
-          minimum: 0.5
-          maximum: 2
-        groupId: { type: string }
         messageId:
           type: string
           format: uuid
     TtsSynthesizeResponse:
       type: object
-      required: [success, audio_id, audio_url, duration]
+      required: [ success, audio_id, audio_url, duration ]
       properties:
         success:
           type: boolean
           const: true
         audio_id: { type: string }
         audio_url: { type: string }
+        requestId: { type: string, format: uuid }
         duration: { type: number }
         voice:
           type: object
@@ -3744,10 +4491,9 @@ components:
           additionalProperties: true
         transcript: { type: string }
         format: { type: string }
-        audio_token: { type: string }
     TtsAudioEnvelope:
       type: object
-      required: [success, audio]
+      required: [ success, audio ]
       properties:
         success:
           type: boolean
@@ -3758,7 +4504,7 @@ components:
           description: MessageTTSAudio 元数据（id/audioUrl/duration/voiceId 等）
     SmartLikeInput:
       type: object
-      required: [message, contextMessages, senderInfo]
+      required: [ message, contextMessages, senderInfo ]
       properties:
         message:
           type: object
@@ -3773,14 +4519,14 @@ components:
           additionalProperties: true
     AutoLikeInput:
       type: object
-      required: [messageId, groupId]
+      required: [ messageId, groupId ]
       additionalProperties: false
       properties:
         messageId: { type: string }
         groupId: { type: string }
     MemoryStoreInput:
       type: object
-      required: [content]
+      required: [ content ]
       additionalProperties: false
       properties:
         content:
@@ -3793,7 +4539,7 @@ components:
           additionalProperties: true
     MemoryRetrieveInput:
       type: object
-      required: [query]
+      required: [ query ]
       additionalProperties: false
       properties:
         query:
@@ -3819,7 +4565,7 @@ components:
         responseConfig/socialConfig/modelConfig/debateConfig 等）。
     Agent:
       type: object
-      required: [id, name, description]
+      required: [ id, name, description ]
       properties:
         id: { type: string }
         name: { type: string }
@@ -3841,7 +4587,7 @@ components:
           format: date-time
     AgentCreateInput:
       type: object
-      required: [name, description, openingMessage]
+      required: [ name, description, openingMessage ]
       properties:
         name:
           type: string
@@ -3860,3 +4606,442 @@ components:
           type: array
           items: { type: string }
         avatarUrl: { type: string }
+    ModelProviderInput:
+      type: object
+      properties:
+        id:
+          type: string
+          maxLength: 80
+        name:
+          type: string
+          maxLength: 80
+        protocol:
+          enum:
+            - openai
+            - anthropic
+        baseUrl:
+          type: string
+          maxLength: 500
+        enabled: &a1
+          type: boolean
+        keyRequired: *a1
+        apiKey:
+          type: string
+          maxLength: 4096
+          writeOnly: true
+          description: 留空保留密钥；保存后不返回。
+        clearApiKey: *a1
+      required:
+        - id
+        - name
+        - protocol
+        - baseUrl
+        - enabled
+        - keyRequired
+    ModelProvider:
+      type: object
+      properties:
+        id:
+          type: string
+          maxLength: 80
+        name:
+          type: string
+          maxLength: 80
+        protocol:
+          enum:
+            - openai
+            - anthropic
+        baseUrl:
+          type: string
+          maxLength: 500
+        enabled: &a1
+          type: boolean
+        keyRequired: *a1
+        apiKeyConfigured: *a1
+        keySource:
+          enum:
+            - user
+            - environment
+            - none
+        ready: *a1
+      required:
+        - id
+        - name
+        - protocol
+        - baseUrl
+        - enabled
+        - keyRequired
+        - apiKeyConfigured
+        - keySource
+        - ready
+    CatalogModelInput:
+      type: object
+      properties:
+        id: &a1
+          type: string
+          maxLength: 80
+        providerId: *a1
+        name:
+          type: string
+          maxLength: 100
+        model:
+          type: string
+          maxLength: 200
+        enabled:
+          type: boolean
+        capabilities:
+          type: array
+          items:
+            enum:
+              - chat
+              - vision
+              - audio
+              - video
+              - tts
+          minItems: 1
+          maxItems: 5
+        contextWindow:
+          type: integer
+          minimum: 1024
+          maximum: 2000000
+        maxTokens:
+          type: integer
+          minimum: 1
+          maximum: 131072
+        temperature:
+          type:
+            - number
+            - "null"
+          minimum: 0
+          maximum: 2
+        tokenParameter:
+          enum:
+            - max_tokens
+            - max_completion_tokens
+        ttsMode:
+          enum:
+            - speech
+            - chat-audio
+        color:
+          type: string
+          pattern: ^#[0-9a-fA-F]{6}$
+      required:
+        - id
+        - providerId
+        - name
+        - model
+        - enabled
+        - capabilities
+    CatalogModel:
+      type: object
+      properties:
+        id: &a1
+          type: string
+          maxLength: 80
+        providerId: *a1
+        name:
+          type: string
+          maxLength: 100
+        model:
+          type: string
+          maxLength: 200
+        enabled: &a2
+          type: boolean
+        capabilities:
+          type: array
+          items:
+            enum:
+              - chat
+              - vision
+              - audio
+              - video
+              - tts
+          minItems: 1
+          maxItems: 5
+        contextWindow:
+          type: integer
+          minimum: 1024
+          maximum: 2000000
+        maxTokens:
+          type: integer
+          minimum: 1
+          maximum: 131072
+        temperature:
+          type:
+            - number
+            - "null"
+          minimum: 0
+          maximum: 2
+        tokenParameter:
+          enum:
+            - max_tokens
+            - max_completion_tokens
+        ttsMode:
+          enum:
+            - speech
+            - chat-audio
+        color:
+          type: string
+          pattern: ^#[0-9a-fA-F]{6}$
+        ready: *a2
+      required:
+        - id
+        - providerId
+        - name
+        - model
+        - enabled
+        - capabilities
+        - contextWindow
+        - maxTokens
+        - temperature
+        - tokenParameter
+        - ttsMode
+        - color
+        - ready
+    ModelCatalogInput:
+      type: object
+      properties:
+        revision:
+          type: integer
+          minimum: 0
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelProviderInput"
+          maxItems: 40
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogModelInput"
+          maxItems: 200
+        defaults:
+          type: object
+          properties:
+            chat: &a1
+              type:
+                - string
+                - "null"
+              maxLength: 80
+            vision: *a1
+            tts: *a1
+          required:
+            - chat
+            - vision
+            - tts
+      required:
+        - revision
+        - providers
+        - models
+        - defaults
+    ModelCatalog:
+      type: object
+      properties:
+        revision:
+          type: integer
+          minimum: 0
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelProvider"
+          maxItems: 40
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/CatalogModel"
+          maxItems: 200
+        defaults:
+          type: object
+          properties:
+            chat: &a1
+              type:
+                - string
+                - "null"
+              maxLength: 80
+            vision: *a1
+            tts: *a1
+          required:
+            - chat
+            - vision
+            - tts
+      required:
+        - revision
+        - providers
+        - models
+        - defaults
+    WorkspaceTaskInput:
+      type: object
+      properties:
+        title:
+          type: string
+          maxLength: 150
+          minLength: 1
+        prompt:
+          type: string
+          maxLength: 12000
+          minLength: 1
+        category:
+          enum:
+            - work
+            - social
+            - play
+        model_id:
+          type:
+            - string
+            - "null"
+          maxLength: 80
+        group_id:
+          type:
+            - string
+            - "null"
+          maxLength: 100
+        run_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+        repeat_minutes:
+          type:
+            - integer
+            - "null"
+          minimum: 15
+          maximum: 43200
+        auto_run:
+          type: boolean
+      required:
+        - title
+        - prompt
+      additionalProperties: false
+      description: auto_run 默认为 false。主动执行必须设置 run_at，repeat_minutes 需要主动执行；服务器必须保持运行。
+    WorkspaceTask:
+      type: object
+      properties:
+        title:
+          type: string
+          maxLength: 150
+          minLength: 1
+        prompt:
+          type: string
+          maxLength: 12000
+          minLength: 1
+        category:
+          enum:
+            - work
+            - social
+            - play
+        model_id:
+          type:
+            - string
+            - "null"
+          maxLength: 80
+        group_id:
+          type:
+            - string
+            - "null"
+          maxLength: 100
+        run_at: &a1
+          type:
+            - string
+            - "null"
+          format: date-time
+        repeat_minutes:
+          type:
+            - integer
+            - "null"
+          minimum: 15
+          maximum: 43200
+        auto_run:
+          type: boolean
+        id:
+          type: string
+        status:
+          enum:
+            - pending
+            - running
+            - needs_review
+            - outcome_unknown
+            - completed
+            - failed
+            - cancelled
+        run_id:
+          type: string
+          description: 当前或最近一次运行标识
+        accepted_run_id:
+          type: string
+          description: 最近经用户明确验收的运行标识
+        result_pending_review:
+          type: boolean
+        source_stale:
+          type: boolean
+          description: 当前关联会话与产出此结果时的来源快照不同；读取时计算
+        result:
+          type: string
+        error:
+          type:
+            - string
+            - "null"
+        run_count:
+          type: integer
+        history:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              finished_at: *a1
+              status:
+                enum:
+                  - generated
+                  - accepted
+                  - completed
+                  - failed
+              result:
+                type: string
+              error:
+                type:
+                  - string
+                  - "null"
+            required:
+              - id
+              - finished_at
+              - status
+              - result
+              - error
+        created_at: *a1
+        updated_at: *a1
+      required:
+        - title
+        - prompt
+        - category
+        - model_id
+        - group_id
+        - run_at
+        - repeat_minutes
+        - auto_run
+        - id
+        - status
+        - result
+        - error
+        - run_count
+        - history
+        - created_at
+        - updated_at
+    WorkspaceTaskPatch:
+      type: object
+      properties:
+        title:
+          type: string
+          maxLength: 150
+          minLength: 1
+        status:
+          enum:
+            - cancelled
+        auto_run:
+          type: boolean
+        run_at:
+          type:
+            - string
+            - "null"
+          format: date-time
+      required: []
+      additionalProperties: false

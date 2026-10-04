@@ -1,10 +1,8 @@
 ﻿import express from 'express';
-import interactionLoggerService from '../services/interactionLogger.js';
-import { getInsightsCache, setInsightsCache } from '../services/insightsCache.js';
 import { getUploadsDir, withWriteLock, updateGroupActivity, sanitizeGroupForClient, sanitizeGroupsForClient } from '../models/db.js';
 import { v4 as uuidv4 } from 'uuid';
 import { broadcastToGroup } from '../websocket/index.js';
-import { startAutonomousChatTimer, stopAutonomousChatTimer } from '../services/scheduler/index.js';
+import { startAutonomousChatTimer, stopAutonomousChatTimer, stopAutomaticGroupConversation } from '../services/scheduler/index.js';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -15,14 +13,34 @@ import { requireGroupMembership } from '../middleware/userDb.js';
 import { validateBody, createGroupSchema, updateDebateSchema, pinGroupSchema } from '../validators/index.js';
 import { sanitizeObject, GROUP_SANITIZE_CONFIG } from '../utils/sanitize.js';
 import { safeLog } from '../utils/logger.js';
-import { AI_LIST } from '../config/personas.js';
+import { readCatalog } from '../services/ai/catalog.js';
+import { revokeTtsForMessages, drainTtsPendingDeletes } from '../services/ttsDeletion.js';
+import { revokeMessageMemories, markGroupDeleted, markFileDeleted,
+  sourceMutationUncertain, readableSourceGroups, readableSourceMessages,
+  readableSourceFiles } from '../services/memory/persistentMemory.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const VALID_AI_IDS = new Set(AI_LIST);
 
 const router = express.Router();
+// Covers group-specific reads and mutations that still look up raw groups.
+// A restored old user JSON must not make a durably deleted group addressable.
+router.param('id', asyncHandler(async (req, res, next) => {
+  const db = await req.getUserDb();
+  await db.read();
+  if (!(await readableSourceGroups(req.userId, db, [{ id: req.params.id }])).length) {
+    return res.status(404).json({ error: 'Group not found' });
+  }
+  return next();
+}));
+router.use(asyncHandler(async (req, res, next) => {
+  if (!/^\/(groups|private-chat|ai-private-chat)(\/|$|s)/.test(req.path)) return next();
+  res.locals.modelCatalog = await readCatalog(req.userId);
+  res.locals.modelNames = Object.fromEntries(res.locals.modelCatalog.models.map(m => [m.id, m.name]));
+  res.locals.validModelIds = new Set(res.locals.modelCatalog.models.filter(m => m.enabled && m.capabilities.includes('chat')).map(m => m.id));
+  next();
+}));
 
 const aiNames = {
   // 向后兼容旧模型ID
@@ -176,29 +194,29 @@ router.get('/groups/:id/background', asyncHandler(async (req, res) => {
 
 router.get('/groups', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
-  await db.read();
-  const { limit, offset } = req.query;
-  let groups = db.data.groups;
+  return withWriteLock(req.userId, async () => {
+    await db.read();
+    const { limit, offset } = req.query;
+    let groups = await readableSourceGroups(req.userId, db);
   if (limit || offset) {
     const start = parseInt(offset, 10) || 0;
     const parsedLimit = parseInt(limit, 10);
     const end = Number.isFinite(parsedLimit) && parsedLimit > 0 ? start + parsedLimit : undefined;
     groups = groups.slice(start, end);
   }
-  res.json(sanitizeGroupsForClient(groups));
+    return res.json(sanitizeGroupsForClient(groups));
+  });
 }));
 
 router.get('/groups/:id', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
-  await db.read();
-  const { id } = req.params;
-  const group = db.data.groups.find(g => g.id === id);
-
-  if (!group) {
-    return res.status(404).json({ error: 'Group not found' });
-  }
-
-  res.json(sanitizeGroupForClient(group));
+  return withWriteLock(req.userId, async () => {
+    await db.read();
+    const group = (await readableSourceGroups(req.userId, db))
+      .find(item => item.id === req.params.id);
+    if (!group) return res.status(404).json({ error: 'Group not found' });
+    return res.json(sanitizeGroupForClient(group));
+  });
 }));
 
 router.post('/groups', validateBody(createGroupSchema), asyncHandler(async (req, res) => {
@@ -209,16 +227,14 @@ router.post('/groups', validateBody(createGroupSchema), asyncHandler(async (req,
   const normalizedAiMembers = Array.isArray(aiMembers) ? [...new Set(aiMembers.filter(Boolean))] : [];
 
   if (is_private) {
-    if (!ai_member || !VALID_AI_IDS.has(ai_member)) {
+    if (!ai_member || !res.locals.validModelIds.has(ai_member)) {
       return res.status(400).json({ error: '私聊需要指定有效的AI成员' });
     }
   } else {
-    if (normalizedAiMembers.some(id => !VALID_AI_IDS.has(id))) {
+    if (normalizedAiMembers.some(id => !res.locals.validModelIds.has(id))) {
       return res.status(400).json({ error: 'ai_members 包含无效的AI标识' });
     }
-    if (normalizedAiMembers.length > 0 && normalizedAiMembers.length < 2) {
-      return res.status(400).json({ error: '群聊至少需要2个AI成员' });
-    }
+
   }
 
   const groupId = uuidv4();
@@ -227,13 +243,14 @@ router.post('/groups', validateBody(createGroupSchema), asyncHandler(async (req,
     name,
     description,
     type: is_private ? 'private' : 'custom',
+    space_category: sanitizedBody.space_category || 'social',
     is_private: is_private || false,
     avatar_url: avatar_url || null,
     avatar_color: avatar_color || null,
     pinned: false,
     debate_mode: false,
     debate_level: 1,
-    ai_members: is_private ? [ai_member] : (normalizedAiMembers.length > 0 ? normalizedAiMembers : ['deepseek', 'deepseek_reasoner', 'glm_air', 'mimo_flash', 'qwen_flash']),
+    ai_members: is_private ? [ai_member] : normalizedAiMembers,
     created_at: new Date().toISOString(),
     last_message_at: new Date().toISOString(),
     last_message_preview: null
@@ -307,7 +324,7 @@ router.post('/groups/:id/members', asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { aiId } = req.body || {};
 
-  if (!aiId || typeof aiId !== 'string' || !VALID_AI_IDS.has(aiId)) {
+  if (!aiId || typeof aiId !== 'string' || !res.locals.validModelIds.has(aiId)) {
     return res.status(400).json({ error: 'aiId 无效或不在允许的AI列表中' });
   }
 
@@ -341,7 +358,7 @@ router.post('/groups/:id/members', asyncHandler(async (req, res) => {
       group_id: id,
       sender_type: 'system',
       sender_id: 'system',
-      content: `邀请了 ${aiNames[aiId] || aiId} 加入群聊`,
+      content: `邀请了 ${res.locals.modelNames[aiId] || aiId} 加入群聊`,
       content_type: 'text',
       metadata: { type: 'member_joined', newMember: aiId },
       created_at: new Date().toISOString()
@@ -373,7 +390,7 @@ router.post('/private-chat/:aiId', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   const { aiId } = req.params;
 
-  if (!VALID_AI_IDS.has(aiId)) {
+  if (!res.locals.validModelIds.has(aiId)) {
     return res.status(400).json({ error: 'aiId 无效或不在允许的AI列表中' });
   }
 
@@ -392,8 +409,8 @@ router.post('/private-chat/:aiId', asyncHandler(async (req, res) => {
       const groupId = uuidv4();
       privateChat = {
         id: groupId,
-        name: aiNames[aiId] || aiId,
-        description: `与 ${aiNames[aiId] || aiId} 的私聊`,
+        name: res.locals.modelNames[aiId] || aiId,
+        description: `与 ${res.locals.modelNames[aiId] || aiId} 的私聊`,
         type: 'private',
         is_private: true,
         pinned: true, // 私聊默认置顶
@@ -445,14 +462,29 @@ router.delete('/groups/:id', asyncHandler(async (req, res) => {
       throw notFound;
     }
 
+    const previous = {
+      messages: db.data.messages, files: db.data.files, groups: [...db.data.groups],
+      ttsAudioFiles: db.data.ttsAudioFiles, ttsPendingDeletes: db.data.ttsPendingDeletes,
+      memoryRecords: db.data.memoryRecords
+    };
     const initialMessageCount = db.data.messages.length;
+    const deletedMessageIds = db.data.messages.filter(m => m.group_id === id).map(m => m.id);
+    await markGroupDeleted(req.userId, db, id);
+    revokeTtsForMessages(db.data, deletedMessageIds);
     db.data.messages = db.data.messages.filter(m => m.group_id !== id);
+    revokeMessageMemories(db.data, id);
     deletedMessageCount = initialMessageCount - db.data.messages.length;
     filesToDelete = (db.data.files || []).filter(file => file.group_id === id);
     db.data.files = (db.data.files || []).filter(file => file.group_id !== id);
 
     db.data.groups.splice(groupIndex, 1);
-    await db.write();
+    try { await db.write(); }
+    catch (error) { Object.assign(db.data, previous); throw sourceMutationUncertain(req.userId, error); }
+  });
+
+  const audioDeletionPending = await drainTtsPendingDeletes(req.userId).catch(error => {
+    safeLog('warn', '删除群组音频待恢复', { userId: req.userId, error: error?.message });
+    return 1;
   });
 
   // 磁盘清理放在锁外异步执行，失败不影响删除结果
@@ -472,6 +504,7 @@ router.delete('/groups/:id', asyncHandler(async (req, res) => {
 
   res.json({
     success: true,
+    audioDeletionPending: audioDeletionPending > 0,
     deleted_messages: deletedMessageCount
   });
 }));
@@ -513,7 +546,7 @@ router.delete('/groups/:id/members/:aiId', asyncHandler(async (req, res) => {
       group_id: id,
       sender_type: 'system',
       sender_id: 'system',
-      content: `${aiNames[aiId] || aiId} 已被移出群聊`,
+      content: `${res.locals.modelNames[aiId] || aiId} 已被移出群聊`,
       content_type: 'text',
       metadata: { type: 'member_removed', removedMember: aiId },
       created_at: new Date().toISOString()
@@ -560,7 +593,7 @@ router.post('/ai-private-chat', asyncHandler(async (req, res) => {
   }
 
   for (const aiId of aiMembers) {
-    if (!VALID_AI_IDS.has(aiId)) {
+    if (!res.locals.validModelIds.has(aiId)) {
       return res.status(400).json({ error: `无效的AI成员: ${String(aiId).slice(0, 64)}` });
     }
   }
@@ -600,7 +633,7 @@ router.post('/ai-private-chat', asyncHandler(async (req, res) => {
     if (customName && customName.trim()) {
       chatName = customName.trim().slice(0, 50);
     } else {
-      const shortNames = sortedIds.map(id => aiShortNames[id] || aiNames[id]);
+      const shortNames = sortedIds.map(id => res.locals.modelNames[id] || id);
       chatName = shortNames.join(' & ');
     }
 
@@ -633,11 +666,12 @@ router.post('/ai-private-chat', asyncHandler(async (req, res) => {
 
 router.get('/ai-private-chats', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
-  await db.read();
-
-  const aiPrivateChats = db.data.groups.filter(g => g.type === 'ai_private' || g.is_ai_private);
-
-  res.json(sanitizeGroupsForClient(aiPrivateChats));
+  return withWriteLock(req.userId, async () => {
+    await db.read();
+    const aiPrivateChats = (await readableSourceGroups(req.userId, db))
+      .filter(g => g.type === 'ai_private' || g.is_ai_private);
+    return res.json(sanitizeGroupsForClient(aiPrivateChats));
+  });
 }));
 
 router.delete('/ai-private-chats/:id', asyncHandler(async (req, res) => {
@@ -664,18 +698,34 @@ router.delete('/ai-private-chats/:id', asyncHandler(async (req, res) => {
       throw notFound;
     }
 
+    const previous = {
+      messages: db.data.messages, groups: [...db.data.groups],
+      ttsAudioFiles: db.data.ttsAudioFiles, ttsPendingDeletes: db.data.ttsPendingDeletes,
+      memoryRecords: db.data.memoryRecords
+    };
     const initialMessageCount = db.data.messages.length;
+    const deletedMessageIds = db.data.messages.filter(m => m.group_id === id).map(m => m.id);
+    await markGroupDeleted(req.userId, db, id);
+    revokeTtsForMessages(db.data, deletedMessageIds);
     db.data.messages = db.data.messages.filter(m => m.group_id !== id);
+    revokeMessageMemories(db.data, id);
     deletedMessageCount = initialMessageCount - db.data.messages.length;
 
     db.data.groups.splice(groupIndex, 1);
-    await db.write();
+    try { await db.write(); }
+    catch (error) { Object.assign(db.data, previous); throw sourceMutationUncertain(req.userId, error); }
+  });
+
+  const audioDeletionPending = await drainTtsPendingDeletes(req.userId).catch(error => {
+    safeLog('warn', '删除AI私聊音频待恢复', { userId: req.userId, error: error?.message });
+    return 1;
   });
 
   safeLog('info', '删除AI私聊', { groupId: id, deletedMessageCount });
 
   res.json({
     success: true,
+    audioDeletionPending: audioDeletionPending > 0,
     deleted_messages: deletedMessageCount
   });
 }));
@@ -904,10 +954,10 @@ router.post('/groups/:id/formal-debate/allocate-roles', asyncHandler(async (req,
   const roles = allocateDebateRoles(group.ai_members, rolePreferences || {}, selectedParticipants || null);
 
   const formattedRoles = {
-    proponents: roles.proponents.map(id => ({ id, name: aiNames[id] || id })),
-    opponents: roles.opponents.map(id => ({ id, name: aiNames[id] || id })),
+    proponents: roles.proponents.map(id => ({ id, name: res.locals.modelNames[id] || id })),
+    opponents: roles.opponents.map(id => ({ id, name: res.locals.modelNames[id] || id })),
     judge: roles.judge ? { id: roles.judge, name: aiNames[roles.judge] || roles.judge } : null,
-    audience: roles.audience.map(id => ({ id, name: aiNames[id] || id })),
+    audience: roles.audience.map(id => ({ id, name: res.locals.modelNames[id] || id })),
     hasJudge: roles.hasJudge,
     hasAudience: roles.hasAudience
   };
@@ -949,7 +999,7 @@ router.put('/groups/:id/settings', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   const { id } = req.params;
   const sanitizedBody = sanitizeObject(req.body, GROUP_SANITIZE_CONFIG);
-  const { name, avatar_url, avatar_color, background_url, announcement, notifications_enabled, pinned, ...restSettings } = sanitizedBody;
+  const { name, avatar_url, avatar_color, background_url, announcement, notifications_enabled, autonomous_chat_enabled, pinned, ...restSettings } = sanitizedBody;
 
   let updatedGroup = null;
   await withWriteLock(req.userId, async () => {
@@ -999,6 +1049,16 @@ router.put('/groups/:id/settings', asyncHandler(async (req, res) => {
     if (notifications_enabled !== undefined) {
       group.notifications_enabled = Boolean(notifications_enabled);
     }
+    if (autonomous_chat_enabled !== undefined) {
+      if (typeof autonomous_chat_enabled !== 'boolean') {
+        const bad = new Error('主动聊天开关必须是布尔值');
+        bad.status = 400;
+        throw bad;
+      }
+      group.autonomous_chat_enabled = autonomous_chat_enabled;
+      if (!autonomous_chat_enabled) stopAutonomousChatTimer(id);
+      else if (group.ai_members?.length > 1) startAutonomousChatTimer(id);
+    }
     if (pinned !== undefined) {
       group.pinned = Boolean(pinned);
     }
@@ -1024,6 +1084,8 @@ router.put('/groups/:id/settings', asyncHandler(async (req, res) => {
     await db.write();
   });
 
+  if (autonomous_chat_enabled === false) stopAutomaticGroupConversation(id);
+
   broadcastToGroup(id, {
     type: 'group_update',
     group_id: id,
@@ -1036,11 +1098,14 @@ router.put('/groups/:id/settings', asyncHandler(async (req, res) => {
 
 router.get('/groups/:id/files', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
+  return withWriteLock(req.userId, async () => {
   await db.read();
-  const group = db.data.groups.find(g => g.id === req.params.id);
+  const group = (await readableSourceGroups(req.userId, db)).find(g => g.id === req.params.id);
   if (!group) return res.status(404).json({ error: '群组不存在' });
-  const files = (db.data.files || [])
-    .filter(f => f.group_id === req.params.id)
+  const files = (await readableSourceFiles(req.userId, db))
+    .filter(f => f.group_id === req.params.id &&
+      (!f.owner_user_id || f.owner_user_id === req.userId) &&
+      (!f.uploader_id || f.uploader_id === req.userId))
     .map(f => ({
       id: f.id,
       group_id: f.group_id,
@@ -1051,7 +1116,8 @@ router.get('/groups/:id/files', asyncHandler(async (req, res) => {
       uploaded_at: f.created_at
     }))
     .sort((a, b) => new Date(b.uploaded_at) - new Date(a.uploaded_at));
-  res.json({ success: true, files });
+  res.set('Cache-Control', 'no-store').json({ success: true, files });
+  });
 }));
 
 router.post('/groups/:id/files', asyncHandler(async (req, res) => {
@@ -1064,7 +1130,7 @@ router.delete('/groups/:id/files/:fileId', asyncHandler(async (req, res) => {
   let fileRecord = null;
   await withWriteLock(req.userId, async () => {
     await db.read();
-    const group = db.data.groups.find(g => g.id === req.params.id);
+    const group = (await readableSourceGroups(req.userId, db)).find(g => g.id === req.params.id);
     if (!group) {
       const notFound = new Error('群组不存在');
       notFound.status = 404;
@@ -1076,9 +1142,22 @@ router.delete('/groups/:id/files/:fileId', asyncHandler(async (req, res) => {
       notFound.status = 404;
       throw notFound;
     }
-    [fileRecord] = db.data.files.splice(fileIndex, 1);
-    await db.write();
+    fileRecord = db.data.files[fileIndex];
+    if ((fileRecord.owner_user_id && fileRecord.owner_user_id !== req.userId) ||
+        (fileRecord.uploader_id && fileRecord.uploader_id !== req.userId)) {
+      return res.status(403).json({ error: '禁止删除其他账号的文件' });
+    }
+    if (!(await readableSourceFiles(req.userId, db, [fileRecord])).length) {
+      return res.status(404).json({ error: '文件不存在' });
+    }
+    await markFileDeleted(req.userId, db, req.params.id, req.params.fileId);
+    const previousFiles = db.data.files;
+    db.data.files = previousFiles.filter((_, index) => index !== fileIndex);
+    try { await db.write(); }
+    catch (error) { db.data.files = previousFiles; throw sourceMutationUncertain(req.userId, error); }
   });
+
+  if (res.headersSent) return;
 
   // 磁盘清理在锁外异步执行
   const ownerId = fileRecord?.owner_user_id || fileRecord?.uploader_id || req.userId;
@@ -1097,13 +1176,14 @@ router.delete('/groups/:id/files/:fileId', asyncHandler(async (req, res) => {
 /**
  * 群聊洞察中心：聚合发言分布、活跃度、社交互动、情感趋势
  * GET /api/groups/:id/insights?days=7
- * 结果按 (userId, groupId, days) 做 60s TTL 缓存
+ * 每次从当前可读来源计算，避免删除后短时缓存回显旧聚合。
  */
 router.get('/groups/:id/insights', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
+  return withWriteLock(req.userId, async () => {
   await db.read();
   const { id } = req.params;
-  const group = db.data.groups.find(g => g.id === id);
+  const group = (await readableSourceGroups(req.userId, db)).find(g => g.id === id);
   if (!group) {
     return res.status(404).json({ error: '群组不存在' });
   }
@@ -1111,16 +1191,12 @@ router.get('/groups/:id/insights', asyncHandler(async (req, res) => {
   const daysRaw = parseInt(String(req.query.days ?? ''), 10);
   const days = Number.isFinite(daysRaw) ? Math.min(Math.max(daysRaw, 1), 30) : 7;
 
-  const cached = getInsightsCache(req.userId, id, days);
-  if (cached) {
-    return res.json(cached);
-  }
-
   const sinceMs = Date.now() - days * 24 * 60 * 60 * 1000;
 
-  const groupMessages = (db.data.messages || []).filter(m =>
+  const groupMessages = (await readableSourceMessages(req.userId, db)).filter(m =>
     m.group_id === id && new Date(m.created_at).getTime() >= sinceMs
   );
+  const visibleMessageIds = new Set(groupMessages.map(message => message.id));
 
   const perAi = new Map();
   let userCount = 0;
@@ -1132,7 +1208,7 @@ router.get('/groups/:id/insights', asyncHandler(async (req, res) => {
 
   for (const msg of groupMessages) {
     if (msg.sender_type === 'ai') {
-      const entry = perAi.get(msg.sender_id) || { ai_id: msg.sender_id, name: aiNames[msg.sender_id] || msg.sender_id, count: 0, last_active: null };
+      const entry = perAi.get(msg.sender_id) || { ai_id: msg.sender_id, name: res.locals.modelNames[msg.sender_id] || msg.sender_id, count: 0, last_active: null };
       entry.count += 1;
       if (!entry.last_active || msg.created_at > entry.last_active) entry.last_active = msg.created_at;
       perAi.set(msg.sender_id, entry);
@@ -1159,12 +1235,15 @@ router.get('/groups/:id/insights', asyncHandler(async (req, res) => {
   // 情感趋势（来自互动日志的情感分析，按日聚合均值）
   let sentimentTrend = [];
   try {
-    const { logs } = await interactionLoggerService.getUserLogs(req.userId);
+    const logs = db.data.interaction_logs || [];
     const sentimentByDay = new Map();
     for (const log of logs) {
       const score = log?.metadata?.sentiment?.score;
       if (typeof score !== 'number') continue;
       if (log.system_info?.group_id !== id) continue;
+      const sourceId = log?.metadata?.message_id ||
+        (log?.target?.type === 'message' ? log.target.id : null);
+      if (!sourceId || !visibleMessageIds.has(sourceId)) continue;
       const ts = new Date(log.timestamp).getTime();
       if (ts < sinceMs) continue;
       const day = String(log.timestamp).slice(0, 10);
@@ -1206,9 +1285,8 @@ router.get('/groups/:id/insights', asyncHandler(async (req, res) => {
       : 0
   };
 
-  setInsightsCache(req.userId, id, days, payload);
-
-  res.json(payload);
+  return res.json(payload);
+  });
 }));
 
 export default router;

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { usePersonasStore } from '../../stores/personasStore';
+import { useModelsStore } from '../../stores/modelsStore';
 import { AI_AVATAR_LETTERS, AI_COLORS, AI_NAMES } from '../../types';
 import { sanitizeUrl } from '../../utils/sanitizeUrl';
 
@@ -10,61 +11,9 @@ interface AIInfoPopupProps {
   position?: { x: number; y: number };
 }
 
-const AI_MODEL_INFO: Record<string, { model: string; provider: string; description: string }> = {
-  deepseek: {
-    model: 'deepseek-v4-flash',
-    provider: 'DeepSeek',
-    description: '通用对话模型，兼顾逻辑推理、日常问答与代码协助。',
-  },
-  deepseek_reasoner: {
-    model: 'deepseek-v4-pro',
-    provider: 'DeepSeek',
-    description: '推理增强模型，适合复杂分析和多步骤思考。',
-  },
-  glm_air: {
-    model: 'GLM-4.5-Air',
-    provider: 'Zhipu AI',
-    description: '轻量级对话模型，适合日常助手类任务。',
-  },
-  glm_flash: {
-    model: 'GLM-4.7-Flash',
-    provider: 'Zhipu AI',
-    description: '低延迟快速响应模型，适合高频常规对话。',
-  },
-  glm_flashx: {
-    model: 'GLM-4.7-FlashX',
-    provider: 'Zhipu AI',
-    description: '增强版快速模型，具备更强的分析和上下文处理能力。',
-  },
-  mimo_flash: {
-    model: 'mimo-v2.5-pro',
-    provider: 'Mimo',
-    description: '最新版 MiMo 模型，速度与质量兼顾，回复简洁直接。',
-  },
-  mimo_omni: {
-    model: 'mimo-v2.5',
-    provider: 'Mimo',
-    description: '多模态模型，适合理解跨文本与媒体信息。',
-  },
-  mimo_tts: {
-    model: 'mimo-v2.5-tts-voicedesign',
-    provider: 'Mimo',
-    description: '语音合成模型，可将文本转成自然流畅的语音。',
-  },
-  qwen_flash: {
-    model: 'Qwen3.5-Flash',
-    provider: 'Alibaba Cloud',
-    description: '快速版通义模型，知识覆盖广、响应速度快。',
-  },
-  qwen_turbo: {
-    model: 'qwen-turbo',
-    provider: 'Alibaba Cloud',
-    description: '通用加速模型，适合高响应要求的助手场景。',
-  },
-};
-
 export function AIInfoPopup({ aiId, isOpen, onClose, position }: AIInfoPopupProps) {
   const personas = usePersonasStore((s) => s.personas);
+  const catalog = useModelsStore((s) => s.catalog);
   const [adjustedPosition, setAdjustedPosition] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
@@ -90,14 +39,18 @@ export function AIInfoPopup({ aiId, isOpen, onClose, position }: AIInfoPopupProp
   }, [isOpen, position]);
 
   const persona = personas[aiId];
-  const modelInfo = useMemo(() => AI_MODEL_INFO[aiId] || {
-    model: aiId,
-    provider: '未知',
-    description: '暂无额外模型说明。',
-  }, [aiId]);
+  const model = catalog?.models.find(item => item.id === aiId);
+  const provider = catalog?.providers.find(item => item.id === model?.providerId);
+  const modelInfo = {
+    model: model?.model || aiId,
+    provider: provider?.name || '未配置服务商',
+    description: model
+      ? `已配置能力：${model.capabilities.join('、')}。${model.ready ? '连接已就绪。' : '连接尚未就绪。'}`
+      : '此模型不在当前目录中，可能是历史会话成员。',
+  };
 
-  const displayName = persona?.name || AI_NAMES[aiId] || aiId;
-  const avatarColor = persona?.color || AI_COLORS[aiId] || '#6b7280';
+  const displayName = persona?.name || model?.name || AI_NAMES[aiId] || aiId;
+  const avatarColor = persona?.color || model?.color || AI_COLORS[aiId] || '#6b7280';
   const avatarUrl = persona?.avatar_url;
   const avatarLetter = (AI_AVATAR_LETTERS[aiId] || displayName[0] || '?').toUpperCase();
   const expertise = useMemo(() => persona?.expertise || [], [persona?.expertise]);

@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { validateBody, smsRegisterSchema, phoneLoginSchema } from '../validators/index.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import { checkSmsVerifyCode, isSmsConfigured } from '../services/sms/index.js';
+import { provisionNewLocalMemoryAccount } from '../services/memory/persistentMemory.js';
 
 const router = express.Router();
 const SESSION_MAX_AGE = parseInt(process.env.SESSION_MAX_AGE) || 30 * 24 * 60 * 60 * 1000;
@@ -14,7 +15,8 @@ const MAX_SESSIONS_PER_USER = 5;
 function buildSessionCookieOptions() {
   return {
     httpOnly: true,
-    domain: isProduction ? undefined : 'localhost',
+    // Keep the cookie host-only. A fixed localhost domain is rejected when
+    // Windows development and test browsers use 127.0.0.1.
     path: '/',
     sameSite: isProduction ? 'none' : 'lax',
     maxAge: SESSION_MAX_AGE,
@@ -24,7 +26,6 @@ function buildSessionCookieOptions() {
 
 function buildClearSessionCookieOptions() {
   return {
-    domain: isProduction ? undefined : 'localhost',
     path: '/',
     sameSite: isProduction ? 'none' : 'lax',
     secure: isProduction
@@ -38,6 +39,25 @@ function pruneUserSessions(db, userId) {
   userSessions.sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at));
   const tokensToRemove = new Set(userSessions.slice(0, excess).map(s => s.token));
   db.data.sessions = db.data.sessions.filter(s => !tokensToRemove.has(s.token));
+}
+
+async function confirmRegistrationWrite(db, userId, token, originalError) {
+  // A write may commit and lose its acknowledgement. Re-read the authority
+  // before deciding whether to return a usable account or a failure.
+  try { await db.read({ force: true }); }
+  catch {
+    throw Object.assign(new Error('注册写入结果待核验，请稍后尝试登录'), {
+      code: 'REGISTRATION_OUTCOME_UNKNOWN', statusCode: 503, isOperational: true
+    });
+  }
+  const userExists = db.data.users?.some(user => user.id === userId);
+  const sessionExists = token ? db.data.sessions?.some(session =>
+    session.userId === userId && session.token === token) : false;
+  if (userExists && (!token || sessionExists)) return;
+  if (!userExists && !sessionExists) throw originalError;
+  throw Object.assign(new Error('注册账号与会话状态不一致，请联系管理员核验'), {
+    code: 'REGISTRATION_OUTCOME_UNKNOWN', statusCode: 503, isOperational: true
+  });
 }
 
 // 仅供本地开发和自动化测试使用；生产注册必须经过短信验证。
@@ -82,23 +102,20 @@ if (!isProduction) {
         duplicateField = '手机号已被使用';
         return;
       }
-      db.data.users.push(user);
-      db.data.sessions.push({ token, userId, expires_at: new Date(Date.now() + SESSION_MAX_AGE).toISOString() });
-      await db.write();
+      // Provision the independent deletion ledger before this account/session
+      // becomes visible. A crash can leave an orphan UUID, never an account
+      // that is readable but lacks its required ledger.
+      const userDb = await initUserDatabase(userId);
+      await provisionNewLocalMemoryAccount(userId, userDb);
+      db.data.users = [...db.data.users, user];
+      db.data.sessions = [...db.data.sessions,
+        { token, userId, expires_at: new Date(Date.now() + SESSION_MAX_AGE).toISOString() }];
+      try { await db.write(); }
+      catch (error) {
+        await confirmRegistrationWrite(db, userId, token, error);
+      }
     });
     if (duplicate) return res.status(409).json({ error: duplicateField || '用户名已存在' });
-
-    try {
-      await initUserDatabase(userId);
-    } catch (error) {
-      await withWriteLock('auth', async () => {
-        await db.read();
-        db.data.users = db.data.users.filter(entry => entry.id !== userId);
-        db.data.sessions = db.data.sessions.filter(entry => entry.userId !== userId);
-        await db.write();
-      });
-      throw error;
-    }
 
     res.cookie('session_token', token, buildSessionCookieOptions());
     return res.status(201).json({ success: true, user: { id: userId, username, nickname: user.nickname } });
@@ -197,23 +214,15 @@ router.post('/auth/register-sms', validateBody(smsRegisterSchema), asyncHandler(
       raceDetected = true;
       return;
     }
-    db.data.users.push(user);
-    await db.write();
+    const userDb = await initUserDatabase(userId);
+    await provisionNewLocalMemoryAccount(userId, userDb);
+    db.data.users = [...db.data.users, user];
+    try { await db.write(); }
+    catch (error) { await confirmRegistrationWrite(db, userId, null, error); }
   });
 
   if (raceDetected) {
     return res.status(409).json({ error: '该手机号已注册' });
-  }
-
-  try {
-    await initUserDatabase(userId);
-  } catch (error) {
-    await withWriteLock('auth', async () => {
-      await db.read();
-      db.data.users = db.data.users.filter(u => u.id !== userId);
-      await db.write();
-    });
-    return res.status(500).json({ error: '用户数据库初始化失败' });
   }
 
   const token = generateSessionToken();
