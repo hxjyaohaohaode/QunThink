@@ -204,6 +204,10 @@ axiosInstance.interceptors.request.use(
 
 axiosInstance.interceptors.response.use(
   (response) => {
+    const expected = response.config.headers?.['X-Expected-User-Id'];
+    if (expected && expected !== activeRequestAccount()) {
+      return Promise.reject(Object.assign(new Error('账号已切换，已丢弃旧账号的迟到响应'), { status: 409, code: 'STALE_ACCOUNT_RESPONSE' }));
+    }
     const start = (response.config as typeof response.config & { diagnosticStarted?: number }).diagnosticStarted;
     recordDiagnostic('request', getDiagnosticSurface(), 'succeeded', start === undefined ? undefined : performance.now() - start);
     rememberBackendOriginFromUrl(response.request?.responseURL || response.config.baseURL);

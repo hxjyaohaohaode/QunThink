@@ -50,3 +50,12 @@ test('current stale tab receives reauthentication signal when shared cookie chan
   await assert.rejects(axiosInstance.get('/tasks'), error => error.code==='ACCOUNT_CHANGED');
   assert.deepEqual(events,['account_changed']); off();
 });
+
+test('a successful old-account response is rejected before any store can consume it', async () => {
+  globalThis.__apiAccount = 'alice';
+  let finish;
+  axiosInstance.defaults.adapter = config => new Promise(resolve => { finish = () => resolve(response(config,{nickname:'private-alice'})); });
+  const pending = axiosInstance.get('/user/profile'); await new Promise(resolve => setTimeout(resolve,0));
+  globalThis.__apiAccount = 'bob'; finish();
+  await assert.rejects(pending,error => error.code==='STALE_ACCOUNT_RESPONSE');
+});

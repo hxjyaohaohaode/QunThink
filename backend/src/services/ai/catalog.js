@@ -242,8 +242,12 @@ export async function resolveProviderConnection(userId, providerId) {
 
 export async function defaultModelId(userId, capability = 'chat') {
   const catalog = await readCatalog(userId || 'default');
-  const preferred = catalog.models.find(m => m.id === catalog.defaults[capability] && m.ready && m.verifiedCapabilities.includes(capability));
-  const selected = preferred || catalog.models.find(m => m.ready && m.verifiedCapabilities.includes(capability));
+  const explicitId = catalog.defaults[capability];
+  const preferred = catalog.models.find(m => m.id === explicitId && m.ready && m.verifiedCapabilities.includes(capability));
+  if (explicitId && !preferred) {
+    throw catalogError(`你选择的默认 ${capability} 模型暂不可用或尚未通过测试。请重新测试或明确更改默认模型；不会自动改用其他服务商。`, 409);
+  }
+  const selected = explicitId ? preferred : catalog.models.find(m => m.ready && m.verifiedCapabilities.includes(capability));
   if (!selected) throw catalogError(`还没有经过测试的 ${capability} 模型，请在模型中心配置并测试，或明确选择模型`, 409);
   return selected.id;
 }

@@ -148,7 +148,7 @@ const defaultProfileState: UserProfile = {
 };
 
 function hydrateBootstrapData(userId: string, payload: BootstrapPayload) {
-  if (getCacheUserId() !== userId) { useAudioStore.getState().clearAll(); useTasksStore.getState().cleanup(); clearDiagnostics(); }
+  if (getCacheUserId() !== userId) { useAudioStore.getState().clearAll(); useTasksStore.getState().cleanup(); useProfileStore.getState().cleanup(); clearDiagnostics(); }
   setCacheUserId(userId);
   confirmAuthIdentity(userId);
   setIndexedDBUserId(userId);
@@ -256,6 +256,7 @@ async function initializeUserData(userId: string) {
 async function handleLogout(remote = true) {
   clearDiagnostics();
   useAudioStore.getState().clearAll();
+  useProfileStore.getState().cleanup();
   await purgeLegacyPrivateCaches();
   useTasksStore.getState().cleanup();
   useModelsStore.getState().cleanup();

@@ -367,7 +367,10 @@ test('a multi-model group does not start additional paid AI rounds without opt-i
   assert.equal(group.status, 201);
   assert.notEqual(group.body.autonomous_chat_enabled, true);
   const before = calls.length;
-  await queueAIMessages(group.body.id, '每个模型只回答一次', null, s.userId);
+  // Natural group replies intentionally cap participation probability at 0.98.
+  // Explicit mentions make the first-round fixture deterministic while still
+  // asserting that no additional paid round starts without autonomous opt-in.
+  await queueAIMessages(group.body.id, '@custom @custom_partner 每个模型只回答一次', null, s.userId);
   const generated = calls.slice(before).filter(call => call.body.stream);
   assert.equal(generated.length, 2);
   assert.deepEqual(new Set(generated.map(call => call.body.model)),
@@ -1237,4 +1240,20 @@ test('queued user replies stop before dispatch and discard responses after sourc
     await new Promise(resolve => wss.close(resolve));
     await new Promise(resolve => socketServer.close(resolve));
   }
+});
+
+test('an explicit unavailable default never silently reroutes input to another verified provider', async () => {
+  const s = await session(); await configure(s.userId); await probeChat(s);
+  const catalog = await readCatalog(s.userId);
+  catalog.providers.push({id:'private_provider',name:'明确选择的服务商',baseUrl:`${origin}/private`,protocol:'openai',enabled:true,keyRequired:true,apiKey:'isolated-private-test-key'});
+  catalog.models.push(customModel({id:'private_model',providerId:'private_provider',name:'明确默认但未测试'}));
+  catalog.defaults.chat = 'private_model';
+  await saveCatalog(s.userId,catalog);
+  assert.deepEqual((await readCatalog(s.userId)).models.find(model=>model.id==='custom').verifiedCapabilities,['chat']);
+  const before = calls.length;
+  await assert.rejects(defaultModelId(s.userId), error=>error.status===409 && error.message.includes('不会自动改用其他服务商'));
+  await assert.rejects(createTask(s.userId,{title:'不得换服务商',prompt:'属于用户选定服务商的内容',auto_run:true,run_at:new Date(Date.now()+60000).toISOString()}),error=>error.status===409);
+  assert.equal(calls.length,before);
+  const automatic=await readCatalog(s.userId);automatic.defaults.chat=null;await saveCatalog(s.userId,automatic);
+  assert.equal(await defaultModelId(s.userId),'custom');
 });

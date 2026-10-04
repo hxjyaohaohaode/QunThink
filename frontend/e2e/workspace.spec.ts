@@ -66,7 +66,8 @@ test('lost save acknowledgment is same-key replay with one persisted task', asyn
   });
   await workspace.getByRole('button', { name: '保存任务', exact: true }).click();
   await expect(workspace.getByRole('button', { name: '核验并重试保存', exact: true })).toBeVisible();
-  await expect(workspace.locator('fieldset')).toBeDisabled();
+  await expect(workspace.getByLabel('任务名称', { exact: true })).toBeDisabled();
+  await expect(workspace.getByLabel('希望得到什么')).toBeDisabled();
   await workspace.getByRole('button', { name: '核验并重试保存', exact: true }).click();
   await expect(workspace.getByRole('heading', { name: '断网核验任务', exact: true })).toBeVisible();
   expect(keys).toHaveLength(2); expect(keys[0]).toBeTruthy(); expect(keys[1]).toBe(keys[0]);
