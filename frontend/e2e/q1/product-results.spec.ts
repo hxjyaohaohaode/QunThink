@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { registerSyntheticAccount } from '../authFixture';
-import { pickWorkspaceNavigationState, CONTEXT_DISCLOSURE } from '../../scripts/q1-navigation.mjs';
+import { pickWorkspaceNavigationState, sessionRetryAt, CONTEXT_DISCLOSURE } from '../../scripts/q1-navigation.mjs';
 import { assertQ1CiRuntime, Q1_ORIGIN, ORIGINAL, CORRECTION, LATER_CORRECTION, PURPOSE, INVITATION, messageBubbleSelector, observeNewChatCalls } from '../../scripts/q1-fixture-protocol.mjs';
 
 if (!process.argv.includes('--list')) assertQ1CiRuntime();
@@ -15,6 +15,7 @@ const BASELINE = git('rev-parse', 'HEAD');
 // Start/end gates still reject modified or untracked production/brand bytes.
 const TREES = Object.fromEntries(['frontend/src', 'backend/src', 'shared', 'frontend/public'].map(path => [path, git('rev-parse', `HEAD:${path}`)]));
 type Json = Record<string, any>;
+const sessionLimits = new WeakMap<Page, { path: string; status: number; retryAfter: string; observedAt: number; retryAt: number | null }>();
 class Evidence {
   entries: Json[] = []; gaps: Json[] = []; sequence = 0; stage = 'initialization'; outcome = 'running';
   constructor(readonly page: Page, readonly info: TestInfo) {}
@@ -92,6 +93,7 @@ async function workspace(page: Page, info: TestInfo, e: Evidence) {
   const mobile = info.project.name === 'mobile-reduced-motion';
   const controls = {
     workspace: page.getByTestId('workspace'),
+    sessionRetry: page.getByRole('button', { name: '重试连接', exact: true }),
     writingClose: page.getByRole('button', { name: '收起文稿，返回对话', exact: true }),
     mobileWorkspace: page.getByRole('button', { name: '⌘ 工作台', exact: true }),
     mobileBack: page.getByRole('button', { name: '返回', exact: true }),
@@ -108,10 +110,24 @@ async function workspace(page: Page, info: TestInfo, e: Evidence) {
       return next;
     }, { timeout: 20000, intervals: [100, 250, 500], message: 'Observe a known authenticated workspace/chat navigation state; do not infer Back from an unready workspace' }).not.toBe('waiting');
     if (next === 'workspace') {
+      sessionLimits.delete(page);
       await e.record('workspace-navigation-observed', { observations, elapsedMs: Date.now() - started, meaning: 'Readiness observation only, not an acceptable user waiting-time verdict' });
       await e.shot('workspace-ready-for-original-draft', controls.workspace); return;
     }
-    if (next === 'close-writing') { await controls.writingClose.click({ timeout: 20000 }); await expect(controls.writingClose).not.toBeVisible(); }
+    if (next === 'session-retry') {
+      const limit = sessionLimits.get(page);
+      await e.record('session-recovery-screen', { observedResponse: limit || null });
+      await e.shot('session-rate-limit-before-wait', controls.sessionRetry);
+      if (!limit || limit.retryAt === null) throw new Error('Session recovery requires triage: no bounded server Retry-After observation');
+      sessionLimits.delete(page);
+      const waitStarted = Date.now();
+      await new Promise(resolve => setTimeout(resolve, Math.max(0, limit.retryAt! - Date.now()) + 100));
+      await e.record('session-rate-limit-wait-completed', { ...limit, waitStarted, waitFinished: Date.now(), meaning: 'Actual server-directed waiting, not an unchanged no-wait success or an acceptable speed claim' });
+      await e.shot('session-rate-limit-before-real-retry', controls.sessionRetry, true);
+      await controls.sessionRetry.click();
+      await expect(controls.sessionRetry).not.toBeVisible();
+    }
+    else if (next === 'close-writing') { await controls.writingClose.click({ timeout: 20000 }); await expect(controls.writingClose).not.toBeVisible(); }
     else if (next === 'mobile-home') { await controls.mobileWorkspace.click({ timeout: 20000 }); await expect(controls.workspace).toBeVisible({ timeout: 20000 }); }
     else if (next === 'mobile-chat') { await controls.mobileBack.click({ timeout: 20000 }); await expect(controls.mobileWorkspace).toBeVisible({ timeout: 20000 }); }
     else if (next === 'desktop-chat') { await controls.desktopBack.click({ timeout: 20000 }); await expect(controls.workspace).toBeVisible({ timeout: 20000 }); }
@@ -172,6 +188,12 @@ async function waitForLoginForm(page: Page, e: Evidence) {
 }
 
 async function setup(page: Page, context: BrowserContext, info: TestInfo, e: Evidence, withModel = true) {
+  page.on('response', response => {
+    const url = new URL(response.url());
+    if (url.origin !== new URL(page.url()).origin || response.request().method() !== 'GET' || !url.pathname.startsWith('/api/auth/') || response.status() !== 429) return;
+    const observedAt = Date.now(), retryAfter = response.headers()['retry-after'] || '';
+    sessionLimits.set(page, { path: url.pathname, status: 429, retryAfter, observedAt, retryAt: sessionRetryAt(retryAfter, observedAt) });
+  });
   const providerCallCountAtStart = (await get(context, `${Q1_ORIGIN}/__q1/observations`)).calls.length;
   const protection = protectedSnapshot(); await e.record('protected-start', protection);
   expect(protection.unchanged).toBe(true);
@@ -480,6 +502,7 @@ test('Q1 partial fault evidence: lost save ACK, reload, dispatched cancellation 
     page.once('dialog', reloadDialog);
     allowAuthorityRead = true;
     try { await page.reload(); } finally { page.off('dialog', reloadDialog); }
+    await workspace(page, info, e);
     const target = await openDetails(page, title); const recovered = await taskById(context, savedId);
     expect(recovered.client_request_id).toBe(createIntents[0].key); expect(recovered.prompt).toBe(createIntents[0].payload.prompt);
     expect((await tasks(context)).filter(t => t.title === title)).toHaveLength(1); expect(createIntents).toHaveLength(1);
@@ -502,7 +525,7 @@ test('Q1 partial fault evidence: lost save ACK, reload, dispatched cancellation 
     await expect.poll(async () => (await fixtureCalls(context, model)).filter((call: Json) => call.kind === 'task' && call.releasedAt).length).toBe(1);
     await e.record('late-provider-receipt-released', { release: await release.json(), calls: await fixtureCalls(context, model),
       limitation: 'If the HTTP socket was already aborted, evidence is a late response attempt after processing, not proof the client received a late ACK.' });
-    await page.reload(); const reopened = await openDetails(page, title); const unknown = await taskById(context, savedId);
+    await page.reload(); await workspace(page, info, e); const reopened = await openDetails(page, title); const unknown = await taskById(context, savedId);
     expect(unknown.status).toBe('outcome_unknown'); expect(unknown.run_id).toBe(running.run_id); expect(unknown.result_pending_review).toBe(false);
     expect(runKeys).toHaveLength(1); expect((await fixtureCalls(context, model)).filter((call: Json) => call.kind === 'task')).toHaveLength(1);
     await e.shot('same-unknown-run-after-reload', reopened);
