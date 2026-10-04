@@ -30,7 +30,7 @@ plugins:[{name:'reduced-motion',setup(build) { build.onResolve({filter:/useReduc
 const {act,render}=await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
 let container,mounted;
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-const button=text=>[...container.querySelectorAll('button')].find(el=>el.textContent===text);
+const button=text=>[...document.body.querySelectorAll('button')].find(el=>el.textContent===text);
 async function flush(ms=5) { await act(async()=>{await wait(ms);}); }
 async function key(value,shift=false) { await act(async()=>document.dispatchEvent(new window.KeyboardEvent('keydown',{key:value,shiftKey:shift,bubbles:true,cancelable:true}))); }
 beforeEach(async()=>{if(mounted)await act(async()=>mounted.unmount());container?.remove();container=document.createElement('div');document.body.append(container);mounted=null;Object.assign(globalThis.__modalTest,{reduced:true,close:0,answers:[],outer:0,inner:0});});
@@ -43,7 +43,7 @@ test('replacing an in-flight confirmation cancels the old intent, including its 
  await act(async()=>{void globalThis.__modalTest.ask('second');});
  await flush();
  assert.deepEqual(globalThis.__modalTest.answers,[['first',false]]);
- assert.equal(container.querySelector('[role="dialog"]').getAttribute('aria-label'),'second');
+ assert.equal(document.body.querySelector('[role="dialog"]').getAttribute('aria-label'),'second');
  await act(async()=>button('取消').click()); await flush(180);
  assert.deepEqual(globalThis.__modalTest.answers,[['first',false],['second',false]]);
 });
@@ -56,8 +56,8 @@ test('same-frame double confirm invokes one callback and loading blocks all dism
  mounted=await render(container,'direct',props);
  await act(async()=>{button('确认').click();button('确认').click();});await flush();assert.equal(confirmed,1);
  mounted=await render(container,'direct',{...props,visible:false},mounted);mounted=await render(container,'direct',{...props,loading:true},mounted);
- await key('Escape');await act(async()=>container.firstElementChild.click());await flush(); assert.equal(cancelled,0);assert.equal(confirmed,1);
- assert.ok(document.getElementById(container.querySelector('[role="dialog"]').getAttribute('aria-describedby')));
+ await key('Escape');await act(async()=>document.body.querySelector('[role="dialog"]').parentElement.click());await flush(); assert.equal(cancelled,0);assert.equal(confirmed,1);
+ assert.ok(document.getElementById(document.body.querySelector('[role="dialog"]').getAttribute('aria-describedby')));
 });
 test('focus cycles past fieldset-disabled controls and only the top dialog receives Escape',async()=>{
  const trigger=document.createElement('button');document.body.append(trigger);trigger.focus();

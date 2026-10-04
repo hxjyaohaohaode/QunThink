@@ -23,7 +23,7 @@ test('brand login entry remains visible before authentication', async ({ page },
   await page.goto('/');
   await expect(page.getByText('群想', { exact: true }).first()).toBeVisible();
   await expect(page.getByPlaceholder('请输入手机号')).toBeVisible();
-  await page.screenshot({ path: info.outputPath('brand-login.png'), fullPage: true });
+  await page.screenshot({ path: info.outputPath('brand-login.png'), fullPage: true, animations: 'disabled' });
 });
 
 test('real API saves once, preserves draft across views, and restores saved task after reload', async ({ page, context }, info) => {
@@ -36,14 +36,14 @@ test('real API saves once, preserves draft across views, and restores saved task
   await workspace.getByRole('button', { name: '工作台', exact: true }).click();
   await expect(workspace.getByLabel('任务名称', { exact: true })).toHaveValue('中文跨页草稿测试');
   await expect(workspace.getByLabel('希望得到什么')).toHaveValue('保留这段内容，检查保存结果和来源。');
-  await page.screenshot({ path: info.outputPath('task-composer.png'), fullPage: true });
+  await page.screenshot({ path: info.outputPath('task-composer.png'), fullPage: true, animations: 'disabled' });
   await workspace.getByRole('button', { name: '保存任务', exact: true }).click();
   await expect(workspace.getByRole('heading', { name: '中文跨页草稿测试', exact: true })).toBeVisible();
   const tasks = await (await context.request.get('/api/tasks')).json();
   expect(tasks.filter((task: { title: string }) => task.title === '中文跨页草稿测试')).toHaveLength(1);
   await page.reload();
   await expect(page.getByTestId('workspace').getByRole('heading', { name: '中文跨页草稿测试', exact: true })).toBeVisible();
-  await page.screenshot({ path: info.outputPath('workspace-saved-task.png'), fullPage: true });
+  await page.screenshot({ path: info.outputPath('workspace-saved-task.png'), fullPage: true, animations: 'disabled' });
   await page.getByLabel('搜索任务').fill('没有任何匹配的内容');
   await expect(page.getByText('没有符合条件的任务')).toBeVisible();
   await page.getByRole('button', { name: '清除筛选', exact: true }).click();
@@ -84,7 +84,7 @@ test('local diagnostics never include input or upload runtime reports', async ({
   await expect(workspace.getByRole('heading', { name: '运行记录', exact: true })).toBeVisible();
   await expect(workspace.getByRole('list', { name: '本地运行记录' })).not.toContainText('Private-QA-Canary-39208');
   expect(uploads).toEqual([]);
-  await page.screenshot({ path: info.outputPath('local-diagnostics.png'), fullPage: true });
+  await page.screenshot({ path: info.outputPath('local-diagnostics.png'), fullPage: true, animations: 'disabled' });
   await workspace.getByRole('checkbox', { name: '本标签页记录诊断' }).uncheck();
   await expect(workspace.getByText('暂无记录。开启后，接下来的操作会显示在这里。')).toBeVisible();
 });
@@ -158,7 +158,7 @@ test('model configuration preserves drafts and real revision conflicts; profile 
   await models.getByRole('button',{name:'保存并应用',exact:true}).click();
   await expect(models.getByText('当前配置已保存',{exact:true})).toBeVisible();
   expect(probes).toEqual([]);
-  await page.screenshot({path:info.outputPath('model-setup-recovered.png'),fullPage:true});
+  await page.screenshot({path:info.outputPath('model-setup-recovered.png'),fullPage:true,animations:'disabled'});
 
   if (info.project.name === 'mobile-reduced-motion') {
     await page.getByRole('button',{name:'设置',exact:true}).click();
@@ -166,7 +166,19 @@ test('model configuration preserves drafts and real revision conflicts; profile 
   } else await page.getByTitle('个人资料',{exact:true}).click();
   const profile = page.getByRole('dialog',{name:'编辑个人资料',exact:true});
   await profile.getByLabel('昵称',{exact:true}).fill('保存前先确认');
-  await page.screenshot({path:info.outputPath('profile-editing.png'),fullPage:true});
+  await page.screenshot({path:info.outputPath('profile-editing.png'),fullPage:true,animations:'disabled'});
+  const geometry = await profile.evaluate(element => {
+    const scroll = element.querySelector('[data-profile-scroll]')!.getBoundingClientRect();
+    const actions = element.querySelector('[data-profile-actions]')!.getBoundingClientRect();
+    const layer = element.closest('[data-profile-layer]');
+    const bottomHit = document.elementFromPoint(window.innerWidth / 2, window.innerHeight - 4);
+    return { scrollBottom: scroll.bottom, actionsTop: actions.top, actionsBottom: actions.bottom,
+      viewportHeight: window.innerHeight, onTop: Boolean(bottomHit?.closest('[data-profile-layer]')),
+      bodyPortal: layer?.parentElement === document.body, opacity: Number(getComputedStyle(element).opacity) };
+  });
+  expect(geometry.scrollBottom).toBeLessThanOrEqual(geometry.actionsTop + 1);
+  expect(geometry.actionsBottom).toBeLessThanOrEqual(geometry.viewportHeight + 1);
+  expect(geometry.bodyPortal).toBe(true); expect(geometry.onTop).toBe(true); expect(geometry.opacity).toBe(1);
   await page.keyboard.press('Escape');
   const confirm = page.getByRole('dialog',{name:'放弃未保存的资料修改？',exact:true});
   await expect(confirm).toBeVisible();
@@ -190,5 +202,5 @@ test('model configuration preserves drafts and real revision conflicts; profile 
   const savedProfile = await (await context.request.get('/api/profile')).json();
   expect(savedProfile.profile.nickname).toBe('保存前先确认');
   expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)).toBe(false);
-  await page.screenshot({path:info.outputPath('profile-saved.png'),fullPage:true});
+  await page.screenshot({path:info.outputPath('profile-saved.png'),fullPage:true,animations:'disabled'});
 });

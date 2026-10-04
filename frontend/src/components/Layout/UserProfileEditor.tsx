@@ -1,4 +1,5 @@
 ﻿import { useState, useEffect, useCallback, useRef, useId } from 'react';
+import { createPortal } from 'react-dom';
 import { useProfileStore, UserProfile } from '../../stores/profileStore';
 import { useModalAnimation } from '../../hooks/useModalAnimation';
 import { useToast, useConfirm } from '../Common';
@@ -100,6 +101,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
   const sessionRef = useRef(0);
   const avatarReadRef = useRef(0);
   const avatarReaderRef = useRef<FileReader | null>(null);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
   const [avatarReading, setAvatarReading] = useState(false);
   const openRef = useRef(isOpen); openRef.current = isOpen;
   const savingRef = useRef(false);
@@ -120,6 +122,9 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
       savingRef.current = false;
       setSaving(false);
       setAvatarReading(false);
+      setHobbyCustomInput('');
+      setPersonalityCustomInput('');
+      setValidationError(null);
     }
     return () => {
       sessionRef.current++;
@@ -207,7 +212,11 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
     const saveSession = sessionRef.current;
     savingRef.current = true; setSaving(true);
     try {
-      await updateProfile(form);
+      const hobby = hobbyCustomInput.trim(), personality = personalityCustomInput.trim();
+      await updateProfile({ ...form,
+        hobbies: hobby && !form.hobbies.includes(hobby) ? [...form.hobbies, hobby] : form.hobbies,
+        personality: personality && !form.personality.includes(personality) ? [...form.personality, personality] : form.personality,
+      });
       if (!openRef.current || sessionRef.current !== saveSession) return;
       setIsDirty(false);
       showToast({ message: '资料已保存', type: 'success' });
@@ -237,9 +246,9 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
     setPersonalityCustomInput('');
   };
 
-  return (
+  return createPortal(
     <>
-    <div className={`fixed inset-0 bg-black/50 flex items-end md:items-center justify-center z-[70] ${overlayClass}`} onClick={handleCloseWithDirtyCheck}>
+    <div data-profile-layer className={`fixed inset-0 bg-black/50 flex items-end md:items-center justify-center z-[70] ${overlayClass}`} onClick={handleCloseWithDirtyCheck}>
       <div
         ref={trapRef} role="dialog" aria-modal="true" aria-label="编辑个人资料" data-observe="settings" aria-busy={saving}
         className={`bg-bg-surface dark:bg-gray-800 w-full md:max-w-[480px] md:rounded-lg rounded-t-2xl shadow-xl max-h-[100dvh] md:max-h-[85vh] flex flex-col overflow-hidden profile-editor-motion ${isClosing ? 'profile-editor-motion-closing' : ''}`}
@@ -261,10 +270,11 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
 
         <div className="flex shrink-0 items-center justify-between px-6 py-4 border-b border-border-subtle">
           <h3 className="text-lg font-semibold text-text-primary dark:text-white">编辑个人资料</h3>
-          <button disabled={saving} onClick={() => void handleCloseWithDirtyCheck()} className="rounded-lg px-3 py-2 text-sm text-text-secondary hover:bg-bg-surface2 hover:text-text-primary">关闭</button>
+          <button disabled={saving} onClick={() => void handleCloseWithDirtyCheck()} className="min-h-11 rounded-lg px-3 py-2 text-sm text-text-secondary hover:bg-bg-surface2 hover:text-text-primary">关闭</button>
         </div>
 
-        <fieldset disabled={saving} className="min-w-0 flex-1 overflow-y-auto p-6 space-y-4" style={{ paddingBottom: 'max(1.5rem, calc(env(safe-area-inset-bottom, 0px) + 60px))' }}>
+        <div data-profile-scroll className="min-h-0 flex-1 overflow-y-auto p-6">
+        <fieldset disabled={saving} className="min-w-0 space-y-4">
           <p className="text-xs text-text-secondary leading-relaxed">除昵称外均可不填。昵称、偏好和自我介绍等资料可能随对话发送给你选择的模型服务商，请只填写愿意用于个性化交流的信息。</p>
           <div className="flex items-center gap-4">
             <div className="relative group">
@@ -279,17 +289,20 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
               >
                 {!form.avatar_url && (form.nickname?.charAt(0) || 'U')}
               </div>
-              <label className="absolute inset-0 flex items-center justify-center rounded-full bg-black/0 group-hover:bg-black/40 transition-colors cursor-pointer">
-                <svg className="w-5 h-5 text-white opacity-0 group-hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+              <button type="button" aria-label="选择头像" onClick={() => avatarInputRef.current?.click()} className="absolute inset-0 flex items-center justify-center rounded-full bg-black/0 group-hover:bg-black/40 focus-visible:bg-black/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent transition-colors cursor-pointer">
+                <svg className="w-5 h-5 text-white opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z" />
                   <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0z" />
                 </svg>
+              </button>
                 <input
+                  ref={avatarInputRef}
                   type="file"
                   accept="image/jpeg,image/png,image/webp"
                   className="hidden"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
+                    e.target.value = '';
                     if (!file) return;
                     if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) { setValidationError('请选择 JPG、PNG 或 WebP 图片'); return; }
                     if (file.size > 2 * 1024 * 1024) {
@@ -315,7 +328,6 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
                     reader.readAsDataURL(file);
                   }}
                 />
-              </label>
             </div>
             <div className="flex-1">
               <label className="block text-caption text-text-secondary dark:text-gray-400 mb-1">头像</label>
@@ -424,7 +436,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
               selected={form.hobbies}
               onChange={(hobbies) => updateForm({ ...form, hobbies })}
               customInput={hobbyCustomInput}
-              onCustomInputChange={setHobbyCustomInput}
+              onCustomInputChange={value => { if (!savingRef.current) { setHobbyCustomInput(value); setIsDirty(true); } }}
               onCustomInputConfirm={addHobbyCustomTag}
             />
           </div>
@@ -436,7 +448,7 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
               selected={form.personality}
               onChange={(personality) => updateForm({ ...form, personality })}
               customInput={personalityCustomInput}
-              onCustomInputChange={setPersonalityCustomInput}
+              onCustomInputChange={value => { if (!savingRef.current) { setPersonalityCustomInput(value); setIsDirty(true); } }}
               onCustomInputConfirm={addPersonalityCustomTag}
             />
           </div>
@@ -463,8 +475,9 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
             />
           </div>
         </fieldset>
+        </div>
 
-        <div className="flex shrink-0 flex-wrap gap-2 px-6 py-4 border-t border-border-subtle" style={{ paddingBottom: 'max(1rem, calc(env(safe-area-inset-bottom, 0px) + 60px))' }}>
+        <div data-profile-actions className="relative shrink-0 flex flex-wrap gap-2 px-6 py-4 border-t border-border-subtle bg-bg-surface dark:bg-gray-800" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom, 0px))' }}>
           {validationError && (
             <div role="alert" className="w-full p-2 bg-red-50 dark:bg-red-900/20 rounded-lg text-xs text-red-600 dark:text-red-400 mb-2">
               {validationError}
@@ -473,14 +486,14 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
           <button
             onClick={() => void handleCloseWithDirtyCheck()}
             disabled={saving}
-            className="flex-1 px-4 py-2 border border-border dark:border-gray-600 rounded-lg text-text-secondary dark:text-gray-400 hover:bg-bg-surface2 dark:hover:bg-gray-700 transition-all duration-200"
+            className="min-h-11 flex-1 px-4 py-2 border border-border dark:border-gray-600 rounded-lg text-text-secondary dark:text-gray-400 hover:bg-bg-surface2 dark:hover:bg-gray-700 transition-all duration-200"
           >
             取消
           </button>
           <button
             onClick={handleSave}
             disabled={saving || avatarReading}
-            className="flex-1 px-4 py-2 bg-user text-white rounded-lg hover:opacity-90 disabled:opacity-50 transition-all duration-200"
+            className="min-h-11 flex-1 px-4 py-2 bg-user text-white rounded-lg hover:opacity-90 disabled:opacity-50 transition-all duration-200"
           >
             {saving ? '保存中...' : '保存'}
           </button>
@@ -489,6 +502,6 @@ export function UserProfileEditor({ isOpen, onClose }: UserProfileEditorProps) {
     </div>
     {ConfirmModal}
     {Toast}
-    </>
+    </>, document.body
   );
 }

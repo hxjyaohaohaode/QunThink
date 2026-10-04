@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useId } from 'react';
+import { createPortal } from 'react-dom';
 import { useFocusTrap } from './useFocusTrap';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 
@@ -64,7 +65,7 @@ export function ConfirmModal({
 
   if (!show && !visible) return null;
 
-  return (
+  return createPortal(
     <div
       className={`fixed inset-0 flex items-center justify-center z-[80] p-4 backdrop-blur-sm transition-opacity duration-200 ${
         show && !isClosing ? 'opacity-100' : 'opacity-0'
@@ -127,6 +128,6 @@ export function ConfirmModal({
           </button>
         </div>
       </div>
-    </div>
+    </div>, document.body
   );
 }
