@@ -1,4 +1,4 @@
-import { clearCurrentUserCache } from '../../utils/privateCache';
+import { useLocalCacheClear } from '../../hooks/useLocalCacheClear';
 ﻿import { useState, useEffect, useRef } from 'react';
 import { useThemeStore } from '../../stores/themeStore';
 import { useGroupsStore } from '../../stores/groupsStore';
@@ -6,7 +6,7 @@ import { usePersonasStore } from '../../stores/personasStore';
 import { AIPersonaEditor } from './AIPersonaEditor';
 import { UserProfileEditor } from './UserProfileEditor';
 import { FontSizeSelector } from './FontSizeToggle';
-import { useConfirm, useToast, ErrorBoundary } from '../Common';
+import { useToast, ErrorBoundary } from '../Common';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
 import { AI_NAMES } from '../../types';
 import { ModelCenter } from './ModelCenter';
@@ -21,7 +21,7 @@ export function SettingsPage() {
   const personas = usePersonasStore((s) => s.personas);
   const fetchPersonas = usePersonasStore((s) => s.fetchPersonas);
   const personasLoading = usePersonasStore((s) => s.loading);
-  const { confirm, ConfirmModal } = useConfirm();
+  const { clear: handleClearData, clearing: clearingCache, ConfirmModal } = useLocalCacheClear();
   const { showToast, Toast } = useToast();
   const [expandedPersona, setExpandedPersona] = useState<string | null>(null);
   const [isPageEntered, setIsPageEntered] = useState(false);
@@ -81,17 +81,7 @@ export function SettingsPage() {
     }, 300);
   };
 
-  const handleClearData = async () => {
-    const confirmed = await confirm({
-      title: '清理本地缓存',
-      description: '仅清理当前浏览器缓存，服务器上的会话与文件会在下次加载时恢复。是否继续？',
-      danger: true,
-    });
-    if (confirmed) {
-      await clearCurrentUserCache();
-      showToast({ message: '本地缓存已清理', type: 'success' });
-    }
-  };
+
 
   const handlePersonaToggle = (id: string) => {
     setPrevExpandedPersona(expandedPersona);
@@ -636,10 +626,11 @@ export function SettingsPage() {
               className="px-4 pb-4"
             >
               <button
-                onClick={handleClearData}
+                onClick={() => void handleClearData()}
+                disabled={clearingCache}
                 className="w-full py-3 text-sm text-error btn-secondary hover:bg-error/5"
               >
-                清理当前浏览器缓存
+                {clearingCache ? '正在清理…' : '清理当前浏览器缓存'}
               </button>
             </div>
           </div>

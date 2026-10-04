@@ -2,6 +2,7 @@ import { clearDiagnostics, observeInteractions, setDiagnosticSurface } from './o
 import { purgeLegacyPrivateCaches } from './utils/privateCache';
 import { useModelsStore } from './stores/modelsStore';
 import { useTasksStore } from './stores/tasksStore';
+import { useMemoryStore } from './stores/memoryStore';
 ﻿import { lazy, Suspense, useEffect, useLayoutEffect, useState, useRef, useCallback, type ReactNode, type TouchEvent as ReactTouchEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { Group } from './types';
@@ -148,7 +149,7 @@ const defaultProfileState: UserProfile = {
 };
 
 function hydrateBootstrapData(userId: string, payload: BootstrapPayload) {
-  if (getCacheUserId() !== userId) { useAudioStore.getState().clearAll(); useTasksStore.getState().cleanup(); useProfileStore.getState().cleanup(); useModelsStore.getState().cleanup(); usePersonasStore.getState().cleanup(); clearDiagnostics(); }
+  if (getCacheUserId() !== userId) { useAudioStore.getState().clearAll(); useTasksStore.getState().cleanup(); useMemoryStore.getState().cleanup(); useProfileStore.getState().cleanup(); useModelsStore.getState().cleanup(); usePersonasStore.getState().cleanup(); clearDiagnostics(); }
   setCacheUserId(userId);
   confirmAuthIdentity(userId);
   setIndexedDBUserId(userId);
@@ -244,7 +245,7 @@ async function initializeUserData(userId: string) {
         fetchPersonas()
       ]);
     } catch (error) {
-      console.error('[App] Failed to initialize user data:', error);
+      console.error('[App] Failed to initialize user data');
       throw error;
     }
 
@@ -252,13 +253,13 @@ async function initializeUserData(userId: string) {
       throw bootstrapError;
     }
 
-    console.warn('[App] Bootstrap endpoint failed, fallback stores used:', bootstrapError);
+    console.warn('[App] Bootstrap endpoint failed, fallback stores used');
   }
 
   await useModelsStore.getState().fetch();
   assertCurrentAuthGeneration(generation);
   if (import.meta.env.DEV) {
-    console.log(`[App] User data initialized for: ${userId}`);
+    console.log('[App] User data initialized');
   }
   return generation;
 }
@@ -273,6 +274,7 @@ async function handleLogout() {
   useAudioStore.getState().clearAll();
   useProfileStore.getState().cleanup();
   useTasksStore.getState().cleanup();
+  useMemoryStore.getState().cleanup();
   useModelsStore.getState().cleanup();
   usePersonasStore.getState().cleanup();
 
@@ -439,7 +441,7 @@ function App() {
         }
       } catch (error) {
         if (cancelled || generation !== getAuthGeneration()) return;
-        console.warn('[App] Session bootstrap failed:', error);
+        console.warn('[App] Session bootstrap failed');
         if (!cancelled) {
           dataInitializedRef.current = false;
           if (isAuthFailure(error)) setIsAuthenticated(false);
@@ -505,6 +507,8 @@ function App() {
   useEffect(() => {
     return () => {
       leaveGroup(currentGroupRef.current?.id || '');
+      destroyWebSocket();
+      wsConnectedRef.current = false;
     };
   }, []);
 
@@ -610,7 +614,7 @@ function App() {
       setAppPhase('app');
     } catch (error) {
       if (generation !== getAuthGeneration()) return;
-      console.error('Failed to get user info after login:', error);
+      console.error('Failed to get user info after login');
       dataInitializedRef.current = false;
       setIsAuthenticated(false);
       throw error;

@@ -79,3 +79,33 @@ test('session replacement while obtaining CSRF cancels old write before transpor
   const pending=axiosInstance.post('/memory/store',{content:'old-session-input'});await new Promise(resolve=>setTimeout(resolve,0));
   confirmAuthIdentity(null);confirmAuthIdentity('alice');finishCsrf();await assert.rejects(pending,error=>error.code==='STALE_ACCOUNT_RESPONSE');assert.equal(calls,0);delete document.cookie;
 });
+
+test('request identity is captured at API invocation, before the async interceptor microtask', async () => {
+  globalThis.__apiAccount='alice';confirmAuthIdentity('alice');document.cookie='XSRF-TOKEN=synthetic-csrf';
+  let calls=0;axiosInstance.defaults.adapter=async config=>{calls++;return response(config,{ok:true});};
+  const pending=axiosInstance.post('/memory/store',{content:'alice-only-calltime-input'});
+  globalThis.__apiAccount='bob';confirmAuthIdentity('bob');
+  await assert.rejects(pending,error=>error.code==='STALE_ACCOUNT_RESPONSE');assert.equal(calls,0);
+});
+
+test('all Axios request entry forms preserve call-time identity and explicit headers', async () => {
+  const calls = [
+    () => axiosInstance.get('/profile'), () => axiosInstance.delete('/tasks/id'),
+    () => axiosInstance.put('/profile',{nickname:'alice'}), () => axiosInstance.patch('/tasks/id',{title:'alice'}),
+    () => axiosInstance.request({url:'/profile',method:'get'}), () => axiosInstance.request('/profile',{method:'get'}),
+    () => axiosInstance({url:'/profile',method:'get'}), () => axiosInstance('/profile',{method:'get'}),
+  ];
+  for(const call of calls){
+    globalThis.__apiAccount='alice';confirmAuthIdentity('alice');let sent=0;
+    axiosInstance.defaults.adapter=async config=>{sent++;return response(config,{});};const pending=call();
+    globalThis.__apiAccount='bob';confirmAuthIdentity('bob');await assert.rejects(pending,error=>error.code==='STALE_ACCOUNT_RESPONSE');assert.equal(sent,0);
+  }
+  globalThis.__apiAccount='alice';confirmAuthIdentity('alice');const headers=new axios.AxiosHeaders({'X-Expected-User-Id':'alice'});let expected;
+  axiosInstance.defaults.adapter=async config=>{expected=config.headers['X-Expected-User-Id'];return response(config,{});};const pending=axiosInstance.get('/profile',{headers});headers.set('X-Expected-User-Id','bob');await pending;assert.equal(expected,'alice');
+});
+
+test('explicit account guards are case-insensitive and cannot be overwritten by the current account',async()=>{
+ globalThis.__apiAccount='bob';confirmAuthIdentity('bob');let sent;
+ axiosInstance.defaults.adapter=async config=>{sent=config.headers.get('x-expected-user-id');return response(config,{private:'unexpected-user'});};
+ await assert.rejects(axiosInstance.get('/profile',{headers:{'x-expected-user-id':'alice'}}),error=>error.code==='STALE_ACCOUNT_RESPONSE');assert.equal(sent,'alice');
+});

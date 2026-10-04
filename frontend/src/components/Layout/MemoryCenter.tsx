@@ -1,146 +1,105 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { memoryApi, type MemoryRecord } from '../../services/memory';
+import { useEffect, useRef } from 'react';
+import { motion, useReducedMotion } from 'framer-motion';
+import { useMemoryStore, type MemoryScope } from '../../stores/memoryStore';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { useConfirm } from '../Common';
 
-const field = 'w-full rounded-xl border border-border bg-bg-primary px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-accent/30';
-const button = 'rounded-xl px-3 py-2 text-xs border border-border text-text-secondary hover:bg-bg-surface2 disabled:opacity-40';
+const field = 'w-full rounded-xl border border-border bg-bg-primary px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-60';
+const button = 'rounded-xl px-3 py-2 text-xs border border-border text-text-secondary hover:bg-bg-surface2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40 motion-safe:transition-colors';
+const primary = `${button} bg-accent text-white border-transparent`;
 
 export function MemoryCenter() {
   const groups = useGroupsStore(state => state.groups);
-  const [memories, setMemories] = useState<MemoryRecord[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
-  const [note, setNote] = useState('');
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editText, setEditText] = useState('');
-  const pendingCreate = useRef<{ content: string; key: string } | null>(null);
-  const busyRef = useRef(false);
-  const loadEpoch = useRef(0);
+  const state = useMemoryStore();
+  const { memories, total, loading, loadingMore, busy, error, loadError, notice, note, editing, pending } = state;
+  const reducedMotion = useReducedMotion();
+  const listHeading = useRef<HTMLHeadingElement>(null);
+  const mounted = useRef(false);
+  const editInput = useRef<HTMLTextAreaElement>(null);
+  const previousEdit = useRef<string | null>(null);
+  const editButtons = useRef(new Map<string, HTMLButtonElement>());
   const { confirm, ConfirmModal } = useConfirm();
+  const captureScope = (): MemoryScope => ({ accountId: state.accountId, generation: state.generation });
 
-  const refresh = useCallback(async () => {
-    const epoch = ++loadEpoch.current;
-    setLoading(true);
-    setLoadingMore(false);
-    try {
-      const result = await memoryApi.list();
-      if (epoch !== loadEpoch.current) return;
-      setMemories(result.memories);
-      setTotal(result.total);
-      setError('');
-    } catch (cause) {
-      if (epoch === loadEpoch.current) setError(cause instanceof Error ? cause.message : '记忆读取失败');
-    } finally {
-      if (epoch === loadEpoch.current) setLoading(false);
-    }
-  }, []);
-
-  async function loadMore() {
-    if (loadingMore || loading || memories.length >= total) return;
-    const epoch = ++loadEpoch.current;
-    setLoadingMore(true);
-    try {
-      const result = await memoryApi.list(memories.length);
-      if (epoch !== loadEpoch.current) return;
-      setMemories(current => {
-        const seen = new Set(current.map(memory => memory.id));
-        return [...current, ...result.memories.filter(memory => !seen.has(memory.id))];
-      });
-      setTotal(result.total);
-      setError('');
-    } catch (cause) {
-      if (epoch === loadEpoch.current) setError(cause instanceof Error ? cause.message : '较早记录读取失败');
-    } finally {
-      if (epoch === loadEpoch.current) setLoadingMore(false);
-    }
-  }
-
+  useEffect(() => { mounted.current = true; state.activate(); void useMemoryStore.getState().refresh(); return () => { mounted.current = false; }; }, [state.activate]);
   useEffect(() => {
-    void refresh();
-    return () => { loadEpoch.current += 1; };
-  }, [refresh]);
+    if (editing) editInput.current?.focus();
+    else if (previousEdit.current) (editButtons.current.get(previousEdit.current) || listHeading.current)?.focus({ preventScroll: true });
+    previousEdit.current = editing?.id || null;
+  }, [editing?.id]);
 
-  async function run(action: () => Promise<void>) {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    setBusy(true);
-    setError('');
-    setNotice('');
-    try { await action(); }
-    catch (cause) {
-      setError(cause instanceof Error ? cause.message : '操作结果未确认，请刷新核对后再试');
-    } finally {
-      busyRef.current = false;
-      setBusy(false);
-    }
-  }
 
-  function saveNote() {
-    const content = note.trim();
-    if (!content || content.length > 5000) return;
-    void run(async () => {
-      if (pendingCreate.current?.content !== content) {
-        pendingCreate.current = { content, key: crypto.randomUUID() };
-      }
-      await memoryApi.store(content, pendingCreate.current.key);
-      pendingCreate.current = null;
-      setNote('');
-      setNotice('记录已保存；目前不会自动当作已核实事实或发送给其他群。');
-      await refresh();
-    });
-  }
-
-  function saveCorrection(memory: MemoryRecord) {
-    const content = editText.trim();
-    if (!content || content.length > 5000 || memory.kind !== 'user_note') return;
-    void run(async () => {
-      await memoryApi.correct(memory.id, content, memory.revision);
-      setEditingId(null);
-      setNotice('更正已保存；请检查依赖旧内容的草稿和已发布内容。');
-      await refresh();
-    });
-  }
-
-  async function forget(memory: MemoryRecord) {
+  async function forget(id: string) {
+    const origin = captureScope();
     if (!await confirm({ title: '遗忘这条记忆',
-      description: '这会撤销当前记录并清除其中保存的正文。已导出的文件及外部副本需要分别处理。',
-      danger: true })) return;
-    void run(async () => {
-      await memoryApi.forget(memory.id);
-      if (editingId === memory.id) setEditingId(null);
-      setNotice('该记录已撤销。');
-      await refresh();
-    });
+      description: '这会撤销该记录并清除当前保存的正文，也会清除它在本页的更正草稿。已导出的文件及外部副本需要分别处理。', danger: true })) return;
+    if (mounted.current) await useMemoryStore.getState().forget(id, origin);
   }
+  async function cancelEdit() {
+    const origin = captureScope(), edit = useMemoryStore.getState().editing;
+    if (edit && edit.text !== edit.baseContent && !await confirm({ title: '放弃更正草稿', description: '尚未提交的更正输入会被清除，已保存的记录不会改变。', danger: true })) return;
+    if (mounted.current && edit) useMemoryStore.getState().cancelEdit(origin, edit);
+  }
+  async function discardCreate() {
+    const origin = captureScope(), intent = useMemoryStore.getState().pending;
+    if (!intent || intent.type !== 'create') return;
+    if (!await confirm({ title: '结束本次保存核对', description: '原请求可能已保存成功。结束核对只会清除本页输入，不会撤销或删除服务器上的记录。请先查看现有记录；再次输入并保存可能形成重复记录。', danger: true })) return;
+    if (mounted.current) useMemoryStore.getState().discardCreate(origin, intent);
+  }
+  const revealRecords = () => { listHeading.current?.scrollIntoView({ behavior: reducedMotion ? 'instant' : 'smooth', block: 'start' }); listHeading.current?.focus({ preventScroll: true }); };
+  const locked = !!pending;
+  const transition = { duration: reducedMotion ? 0 : 0.18 };
 
-  return <section className="max-w-3xl space-y-5" aria-label="个人记忆记录">
+  return <section className="max-w-3xl space-y-5" aria-label="个人记忆记录" data-observe="memory">
     <div><h2 className="text-xl font-semibold">个人记忆记录</h2>
       <p className="text-sm text-text-secondary mt-1">这里只保存你主动写下的笔记和从消息保存的摘录。摘录未经事实核验；个人笔记目前不会自动进入群聊上下文。</p></div>
-    <form className="rounded-2xl border border-border bg-bg-surface p-4 space-y-3" onSubmit={event => { event.preventDefault(); saveNote(); }}>
+    <form className="rounded-2xl border border-border bg-bg-surface p-4 space-y-3" aria-busy={busy && pending?.type === 'create'} onSubmit={event => { event.preventDefault(); void state.saveNote(); }}>
       <label className="block text-sm font-medium" htmlFor="memory-note">写一条个人笔记</label>
       <textarea id="memory-note" className={field} value={note} maxLength={5000} rows={3}
-        onChange={event => setNote(event.target.value)} placeholder="记录需要以后查看或更正的内容" />
-      <button type="submit" disabled={busy || !note.trim()} className="rounded-xl px-4 py-2 text-sm bg-accent text-white disabled:opacity-40">{busy ? '处理中…' : '保存笔记'}</button>
+        disabled={pending?.type === 'create'} aria-describedby="memory-draft-help"
+        onChange={event => state.setNote(event.target.value)} placeholder="记录需要以后查看或更正的内容" />
+      <p id="memory-draft-help" className="text-xs text-text-muted">草稿仅保留在当前标签页内存，切换工作台后可继续；刷新、关闭标签页或退出账号会丢失未保存输入。保存待核对时会锁定原内容。</p>
+      <div className="flex items-center justify-between gap-3"><button type="submit" disabled={locked || busy || !note.trim() || !state.accountId} className={primary}>{busy && pending?.type === 'create' ? '正在保存…' : '保存笔记'}</button><span className="text-xs text-text-muted" aria-label={`已输入 ${note.length} 字，最多 5000 字`}>{note.length} / 5000</span></div>
     </form>
-    {error && <div role="alert" className="rounded-xl border border-red-500/30 p-3 text-sm text-red-500">{error} <button className="underline ml-2" onClick={() => void refresh()}>刷新核对</button></div>}
+
+    {pending && <motion.div initial={reducedMotion ? false : { opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} transition={transition} className="rounded-2xl border border-accent/30 bg-accent/5 p-4 space-y-3" aria-label="操作核对" aria-busy={busy}>
+      <p role="status" className="text-sm font-medium">{busy ? '正在等待操作回执…' : pending.type === 'create' ? '笔记保存待核对' : pending.type === 'correct' ? '更正结果待核对' : '遗忘结果待核对'}</p>
+      <p className="text-xs text-text-secondary">{pending.type === 'create' ? '核对会复用同一请求和原内容；列表刷新不会替你判断是否重复。' : pending.type === 'correct' ? '先读取当前记录。只有版本未变才重试原更正，不会覆盖其他修订。' : '该记录的正文已隐藏。核对会重复请求遗忘同一条记录，不会创建或恢复它。'}</p>
+      {!busy && <div className="flex flex-wrap gap-2"><button className={primary} onClick={() => void state.retry()}>{pending.type === 'create' ? '同一请求核对保存' : pending.type === 'correct' ? '核对并重试更正' : '重试核对遗忘'}</button>
+        <button className={button} onClick={revealRecords}>查看现有记录</button>
+        {pending.type === 'forget' && <button className={button} onClick={state.deferForget}>稍后核对，继续使用</button>}
+        {pending.type === 'create' && <button className={button} onClick={() => void discardCreate()}>结束本次核对…</button>}</div>}
+    </motion.div>}
+    {state.deferredForget.length > 0 && <div className="rounded-xl border border-border p-3 space-y-2" aria-label="尚未确认的遗忘请求">
+      <p className="text-sm text-text-secondary">还有 {state.deferredForget.length} 条遗忘结果未确认，正文继续隐藏；刷新或关闭标签页会丢失这些核对入口。</p>
+      <div className="flex flex-wrap gap-2">{state.deferredForget.map((id, index) => <button key={id} className={button} disabled={locked || busy} onClick={() => void state.resumeForget(id)}>继续核对遗忘（{index + 1}）</button>)}</div>
+    </div>}
+    {error && <div role="alert" className="rounded-xl border border-red-500/30 p-3 text-sm text-red-500">{error}</div>}
     {notice && <p role="status" className="text-sm text-text-secondary">{notice}</p>}
-    <div className="flex items-center justify-between gap-3"><h3 className="font-semibold">可查看记录（{total}）</h3><button className={button} disabled={loading} onClick={() => void refresh()}>刷新</button></div>
-    {loading ? <p className="text-sm text-text-muted">正在读取…</p> : memories.length === 0 ? <p className="text-sm text-text-muted">暂无可查看记录</p> : <div className="space-y-3">
+
+    {editing && <motion.section aria-label="更正草稿" initial={reducedMotion ? false : { opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={transition} className="rounded-2xl border border-accent/40 bg-bg-surface p-4 space-y-3">
+      <h3 className="text-sm font-semibold">更正个人笔记 · 基于修订 {editing.revision}</h3>
+      {editing.current && <div className="rounded-xl bg-bg-primary p-3 space-y-1"><p className="text-xs text-text-secondary">当前保存的修订 {editing.current.revision}，请与下方草稿对照</p><p className="text-sm whitespace-pre-wrap break-words">{editing.current.content}</p></div>}
+      <textarea ref={editInput} aria-label="更正个人笔记" className={field} value={editing.text} rows={3} maxLength={5000} readOnly={editing.unavailable} disabled={locked} onChange={event => state.setEditText(event.target.value)} />
+      <div className="flex flex-wrap gap-2">{editing.current ? <button className={primary} disabled={locked} onClick={state.rebaseEdit}>基于当前版本继续编辑</button> : !editing.unavailable && <button className={primary} disabled={locked || !editing.text.trim() || editing.text.trim() === editing.baseContent} onClick={() => void state.saveCorrection()}>保存更正</button>}
+        <button className={button} disabled={locked} onClick={() => void cancelEdit()}>取消</button></div>
+    </motion.section>}
+
+    <div className="flex items-center justify-between gap-3"><h3 ref={listHeading} tabIndex={-1} className="font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">可查看记录（{state.loaded ? total : '待读取'}）</h3><button className={button} disabled={loading} onClick={() => void state.refresh()}>{loading ? '正在刷新…' : '刷新'}</button></div>
+    {loadError && <div role="alert" className="rounded-xl border border-red-500/30 p-3 text-sm text-red-500">{loadError} <button className="underline ml-2 focus-visible:ring-2 focus-visible:ring-accent/50" onClick={() => void state.refresh()}>重新读取</button></div>}
+    <div aria-busy={loading || loadingMore} className="space-y-3">
+      {loading && <p role="status" className="text-sm text-text-muted">正在读取记录…</p>}
+      {!loading && !loadError && state.loaded && memories.length === 0 && <p className="text-sm text-text-muted">{pending?.type === 'forget' || state.deferredForget.length > 0 ? '暂无其他可查看记录，待核对遗忘的正文已隐藏。' : '暂无可查看记录，可以从第一条个人笔记开始。'}</p>}
       {memories.map(memory => {
         const groupName = memory.source ? groups.find(group => group.id === memory.source?.groupId)?.name : null;
-        return <article key={memory.id} className="rounded-2xl border border-border bg-bg-surface p-4 space-y-3">
-          <div className="text-xs text-text-muted">{memory.kind === 'user_note' ? '个人笔记 · 用户自述，未核验' : `消息摘录 · ${groupName || memory.source?.groupId || '来源群已不可用'} · 未核验`} · {new Date(memory.recordedAt).toLocaleString()}</div>
-          {editingId === memory.id ? <div className="space-y-2"><textarea aria-label="更正个人笔记" className={field} value={editText} rows={3} maxLength={5000} onChange={event => setEditText(event.target.value)} /><div className="flex gap-2"><button className={button} disabled={busy || !editText.trim()} onClick={() => saveCorrection(memory)}>保存更正</button><button className={button} onClick={() => setEditingId(null)}>取消</button></div></div> : <p className="text-sm text-text-primary whitespace-pre-wrap break-words">{memory.content}</p>}
-          <div className="flex gap-2">{memory.kind === 'user_note' && editingId !== memory.id && <button className={button} disabled={busy} onClick={() => { setEditingId(memory.id); setEditText(memory.content); }}>更正</button>}<button className={button} disabled={busy} onClick={() => void forget(memory)}>遗忘</button></div>
-        </article>;
+        return <motion.article key={memory.id} layout={reducedMotion ? false : 'position'} initial={false} transition={transition} className="rounded-2xl border border-border bg-bg-surface p-4 space-y-3">
+          <div className="text-xs text-text-muted">{memory.kind === 'user_note' ? '个人笔记 · 用户自述，未核验' : `消息摘录 · ${groupName || '来源群已不可用'} · 未核验`} · {new Date(memory.recordedAt).toLocaleString()} · 修订 {memory.revision}</div>
+          <p className="text-sm text-text-primary whitespace-pre-wrap break-words">{memory.content}</p>
+          <div className="flex gap-2">{memory.kind === 'user_note' && <button ref={element => { if (element) editButtons.current.set(memory.id, element); else editButtons.current.delete(memory.id); }} className={button} disabled={locked || !!editing} onClick={() => state.beginEdit(memory)}>{editing?.id === memory.id ? '正在更正' : '更正'}</button>}<button className={button} disabled={locked} onClick={() => void forget(memory.id)}>遗忘</button></div>
+        </motion.article>;
       })}
-      {total > memories.length && <button className={button} disabled={loadingMore} onClick={() => void loadMore()}>{loadingMore ? '读取中…' : `加载较早记录（还有 ${total - memories.length} 条）`}</button>}
-    </div>}
+      {state.nextOffset < total && <button className={button} disabled={loadingMore || loading} onClick={() => void state.loadMore()}>{loadingMore ? '读取中…' : `加载较早记录（还有 ${total - state.nextOffset} 条）`}</button>}
+    </div>
     {ConfirmModal}
   </section>;
 }

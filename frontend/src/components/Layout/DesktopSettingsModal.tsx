@@ -1,4 +1,4 @@
-import { clearCurrentUserCache } from '../../utils/privateCache';
+import { useLocalCacheClear } from '../../hooks/useLocalCacheClear';
 ﻿import { useState, useEffect } from 'react';
 import { useFocusTrap } from '../Common/useFocusTrap';
 import { useThemeStore } from '../../stores/themeStore';
@@ -8,7 +8,7 @@ import { useProfileStore } from '../../stores/profileStore';
 import { AIPersonaEditor } from './AIPersonaEditor';
 import { UserProfileEditor } from './UserProfileEditor';
 import { FontSizeSelector } from './FontSizeToggle';
-import { useConfirm, useToast, ErrorBoundary } from '../Common';
+import { useToast, ErrorBoundary } from '../Common';
 import { ModelCenter } from './ModelCenter';
 import { useModelsStore, useChatModelIds } from '../../stores/modelsStore';
 import { useModalAnimation } from '../../hooks/useModalAnimation';
@@ -31,7 +31,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
   const personasLoading = usePersonasStore((s) => s.loading);
   const userProfile = useProfileStore(state => state.profile);
   const fetchProfile = useProfileStore(state => state.fetchProfile);
-  const { confirm, ConfirmModal } = useConfirm();
+  const { clear: handleClearData, clearing: clearingCache, ConfirmModal } = useLocalCacheClear();
   const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState<SettingsTab>('api');
   const [editingPersonaId, setEditingPersonaId] = useState<string | null>(null);
@@ -65,17 +65,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
     if (theme !== mode) setTheme(mode);
   };
 
-  const handleClearData = async () => {
-    const confirmed = await confirm({
-      title: '清理本地缓存',
-      description: '仅清理当前浏览器缓存，服务器上的会话与文件会在下次加载时恢复。是否继续？',
-      danger: true,
-    });
-    if (confirmed) {
-      await clearCurrentUserCache();
-      showToast({ message: '本地缓存已清理', type: 'success' });
-    }
-  };
+
 
   if (!isVisible) return null;
 
@@ -387,10 +377,11 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
           导出数据
         </button>
         <button
-          onClick={handleClearData}
+          onClick={() => void handleClearData()}
+          disabled={clearingCache}
           className="flex-1 py-2.5 text-sm text-red-500 border border-red-500/20 rounded-xl hover:bg-red-500/5 transition-colors"
         >
-          清理当前浏览器缓存
+          {clearingCache ? '正在清理…' : '清理当前浏览器缓存'}
         </button>
       </div>
     </div>

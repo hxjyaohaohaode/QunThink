@@ -1,14 +1,9 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
-import { randomUUID, randomInt } from 'node:crypto';
+import { randomInt } from 'node:crypto';
+import { registerSyntheticAccount } from './authFixture';
 
 async function register(context: BrowserContext, phone?: string) {
-  const csrf = await (await context.request.get('/api/csrf-token')).json();
-  const response = await context.request.post('/api/auth/register', {
-    headers: { 'x-csrf-token': csrf.csrfToken },
-    data: { username: `qa_${randomUUID().replaceAll('-', '')}`, password: 'Synthetic-Browser-Only-2026', nickname: '体验测试', ...(phone ? { phone } : {}) },
-  });
-  expect(response.status()).toBe(201);
-  return (await response.json()).user;
+  return registerSyntheticAccount(context, { phone });
 }
 async function openWorkspace(page: Page, context: BrowserContext) {
   await register(context); await page.goto('/');

@@ -1,7 +1,7 @@
 import { probeReceipt } from './modelProbeReceipt';
 import { getCacheUserId } from '../utils/cacheUtils';
 import { recordDiagnostic, getDiagnosticSurface } from '../observability/runtimeDiagnostics';
-import axios from 'axios';
+import axios, { type AxiosRequestConfig } from 'axios';
 import type { Group, GroupFile, Message } from '../types';
 import type { FileUploadResponse, MessageCreateInput } from '../types';
 import type { GroupInsights, MemoryDigest } from '../types';
@@ -45,13 +45,51 @@ export function notifyAuthExpired(reason: 'expired' | 'account_changed' = 'expir
   });
 }
 
-export const axiosInstance = axios.create({
+const transport = axios.create({
   baseURL: getApiBaseUrl(),
   timeout: 30000,
   headers: {
     'Content-Type': 'application/json'
   },
   withCredentials: true
+});
+
+
+// Axios's asynchronous interceptors start in a later microtask. Capture the
+// initiating session at the public call boundary, before that scheduling gap.
+type ScopedRequestConfig = AxiosRequestConfig & { authGeneration?: number };
+function freezeRequestContext(config: ScopedRequestConfig = {}, url?: string): ScopedRequestConfig {
+  const headers = new axios.AxiosHeaders(config.headers as Parameters<typeof axios.AxiosHeaders.from>[0]);
+  const expected = activeRequestAccount();
+  if (expected && !/^\/?auth\/(?:login|register|token)/.test(url || config.url || '')) {
+    headers.set('X-Expected-User-Id', expected, false);
+  }
+  return { ...config, headers, authGeneration: config.authGeneration ?? authGeneration };
+}
+function scopedArguments(method: string, input: unknown[]) {
+  const args = [...input];
+  if (method === 'request') {
+    if (typeof args[0] === 'string') args[1] = freezeRequestContext(args[1] as ScopedRequestConfig, args[0]);
+    else args[0] = freezeRequestContext(args[0] as ScopedRequestConfig);
+  } else {
+    const index = ['post', 'put', 'patch', 'postForm', 'putForm', 'patchForm'].includes(method) ? 2 : 1;
+    args[index] = freezeRequestContext(args[index] as ScopedRequestConfig, args[0] as string);
+  }
+  return args;
+}
+const requestMethods = new Set(['request', 'get', 'delete', 'head', 'options', 'post', 'put', 'patch', 'postForm', 'putForm', 'patchForm']);
+const methodWrappers = new Map<PropertyKey, { source: unknown; wrapped: (...args: unknown[]) => unknown }>();
+export const axiosInstance = new Proxy(transport, {
+  apply(target, thisArg, args) { return Reflect.apply(target, thisArg, scopedArguments('request', args)); },
+  get(target, key) {
+    const value = Reflect.get(target, key, target);
+    if (typeof key !== 'string' || !requestMethods.has(key) || typeof value !== 'function') return value;
+    const existing = methodWrappers.get(key);
+    if (existing && existing.source === value) return existing.wrapped;
+    const wrapped = (...args: unknown[]) => Reflect.apply(value, target, scopedArguments(key, args));
+    methodWrappers.set(key, { source: value, wrapped });
+    return wrapped;
+  },
 });
 
 const MAX_RETRIES = 3;
@@ -184,24 +222,24 @@ axiosInstance.interceptors.request.use(
     // Freeze the initiating identity before any async CSRF work or retry.
     const expectedUser = activeRequestAccount();
     if (expectedUser && !/^\/?auth\/(?:login|register|token)/.test(config.url || '')) {
-      config.headers['X-Expected-User-Id'] ??= expectedUser;
+      config.headers.set('X-Expected-User-Id', expectedUser, false);
     }
     if (authMode === 'dev') {
       const userId = getDevUserId();
       config.headers['x-user-id'] = userId;
       if (import.meta.env.DEV) {
-        console.log(`[API Request] ${config.method?.toUpperCase()}`);
+        console.log('[API Request] started');
       }
     } else {
       config.withCredentials = true;
       if (isMutatingMethod(config.method)) {
         const csrfToken = await ensureCsrfToken();
         if (csrfToken) {
-          config.headers['x-csrf-token'] = csrfToken;
+          config.headers.set('x-csrf-token', csrfToken);
         }
       }
       if (import.meta.env.DEV) {
-        console.log(`[API Request] ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`);
+        console.log('[API Request] started');
       }
     }
     // A session transition during CSRF acquisition must cancel, not send old input.
@@ -223,7 +261,7 @@ function obsoleteSession(config: { authGeneration?: number }) {
 axiosInstance.interceptors.response.use(
   (response) => {
     if (obsoleteSession(response.config as typeof response.config & { authGeneration?: number })) return Promise.reject(staleSessionError());
-    const expected = response.config.headers?.['X-Expected-User-Id'];
+    const expected = response.config.headers?.get('X-Expected-User-Id');
     if (expected && expected !== activeRequestAccount()) {
       return Promise.reject(Object.assign(new Error('账号已切换，已丢弃旧账号的迟到响应'), { status: 409, code: 'STALE_ACCOUNT_RESPONSE' }));
     }
@@ -231,7 +269,7 @@ axiosInstance.interceptors.response.use(
     recordDiagnostic('request', getDiagnosticSurface(), 'succeeded', start === undefined ? undefined : performance.now() - start);
     rememberBackendOriginFromUrl(response.request?.responseURL || response.config.baseURL);
     if (import.meta.env.DEV) {
-      console.log(`[API Response] ${response.config.method?.toUpperCase()} ${response.config.url} -> ${response.status}`);
+      console.log('[API Response] received');
     }
     if (response.status !== 204 && (typeof response.data !== 'object' || response.data === null)) {
       const error = new Error('服务器返回了非预期的响应格式，请稍后重试');
@@ -255,7 +293,7 @@ axiosInstance.interceptors.response.use(
     recordDiagnostic('request', getDiagnosticSurface(), error.response ? 'failed' : 'unknown');
 
     if (error.response?.status === 409 && error.response?.data?.code === 'ACCOUNT_CHANGED') {
-      const expected = config.headers?.['X-Expected-User-Id'];
+      const expected = config.headers?.get('X-Expected-User-Id');
       if (!expected || expected === activeRequestAccount()) { pendingAuthenticatedUserId = null; notifyAuthExpired('account_changed'); }
       return Promise.reject(Object.assign(new Error('登录账号已改变，请重新进入当前账号'), { status: 409, code: 'ACCOUNT_CHANGED' }));
     }
@@ -281,7 +319,7 @@ axiosInstance.interceptors.response.use(
       document.cookie = 'XSRF-TOKEN=; Path=/; Max-Age=0';
       const newToken = await ensureCsrfToken();
       if (newToken) {
-        config.headers['x-csrf-token'] = newToken;
+        config.headers.set('x-csrf-token', newToken);
         if (import.meta.env.DEV) {
           console.warn('[API] CSRF token验证失败，已重新获取token并重试');
         }
@@ -297,7 +335,7 @@ axiosInstance.interceptors.response.use(
         config.baseURL = config.baseUrlCandidates[nextBaseUrlIndex];
         config.retryCount = 0;
         if (import.meta.env.DEV) {
-          console.warn(`[API Fallback] 切换后端地址到 ${config.baseURL}`);
+          console.warn('[API Fallback] switching backend candidate');
         }
         return axiosInstance(config);
       }
@@ -308,7 +346,7 @@ axiosInstance.interceptors.response.use(
 
       const delayMs = RETRY_DELAY * Math.pow(2, config.retryCount - 1);
       if (import.meta.env.DEV) {
-        console.log(`[API Retry] 第${config.retryCount}次重试，${config.method?.toUpperCase()} ${config.url}，等待 ${delayMs}ms`);
+        console.log('[API Retry] retrying a read request');
       }
 
       await delay(delayMs);
@@ -328,7 +366,7 @@ axiosInstance.interceptors.response.use(
     if (import.meta.env.DEV) {
       const isExpected401 = error.response?.status === 401 && error.config?.url?.includes('/auth/token');
       if (!isExpected401) {
-        console.error('[API Error]', error.message, error.code);
+        console.error('[API Error] request failed');
       }
     }
 
@@ -340,7 +378,7 @@ axiosInstance.interceptors.response.use(
     if (error.response?.status === 401) {
       const isAuthRequest = error.config?.url?.includes('/auth/token');
       if (!isAuthRequest) {
-        const expected = config.headers?.['X-Expected-User-Id'];
+        const expected = config.headers?.get('X-Expected-User-Id');
         if (!expected || expected === activeRequestAccount()) notifyAuthExpired();
       }
       return Promise.reject(error);
