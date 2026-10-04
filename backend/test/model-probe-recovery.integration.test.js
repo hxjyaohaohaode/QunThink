@@ -305,7 +305,7 @@ test('URL denial before dispatch leaves a known uncharged failure and does not c
 });
 
 if (process.env.SUPABASE_DB_URL) {
-  for (const sameId of [true, false]) test(`independent workers race ${sameId ? 'identical' : 'different'} UUIDs with one durable PgLow effect`, async () => {
+  for (const sameId of [true, false]) test(`independent workers race ${sameId ? 'identical' : 'different'} UUIDs with at most one paid PgLow effect`, async () => {
     const s = await session(), body = input(), before = calls.length;
     behavior = async (req, res) => { held.push(res); };
     const children = Array.from({ length: 4 }, () => {
@@ -314,7 +314,7 @@ if (process.env.SUPABASE_DB_URL) {
         const { runModelProbe } = await import('./src/services/ai/modelProbes.js');
         const { closeSupabaseConnection } = await import('./src/models/supabaseAdapter.js');
         try { console.log('RESULT:' + JSON.stringify(await runModelProbe(${JSON.stringify(s.userId)}, ${JSON.stringify(contender)}))); }
-        catch (error) { console.log('RESULT:' + JSON.stringify({ errorStatus: error.status })); }
+        catch (error) { console.log('RESULT:' + JSON.stringify({ errorStatus: error.status, errorCode: error.code })); }
         finally { await closeSupabaseConnection(); }
       `], { cwd: process.cwd(), env: process.env, stdio: 'pipe' });
       const record = { child, output: '', result: null };
@@ -323,29 +323,140 @@ if (process.env.SUPABASE_DB_URL) {
     });
     try {
       await eventually(() => held.length || children.every(record => record.child.exitCode !== null));
-      assert.equal(held.length, 1, children.map(record => record.output).join('\n'));
-      // Keep the winner in flight until the remaining intents have attempted
-      // admission; a later fresh UUID after success would be a valid new test.
-      await eventually(() => children.filter(record => record.child.exitCode !== null).length === 3);
-      reply(held.shift());
+      assert.ok(held.length <= 1, children.map(record => record.output).join('\n'));
+      if (held.length) {
+        // Keep the winner in flight until the remaining intents have attempted
+        // admission; a later fresh UUID after success would be a valid new test.
+        await eventually(() => children.filter(record => record.child.exitCode !== null).length === 3);
+        reply(held.shift());
+      }
       await Promise.all(children.map(record => record.exited));
       const results = children.map(record => {
         assert.equal(record.child.exitCode, 0, record.output);
         const result = record.output.split('\n').find(line => line.startsWith('RESULT:'));
         assert.ok(result, record.output); return JSON.parse(result.slice(7));
       });
-      assert.ok(results.some(result => result.status === 'succeeded'));
-      assert.ok(results.every(result => ['succeeded', 'running'].includes(result.status) || result.errorStatus === 503));
-      assert.equal(calls.length, before + 1);
-      const winnerId = results.find(result => result.status === 'succeeded').requestId;
-      clearUserDbCache(s.userId); assert.equal((await get(s, winnerId)).body.healthy, true);
-      assert.equal((await post(s, { ...body, clientRequestId: winnerId })).body.status, 'succeeded'); assert.equal(calls.length, before + 1);
+      const db = await getUserDb(s.userId); await db.read({ force: true });
+      const effects = db.data.modelProbeLedger.effects, check = db.data.modelCapabilityChecks.probe_a.chat;
+      const paid = effects.filter(effect => effect.dispatches > 0), callCount = calls.length - before;
+      const evidence = JSON.stringify({ results, effects, check, callCount });
+      // An alias can win CAS after the initial claim but before its dispatch
+      // checkpoint. That claim must fail known-unsent; a later fresh UUID may
+      // then be admitted. Neither this failure nor a second paid effect may hide
+      // behind a broad "failed" allowance.
+      assert.ok(results.every(result => ['succeeded', 'running'].includes(result.status) ||
+        (result.errorStatus === 503 && result.errorCode === 'PROBE_STORAGE_UNCERTAIN') ||
+        (result.status === 'failed' && result.code === 'PROBE_NOT_SENT' && result.possibleCharge === false && result.healthy === false)), evidence);
+      assert.ok(callCount <= 1, evidence);
+      if (sameId) assert.equal(callCount, 1, evidence);
+      assert.equal(paid.length, callCount, evidence);
+      assert.ok(effects.length > 0, evidence);
+      for (const effect of effects) {
+        if (effect.dispatches) {
+          assert.equal(effect.status, 'succeeded', evidence);
+          assert.equal(effect.dispatches, 1, evidence); assert.equal(effect.receipts, 1, evidence);
+          assert.equal(effect.code, undefined, evidence);
+        } else {
+          assert.equal(effect.status, 'failed', evidence); assert.equal(effect.code, 'PROBE_NOT_SENT', evidence);
+          assert.equal(effect.dispatches, 0, evidence); assert.equal(effect.receipts, 0, evidence);
+        }
+      }
+      assert.equal(effects.some(effect => effect.id === check.probeRequestId), true, evidence);
+      if (callCount) {
+        assert.ok(results.some(result => result.status === 'succeeded' && result.requestId === paid[0].id && result.healthy === true), evidence);
+        assert.equal(check.status, 'verified', evidence); assert.equal(check.probeRequestId, paid[0].id, evidence);
+        assert.equal(check.fingerprint, paid[0].fingerprint, evidence);
+      } else {
+        assert.ok(results.every(result => result.status !== 'succeeded'), evidence);
+        assert.equal(check.status, 'unknown', evidence); assert.equal(check.evidence, null, evidence);
+      }
+      for (const result of results.filter(result => result.requestId)) {
+        const effect = effects.find(effect => effect.id === result.requestId); assert.ok(effect, evidence);
+        if (result.status !== 'running') {
+          assert.equal(result.status, effect.status, evidence); assert.equal(result.code, effect.code, evidence);
+          assert.equal(result.possibleCharge, effect.dispatches > 0, evidence);
+        }
+      }
+      clearUserDbCache(s.userId);
+      for (const effect of effects) for (const identity of effect.requests) {
+        const lookup = await get(s, identity.id);
+        assert.equal(lookup.status, 200, evidence); assert.equal(lookup.body.requestId, effect.id, evidence);
+        assert.equal(lookup.body.status, effect.status, evidence); assert.equal(lookup.body.possibleCharge, effect.dispatches > 0, evidence);
+        const replay = await post(s, { ...body, clientRequestId: identity.id });
+        assert.equal(replay.status, effect.dispatches ? 200 : 502, evidence);
+        assert.equal(replay.body.status, effect.status, evidence); assert.equal(replay.body.requestId, effect.id, evidence);
+        assert.equal(replay.body.healthy, effect.dispatches > 0, evidence);
+      }
+      assert.equal(calls.length, before + callCount, evidence);
     } finally {
       for (const record of children) if (record.child.exitCode === null && record.child.signalCode === null) record.child.kill('SIGKILL');
       await Promise.all(children.map(record => record.exited));
     }
   });
 }
+
+if (process.env.SUPABASE_DB_URL) test('alias CAS before dispatch preserves known-unsent receipt and permits only a new explicit paid intent', async () => {
+  const s = await session(), body = input(), alias = input(), fresh = input(), before = calls.length;
+  const db = await getUserDb(s.userId), original = db.write;
+  let writes = 0, child, exited, output = '', aliasResult, childWaitError;
+  db.write = async function (...args) {
+    if (++writes === 2) {
+      // The claim is durable, but the dispatch checkpoint still has its old CAS
+      // revision. Commit an alias from an actual independent PgLow process.
+      child = spawn(process.execPath, ['--input-type=module', '-e', `
+        const { runModelProbe } = await import('./src/services/ai/modelProbes.js');
+        const { closeSupabaseConnection } = await import('./src/models/supabaseAdapter.js');
+        try { console.log('RESULT:' + JSON.stringify(await runModelProbe(${JSON.stringify(s.userId)}, ${JSON.stringify(alias)}))); }
+        catch (error) { console.log('ERROR:' + error.message); process.exitCode = 1; }
+        finally { await closeSupabaseConnection(); }
+      `], { cwd: process.cwd(), env: process.env, stdio: 'pipe' });
+      child.stdout.on('data', data => { output += data; }); child.stderr.on('data', data => { output += data; });
+      exited = once(child, 'exit');
+      let timer;
+      try {
+        await Promise.race([exited, new Promise((resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('Independent alias worker did not exit within 10 seconds')), 10000);
+        })]);
+      } catch (error) { childWaitError = error; throw error; }
+      finally { clearTimeout(timer); }
+      assert.equal(child.exitCode, 0, output);
+      aliasResult = JSON.parse(output.split('\n').find(line => line.startsWith('RESULT:')).slice(7));
+    }
+    return original.apply(this, args);
+  };
+  try {
+    const failed = await post(s, body);
+    if (childWaitError) throw childWaitError; // persist sanitizes write errors; retain the test failure.
+    assert.equal(aliasResult.requestId, body.clientRequestId); assert.equal(aliasResult.status, 'running'); assert.equal(aliasResult.possibleCharge, false);
+    assert.equal(failed.status, 502); assert.equal(failed.body.status, 'failed'); assert.equal(failed.body.code, 'PROBE_NOT_SENT');
+    assert.equal(failed.body.possibleCharge, false); assert.equal(failed.body.healthy, false); assert.equal(calls.length, before);
+    db.write = original; await db.read({ force: true });
+    const failedEffect = structuredClone(db.data.modelProbeLedger.effects[0]);
+    assert.equal(db.data.modelProbeLedger.effects.length, 1); assert.equal(failedEffect.dispatches, 0); assert.equal(failedEffect.receipts, 0);
+    assert.deepEqual(new Set(failedEffect.requests.map(request => request.id)), new Set([body.clientRequestId, alias.clientRequestId]));
+    assert.equal(db.data.modelCapabilityChecks.probe_a.chat.status, 'unknown'); await unverified(s);
+    for (const intent of [body, alias]) {
+      const replay = await post(s, intent); assert.equal(replay.status, 502); assert.equal(replay.body.code, 'PROBE_NOT_SENT'); assert.equal(replay.body.possibleCharge, false);
+      const lookup = await get(s, intent.clientRequestId); assert.equal(lookup.status, 200); assert.equal(lookup.body.status, 'failed');
+    }
+    assert.equal(calls.length, before);
+    const succeeded = await post(s, fresh);
+    assert.equal(succeeded.status, 200); assert.equal(succeeded.body.healthy, true); assert.equal(calls.length, before + 1);
+    clearUserDbCache(s.userId); const durable = await getUserDb(s.userId); await durable.read({ force: true });
+    const effects = durable.data.modelProbeLedger.effects, check = durable.data.modelCapabilityChecks.probe_a.chat;
+    assert.equal(effects.length, 2); assert.deepEqual(effects[0], failedEffect);
+    assert.equal(effects[1].id, fresh.clientRequestId); assert.equal(effects[1].status, 'succeeded');
+    assert.equal(effects[1].dispatches, 1); assert.equal(effects[1].receipts, 1);
+    assert.equal(check.status, 'verified'); assert.equal(check.probeRequestId, fresh.clientRequestId); assert.equal(check.fingerprint, effects[1].fingerprint);
+    for (const intent of [body, alias, fresh]) {
+      const replay = await post(s, intent); assert.equal(replay.body.status, intent === fresh ? 'succeeded' : 'failed');
+    }
+    assert.equal((await get(s, fresh.clientRequestId)).body.healthy, true); assert.equal(calls.length, before + 1);
+  } finally {
+    db.write = original;
+    if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await exited; }
+  }
+});
 
 if (process.env.SUPABASE_DB_URL) {
   for (const sameId of [true, false]) test(`catalog resolution cannot overwrite a competing ${sameId ? 'same-key' : 'same-input'} probe from a newer CAS revision`, async () => {

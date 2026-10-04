@@ -6,7 +6,6 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { archiveEvidence, hashFile, MAX_PARTS, PART_BYTES, splitArchive, verifyParts } from './pack-ci-evidence.mjs';
-import { RECOVERY_ARTIFACTS, RECOVERY_HEAD_SHA, RECOVERY_RUN_ID, recoverKnownArtifact, validateOriginalBytes, validateOriginalMetadata } from './recover-ci-evidence.mjs';
 
 async function workspace(t) {
   const directory = await mkdtemp(path.join(tmpdir(), 'qunthink-evidence-test-'));
@@ -136,38 +135,10 @@ test('tar round trip retains nested, hidden, Unicode and binary files plus empty
   await assert.rejects(archiveEvidence({ cwd: directory, roots: ['frontend/test-results'], outputDir: path.join(root, 'parts') }), /outside input roots/);
 });
 
-test('old artifact metadata is pinned to exact IDs, run, sizes, digests, names and availability', () => {
-  for (const [project, expected] of Object.entries(RECOVERY_ARTIFACTS)) {
-    const metadata = { id: expected.id, workflow_run: { id: RECOVERY_RUN_ID, head_sha: RECOVERY_HEAD_SHA }, name: `qunthink-browser-evidence-${project}`, expired: false, size_in_bytes: expected.bytes, digest: `sha256:${expected.sha256}` };
-    assert.equal(validateOriginalMetadata(metadata, project), expected);
-    for (const changed of [{ id: 1 }, { workflow_run: { id: 1, head_sha: RECOVERY_HEAD_SHA } }, { workflow_run: { id: RECOVERY_RUN_ID, head_sha: 'different-commit' } }, { name: 'other' }, { expired: true }, { size_in_bytes: 1 }, { digest: 'sha256:wrong' }]) {
-      assert.throws(() => validateOriginalMetadata({ ...metadata, ...changed }, project), /exact approved/);
-    }
-    assert.throws(() => validateOriginalMetadata(metadata, 'unapproved-project'), /exact approved/);
-  }
-});
-
-test('download byte validation accepts binary only and rejects a changed original archive', () => {
-  const bytes = randomBytes(4096);
-  const expected = { bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
-  assert.deepEqual(validateOriginalBytes(bytes, expected), bytes);
-  assert.deepEqual(validateOriginalBytes(Uint8Array.from(bytes).buffer, expected), bytes);
-  assert.throws(() => validateOriginalBytes('not-a-zip', expected), /binary/);
-  assert.throws(() => validateOriginalBytes(bytes.subarray(1), expected), /pinned/);
-  assert.throws(() => validateOriginalBytes(bytes, { ...expected, sha256: '0'.repeat(64) }), /pinned/);
-});
-
-test('recovery rejects an unauthorized context before attempting any API call', async () => {
-  let called = false;
-  const github = { rest: { actions: { getArtifact() { called = true; throw new Error('must not call'); } } } };
-  await assert.rejects(recoverKnownArtifact({ github, context: { eventName: 'push', payload: {} }, project: 'desktop-chromium', outputDir: 'unused' }), /restricted/);
-  assert.equal(called, false);
-});
-
-test('workflow uploads each bounded part separately, preserves the full artifact and confines historical recovery', async () => {
+test('workflow uploads each bounded part separately, preserves full evidence and does not repeat historical recovery', async () => {
   const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
   const blocks = workflow.split(/(?=^      - name:)/m);
-  for (const directory of ['.ci-evidence', '.ci-recovered-evidence']) {
+  for (const directory of ['.ci-evidence']) {
     const filenames = ['manifest.json', ...Array.from({ length: MAX_PARTS }, (_, index) => `evidence.part-${String(index + 1).padStart(3, '0')}`)];
     for (const filename of filenames) {
       const matching = blocks.filter((block) => block.includes(`path: ${directory}/${filename}\n`));
@@ -179,12 +150,9 @@ test('workflow uploads each bounded part separately, preserves the full artifact
       assert.match(matching[0], /name: qunthink-.*-\$\{\{ matrix.project \}\}-(manifest|part-\d{3})/);
     }
   }
-  assert.equal(workflow.split('project: [desktop-chromium, mobile-reduced-motion]').length - 1, 2, 'both current and recovery matrices cover both projects');
+  assert.equal(workflow.split('project: [desktop-chromium, mobile-reduced-motion]').length - 1, 1, 'current evidence matrix covers both projects');
   assert.match(workflow, /name: qunthink-browser-evidence-\$\{\{ matrix.project \}\}/);
   assert.match(workflow, /node --test scripts\/pack-ci-evidence.test.mjs/);
-  assert.match(workflow, /actions: read/);
   assert.doesNotMatch(workflow, /actions: write|pull_request_target|workflow_run:|workflow_dispatch:/);
-  assert.match(workflow, /github.event.pull_request.number == 1/);
-  assert.match(workflow, /retries: 0/);
-  assert.match(workflow, /debug: false/);
+  assert.doesNotMatch(workflow, /recover-original-q1-evidence|recover-ci-evidence|actions\/github-script/, 'completed historical recovery is not repeated');
 });

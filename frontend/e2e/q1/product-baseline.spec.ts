@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { registerSyntheticAccount } from '../authFixture';
-import { assertQ1CiRuntime, Q1_ORIGIN, ORIGINAL, CORRECTION, LATER_CORRECTION, PURPOSE, INVITATION, messageBubbleSelector } from '../../scripts/q1-fixture-protocol.mjs';
+import { assertQ1CiRuntime, Q1_ORIGIN, ORIGINAL, CORRECTION, LATER_CORRECTION, PURPOSE, INVITATION, messageBubbleSelector, observeNewChatCalls } from '../../scripts/q1-fixture-protocol.mjs';
 
 if (!process.argv.includes('--list')) assertQ1CiRuntime();
 const BASELINE = '5056661e681665b7c82c25460af3ea6bc9112f4e';
@@ -81,7 +81,7 @@ class Evidence {
   }
 }
 async function get(context: BrowserContext, path: string) {
-  const response = await context.request.get(path); expect(response.ok(), `Read-only corroboration ${path}`).toBe(true); return response.json();
+  const response = await context.request.get(path); expect(response.ok(), `Read-only corroboration ${path}: HTTP ${response.status()}`).toBe(true); return response.json();
 }
 async function fixtureCalls(context: BrowserContext, model: string) { return (await get(context, `${Q1_ORIGIN}/__q1/observations`)).calls.filter((call: Json) => call.model === model); }
 async function tasks(context: BrowserContext) { return get(context, '/api/tasks') as Promise<Json[]>; }
@@ -111,6 +111,39 @@ function protectedSnapshot() {
   try { brand = execFileSync('node', ['scripts/verify-brand.mjs'], { encoding: 'utf8', cwd: repoRoot }).trim(); } catch (cause) { brandError = String(cause); }
   return { actualTrees, changed, untracked, brand, brandError, unchanged: Object.entries(TREES).every(([path, hash]) => actualTrees[path] === hash) && !changed && !untracked && !brandError };
 }
+// This gate is specific to LoginPage's finite form entry animation. It does
+// not classify disabled/semitransparent components elsewhere as invisible.
+async function waitForLoginForm(page: Page, e: Evidence) {
+  const input = page.getByPlaceholder('请输入手机号');
+  const handle = await input.elementHandle();
+  expect(handle, 'Phone field exists after the initial natural frame').toBeTruthy();
+  const started = Date.now(); const observations: Json[] = []; let failure: unknown;
+  try {
+    await expect.poll(async () => {
+      const state = await handle!.evaluate(el => {
+        let opacity = 1, shown = true;
+        for (let node: Element | null = el; node; node = node.parentElement) {
+          const style = getComputedStyle(node); opacity *= Number(style.opacity);
+          shown = shown && style.display !== 'none' && style.visibility !== 'hidden';
+        }
+        const r = el.getBoundingClientRect();
+        const visibleWidth = Math.max(0, Math.min(innerWidth, r.right) - Math.max(0, r.left));
+        const visibleHeight = Math.max(0, Math.min(innerHeight, r.bottom) - Math.max(0, r.top));
+        const visibleArea = r.width * r.height > 0 ? visibleWidth * visibleHeight / (r.width * r.height) : 0;
+        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+        const centerHit = hit === el || !!hit && el.contains(hit);
+        return { opacity, shown, visibleArea, centerHit, rect: { x: r.x, y: r.y, width: r.width, height: r.height } };
+      });
+      observations.push({ elapsedMs: Date.now() - started, ...state });
+      return state.opacity >= 0.999 && state.shown && state.visibleArea >= 0.99 && state.centerHit;
+    }, { timeout: 20000, intervals: [100, 250, 500], message: 'Login form must finish its existing entry before real input; 20s is only the CI observation ceiling' }).toBe(true);
+  } catch (cause) { failure = cause; }
+  await e.record('login-specific-visual-readiness', { elapsedMs: Date.now() - started, observations, ready: !failure, failureReason: failure instanceof Error ? failure.message : null,
+    interpretation: 'A successful gate permits input; it is not an acceptable-speed or reduced-motion usability verdict. Review initial/ready pixels and video timing.' });
+  await e.shot(failure ? 'login-still-not-ready' : 'login-ready-before-input', failure ? undefined : input);
+  if (failure) throw failure;
+}
+
 async function setup(page: Page, context: BrowserContext, info: TestInfo, e: Evidence) {
   const protection = protectedSnapshot(); await e.record('protected-start', protection);
   expect(protection.unchanged).toBe(true);
@@ -127,6 +160,7 @@ async function setup(page: Page, context: BrowserContext, info: TestInfo, e: Evi
   await context.clearCookies(); await page.goto('/');
   await e.record('ui-login-before', { fixtureAccountId: user.id, realSmsOnboarding: 'not-tested' });
   await e.shot('login-before', page.getByPlaceholder('请输入手机号'));
+  await waitForLoginForm(page, e);
   await page.getByPlaceholder('请输入手机号').fill(phone);
   await page.getByPlaceholder('请输入密码', { exact: true }).fill('Synthetic-Browser-Only-2026');
   await page.locator('form').getByRole('button', { name: '登录', exact: true }).click();
@@ -161,25 +195,19 @@ async function setup(page: Page, context: BrowserContext, info: TestInfo, e: Evi
   await e.shot('conversation-before-notes', input);
   const messages: Json[] = [];
   for (const note of [ORIGINAL, CORRECTION]) {
+    const knownCallIds = (await fixtureCalls(context, model)).filter((call: Json) => call.kind === 'chat').map((call: Json) => call.id);
     const response = page.waitForResponse(r => r.url().endsWith(`/api/groups/${group.id}/messages`) && r.request().method() === 'POST');
     await input.fill(note); await input.press('Enter');
     const sent = await response; expect(sent.status()).toBe(201); const message = await sent.json(); messages.push(message);
     await expect(messageBubble(page, message.id)).toContainText(note);
-    // Observe normal scheduling without replacing it by a store flag. A fixture
-    // responses/silence are recorded from durable messages in a bounded observation window.
-    let previousSignature = '', stableSince = Date.now();
-    const observationEnds = Date.now() + 12000;
-    let normalMessages: Json[] = [];
-    while (Date.now() < observationEnds) {
-      normalMessages = (await get(context, `/api/groups/${group.id}/messages`)).messages;
-      const signature = JSON.stringify(normalMessages.map((m: Json) => [m.id, m.content, m.edited_at]));
-      if (signature !== previousSignature) { previousSignature = signature; stableSince = Date.now(); }
-      const actualCalls = await fixtureCalls(context, model);
-      if (actualCalls.some((call: Json) => call.kind === 'chat' && JSON.stringify(call.body.messages).includes(note)) && Date.now() - stableSince >= 1200) break;
-      await new Promise(resolve => setTimeout(resolve, 250));
-    }
-    await e.record('normal-chat-scheduling-observation', { noteId: message.id, messages: normalMessages, observedMillisecondsBound: 12000,
-      note: 'Actual replies/silence retained; no requirement of exactly one response and no claim of long-term inactivity.' });
+    // The fixture endpoint is observed at most four times, one second apart.
+    // Message API receives one corroborating read per note, not a polling loop.
+    const actualCalls = await observeNewChatCalls(() => fixtureCalls(context, model), knownCallIds);
+    const normalMessages = (await get(context, `/api/groups/${group.id}/messages`)).messages;
+    await e.record('normal-chat-scheduling-observation', { noteId: message.id, userEnteredText: note, storedReceiptText: message.content,
+      storedTextExactlyMatchesInput: message.content === note, messages: normalMessages, fixtureCalls: actualCalls,
+      sampling: 'At most four local fixture reads with 1000ms intervals, followed by one message API read',
+      note: 'Actual replies/silence retained; provider arrival does not prove durable reply completion, exact one-response behavior, or long-term inactivity.' });
   }
   const visibleMessages = await get(context, `/api/groups/${group.id}/messages`);
   const observedCalls = await fixtureCalls(context, model);
@@ -226,7 +254,15 @@ test('Q1 product outcome: source conversation to editable invitation and same-dr
     await expect(target.locator('.workspace-result')).toContainText('Dear colleagues');
     expect(generated.result).toBe(INVITATION); expect(generated.status).toBe('needs_review');
     const calls = (await fixtureCalls(context, state.model)).filter((call: Json) => call.kind === 'task');
-    expect(calls).toHaveLength(1); expect(calls[0].hasOriginal).toBe(true); expect(calls[0].hasCorrection).toBe(true); expect(calls[0].hasPurpose).toBe(true);
+    expect(calls).toHaveLength(1); expect(calls[0].hasPurpose).toBe(true);
+    const providerTexts = calls[0].body.messages.map((message: Json) => typeof message.content === 'string' ? message.content : JSON.stringify(message.content));
+    for (const source of state.messages) {
+      expect(typeof source.content).toBe('string'); expect(source.content.length).toBeGreaterThan(0);
+      expect(providerTexts.some((text: string) => text.includes(source.content)), `Complete stored source ${source.id} reached the provider`).toBe(true);
+    }
+    await e.record('source-text-representation', { userInputs: [ORIGINAL, CORRECTION], storedReceipts: state.messages.map(m => ({ id: m.id, content: m.content })),
+      rawInputExactMatches: { original: calls[0].hasOriginal, correction: calls[0].hasCorrection }, completeStoredSourcesTransferred: true,
+      limitation: 'Stored HTML entity encoding differs from user input. No silent decoding/equality claim; inspect actual body and rendered source links for usability.' });
     for (const source of state.messages) expect(generated.source_messages).toContainEqual({ id: source.id, revision: source.revision ?? null, edited_at: source.edited_at ?? null });
     expect(generated.history[0].context_audit.omitted).toBe(0);
     await e.record('source-provenance-boundary', { providerIdsAndRevisions: 'not included in provider text', persistedSourceRevisions: generated.source_messages, visibleSourceAccess: 'conversation link and fixture-preserved URLs; no claim of exact generated-claim-to-message revision lineage' });

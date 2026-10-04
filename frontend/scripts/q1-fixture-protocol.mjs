@@ -36,3 +36,16 @@ export function messageBubbleSelector(id) {
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new Error('Expected a server message UUID');
   return `.group[data-message-id="${id}"]`;
 }
+
+// Observe provider scheduling without repeatedly consuming the application's
+// real message-query quota. Content representation is audited separately.
+export async function observeNewChatCalls(readCalls, knownCallIds, wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))) {
+  const known = new Set(knownCallIds);
+  let calls = [];
+  for (let attempt = 0; attempt < 4; attempt++) {
+    calls = await readCalls();
+    if (calls.some(call => call.kind === 'chat' && !known.has(call.id))) break;
+    if (attempt < 3) await wait(1000);
+  }
+  return calls;
+}
