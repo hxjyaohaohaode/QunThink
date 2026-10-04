@@ -9,3 +9,7 @@ export function pickWorkspaceNavigationState(state, mobile) {
   if (!mobile && state.desktopBack) return 'desktop-chat';
   return 'waiting';
 }
+
+// Source context contains per-material disclosures. Select the context's own
+// direct summary, never all nested summaries or an arbitrary first match.
+export const CONTEXT_DISCLOSURE = ':scope > summary';

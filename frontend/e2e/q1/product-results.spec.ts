@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { registerSyntheticAccount } from '../authFixture';
-import { pickWorkspaceNavigationState } from '../../scripts/q1-navigation.mjs';
+import { pickWorkspaceNavigationState, CONTEXT_DISCLOSURE } from '../../scripts/q1-navigation.mjs';
 import { assertQ1CiRuntime, Q1_ORIGIN, ORIGINAL, CORRECTION, LATER_CORRECTION, PURPOSE, INVITATION, messageBubbleSelector, observeNewChatCalls } from '../../scripts/q1-fixture-protocol.mjs';
 
 if (!process.argv.includes('--list')) assertQ1CiRuntime();
@@ -355,7 +355,7 @@ test('Q1 complete result protocol: same invitation, human revision, exact accept
     await page.getByRole('button', { name: new RegExp(title) }).click();
     editor = page.getByTestId('task-result-editor'); await expect(editor).toContainText('需要复核');
     await expect(editor.getByRole('textbox', { name: '文稿正文', exact: true })).toHaveValue(humanBody);
-    const sourceDetails = editor.locator('details.writing-context'); if (!await sourceDetails.getAttribute('open').then(value => value !== null)) await sourceDetails.locator('summary').click();
+    const sourceDetails = editor.locator('details.writing-context'); if (!await sourceDetails.getAttribute('open').then(value => value !== null)) await sourceDetails.locator(CONTEXT_DISCLOSURE).click();
     const changedMaterial = sourceDetails.locator(`[data-source-id="${state.messages[1].id}"]`);
     await changedMaterial.getByText('查看这条材料全文', { exact: true }).click();
     await expect(changedMaterial.locator('.writing-source-body')).toHaveAttribute('open', '');
