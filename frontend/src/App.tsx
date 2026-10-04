@@ -27,7 +27,7 @@ import { PWAInstallPrompt } from './components/Common/PWAInstallPrompt';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useReducedMotion } from './hooks/useReducedMotion';
 import { useSwipeBack } from './components/Common/SwipeTransition';
-import { api, getDevUserId, onAuthExpired, confirmAuthIdentity } from './services/api';
+import { api, getDevUserId, onAuthExpired, confirmAuthIdentity, getAuthGeneration } from './services/api';
 import { initFontSize } from './stores/fontSizeStore';
 import { useAudioStore } from './stores/audioStore';
 import { setCacheUserId, getCacheUserId, clearAllCachesForUser, saveGroupsCache, savePersonasCache, saveProfileCache } from './utils/cacheUtils';
@@ -148,7 +148,7 @@ const defaultProfileState: UserProfile = {
 };
 
 function hydrateBootstrapData(userId: string, payload: BootstrapPayload) {
-  if (getCacheUserId() !== userId) { useAudioStore.getState().clearAll(); useTasksStore.getState().cleanup(); useProfileStore.getState().cleanup(); clearDiagnostics(); }
+  if (getCacheUserId() !== userId) { useAudioStore.getState().clearAll(); useTasksStore.getState().cleanup(); useProfileStore.getState().cleanup(); useModelsStore.getState().cleanup(); usePersonasStore.getState().cleanup(); clearDiagnostics(); }
   setCacheUserId(userId);
   confirmAuthIdentity(userId);
   setIndexedDBUserId(userId);
@@ -215,12 +215,20 @@ export function clearMemoryApiConfigs(userId?: string): void {
   }
 }
 
+function assertCurrentAuthGeneration(generation: number) {
+  if (generation !== getAuthGeneration()) throw Object.assign(new Error('登录会话已更新，忽略较早的初始化'), { code: 'STALE_ACCOUNT_RESPONSE' });
+}
+
 async function initializeUserData(userId: string) {
+  let generation = getAuthGeneration();
   try {
     const payload = await api.getBootstrap();
+    assertCurrentAuthGeneration(generation);
     const resolvedUserId = payload.user?.id || userId;
     hydrateBootstrapData(resolvedUserId, payload);
+    generation = getAuthGeneration();
   } catch (bootstrapError) {
+    assertCurrentAuthGeneration(generation);
     if (AUTH_MODE === 'session' && isAuthFailure(bootstrapError)) {
       throw bootstrapError;
     }
@@ -248,20 +256,25 @@ async function initializeUserData(userId: string) {
   }
 
   await useModelsStore.getState().fetch();
+  assertCurrentAuthGeneration(generation);
   if (import.meta.env.DEV) {
     console.log(`[App] User data initialized for: ${userId}`);
   }
+  return generation;
 }
 
-async function handleLogout(remote = true) {
+async function handleLogout() {
+  // Fence older requests before asynchronous cache deletion or remote logout.
+  confirmAuthIdentity(null);
+  const logoutGeneration = getAuthGeneration();
+  const cachedUserId = getCacheUserId();
+  const pendingCleanup: Promise<unknown>[] = [];
   clearDiagnostics();
   useAudioStore.getState().clearAll();
   useProfileStore.getState().cleanup();
-  await purgeLegacyPrivateCaches();
   useTasksStore.getState().cleanup();
   useModelsStore.getState().cleanup();
   usePersonasStore.getState().cleanup();
-  const cachedUserId = getCacheUserId();
 
   destroyWebSocket();
   stopPersonasAutoRefresh();
@@ -273,15 +286,15 @@ async function handleLogout(remote = true) {
 
   useUIStore.getState().clearAllTypingTimeouts();
 
-  try {
-    if (remote) await api.logout();
-  } catch { }
+  // Expiry/account-change is local cleanup, not an explicit server sign-out.
+  // A delayed logout Set-Cookie could otherwise clear a newer login before JS
+  // can reject its obsolete response. Do not send /auth/logout from this path.
 
   clearPersistedSessionInfo();
 
   if (cachedUserId) {
     clearAllCachesForUser(cachedUserId);
-    await clearAllIndexedDBForUser(cachedUserId);
+    pendingCleanup.push(clearAllIndexedDBForUser(cachedUserId));
   }
 
   try {
@@ -343,12 +356,15 @@ async function handleLogout(remote = true) {
   });
 
   setCacheUserId(null);
-  confirmAuthIdentity(null);
   setIndexedDBUserId(null);
+  pendingCleanup.push(purgeLegacyPrivateCaches());
+  await Promise.allSettled(pendingCleanup);
+  if (logoutGeneration !== getAuthGeneration()) return false;
 
   if (import.meta.env.DEV) {
     console.log('[App] User logged out, caches cleared');
   }
+  return true;
 }
 
 function App() {
@@ -379,15 +395,16 @@ function App() {
     let cancelled = false;
 
     const bootstrapSession = async () => {
+      let generation = getAuthGeneration();
       setSessionCheckError(false);
       try {
         const authStatus = await api.getAuthStatus();
-        if (cancelled) return;
+        if (cancelled || generation !== getAuthGeneration()) return;
 
         if (authStatus?.enabled === false) {
           const devUserId = getDevUserId();
-          await initializeUserData(devUserId);
-          if (!cancelled) {
+          generation = await initializeUserData(devUserId);
+          if (!cancelled && generation === getAuthGeneration()) {
             dataInitializedRef.current = true;
             setIsAuthenticated(true);
           }
@@ -403,6 +420,7 @@ function App() {
         }
 
         const currentUser = await api.getCurrentUser();
+        if (cancelled || generation !== getAuthGeneration()) return;
         const userId = currentUser?.user?.id || getCacheUserId() || getPersistedSessionInfo()?.userId;
         if (!userId) {
           if (!cancelled) {
@@ -412,13 +430,15 @@ function App() {
           return;
         }
 
-        await initializeUserData(userId);
+        generation = await initializeUserData(userId);
+        if (cancelled || generation !== getAuthGeneration()) return;
         persistSessionInfo(userId);
         if (!cancelled) {
           dataInitializedRef.current = true;
           setIsAuthenticated(true);
         }
       } catch (error) {
+        if (cancelled || generation !== getAuthGeneration()) return;
         console.warn('[App] Session bootstrap failed:', error);
         if (!cancelled) {
           dataInitializedRef.current = false;
@@ -459,11 +479,14 @@ function App() {
   }, [isAuthenticated, appPhase, sessionCheckError]);
 
   useEffect(() => {
-    const unsubscribe = onAuthExpired(async reason => {
+    const unsubscribe = onAuthExpired(async () => {
       // Hide account-bound UI before waiting for asynchronous cache cleanup.
       setIsAuthenticated(false);
       setAppPhase('auth');
-      await handleLogout(reason !== 'account_changed');
+      wsConnectedRef.current = false;
+      dataInitializedRef.current = false;
+      const stillLoggedOut = await handleLogout();
+      if (!stillLoggedOut) return;
       wsConnectedRef.current = false;
       dataInitializedRef.current = false;
       setIsAuthenticated(false);
@@ -568,20 +591,25 @@ function App() {
   }, []);
 
   const handleLoginSuccess = useCallback(async () => {
+    let generation = getAuthGeneration();
     try {
       const response = await api.getBootstrap();
+      if (generation !== getAuthGeneration()) return;
       const userId = response.user?.id;
       if (!userId) {
         throw new Error('登录后未获取到用户信息');
       }
       dataInitializedRef.current = true;
       hydrateBootstrapData(userId, response);
+      generation = getAuthGeneration();
       await useModelsStore.getState().fetch();
+      if (generation !== getAuthGeneration()) return;
       persistSessionInfo(userId);
       splashCompletedRef.current = true;
       setIsAuthenticated(true);
       setAppPhase('app');
     } catch (error) {
+      if (generation !== getAuthGeneration()) return;
       console.error('Failed to get user info after login:', error);
       dataInitializedRef.current = false;
       setIsAuthenticated(false);

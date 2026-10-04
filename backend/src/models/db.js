@@ -8,9 +8,12 @@ import { Mutex } from 'async-mutex';
 import { isMongoEnabled, getMongoDb, MongoLow } from './mongoAdapter.js';
 import { isSupabaseEnabled, PgLow, listAllKeys, getPool } from './supabaseAdapter.js';
 import { encryptText, decryptText } from '../utils/encryption.js';
+import { readWithWriteBarrier } from './readBarrier.js';
+export { beginUserDbWriteBarrier, readCommittedUserDb } from './readBarrier.js';
 
 const _writeTimestamps = new WeakMap();
 const _lastReadTimestamps = new WeakMap();
+
 
 function isEncryptedEnvelope(value) {
   return typeof value === 'string'
@@ -40,6 +43,13 @@ function encryptStoredValue(plaintext) {
 }
 
 class CustomLow extends Low {
+  invalidateReadCache() {
+    // A write can commit without an acknowledgement. Callers recovering from
+    // that uncertainty must not expose a pre-write snapshot as cached truth.
+    // A failed read never restores this timestamp; only a durable read does.
+    _lastReadTimestamps.delete(this);
+  }
+
   async write() {
     try {
       await super.write();
@@ -76,27 +86,29 @@ class CustomLow extends Low {
   }
 
   async read({ force = false } = {}) {
-    const lastWrite = _writeTimestamps.get(this);
-    const lastRead = _lastReadTimestamps.get(this);
-    if (!force && lastWrite && lastRead && lastRead >= lastWrite && this.data) {
-      return;
-    }
-
-    const maxRetries = 3;
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      try {
-        await super.read();
-        _lastReadTimestamps.set(this, Date.now());
-        return;
-      } catch (err) {
-        if (err instanceof SyntaxError && err.message.includes('JSON') && attempt < maxRetries - 1) {
-          await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
-          continue;
+    return readWithWriteBarrier(this, async () => {
+      const lastWrite = _writeTimestamps.get(this);
+      const lastRead = _lastReadTimestamps.get(this);
+      if (!force && lastWrite && lastRead && lastRead >= lastWrite && this.data) return { cached: true };
+      const maxRetries = 3;
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try { return { data: await this.adapter.read() }; }
+        catch (err) {
+          if (err instanceof SyntaxError && err.message.includes('JSON') && attempt < maxRetries - 1) {
+            await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+            continue;
+          }
+          throw err;
         }
-        throw err;
       }
-    }
+    }, result => {
+      if (!result.cached) {
+        if (result.data) this.data = result.data;
+        _lastReadTimestamps.set(this, Date.now());
+      }
+    });
   }
+
 }
 
 const BACKUP_INTERVAL_MS = 60 * 60 * 1000;

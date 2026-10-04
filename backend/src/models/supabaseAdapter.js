@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { readWithWriteBarrier } from './readBarrier.js';
 
 const { Pool } = pg;
 
@@ -99,17 +100,17 @@ export class PgLow {
     try {
       const p = this._poolOverride || await getPool();
       if (!p) throw new Error('PostgreSQL连接不可用');
-      const result = await p.query(
-        'SELECT data, revision FROM kv_store WHERE key = $1',
-        [this.key]
-      );
-      if (result.rows.length > 0 && result.rows[0].data) {
-        this.data = result.rows[0].data;
-        this._revision = Number(result.rows[0].revision);
-      } else {
-        this.data = JSON.parse(JSON.stringify(this.defaultData));
-        this._revision = 0;
-      }
+      await readWithWriteBarrier(this, () => p.query(
+        'SELECT data, revision FROM kv_store WHERE key = $1', [this.key]
+      ), result => {
+        if (result.rows.length > 0 && result.rows[0].data) {
+          this.data = result.rows[0].data;
+          this._revision = Number(result.rows[0].revision);
+        } else {
+          this.data = JSON.parse(JSON.stringify(this.defaultData));
+          this._revision = 0;
+        }
+      });
     } catch (err) {
       console.warn('PgLow read failed:', err.message);
       throw err;

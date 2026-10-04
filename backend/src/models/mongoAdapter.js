@@ -1,4 +1,5 @@
 import { MongoClient } from 'mongodb';
+import { readWithWriteBarrier } from './readBarrier.js';
 
 let client = null;
 let db = null;
@@ -65,13 +66,10 @@ export class MongoLow {
 
   async read() {
     try {
-      const doc = await this.collection.findOne(this.filter);
-      this._revision = Number(doc?.revision || 0);
-      if (doc && doc.data) {
-        this.data = doc.data;
-      } else {
-        this.data = JSON.parse(JSON.stringify(this.defaultData));
-      }
+      await readWithWriteBarrier(this, () => this.collection.findOne(this.filter), doc => {
+        this._revision = Number(doc?.revision || 0);
+        this.data = doc?.data || JSON.parse(JSON.stringify(this.defaultData));
+      });
     } catch (err) {
       console.warn('MongoLow read failed:', err.message);
       throw err;

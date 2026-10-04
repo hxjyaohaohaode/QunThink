@@ -3254,57 +3254,75 @@ paths:
   /api/user/model-catalog/test:
     post:
       operationId: testCatalogModel
-      summary: 调用保存的模型做一次连通性测试，可能计费
-      tags:
-        - Models
+      summary: 发起有持久请求号的能力测试（可能计费），重复请求不重发
+      description: >-
+        必须在 Idempotency-Key 或 clientRequestId 提供 UUID；两者同时存在必须相同。
+        测试只使用固定的合成输入。视觉测试最多发送两次请求，每次超时 20 秒，整体截止 60 秒。
+        浏览器停止等待不会取消已授权测试。相同请求号重放记录；同模型、能力及配置的 running/unknown 请求即使换号也返回原请求，别名号持久关联。
+        unknown 只允许查询核验，没有自动重试或清空入口；可能一直阻止同配置新测试。
+      tags: [Models]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          description: 每次新测试意图的 UUID；中断后保留并查询，不能为了重试换号
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
+              required: [modelId]
               properties:
-                modelId:
-                  type: string
-                  maxLength: 80
-                capability:
-                  type: string
-                  enum: [chat, tts]
-                  default: chat
-              required:
-                - modelId
+                clientRequestId: { type: string, format: uuid }
+                modelId: { type: string, maxLength: 80 }
+                capability: { type: string, enum: [chat, vision, tts], default: chat }
+                expectedRevision: { type: integer, minimum: 0, description: 新准入必须匹配目录修订；同请求号重放必须保持原值 }
       responses:
-        "200":
-          description: 成功
+        '200':
+          description: 已完成或已完成记录的重放；只有 healthy=true 验证当前配置
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  healthy:
-                    type: boolean
-                  capability:
-                    type: string
-                    enum: [chat, tts]
-                  model:
-                    type: string
-                  responseTime:
-                    type: number
-                required:
-                  - healthy
-                  - capability
-                  - model
-                  - responseTime
-        "400":
-          description: 请求无效
-        "401":
-          description: 需要登录
-        "404":
-          description: 资源不属于当前用户或不存在
-        "409":
-          description: 配置版本冲突、任务运行中或模型被引用
-        "429":
-          description: 达到执行次数或请求限制
+              schema: { $ref: '#/components/schemas/ModelProbeReceipt' }
+        '202':
+          description: 仍在运行或结果未知；保留 requestId，仅查询，不自动重发
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelProbeReceipt' }
+        '400': { description: 请求号缺失、无效、头体不一致或参数无效 }
+        '401': { description: 需要登录 }
+        '404': { description: 模型不存在 }
+        '409':
+          description: 请求号用于不同模型/能力/版本条件、配置不可用或测试已过时；新准入版本不匹配返回 PROBE_CONFIG_CHANGED、possibleCharge=false 回执（未创建效果）
+        '429':
+          description: 每账号最多 10 次新测试/分钟、100 次/UTC日、2 次并发、2000 条效果或 10000 个请求号；旧记录不会自动淘汰
+        '502':
+          description: 已知测试失败，当前能力未验证；仍可能产生费用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelProbeReceipt' }
+        '503': { description: 无法可靠读取或写入记录，禁止新付费调用；保留原请求号查询 }
+  /api/user/model-catalog/tests/{requestId}:
+    get:
+      operationId: getCatalogModelProbe
+      summary: 查询当前账号的能力测试效果（不会调用服务商）
+      tags: [Models]
+      parameters:
+        - in: path
+          name: requestId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 当前持久记录（Cache-Control no-store）；running 超过截止时间后保守转为 unknown 或未发送的 failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelProbeReceipt' }
+        '400': { description: 请求号无效 }
+        '401': { description: 需要登录 }
+        '404': { description: 本账号没有此请求号 }
+        '503': { description: 记录不可可靠读取或写入；不能把查询失败当成可以重试 }
   /api/user/model-catalog/discover:
     post:
       operationId: discoverProviderModels
@@ -3894,6 +3912,24 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
   schemas:
+    ModelProbeReceipt:
+      type: object
+      additionalProperties: false
+      required: [requestId, modelId, capability, status, healthy, stale, possibleCharge, replayed]
+      properties:
+        requestId: { type: string, format: uuid, description: 原请求的规范 UUID，别名也返回此值 }
+        modelId: { type: string }
+        capability: { type: string, enum: [chat, vision, tts] }
+        status: { type: string, enum: [running, succeeded, failed, unknown] }
+        healthy: { type: boolean, description: 仅当成功回执仍验证当前配置时为 true }
+        stale: { type: boolean, description: 配置或验证结果已过时；历史成功不能替代当前能力测试 }
+        possibleCharge: { type: boolean, description: 可能已发送/计费，不是供应商账单或准确费用回执 }
+        replayed: { type: boolean }
+        responseTime: { type: integer, minimum: 0 }
+        code:
+          type: string
+          enum: [PROBE_UNKNOWN, PROBE_FAILED, PROBE_REJECTED, PROBE_NOT_SENT, PROBE_STALE, PROBE_CONFIG_CHANGED, PROBE_STORAGE_UNCERTAIN]
+        error: { type: string, description: 固定脱敏提示，不含供应商原始错误或凭据 }
     PersonalGoalInput:
       type: object
       required: [outcome, checks]

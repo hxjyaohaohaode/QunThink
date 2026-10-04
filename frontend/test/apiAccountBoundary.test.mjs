@@ -8,12 +8,12 @@ Object.assign(globalThis, { window, document: window.document, localStorage: win
 after(() => window.close());
 globalThis.__apiAccount = 'alice';
 const root = resolve(import.meta.dirname, '..');
-const result = await build({ stdin: { contents: `export { axiosInstance, onAuthExpired, api } from './src/services/api'; export { default as axios } from 'axios';`, resolveDir:root, loader:'ts' }, bundle:true, format:'esm', platform:'browser', write:false, define: { 'import.meta.env.DEV': 'false', 'import.meta.env.VITE_AUTH_MODE': '"session"' }, plugins:[{name:'api-runtime-fixture',setup(build){
+const result = await build({ stdin: { contents: `export { axiosInstance, onAuthExpired, api, confirmAuthIdentity } from './src/services/api'; export { default as axios } from 'axios';`, resolveDir:root, loader:'ts' }, bundle:true, format:'esm', platform:'browser', write:false, define: { 'import.meta.env.DEV': 'false', 'import.meta.env.VITE_AUTH_MODE': '"session"' }, plugins:[{name:'api-runtime-fixture',setup(build){
   build.onResolve({filter:/utils\/cacheUtils$/},()=>({path:'cache',namespace:'mock'}));
   build.onResolve({filter:/\.\/runtimeConfig$/},()=>({path:'runtime',namespace:'mock'}));
   build.onLoad({filter:/.*/,namespace:'mock'},({path})=>({loader:'js',contents:path==='cache'?'export const getCacheUserId = () => globalThis.__apiAccount;':`export const getApiBaseUrl = () => '/api'; export const getApiBaseUrlCandidates = () => ['/api','http://fallback.test/api']; export const rememberBackendOrigin = () => {};`}));
 }}]});
-const { axiosInstance, axios, onAuthExpired, api } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+const { axiosInstance, axios, onAuthExpired, api, confirmAuthIdentity } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 const response = (config, data) => ({config,data,status:200,statusText:'OK',headers:{}});
 test('account identity is frozen before CSRF wait; superseded request cannot log out the new account', async () => {
   let resolveCsrf, sent;
@@ -58,4 +58,24 @@ test('a successful old-account response is rejected before any store can consume
   const pending = axiosInstance.get('/user/profile'); await new Promise(resolve => setTimeout(resolve,0));
   globalThis.__apiAccount = 'bob'; finish();
   await assert.rejects(pending,error => error.code==='STALE_ACCOUNT_RESPONSE');
+});
+
+
+test('A-B-A session generations reject old success, auth errors and retryable failures before side effects', async () => {
+  for (const status of [200,401,409,503]) {
+    globalThis.__apiAccount='alice';confirmAuthIdentity('alice');document.cookie='XSRF-TOKEN=synthetic-csrf';
+    let finish;let calls=0;const events=[];const off=onAuthExpired(reason=>events.push(reason));
+    axiosInstance.defaults.adapter=config=>{calls++;return new Promise((resolve,reject)=>{finish=()=>status===200?resolve(response(config,{private:'old-session'})):reject(Object.assign(new Error('old'),{config,response:{status,data:{code:status===409?'ACCOUNT_CHANGED':'OLD_ERROR',error:'obsolete'}}}));});};
+    const pending=axiosInstance.get('/profile');await new Promise(resolve=>setTimeout(resolve,0));
+    globalThis.__apiAccount='bob';confirmAuthIdentity('bob');globalThis.__apiAccount='alice';confirmAuthIdentity('alice');finish();
+    await assert.rejects(pending,error=>error.code==='STALE_ACCOUNT_RESPONSE');assert.equal(calls,1);assert.deepEqual(events,[]);off();
+  }
+});
+test('session replacement while obtaining CSRF cancels old write before transport', async () => {
+  globalThis.__apiAccount='alice';confirmAuthIdentity('alice');
+  Object.defineProperty(document,'cookie',{configurable:true,get:()=>'',set:()=>{}});
+  let finishCsrf;let calls=0;axios.defaults.adapter=config=>new Promise(resolve=>{finishCsrf=()=>resolve(response(config,{csrfToken:'synthetic-new-session'}));});
+  axiosInstance.defaults.adapter=async config=>{calls++;return response(config,{});};
+  const pending=axiosInstance.post('/memory/store',{content:'old-session-input'});await new Promise(resolve=>setTimeout(resolve,0));
+  confirmAuthIdentity(null);confirmAuthIdentity('alice');finishCsrf();await assert.rejects(pending,error=>error.code==='STALE_ACCOUNT_RESPONSE');assert.equal(calls,0);delete document.cookie;
 });

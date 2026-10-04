@@ -160,7 +160,7 @@ function mergePersona(persona?: PersonaConfig): PersonaConfig {
 
 export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps) {
   const { isVisible, close: handleClose, overlayClass, contentClass, sheetClass } = useModalAnimation(isOpen, onClose);
-  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isVisible);
+  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isVisible, () => { if (!saving) handleCloseWithDirtyCheck(); });
   const personas = usePersonasStore((s) => s.personas);
   const catalogModels = useModelsStore((s) => s.catalog?.models);
   const fetchPersonas = usePersonasStore((s) => s.fetchPersonas);
@@ -175,12 +175,13 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
 
   // 关闭时脏数据检查（必须在 isDirty 声明之后）
   const handleCloseWithDirtyCheck = useCallback(() => {
+    if (saving) return;
     if (isDirty) {
       const confirmed = window.confirm('有未保存的更改，确定离开吗？');
       if (!confirmed) return;
     }
     handleClose();
-  }, [isDirty, handleClose]);
+  }, [isDirty, handleClose, saving]);
   const [phrasesText, setPhrasesText] = useState('');
   const [keywordsText, setKeywordsText] = useState('');
   const [topicsText, setTopicsText] = useState('');
@@ -370,7 +371,7 @@ export function AIPersonaEditor({ aiId, isOpen, onClose }: AIPersonaEditorProps)
   );
 
   return (
-    <div ref={overlayTrapRef} role="dialog" aria-modal="true" className={`fixed inset-0 z-[70] flex items-end md:items-center justify-center bg-black/50 md:p-4 ${overlayClass}`} onClick={handleCloseWithDirtyCheck}>
+    <div ref={overlayTrapRef} role="dialog" aria-modal="true" aria-label="编辑 AI 角色" className={`fixed inset-0 z-[70] flex items-end md:items-center justify-center bg-black/50 md:p-4 ${overlayClass}`} onClick={handleCloseWithDirtyCheck}>
       <div
         className={`flex max-h-[100dvh] md:max-h-[92vh] w-full md:max-w-3xl flex-col overflow-hidden rounded-t-2xl md:rounded-2xl border border-border-subtle bg-bg-surface shadow-2xl ${sheetClass} md:${contentClass}`}
         style={{ transform: dragOffsetY > 0 ? `translateY(${dragOffsetY}px)` : undefined, transition: dragStartY === null ? 'transform 0.2s ease' : 'none' }}

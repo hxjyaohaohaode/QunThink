@@ -1163,3 +1163,15 @@ input[type="range"]::-moz-range-track {
 @media (max-width: 480px) { .workspace-stat { padding: 13px; } .workspace-composer, .workspace-task, .workspace-result { padding: 16px; } .workspace-button, .workspace-primary { min-height: 40px; } }
 @media (prefers-reduced-motion: reduce) { .workspace-page { scroll-behavior: auto; } .workspace-page *, .workspace-page *::before, .workspace-page *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; } }
 @media (forced-colors: active) { .workspace-status, .workspace-notice { border: 1px solid CanvasText; } .workspace-tab.is-active { border-bottom: 2px solid Highlight; } }
+
+/* Profile: mobile sheet and desktop dialog have different physical origins.
+   Do not retain a completed animation transform, so dragging stays responsive. */
+.profile-editor-motion { animation: sheetIn 0.22s cubic-bezier(0.16, 1, 0.3, 1); }
+.profile-editor-motion-closing { animation: sheetOut 0.15s ease-in both; }
+@media (min-width: 768px) {
+  .profile-editor-motion { animation-name: modalIn; }
+  .profile-editor-motion-closing { animation-name: modalOut; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .profile-editor-motion, .profile-editor-motion-closing { animation: none; }
+}

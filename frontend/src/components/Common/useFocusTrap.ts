@@ -11,15 +11,14 @@ const FOCUSABLE_SELECTOR = [
 
 function getFocusableElements(container: HTMLElement): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-    (el) => el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0,
+    (el) => !el.matches(':disabled') && !el.closest('[hidden], [inert]') && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0),
   );
 }
 
-const trapStack: symbol[] = [];
+const trapStack: { id: symbol; container: HTMLElement; restoreTarget: HTMLElement | null }[] = [];
 
 export function useFocusTrap<T extends HTMLElement>(active: boolean, onClose?: () => void) {
   const containerRef = useRef<T | null>(null);
-  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
 
   useEffect(() => {
@@ -32,21 +31,29 @@ export function useFocusTrap<T extends HTMLElement>(active: boolean, onClose?: (
     if (!container) return;
 
     const trapId = Symbol('focus-trap');
-    trapStack.push(trapId);
-    previouslyFocusedRef.current = document.activeElement as HTMLElement | null;
+    const entry = { id: trapId, container, restoreTarget: document.activeElement as HTMLElement | null };
+    // React runs child effects first. A newly mounted parent must not cover its nested trap.
+    const childIndex = trapStack.findIndex(item => container.contains(item.container));
+    if (childIndex >= 0) {
+      entry.restoreTarget = trapStack[childIndex].restoreTarget;
+      trapStack[childIndex].restoreTarget = container;
+      trapStack.splice(childIndex, 0, entry);
+    } else trapStack.push(entry);
     container.setAttribute('data-focus-trap-active', '');
+    const previousTabIndex = container.getAttribute('tabindex');
+    if (previousTabIndex === null) container.tabIndex = -1;
 
     const focusFirst = () => {
       const elements = getFocusableElements(container);
       (elements[0] ?? container).focus();
     };
-    focusFirst();
+    if (trapStack[trapStack.length - 1]?.id === trapId) focusFirst();
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (trapStack[trapStack.length - 1] !== trapId) return;
+      if (trapStack[trapStack.length - 1]?.id !== trapId) return;
       if (event.key === 'Escape') {
         event.preventDefault();
-        event.stopPropagation();
+        event.stopImmediatePropagation();
         onCloseRef.current?.();
         return;
       }
@@ -76,11 +83,18 @@ export function useFocusTrap<T extends HTMLElement>(active: boolean, onClose?: (
     return () => {
       document.removeEventListener('keydown', handleKeyDown, true);
       container.removeAttribute('data-focus-trap-active');
-      const index = trapStack.indexOf(trapId);
+      if (previousTabIndex === null) container.removeAttribute('tabindex');
+      const wasTop = trapStack[trapStack.length - 1]?.id === trapId;
+      const index = trapStack.findIndex(item => item.id === trapId);
       if (index >= 0) trapStack.splice(index, 1);
-      const restoreTarget = previouslyFocusedRef.current;
-      previouslyFocusedRef.current = null;
-      if (restoreTarget && typeof restoreTarget.focus === 'function') {
+      for (const remaining of trapStack) {
+        if (remaining.restoreTarget && container.contains(remaining.restoreTarget)) remaining.restoreTarget = entry.restoreTarget;
+      }
+      const parent = trapStack[trapStack.length - 1];
+      const restoreTarget = parent && (!entry.restoreTarget || !parent.container.contains(entry.restoreTarget))
+        ? getFocusableElements(parent.container)[0] ?? parent.container
+        : entry.restoreTarget === parent?.container ? getFocusableElements(parent.container)[0] ?? parent.container : entry.restoreTarget;
+      if (wasTop && restoreTarget?.isConnected && typeof restoreTarget.focus === 'function') {
         try { restoreTarget.focus(); } catch {}
       }
     };

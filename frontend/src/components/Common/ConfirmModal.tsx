@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useId } from 'react';
 import { useFocusTrap } from './useFocusTrap';
+import { useReducedMotion } from '../../hooks/useReducedMotion';
 
 interface ConfirmModalProps {
   visible: boolean;
@@ -26,13 +27,19 @@ export function ConfirmModal({
 }: ConfirmModalProps) {
   const [show, setShow] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
+  const reducedMotion = useReducedMotion();
+  const descriptionId = useId();
+  const closingRef = useRef(false);
   const closeTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
+    if (closeTimerRef.current !== null) clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = null;
+    closingRef.current = false;
     if (visible) {
       setShow(true);
       setIsClosing(false);
-    }
+    } else { setShow(false); setIsClosing(false); }
   }, [visible]);
 
   useEffect(() => {
@@ -41,29 +48,19 @@ export function ConfirmModal({
     };
   }, []);
 
-  const handleClose = useCallback(() => {
-    if (isClosing) return;
+  const finish = useCallback((accepted: boolean) => {
+    if (closingRef.current || loading || !visible) return;
+    closingRef.current = true;
     setIsClosing(true);
     closeTimerRef.current = window.setTimeout(() => {
       closeTimerRef.current = null;
       setShow(false);
-      setIsClosing(false);
-      onCancel();
-    }, 200);
-  }, [onCancel, isClosing]);
-
-  const handleConfirm = useCallback(() => {
-    if (isClosing) return; // 防止双击重复触发
-    setIsClosing(true);
-    closeTimerRef.current = window.setTimeout(() => {
-      closeTimerRef.current = null;
-      setShow(false);
-      setIsClosing(false);
-      onConfirm();
-    }, 200);
-  }, [onConfirm, isClosing]);
-
-  const trapRef = useFocusTrap<HTMLDivElement>(show && !isClosing && visible, handleClose);
+      (accepted ? onConfirm : onCancel)();
+    }, reducedMotion ? 0 : 160);
+  }, [onConfirm, onCancel, loading, visible, reducedMotion]);
+  const handleClose = useCallback(() => finish(false), [finish]);
+  const handleConfirm = useCallback(() => finish(true), [finish]);
+  const trapRef = useFocusTrap<HTMLDivElement>(show && visible, handleClose);
 
   if (!show && !visible) return null;
 
@@ -79,14 +76,16 @@ export function ConfirmModal({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={`w-full max-w-[420px] bg-bg-surface rounded-2xl shadow-xl border border-border-subtle overflow-hidden transition-all duration-[250ms] ${
+        aria-describedby={description ? descriptionId : undefined}
+        aria-busy={loading}
+        className={`w-full max-w-[420px] bg-bg-surface rounded-2xl shadow-xl border border-border-subtle overflow-hidden transition-[opacity,transform] duration-150 ${
           show && !isClosing
             ? 'opacity-100 scale-100'
-            : 'opacity-0 scale-90'
+            : 'opacity-0 scale-[0.97]'
         }`}
         style={{
           transitionTimingFunction: show && !isClosing
-            ? 'cubic-bezier(0.175, 0.885, 0.32, 1.275)'
+            ? 'cubic-bezier(0.16, 1, 0.3, 1)'
             : 'cubic-bezier(0.4, 0.0, 1, 1)'
         }}
         onClick={(e) => e.stopPropagation()}
@@ -96,7 +95,7 @@ export function ConfirmModal({
             {title}
           </h3>
           {description && (
-            <p className="mt-2 text-sm text-text-secondary text-center leading-relaxed">
+            <p id={descriptionId} className="mt-2 text-sm text-text-secondary text-center leading-relaxed">
               {description}
             </p>
           )}
@@ -104,13 +103,14 @@ export function ConfirmModal({
         <div className="flex gap-3 px-6 pb-6 pt-2">
           <button
             onClick={handleClose}
+            disabled={loading || isClosing}
             className="flex-1 py-2.5 text-sm font-medium text-text-secondary bg-transparent border border-border rounded-[10px] hover:bg-bg-surface2 transition-colors"
           >
             {cancelText}
           </button>
           <button
             onClick={handleConfirm}
-            disabled={loading}
+            disabled={loading || isClosing}
             className={`flex-1 py-2.5 text-sm font-medium text-white rounded-[10px] transition-colors flex items-center justify-center gap-2 ${
               danger
                 ? 'bg-red-500 hover:bg-red-600'

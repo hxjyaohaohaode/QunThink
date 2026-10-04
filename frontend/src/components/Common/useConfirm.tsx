@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { ConfirmModal } from './ConfirmModal';
 
 interface ConfirmOptions {
@@ -10,6 +10,7 @@ interface ConfirmOptions {
 }
 
 interface ConfirmState {
+  requestId: number;
   visible: boolean;
   title: string;
   description?: string;
@@ -20,6 +21,7 @@ interface ConfirmState {
 
 export function useConfirm() {
   const [state, setState] = useState<ConfirmState>({
+    requestId: 0,
     visible: false,
     title: '',
     confirmText: '确认',
@@ -27,12 +29,28 @@ export function useConfirm() {
     danger: false,
   });
 
-  const resolverRef = useRef<((value: boolean) => void) | null>(null);
+  const nextRequestId = useRef(0);
+  const resolverRef = useRef<{ requestId: number; resolve: (value: boolean) => void } | null>(null);
+
+  useEffect(() => () => { resolverRef.current?.resolve(false); resolverRef.current = null; }, []);
+
+  const cancelPending = useCallback(() => {
+    const pending = resolverRef.current;
+    resolverRef.current = null;
+    if (pending) {
+      pending.resolve(false);
+      setState(prev => ({ ...prev, visible: false }));
+    }
+  }, []);
 
   const confirm = useCallback((options: ConfirmOptions): Promise<boolean> => {
     return new Promise<boolean>((resolve) => {
-      resolverRef.current = resolve;
+      // Replacing a question is cancellation of the previous intent, never approval.
+      resolverRef.current?.resolve(false);
+      const requestId = ++nextRequestId.current;
+      resolverRef.current = { requestId, resolve };
       setState({
+        requestId,
         visible: true,
         title: options.title,
         description: options.description,
@@ -43,30 +61,27 @@ export function useConfirm() {
     });
   }, []);
 
-  const handleConfirm = useCallback(() => {
-    setState((prev) => ({ ...prev, visible: false }));
-    resolverRef.current?.(true);
+  const answer = useCallback((requestId: number, accepted: boolean) => {
+    if (resolverRef.current?.requestId !== requestId) return;
+    const pending = resolverRef.current;
     resolverRef.current = null;
-  }, []);
-
-  const handleCancel = useCallback(() => {
-    setState((prev) => ({ ...prev, visible: false }));
-    resolverRef.current?.(false);
-    resolverRef.current = null;
+    setState(prev => prev.requestId === requestId ? { ...prev, visible: false } : prev);
+    pending.resolve(accepted);
   }, []);
 
   const ConfirmModalComponent = (
     <ConfirmModal
+      key={state.requestId}
       visible={state.visible}
       title={state.title}
       description={state.description}
       confirmText={state.confirmText}
       cancelText={state.cancelText}
       danger={state.danger}
-      onConfirm={handleConfirm}
-      onCancel={handleCancel}
+      onConfirm={() => answer(state.requestId, true)}
+      onCancel={() => answer(state.requestId, false)}
     />
   );
 
-  return { confirm, ConfirmModal: ConfirmModalComponent };
+  return { confirm, cancelPending, ConfirmModal: ConfirmModalComponent };
 }

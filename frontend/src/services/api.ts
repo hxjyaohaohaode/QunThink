@@ -1,3 +1,4 @@
+import { probeReceipt } from './modelProbeReceipt';
 import { getCacheUserId } from '../utils/cacheUtils';
 import { recordDiagnostic, getDiagnosticSurface } from '../observability/runtimeDiagnostics';
 import axios from 'axios';
@@ -10,8 +11,13 @@ import { getApiBaseUrl, getApiBaseUrlCandidates, rememberBackendOrigin } from '.
 const DEFAULT_AUTH_MODE = 'session';
 // A successful explicit login identifies the new account before bootstrap hydrates stores.
 let pendingAuthenticatedUserId: string | null = null;
+let authGeneration = 0;
 const activeRequestAccount = () => pendingAuthenticatedUserId || getCacheUserId();
+export const getAuthGeneration = () => authGeneration;
 export function confirmAuthIdentity(userId: string | null) {
+  // Identity equality is insufficient after logout/login A → B → A.
+  authGeneration++;
+  authExpiredHandledAt = 0;
   if (userId === null || userId === pendingAuthenticatedUserId) pendingAuthenticatedUserId = null;
 }
 
@@ -160,8 +166,11 @@ axiosInstance.interceptors.request.use(
     const requestConfig = config as typeof config & {
       baseUrlCandidates?: string[];
       activeBaseUrlIndex?: number;
+      authGeneration?: number;
     };
 
+    requestConfig.authGeneration ??= authGeneration;
+    if (requestConfig.authGeneration !== authGeneration) throw staleSessionError();
     requestConfig.baseUrlCandidates = requestConfig.baseUrlCandidates || getBaseUrlCandidates();
     // Keep an explicitly selected fallback on retry instead of resetting to the failed origin.
     requestConfig.activeBaseUrlIndex ??= requestConfig.baseUrlCandidates.indexOf(runtimeBaseUrl);
@@ -195,6 +204,8 @@ axiosInstance.interceptors.request.use(
         console.log(`[API Request] ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`);
       }
     }
+    // A session transition during CSRF acquisition must cancel, not send old input.
+    if (requestConfig.authGeneration !== authGeneration) throw staleSessionError();
     return config;
   },
   (error) => {
@@ -202,8 +213,16 @@ axiosInstance.interceptors.request.use(
   }
 );
 
+function staleSessionError() {
+  return Object.assign(new Error('登录会话已变化，已丢弃旧会话的请求或响应'), { status: 409, code: 'STALE_ACCOUNT_RESPONSE' });
+}
+function obsoleteSession(config: { authGeneration?: number }) {
+  return config.authGeneration !== undefined && config.authGeneration !== authGeneration;
+}
+
 axiosInstance.interceptors.response.use(
   (response) => {
+    if (obsoleteSession(response.config as typeof response.config & { authGeneration?: number })) return Promise.reject(staleSessionError());
     const expected = response.config.headers?.['X-Expected-User-Id'];
     if (expected && expected !== activeRequestAccount()) {
       return Promise.reject(Object.assign(new Error('账号已切换，已丢弃旧账号的迟到响应'), { status: 409, code: 'STALE_ACCOUNT_RESPONSE' }));
@@ -221,9 +240,9 @@ axiosInstance.interceptors.response.use(
     return response;
   },
   async (error) => {
-    recordDiagnostic('request', getDiagnosticSurface(), error.response ? 'failed' : 'unknown');
     const config = error.config as (typeof error.config & {
       retryCount?: number;
+      authGeneration?: number;
       baseUrlCandidates?: string[];
       activeBaseUrlIndex?: number;
     }) | undefined;
@@ -231,6 +250,9 @@ axiosInstance.interceptors.response.use(
     if (!config) {
       return Promise.reject(error);
     }
+
+    if (obsoleteSession(config)) return Promise.reject(staleSessionError());
+    recordDiagnostic('request', getDiagnosticSurface(), error.response ? 'failed' : 'unknown');
 
     if (error.response?.status === 409 && error.response?.data?.code === 'ACCOUNT_CHANGED') {
       const expected = config.headers?.['X-Expected-User-Id'];
@@ -322,6 +344,17 @@ axiosInstance.interceptors.response.use(
         if (!expected || expected === activeRequestAccount()) notifyAuthExpired();
       }
       return Promise.reject(error);
+    }
+
+    // Keep typed model-test outcomes through the friendly-error boundary, but
+    // only on the exact probe routes and after identity/401 handling above.
+    const probeRoute = (config.method?.toUpperCase() === 'POST' && /^\/?user\/model-catalog\/test$/.test(config.url || '')) ||
+      (config.method?.toUpperCase() === 'GET' && /^\/?user\/model-catalog\/tests\/[0-9a-f-]{36}$/i.test(config.url || ''));
+    const receipt = probeRoute ? probeReceipt(error.response.data) : null;
+    if (receipt) {
+      return Promise.reject(Object.assign(new Error(receipt.error || '测试结果需要核验，请查询原请求'), {
+        status: error.response.status, code: receipt.code, probeReceipt: receipt,
+      }));
     }
 
     if (typeof error.response.data === 'object' && error.response.data !== null && error.response.data.error) {
@@ -898,17 +931,21 @@ export const api = {
   loginPhone: async (phone: string, password: string) => {
     const response = await axiosInstance.post('/auth/login-phone', { phone, password });
     pendingAuthenticatedUserId = typeof response.data?.user?.id === 'string' ? response.data.user.id : null;
+    authGeneration++; authExpiredHandledAt = 0;
     return response.data;
   },
 
   registerSms: async (phone: string, password: string, code: string, nickname?: string) => {
     const response = await axiosInstance.post('/auth/register-sms', { phone, password, code, nickname });
     pendingAuthenticatedUserId = typeof response.data?.user?.id === 'string' ? response.data.user.id : null;
+    authGeneration++; authExpiredHandledAt = 0;
     return response.data;
   },
 
-  logout: async () => {
-    const response = await axiosInstance.post('/auth/logout');
+  logout: async (expectedUserId = activeRequestAccount()) => {
+    const response = await axiosInstance.post('/auth/logout', undefined, {
+      headers: expectedUserId ? { 'X-Expected-User-Id': expectedUserId } : {},
+    });
     return response.data;
   },
 

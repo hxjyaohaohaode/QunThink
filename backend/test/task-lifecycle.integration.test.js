@@ -58,7 +58,7 @@ async function session(withModel = false) {
     catalog.models.push({ id: 'task_test', providerId: 'local_task_test', name: '隔离任务模型', model: 'isolated-task-model', enabled: true, capabilities: ['chat'], contextWindow: 32000, maxTokens: 2048, temperature: null });
     catalog.defaults.chat = 'task_test';
     await saveCatalog(userId, catalog);
-    const probe = await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie).send({ modelId: 'task_test', capability: 'chat' });
+    const probe = await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie).send({ clientRequestId: crypto.randomUUID(), modelId: 'task_test', capability: 'chat' });
     assert.equal(probe.status, 200);
   }
   behavior = 'ok';

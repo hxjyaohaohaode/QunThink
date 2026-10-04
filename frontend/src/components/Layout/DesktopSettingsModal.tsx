@@ -39,7 +39,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
 
   const [expandedPersona, setExpandedPersona] = useState<string | null>(null);
   const { isVisible, close: handleClose, overlayClass, contentClass } = useModalAnimation(isOpen, onClose);
-  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isVisible);
+  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isVisible, handleClose);
 
   const chatIds = useChatModelIds();
   const models = useModelsStore(s => s.catalog?.models);
@@ -60,15 +60,6 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
       fetchPersonas();
     }
   }, [isOpen, fetchPersonas]);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') handleClose();
-    };
-    window.addEventListener('keydown', handleEsc);
-    return () => window.removeEventListener('keydown', handleEsc);
-  }, [isOpen, onClose]);
 
   const handleThemeModeSelect = (mode: 'light' | 'dark' | 'system') => {
     if (theme !== mode) setTheme(mode);
@@ -399,7 +390,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
           onClick={handleClearData}
           className="flex-1 py-2.5 text-sm text-red-500 border border-red-500/20 rounded-xl hover:bg-red-500/5 transition-colors"
         >
-          清空数据
+          清理当前浏览器缓存
         </button>
       </div>
     </div>
@@ -418,7 +409,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
   return (
     <>
       <div
-        ref={overlayTrapRef} role="dialog" aria-modal="true" className={`fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm ${overlayClass}`}
+        ref={overlayTrapRef} role="dialog" aria-modal="true" aria-label="设置" data-observe="settings" className={`fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm ${overlayClass}`}
         onClick={handleClose}
       >
         <div
