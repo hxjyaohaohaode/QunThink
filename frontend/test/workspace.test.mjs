@@ -121,3 +121,15 @@ test('confirmed document filter includes exact manual head and excludes unconfir
   await act(async()=>store.getState().fetch()); await act(async()=>button('已确认文稿').click());
   const cards=[...container.querySelectorAll('[data-observe="task-card"]')];assert.equal(cards.length,1);assert.match(cards[0].textContent,/已确认的人工稿/);assert.match(cards[0].textContent,/已确认成果/);assert.doesNotMatch(cards[0].querySelector('.workspace-status').textContent,/原始消息已变化/);
 });
+
+test('zero-model workspace offers writing first and replaces the large setup card once a document exists',async()=>{
+ assert.ok(button('现在开始写作'));await act(async()=>button('现在开始写作').click());assert.ok(container.querySelector('form'));await act(async()=>button('收起').click());
+ globalThis.__workspaceTest.tasks=[{id:'writing',title:'已有人工文稿',prompt:'用途',category:'work',status:'needs_review',history:[],result:'实际正文',run_count:0,group_id:null}];await act(async()=>store.getState().fetch());
+ assert.equal(container.querySelector('.workspace-setup'),null);assert.ok(button('继续最近文稿'));await act(async()=>button('继续最近文稿').click());assert.match(container.textContent,/共享正文编辑器/);
+});
+test('minimal unresolved receipt prioritizes the original document without starting a model or new task',async()=>{
+ const requestId='11111111-1111-4111-8111-111111111111';localStorage.setItem('qunthink_command_v1_alice:'+requestId,JSON.stringify({key:requestId,action:'save_revision',taskId:'pending-doc',payloadHash:'digest-only',createdAt:'2026-10-04T12:00:00Z'}));
+ globalThis.__workspaceTest.tasks=[{id:'recent',title:'另一较新文稿',prompt:'用途',category:'work',status:'needs_review',history:[],result:'文字',run_count:0,group_id:null},{id:'pending-doc',title:'原回执对应文稿',prompt:'用途',category:'work',status:'needs_review',history:[],result:'待核验正文',run_count:0,group_id:null}];await act(async()=>store.getState().fetch());
+ assert.ok(button('打开文稿核验'));assert.equal(container.querySelector('.workspace-setup'),null);await act(async()=>button('打开文稿核验').click());
+ assert.ok(container.querySelector('#task-detail-pending-doc'));assert.equal(container.querySelector('#task-detail-recent'),null);assert.ok(localStorage.getItem('qunthink_command_v1_alice:'+requestId));
+});

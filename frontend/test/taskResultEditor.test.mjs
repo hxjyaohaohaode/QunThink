@@ -8,7 +8,7 @@ const root=resolve(import.meta.dirname,'..'),window=new Window({url:'https://qun
 Object.assign(globalThis,{window,document:window.document,localStorage:window.localStorage,HTMLElement:window.HTMLElement,Node:window.Node,Element:window.Element,requestAnimationFrame:fn=>setTimeout(fn,0),IS_REACT_ACT_ENVIRONMENT:true});Object.defineProperty(globalThis,'navigator',{value:window.navigator,configurable:true});
 class Channel{port1={onmessage:null};port2={postMessage:()=>setTimeout(()=>this.port1.onmessage?.(),0)}};Object.defineProperty(globalThis,'MessageChannel',{value:Channel,configurable:true});
 globalThis.__editor={};
-const built=await build({stdin:{resolveDir:root,loader:'tsx',contents:`import{createRoot}from'react-dom/client';import{act}from'react';import{TaskResultEditor}from'./src/components/Writing/TaskResultEditor';import{useTaskResultsStore}from'./src/stores/taskResultsStore';export{act,useTaskResultsStore};export async function mount(el){const root=createRoot(el);await act(async()=>root.render(<TaskResultEditor taskId="task-1"/>));return root;}`},bundle:true,write:false,format:'esm',platform:'browser',jsx:'automatic',plugins:[{name:'editor-ui-fixtures',setup(build){
+const built=await build({stdin:{resolveDir:root,loader:'tsx',contents:`import{createRoot}from'react-dom/client';import{act}from'react';import{TaskResultEditor}from'./src/components/Writing/TaskResultEditor';import{MessageContent}from'./src/components/Chat/MessageContent';import{useTaskResultsStore}from'./src/stores/taskResultsStore';export{act,useTaskResultsStore};export async function mountMessage(el,props){const root=createRoot(el);await act(async()=>root.render(<MessageContent {...props}/>));return root;}export async function mount(el){const root=createRoot(el);await act(async()=>root.render(<TaskResultEditor taskId="task-1"/>));return root;}`},bundle:true,write:false,format:'esm',platform:'browser',jsx:'automatic',plugins:[{name:'editor-ui-fixtures',setup(build){
  const routes=[[/services\/api$/,'api'],[/utils\/cacheUtils$/,'cache'],[/utils\/taskRecovery$/,'recovery'],[/stores\/tasksStore$/,'tasks'],[/stores\/modelsStore$/,'models'],[/stores\/navigationStore$/,'nav'],[/Common\/useConfirm$/,'confirm']];for(const[filter,path]of routes)build.onResolve({filter},()=>({path,namespace:'fixture'}));
  build.onLoad({filter:/.*/,namespace:'fixture'},({path})=>({loader:'js',contents:{
  api:`export const getAuthGeneration=()=>1;export const axiosInstance={get:(...args)=>globalThis.__editor.get(...args),post:(...args)=>globalThis.__editor.post(...args)};`,
@@ -20,7 +20,7 @@ const built=await build({stdin:{resolveDir:root,loader:'tsx',contents:`import{cr
  confirm:`export const useConfirm=()=>({confirm:async()=>true,ConfirmModal:null});`
  }[path]}));
 }}]});
-const{act,mount,useTaskResultsStore:store}=await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
+const{act,mount,mountMessage,useTaskResultsStore:store}=await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
 const longBody='朋友们，欢迎参加10月20日的读书活动。\n\n'+('这是一段需要完整核对的邀请内容。'.repeat(90))+'\n最后一段：请确认是否参加。';
 const version=(id='v1',content=longBody)=>({id,sequence:1,kind:'generated',parent_version_id:null,run_id:'run-1',content,content_hash:'hash-'+id,created_at:'2026-10-04T12:00:00Z',source_hash:'source-20',source_messages:[],source_status:'current',content_hidden:false});
 const sourceMessages=[{id:'m18',revision:1,edited_at:null,sender_type:'user',content:'初定10月18日读书活动',created_at:'2026-10-01',change:'unchanged'},{id:'m20',revision:1,edited_at:null,sender_type:'user',content:'明确更正：活动改为10月20日，原18日作废',created_at:'2026-10-02',change:'unchanged'}];
@@ -33,7 +33,7 @@ beforeEach(async()=>{if(mounted)await act(async()=>mounted.unmount());container?
 after(async()=>{if(mounted)await act(async()=>mounted.unmount());window.close();});
 
 test('actual body is editable and full preview never truncates before acceptance',async()=>{
- assert.equal(container.querySelector('textarea[aria-label="文稿正文"]').value,longBody);await act(async()=>button('全文预览').click());const preview=container.querySelector('[aria-label="文稿全文预览"]');assert.match(preview.textContent,/最后一段：请确认是否参加/);assert.equal(preview.textContent.includes('展开全部'),false);assert.match(container.textContent,/明确更正：活动改为10月20日/);assert.match(container.textContent,/给朋友写活动邀请/);
+ assert.equal(container.querySelector('textarea[aria-label="文稿正文"]').value,longBody);await act(async()=>button('全文预览').click());const preview=container.querySelector('[aria-label="文稿全文预览"]');assert.match(preview.textContent,/最后一段：请确认是否参加/);assert.equal(preview.querySelector('button') === null,true, 'an always-expanded preview must not advertise a fake expansion toggle');assert.match(container.textContent,/明确更正：活动改为10月20日/);assert.match(container.textContent,/给朋友写活动邀请/);
 });
 test('manual save and exact version acceptance use real editor state, not task requirements',async()=>{
  const manual='亲爱的朋友，邀请你10月20日参加读书活动。落款：小林';await type(manual);assert.equal(button('验收版本 1').disabled,true);const calls=[];
@@ -56,4 +56,12 @@ test('composition input does not trigger save keyboard shortcut',async()=>{
 
 test('unknown generation offers actionable original-run recovery without requiring a connected model',async()=>{
  currentDocument=doc({generation:{status:'outcome_unknown',run_id:'original-run',source_input_stale:false}});await act(async()=>store.getState().fetch('task-1'));assert.equal(button('已核验，允许重试').disabled,false);await act(async()=>{button('已核验，允许重试').click();await flush()});assert.deepEqual(globalThis.__editor.resolved,['task-1','original-run','allow_retry']);assert.ok(button('停止后续生成'));
+});
+
+
+test('ordinary chat long messages still support a real expand and collapse toggle',async()=>{
+ await act(async()=>mounted.unmount());mounted=await mountMessage(container,{content:longBody,isUser:false});
+ assert.doesNotMatch(container.textContent,/最后一段：请确认是否参加/);assert.ok(button('展开全文 ↓'));
+ await act(async()=>button('展开全文 ↓').click());assert.match(container.textContent,/最后一段：请确认是否参加/);assert.ok(button('收起 ↑'));
+ await act(async()=>button('收起 ↑').click());assert.doesNotMatch(container.textContent,/最后一段：请确认是否参加/);
 });

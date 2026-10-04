@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { registerSyntheticAccount } from '../authFixture';
+import { pickWorkspaceNavigationState } from '../../scripts/q1-navigation.mjs';
 import { assertQ1CiRuntime, Q1_ORIGIN, ORIGINAL, CORRECTION, LATER_CORRECTION, PURPOSE, INVITATION, messageBubbleSelector, observeNewChatCalls } from '../../scripts/q1-fixture-protocol.mjs';
 
 if (!process.argv.includes('--list')) assertQ1CiRuntime();
@@ -87,11 +88,40 @@ async function taskById(context: BrowserContext, id: string) { const task = (awa
 // .group MessageBubble (MessageBubble.tsx), never an arbitrary first match.
 function messageBubble(page: Page, id: string) { return page.locator(messageBubbleSelector(id)); }
 function card(page: Page, title: string) { return page.locator('[data-observe="task-card"]').filter({ has: page.getByRole('heading', { name: title, exact: true }) }); }
-async function workspace(page: Page, info: TestInfo) {
-  if (await page.getByTestId('workspace').isVisible()) return;
-  if (info.project.name === 'mobile-reduced-motion') { await page.getByRole('button', { name: '返回', exact: true }).click(); await page.getByRole('button', { name: '工作台', exact: true }).click(); }
-  else await page.getByRole('button', { name: '返回工作台', exact: true }).click();
-  await expect(page.getByTestId('workspace')).toBeVisible();
+async function workspace(page: Page, info: TestInfo, e: Evidence) {
+  const mobile = info.project.name === 'mobile-reduced-motion';
+  const controls = {
+    workspace: page.getByTestId('workspace'),
+    writingClose: page.getByRole('button', { name: '收起文稿，返回对话', exact: true }),
+    mobileWorkspace: page.getByRole('button', { name: '⌘ 工作台', exact: true }),
+    mobileBack: page.getByRole('button', { name: '返回', exact: true }),
+    desktopBack: page.getByRole('button', { name: '返回工作台', exact: true })
+  };
+  const started = Date.now(), observations: Json[] = [];
+  try {
+  for (let step = 0; step < 4; step++) {
+    let next = 'waiting';
+    await expect.poll(async () => {
+      const visible = Object.fromEntries(await Promise.all(Object.entries(controls).map(async ([name, locator]) => [name, await locator.isVisible()])));
+      next = pickWorkspaceNavigationState(visible, mobile);
+      observations.push({ elapsedMs: Date.now() - started, visible, next });
+      return next;
+    }, { timeout: 20000, intervals: [100, 250, 500], message: 'Observe a known authenticated workspace/chat navigation state; do not infer Back from an unready workspace' }).not.toBe('waiting');
+    if (next === 'workspace') {
+      await e.record('workspace-navigation-observed', { observations, elapsedMs: Date.now() - started, meaning: 'Readiness observation only, not an acceptable user waiting-time verdict' });
+      await e.shot('workspace-ready-for-original-draft', controls.workspace); return;
+    }
+    if (next === 'close-writing') { await controls.writingClose.click({ timeout: 20000 }); await expect(controls.writingClose).not.toBeVisible(); }
+    else if (next === 'mobile-home') { await controls.mobileWorkspace.click({ timeout: 20000 }); await expect(controls.workspace).toBeVisible({ timeout: 20000 }); }
+    else if (next === 'mobile-chat') { await controls.mobileBack.click({ timeout: 20000 }); await expect(controls.mobileWorkspace).toBeVisible({ timeout: 20000 }); }
+    else if (next === 'desktop-chat') { await controls.desktopBack.click({ timeout: 20000 }); await expect(controls.workspace).toBeVisible({ timeout: 20000 }); }
+  }
+  throw new Error('Actual workspace navigation did not settle after the known visible steps');
+  } catch (error) {
+    await e.record('workspace-navigation-blocked', { observations, elapsedMs: Date.now() - started });
+    await e.shot('workspace-navigation-unresolved');
+    throw error;
+  }
 }
 async function openDetails(page: Page, title: string) {
   const target = card(page, title); await expect(target).toBeVisible();
@@ -238,8 +268,8 @@ async function reloadWithEvidence(page: Page, e: Evidence) {
   page.on('dialog', handler);
   try { await page.reload(); } finally { page.off('dialog', handler); }
 }
-async function reopenInConversation(page: Page, info: TestInfo, title: string) {
-  await workspace(page, info);
+async function reopenInConversation(page: Page, info: TestInfo, title: string, e: Evidence) {
+  await workspace(page, info, e);
   const target = await openDetails(page, title);
   await target.getByRole('button', { name: '打开来源会话 →', exact: true }).click();
   const editor = page.getByTestId('task-result-editor'); await expect(editor).toBeVisible(); return editor;
@@ -295,7 +325,7 @@ test('Q1 complete result protocol: same invitation, human revision, exact accept
     const saved = await saveVersion(page, editor, task.id); const manual = currentVersion(saved.document);
     expect(manual.content).toBe(humanBody); expect(manual.kind).toBe('manual'); expect(manual.content_hash).toBe(createHash('sha256').update(humanBody).digest('hex'));
     await e.record('manual-version-saved', { response: saved, manualSentence: humanSentence });
-    await reloadWithEvidence(page, e); editor = await reopenInConversation(page, info, title);
+    await reloadWithEvidence(page, e); editor = await reopenInConversation(page, info, title, e);
     await expect(editor).toHaveAttribute('data-task-id', task.id); await expect(editor.getByRole('textbox', { name: '文稿正文', exact: true })).toHaveValue(humanBody);
     await e.shot('same-manual-body-after-reload', editor.getByRole('textbox', { name: '文稿正文', exact: true }));
     const accepting = page.waitForResponse(r => r.url().endsWith(`/api/tasks/${task.id}/result/accept`) && r.request().method() === 'POST');
@@ -306,7 +336,7 @@ test('Q1 complete result protocol: same invitation, human revision, exact accept
     await e.record('exact-human-version-accepted', { request: acceptedResponse.request().postDataJSON(), response: accepted });
     await e.shot('specific-human-version-accepted', editor.getByRole('button', { name: `已验收版本 ${manual.sequence}`, exact: true }));
     await page.getByRole('button', { name: '收起文稿，返回对话', exact: true }).click();
-    await workspace(page, info); await page.getByRole('button', { name: '已确认文稿', exact: true }).click();
+    await workspace(page, info, e); await page.getByRole('button', { name: '已确认文稿', exact: true }).click();
     await expect(card(page, title)).toBeVisible();
     const acceptedSummary = await taskById(context, task.id);
     expect(acceptedSummary.accepted_run_id).toBeNull(); expect(acceptedSummary.result_head_version_id).toBe(manual.id); expect(acceptedSummary.result_accepted_version_id).toBe(manual.id);
@@ -358,10 +388,10 @@ test('Q1 complete result protocol: same invitation, human revision, exact accept
     await info.attach('actual-human-invitation-download.txt', { path: downloadPath!, contentType: 'text/plain' });
     await e.record('actual-delivery-fallback', { suggestedFilename: download.suggestedFilename(), bodyHash: createHash('sha256').update(reviewedBody).digest('hex'), selectionExact: true, downloadExact: true });
     await e.shot('usable-copy-selection-download-feedback', editor.getByRole('button', { name: '下载文本', exact: true }));
-    await reloadWithEvidence(page, e); await workspace(page, info);
+    await reloadWithEvidence(page, e); await workspace(page, info, e);
     await expect(card(page, title).locator('.workspace-status')).not.toContainText('来源已变化');
     await e.shot('final-workspace-body-current-and-generation-brief-separate', card(page, title));
-    editor = await reopenInConversation(page, info, title);
+    editor = await reopenInConversation(page, info, title, e);
     await expect(editor).toHaveAttribute('data-task-id', task.id); await expect(editor.getByRole('textbox', { name: '文稿正文', exact: true })).toHaveValue(reviewedBody);
     expect((await tasks(context)).filter(item => item.title === title)).toHaveLength(1);
     expect((await fixtureCalls(context, state.model)).filter((call: Json) => call.kind === 'task')).toHaveLength(1);
@@ -396,7 +426,12 @@ test('Q1 writing before model setup: committed body ACK lost, reload and same co
     await expect(editor.getByRole('button', { name: '核验原请求', exact: true })).toBeVisible();
     await e.record('manual-save-committed-ack-lost', { taskId: task.id, intents, committedResponse: saved, devicePrivateContentChoice: 'default off; minimal command receipt retained' });
     await e.shot('manual-save-unknown-before-reload', editor.getByRole('button', { name: '核验原请求', exact: true }));
-    await reloadWithEvidence(page, e); editor = await reopenInConversation(page, info, title);
+    await reloadWithEvidence(page, e); await workspace(page, info, e);
+    const continueOriginal = page.getByRole('button', { name: '打开文稿核验', exact: true });
+    await expect(continueOriginal).toBeVisible();
+    await e.shot('visible-original-receipt-recovery-entry', continueOriginal, true);
+    await continueOriginal.click(); editor = page.getByTestId('task-result-editor');
+    await expect(editor).toHaveAttribute('data-task-id', task.id);
     await expect(editor.getByRole('button', { name: '核验原请求', exact: true })).toBeVisible();
     const checking = page.waitForResponse(r => r.url().endsWith(`/api/tasks/${task.id}/result/commands/${intents[0].key}`));
     await editor.getByRole('button', { name: '核验原请求', exact: true }).click();

@@ -12,6 +12,7 @@ import { MemoryCenter } from './MemoryCenter';
 import { RuntimeDiagnostics } from './RuntimeDiagnostics';
 import { TaskResultEditor } from '../Writing/TaskResultEditor';
 import { useTaskResultsStore } from '../../stores/taskResultsStore';
+import { readTaskReceipts } from '../../utils/taskRecovery';
 import { useConfirm } from '../Common';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 import { setDiagnosticSurface } from '../../observability/runtimeDiagnostics';
@@ -56,6 +57,7 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
   const pending = useTasksStore(state => state.pending);
   const recoveredCreate = useTasksStore(state => state.recoveredCreate);
   const uncertainCreate = useTasksStore(state => state.uncertainCreate);
+  const uncertainResults = useTaskResultsStore(state => state.uncertain);
   const [view, setView] = useState<View>('overview');
   const [filter, setFilter] = useState<'all' | TaskCategory>('all');
   const [stage, setStage] = useState<Stage>('all');
@@ -113,6 +115,20 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
     `${task.title} ${task.prompt}`.toLocaleLowerCase().includes(taskSearch.trim().toLocaleLowerCase())), [tasks, filter, stage, taskSearch]);
   const attentionCount = tasks.filter(attention).length;
   const runningCount = tasks.filter(task => task.status === 'running').length;
+  const continuation = useMemo(() => {
+    const unresolved = new Set(Object.keys(uncertainResults));
+    try { for (const receipt of readTaskReceipts()) if (receipt.taskId && ['save_revision', 'accept_revision', 'adopt_revision', 'review_brief', 'run'].includes(receipt.action)) unresolved.add(receipt.taskId); } catch { /* The editor still exposes storage/query errors; do not claim there are no pending commands. */ }
+    const task = tasks.find(item => unresolved.has(item.id) || item.status === 'outcome_unknown') || tasks[0];
+    return { task, unresolved: !!task && (unresolved.has(task.id) || task.status === 'outcome_unknown') };
+  }, [tasks, uncertainResults, lastUpdated]);
+  function continueWriting() {
+    const task = continuation.task; if (!task) return;
+    if (task.group_id && groups.some(group => group.id === task.group_id)) {
+      useTaskResultsStore.getState().openPanel(task.group_id, task.id); onOpenConversation(task.group_id); return;
+    }
+    setTaskSearch(''); setFilter('all'); setStage('all'); setSelected(task.id);
+    requestAnimationFrame(() => document.getElementById(`task-detail-${task.id}`)?.scrollIntoView({ block: 'start' }));
+  }
   async function perform(action: () => Promise<unknown>, success?: string) {
     setError('');
     try { await action(); if (success) setNotice(success); return true; }
@@ -183,7 +199,7 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
       {(error || loadError) && <div className="workspace-error mb-4" role="alert"><p>{error || loadError}</p><button className="underline mt-2" onClick={() => { setError(''); void load(); }}>刷新任务状态</button></div>}
       <motion.div key={view} initial={reduced ? false : { opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={transition}>
         {view === 'models' ? <section data-observe="models" className="max-w-3xl"><ModelCenter /></section> : view === 'goals' ? <section data-observe="goals"><PersonalGoalsPanel /></section> : view === 'memory' ? <section data-observe="memory"><MemoryCenter /></section> : view === 'diagnostics' ? <RuntimeDiagnostics /> : <>
-          {!ready.length && <section className="workspace-setup mb-6"><div><span className="text-xs font-semibold text-accent">需要 AI 时再连接</span><h2 className="text-base font-semibold mt-1">先写作，再选择 AI 助手</h2><p className="text-sm text-text-secondary mt-2">现在就能整理材料、写正文并保存版本。模型连接只在生成 AI 候选稿时需要。</p></div><button className="workspace-button" onClick={() => setView('models')}>设置模型 →</button></section>}
+          {!ready.length && (continuation.task ? <section className="workspace-writing-return mb-5" aria-label="继续写作"><div><p className="text-sm font-medium">{continuation.unresolved ? '先核验上次文稿操作' : '接着完成自己的文稿'}</p><p className="text-xs text-text-secondary mt-1">{continuation.unresolved ? '保留原请求编号，打开同一份文稿查看结果' : '在原位置继续编辑，AI 仅在需要候选稿时连接'}</p></div><div className="flex flex-wrap items-center gap-3"><button className="workspace-primary" onClick={continueWriting}>{continuation.unresolved ? '打开文稿核验' : '继续最近文稿'}</button><button className="writing-link" onClick={() => setView('models')}>需要 AI 时设置模型</button></div></section> : <section className="workspace-setup mb-6"><div><span className="text-xs font-semibold text-accent">需要 AI 时再连接</span><h2 className="text-base font-semibold mt-1">先写作，再选择 AI 助手</h2><p className="text-sm text-text-secondary mt-2">现在就能整理材料、写正文并保存版本。模型连接只在生成 AI 候选稿时需要。</p><div className="flex flex-wrap items-center gap-3 mt-4"><button className="workspace-primary" onClick={() => void startTask()}>现在开始写作</button><button className="writing-link" onClick={() => setView('models')}>需要 AI 时设置模型</button></div></div></section>)}
           <div className="grid grid-cols-3 gap-2 md:gap-4 mb-6" aria-label="任务概览">{([{ id: 'attention', label: '需要你处理', value: attentionCount, hint: '检查草稿与异常' }, { id: 'running', label: '正在进行', value: runningCount, hint: '不必停留等待' }, { id: 'all', label: '全部任务', value: tasks.length, hint: '想法与成果' }] as const).map(item => <button key={item.id} aria-pressed={stage === item.id} onClick={() => setStage(stage === item.id ? 'all' : item.id)} className={`workspace-stat ${stage === item.id ? 'is-active' : ''}`}><span className="text-xl md:text-3xl font-semibold tabular-nums">{loading && !tasks.length ? '—' : item.value}</span><span className="block text-xs md:text-sm mt-2">{item.label}</span><span className="hidden sm:block text-xs text-text-muted mt-1">{item.hint}</span></button>)}</div>
           <AnimatePresence initial={false}>{composer && <motion.section ref={composerRef} key="composer" data-observe="task-composer" initial={{ opacity: 0, height: reduced ? 'auto' : 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: reduced ? 'auto' : 0 }} transition={transition} className="overflow-hidden mb-6">
             <form className="workspace-composer" onSubmit={event => { event.preventDefault(); void submit(); }} aria-busy={!!pending.create}>

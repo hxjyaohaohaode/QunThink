@@ -1255,3 +1255,6 @@ input[type="range"]::-moz-range-track {
 
 .dark .writing-state.is-warning, .dark .writing-source-warning, .dark .writing-recovery.is-warning { color:#e9ba70; }
 .dark .writing-state.is-accepted { color:#74dcb0; }
+
+.workspace-writing-return { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:.8rem; padding:.85rem 1rem; border:1px solid rgb(var(--border-color)); border-left:3px solid rgb(var(--accent)); border-radius:.75rem; background:rgb(var(--bg-surface)); }
+.workspace-writing-return .workspace-primary { min-height:44px; padding:.55rem .8rem; font-size:.8rem; }

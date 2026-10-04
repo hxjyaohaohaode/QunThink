@@ -122,7 +122,7 @@ export const MessageContent = React.memo(function MessageContent({
           )}
         </>
       )}
-      {processedContent.length > collapseThreshold && !isStreaming && (
+      {!alwaysExpanded && processedContent.length > collapseThreshold && !isStreaming && (
         <button
           onClick={(e) => {
             e.stopPropagation();
