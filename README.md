@@ -57,6 +57,10 @@ node scripts/migrate-foundations.mjs --schema qunthink_core
 
 推送 `main` 会运行 GitHub Actions：后端测试使用临时 PostgreSQL，前端运行测试与构建，随后构建两个 Docker 镜像。仓库中的 Render API 部署工作流只在该次 `main` CI 成功且提交仍是最新版本时触发；`render.yaml` 将 Blueprint 服务的自动部署设置为检查通过后触发。已有 Render 服务的实际自动部署设置、数据迁移与运行状态须在服务端核实；GitHub CI 通过不代表生产部署成功。
 
+## 2026-10 工作台与任务可靠性
+
+本次改进覆盖任务请求幂等、取消/未知结果核验、消息来源修订、跨标签账号保护、任务草稿连续性和本地脱敏诊断。品牌与登录动画设有字节校验。真实实现、测试与未完成边界见 [本次迭代记录](docs/optimization-2026-10.md)。
+
 ## 验证
 
 ```powershell
@@ -71,6 +75,7 @@ npm audit --omit=dev --registry=https://registry.npmjs.org
 
 cd ..
 node scripts/validate-openapi.mjs
+node scripts/verify-brand.mjs
 ```
 
 真实 PostgreSQL 专项测试需另行设置隔离库的 `QUNTHINK_TEST_PG_URL`。当前 Windows Node v24.15 的 `node --test` 跨文件 IPC 偶发反序列化失败；`npm test` 将每个测试文件放在独立进程执行，并核对全部退出码。隔离真实 PostgreSQL 下本轮为 136/136、37/37 文件、0 跳过；这不证明多 Worker 生产竞争或 100 人团队容量。

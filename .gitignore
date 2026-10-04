@@ -80,3 +80,7 @@ frontend/*.log
 *.tsbuildinfo
 *.development
 *.production
+
+# Browser-test evidence is uploaded by CI, never committed
+frontend/test-results/
+frontend/playwright-report/

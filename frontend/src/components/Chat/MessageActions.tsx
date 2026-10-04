@@ -9,6 +9,7 @@ import { useNavigationStore } from '../../stores/navigationStore';
 
 interface MessageActionsProps {
   messageId: string;
+  editedAt?: string | null;
   isUser: boolean;
   content: string;
   likes?: string[];
@@ -26,6 +27,7 @@ interface MessageActionsProps {
 
 export const MessageActions = React.memo(function MessageActions({
   messageId,
+  editedAt = null,
   isUser,
   content,
   likes = [],
@@ -179,7 +181,7 @@ export const MessageActions = React.memo(function MessageActions({
       </ActionButton>
 
       <ActionButton title="创建任务" onClick={() => {
-        useTasksStore.getState().setDraft({ prompt: content, groupId: currentGroup?.id || null });
+        useTasksStore.getState().setDraft({ prompt: content, groupId: currentGroup?.id || null, messageId, editedAt });
         useNavigationStore.getState().setActiveDesktopView('workspace');
         useNavigationStore.getState().setActiveMobileTab('workspace');
       }}><span className="text-sm">↗</span></ActionButton>

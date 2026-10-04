@@ -1,0 +1,31 @@
+{
+  "baselineCommit": "ac69f6d6aa92b2b6f42166af26112bbdf3e9fd4c",
+  "files": {
+    "frontend/src/components/Layout/SplashScreen.tsx": "e54564aee727766401fb5e63492663d2d1718800fc9b6205df1ede7661fd2631",
+    "frontend/src/components/Layout/LoginPage.tsx": "b5179d9d833e63ba298fe6b24f61f7c3a9d6c5af3d1e4075d6fcb7f2504d2901",
+    "frontend/public/favicon.svg": "e470714d6d8612cf6a8db4ad0c69e3d3cd049c63d2a66b06722971852a56c3de",
+    "有字logo.txt": "faec2e780810f5218f1b4406f119b758dbdff2269deaf483558164090d356b4b",
+    "纯logo.txt": "09e6eacb4e9cc715e9c948073620d0cef4af2b5d98eb5bf8b9cf3314bc7c4240",
+    "frontend/public/pwa/icon-128x128.png": "db9eb9b7d2f0b70b450a4a1f7a4b4abe8d22b7622b3034cedc2d5ac41decc442",
+    "frontend/public/pwa/icon-96x96.png": "5cfff9cce75532f6656015bcee1b5028c9047af154b264bc32c74e6e5823d54a",
+    "frontend/public/pwa/icon-384x384.png": "3734bf61fc1f487320990b19fea6c94275baa17a4049eb06ccd2ca6fa776bc25",
+    "frontend/public/pwa/apple-touch-icon-180x180.png": "6000a937a38f956ee1e27e138fcf690dd9e5f950929c370976aca6a34b3e270f",
+    "frontend/public/pwa/icon-512x512.png": "1a1290f6d1c8114452f25f3611a71ac3b1b4f40e933566a62384be92d3622330",
+    "frontend/public/pwa/maskable-icon-512x512.png": "78119b8b70d4ebccbe301f556688d2604bd36dfab25c44620b65a3c83266e5f6",
+    "frontend/public/pwa/icon-144x144.png": "85ec8478268a21b740ae157f5c9879f5c3f735d403334cc375395cb66030ea28",
+    "frontend/public/pwa/icon-192x192.png": "ef657d21e272ff8f37107755689c31b80ade2a3c2c8af66ae35cf1c17eea9cfe",
+    "frontend/public/pwa/icon-72x72.png": "44476d93ea7f85159ef9d768775ddabf46552daaff2d487ff9cb3266da69f765",
+    "frontend/public/pwa/icon-152x152.png": "44995a731a3d50eb9fce8313ef578324d0b36ada28300c95cba16cde5a9c38e7"
+  },
+  "inlineLogos": {
+    "frontend/src/components/Layout/Sidebar.tsx": [
+      "45863fd66086fc373aca67c0739fa07690294422830b23f1cbf253fbac70b384"
+    ],
+    "frontend/src/components/Layout/SettingsPage.tsx": [
+      "44d4efdc6a156c27f3ebb3ceccdf1cd986737bbb52168db2d4aef3635b52c463"
+    ],
+    "frontend/src/components/Layout/DesktopSettingsModal.tsx": [
+      "c3e68028e7c98f4ca1095634ad6101ce98124a3a374c09d1f5f2fcfb1bc1519d"
+    ]
+  }
+}

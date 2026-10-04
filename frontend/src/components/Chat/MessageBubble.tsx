@@ -632,6 +632,7 @@ const MessageBubbleComponent = ({ message, onReply, showTimeDivider, isMultiSele
           {!isMultiSelectMode && (
             <MessageActions
               messageId={message.id}
+              editedAt={message.edited_at ?? null}
               isUser={isUser}
               content={message.content}
               likes={message.likes}

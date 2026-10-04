@@ -1,3 +1,5 @@
+import { mockProviderDns } from './helpers/mockProviderDns.js';
+mockProviderDns(['api.deepseek.com', 'api.openai.com']);
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -1039,11 +1041,13 @@ test('task cancellation defeats late completions, duplicate runs are rejected an
   const s = await session(); await configure(s.userId, { model: 'slow-task-model' });
   await probeChat(s);
   const task = await createTask(s.userId, { title: '慢请求', prompt: '执行', model_id: 'custom' });
+  const slowBefore = slow.length;
   const running = runTask(s.userId, task.id);
-  await eventually(async () => (await listTasks(s.userId))[0]?.status === 'running');
+  await eventually(() => slow.length > slowBefore);
   await assert.rejects(runTask(s.userId, task.id), e => e.status === 409);
-  await updateTask(s.userId, task.id, { status: 'cancelled' });
-  await running; assert.equal((await listTasks(s.userId))[0].status, 'cancelled');
+  await updateTask(s.userId, task.id, { status: 'cancelled', run_id: (await listTasks(s.userId)).find(item => item.id === task.id).run_id });
+  await running; assert.equal((await listTasks(s.userId))[0].status, 'outcome_unknown');
+  assert.equal((await listTasks(s.userId))[0].history.at(-1).dispatch_status, 'sent_or_unknown');
   const db = await getUserDb(s.userId);
   await withWriteLock(s.userId, async () => { await db.read(); db.data.tasks[0].status = 'running'; db.data.tasks[0].auto_run = true; await db.write(); });
   await startTaskScheduler(); stopTaskScheduler();
@@ -1052,8 +1056,8 @@ test('task cancellation defeats late completions, duplicate runs are rejected an
   await assert.rejects(runTask(s.userId, task.id), error => error.status === 409);
   assert.equal((await request.post(`/api/tasks/${task.id}/resolve-unknown`).set('Cookie', s.cookie).send({ decision: 'retry' })).status, 400);
   const other = await session();
-  assert.equal((await request.post(`/api/tasks/${task.id}/resolve-unknown`).set('Cookie', other.cookie).send({ decision: 'allow_retry' })).status, 404);
-  const resolved = await request.post(`/api/tasks/${task.id}/resolve-unknown`).set('Cookie', s.cookie).send({ decision: 'allow_retry' });
+  assert.equal((await request.post(`/api/tasks/${task.id}/resolve-unknown`).set('Cookie', other.cookie).send({ decision: 'allow_retry', run_id: recovered.run_id })).status, 404);
+  const resolved = await request.post(`/api/tasks/${task.id}/resolve-unknown`).set('Cookie', s.cookie).send({ decision: 'allow_retry', run_id: recovered.run_id });
   assert.equal(resolved.status, 200); assert.equal(resolved.body.status, 'failed');
   assert.equal(resolved.body.history.at(-1).resolution, 'allow_retry');
 });

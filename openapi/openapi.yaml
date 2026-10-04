@@ -3348,6 +3348,13 @@ paths:
         "429":
           description: 达到执行次数或请求限制
   /api/tasks:
+    parameters:
+      - name: X-Expected-User-Id
+        in: header
+        required: false
+        description: 写操作提交前捕获的账号标识；与认证账号不符时返回 409 ACCOUNT_CHANGED，不改变任何任务
+        schema:
+          type: string
     get:
       operationId: listWorkspaceTasks
       summary: 读取当前用户的任务和最近执行结果
@@ -3374,6 +3381,14 @@ paths:
           description: 达到执行次数或请求限制
     post:
       operationId: createWorkspaceTask
+      description: 同账号内复用相同 UUID 和相同内容返回原任务；不同内容返回 409。任务删除后保留请求回执并返回 410，不会重新创建。
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            format: uuid
       summary: 创建待办或明确授权的主动任务
       tags:
         - Tasks
@@ -3398,9 +3413,18 @@ paths:
           description: 资源不属于当前用户或不存在
         "409":
           description: 配置版本冲突、任务运行中或模型被引用
+        "410":
+          description: 此请求创建的任务已删除
         "429":
           description: 达到执行次数或请求限制
   /api/tasks/{taskId}:
+    parameters:
+      - name: X-Expected-User-Id
+        in: header
+        required: false
+        description: 写操作提交前捕获的账号标识；与认证账号不符时返回 409 ACCOUNT_CHANGED，不改变任何任务
+        schema:
+          type: string
     patch:
       operationId: updateWorkspaceTask
       summary: 修改任务状态、暂停或停止执行
@@ -3449,8 +3473,16 @@ paths:
         "409":
           description: 请先停止运行中的任务
   /api/tasks/{taskId}/run:
+    parameters:
+      - name: X-Expected-User-Id
+        in: header
+        required: false
+        description: 写操作提交前捕获的账号标识；与认证账号不符时返回 409 ACCOUNT_CHANGED，不改变任何任务
+        schema:
+          type: string
     post:
       operationId: runWorkspaceTask
+      description: 每次新生成意图使用新 UUID；同一任务复用请求号只返回任务当前状态，不再次调用模型。网络断开、5xx 或发送后停止可能返回 outcome_unknown，须先核验才能显式重试。此保证限于当前单进程用户存储，未证明多 Worker 并发。
       summary: 生成一次待验收的 AI 草稿并等待结果，可能计费
       tags:
         - Tasks
@@ -3460,6 +3492,23 @@ paths:
           required: true
           schema:
             type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                client_request_id:
+                  type: string
+                  format: uuid
+              additionalProperties: false
       responses:
         "200":
           description: 成功
@@ -3478,6 +3527,13 @@ paths:
         "429":
           description: 达到执行次数或请求限制
   /api/tasks/{taskId}/accept:
+    parameters:
+      - name: X-Expected-User-Id
+        in: header
+        required: false
+        description: 写操作提交前捕获的账号标识；与认证账号不符时返回 409 ACCOUNT_CHANGED，不改变任何任务
+        schema:
+          type: string
     post:
       operationId: acceptWorkspaceTaskResult
       summary: 当前用户验收本次生成的草稿；来源变化时拒绝
@@ -3515,9 +3571,16 @@ paths:
         "409":
           description: 成果不是当前运行的草稿或来源已变化
   /api/tasks/{taskId}/resolve-unknown:
+    parameters:
+      - name: X-Expected-User-Id
+        in: header
+        required: false
+        description: 写操作提交前捕获的账号标识；与认证账号不符时返回 409 ACCOUNT_CHANGED，不改变任何任务
+        schema:
+          type: string
     post:
       operationId: resolveUnknownWorkspaceTaskRun
-      summary: 人工处理重启后结果未知的运行；允许重试前须确认重复调用与费用风险
+      summary: 人工处理结果未知的运行；允许重试前须确认重复调用与费用风险
       tags:
         - Tasks
       parameters:
@@ -3535,7 +3598,11 @@ paths:
               properties:
                 decision:
                   enum: [allow_retry, abandon]
-              required: [decision]
+                run_id:
+                  type: string
+                  format: uuid
+                  description: 必须传入用户检查时的待核验运行标识，拒绝将旧决定应用到新的运行
+              required: [decision, run_id]
               additionalProperties: false
       responses:
         "200":
@@ -4871,6 +4938,10 @@ components:
     WorkspaceTaskInput:
       type: object
       properties:
+        client_request_id:
+          type: string
+          format: uuid
+          description: 创建意图的 UUID，也可通过 Idempotency-Key 请求头传入；两者同时存在时必须相同
         title:
           type: string
           maxLength: 150
@@ -4894,6 +4965,15 @@ components:
             - string
             - "null"
           maxLength: 100
+        source_message_id:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 100
+          description: 从消息创建任务时传入；必须与 group_id 同属当前账号
+        source_message_edited_at:
+          type: [string, "null"]
+          format: date-time
+          description: 选择来源消息时的 edited_at，未编辑时显式传 null；来源已更新则创建被拒绝
         run_at:
           type:
             - string
@@ -4915,6 +4995,10 @@ components:
     WorkspaceTask:
       type: object
       properties:
+        client_request_id:
+          type: string
+          format: uuid
+          description: 创建意图的 UUID，也可通过 Idempotency-Key 请求头传入；两者同时存在时必须相同
         title:
           type: string
           maxLength: 150
@@ -4938,6 +5022,15 @@ components:
             - string
             - "null"
           maxLength: 100
+        source_message_id:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 100
+          description: 从消息创建任务时传入；必须与 group_id 同属当前账号
+        source_message_edited_at:
+          type: [string, "null"]
+          format: date-time
+          description: 选择来源消息时的 edited_at，未编辑时显式传 null；来源已更新则创建被拒绝
         run_at: &a1
           type:
             - string
@@ -4965,11 +5058,25 @@ components:
         run_id:
           type: string
           description: 当前或最近一次运行标识
+        run_request_id:
+          type: [string, "null"]
+          format: uuid
+        retry_of_run_id:
+          type: [string, "null"]
+          format: uuid
+        result_run_id:
+          type: [string, "null"]
+          format: uuid
+        dispatch_status:
+          enum: [not_sent, sent_or_unknown]
         accepted_run_id:
           type: string
           description: 最近经用户明确验收的运行标识
         result_pending_review:
           type: boolean
+        source_input_stale:
+          type: boolean
+          description: 原始来源消息已改变或撤销；隐藏其复制的任务输入及成果，并拒绝继续运行
         source_stale:
           type: boolean
           description: 当前关联会话与产出此结果时的来源快照不同；读取时计算
@@ -4988,6 +5095,42 @@ components:
             properties:
               id:
                 type: string
+              client_request_id:
+                type: [string, "null"]
+                format: uuid
+              retry_of_run_id:
+                type: [string, "null"]
+                format: uuid
+              started_at: *a1
+              source_stale:
+                type: boolean
+                description: 独立检查此运行的来源；新结果不会使旧失效草稿重新可读
+              source_messages:
+                type: array
+                description: 来源快照的消息标识与修订；实际上下文省略情况见 context_audit
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    revision:
+                      type: [integer, "null"]
+                    edited_at:
+                      type: [string, "null"]
+                      format: date-time
+                  required: [id, revision, edited_at]
+              dispatch_status:
+                enum: [not_sent, sent_or_unknown]
+              context_audit:
+                type: [object, "null"]
+              usage:
+                type: [object, "null"]
+              usage_status:
+                enum: [provider_reported, unknown]
+              cost:
+                type: "null"
+              resolution:
+                enum: [allow_retry, abandon]
               finished_at: *a1
               status:
                 enum:
@@ -4995,6 +5138,8 @@ components:
                   - accepted
                   - completed
                   - failed
+                  - cancelled
+                  - outcome_unknown
               result:
                 type: string
               error:
@@ -5036,6 +5181,14 @@ components:
         status:
           enum:
             - cancelled
+        cancel_request_id:
+          type: string
+          format: uuid
+          description: 精确停止该生成请求；即使停止先于运行请求到达，也会保留拒绝后续派发的记录
+        run_id:
+          type: string
+          format: uuid
+          description: 停止已接收运行时的标识；停止时必须提供此字段或 cancel_request_id
         auto_run:
           type: boolean
         run_at:

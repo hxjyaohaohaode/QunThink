@@ -1,3 +1,5 @@
+import { mockProviderDns } from './helpers/mockProviderDns.js';
+mockProviderDns(['api.deepseek.com', 'example.org']);
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';

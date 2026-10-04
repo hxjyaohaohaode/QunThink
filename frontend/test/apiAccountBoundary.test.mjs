@@ -1,0 +1,52 @@
+import test, { after } from 'node:test';
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+import { Window } from 'happy-dom';
+import { resolve } from 'node:path';
+const window = new Window({ url: 'http://localhost/' });
+Object.assign(globalThis, { window, document: window.document, localStorage: window.localStorage });
+after(() => window.close());
+globalThis.__apiAccount = 'alice';
+const root = resolve(import.meta.dirname, '..');
+const result = await build({ stdin: { contents: `export { axiosInstance, onAuthExpired, api } from './src/services/api'; export { default as axios } from 'axios';`, resolveDir:root, loader:'ts' }, bundle:true, format:'esm', platform:'browser', write:false, define: { 'import.meta.env.DEV': 'false', 'import.meta.env.VITE_AUTH_MODE': '"session"' }, plugins:[{name:'api-runtime-fixture',setup(build){
+  build.onResolve({filter:/utils\/cacheUtils$/},()=>({path:'cache',namespace:'mock'}));
+  build.onResolve({filter:/\.\/runtimeConfig$/},()=>({path:'runtime',namespace:'mock'}));
+  build.onLoad({filter:/.*/,namespace:'mock'},({path})=>({loader:'js',contents:path==='cache'?'export const getCacheUserId = () => globalThis.__apiAccount;':`export const getApiBaseUrl = () => '/api'; export const getApiBaseUrlCandidates = () => ['/api','http://fallback.test/api']; export const rememberBackendOrigin = () => {};`}));
+}}]});
+const { axiosInstance, axios, onAuthExpired, api } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+const response = (config, data) => ({config,data,status:200,statusText:'OK',headers:{}});
+test('account identity is frozen before CSRF wait; superseded request cannot log out the new account', async () => {
+  let resolveCsrf, sent;
+  axios.defaults.adapter = config => new Promise(resolve => { resolveCsrf = () => resolve(response(config,{csrfToken:'synthetic-csrf'})); });
+  axiosInstance.defaults.adapter = async config => { sent = config; throw Object.assign(new Error('changed'), {config,response:{status:409,data:{code:'ACCOUNT_CHANGED'}}}); };
+  const events = []; const off = onAuthExpired(reason => events.push(reason));
+  const pending = axiosInstance.post('/tasks',{prompt:'alice-private-input'});
+  await new Promise(resolve => setTimeout(resolve,0));
+  globalThis.__apiAccount = 'bob'; resolveCsrf();
+  await assert.rejects(pending,error => error.code==='ACCOUNT_CHANGED');
+  assert.equal(sent.headers['X-Expected-User-Id'],'alice');
+  assert.deepEqual(events,[]); off();
+});
+test('read fallback advances once rather than resetting to the failed origin', async () => {
+  const origins = [];
+  axiosInstance.defaults.adapter = async config => { origins.push(config.baseURL); if(origins.length===1) throw Object.assign(new Error('network'),{config,code:'ERR_NETWORK'}); return response(config,[]); };
+  await axiosInstance.get('/tasks');
+  assert.deepEqual(origins,['/api','http://fallback.test/api']);
+});
+
+test('deliberate login binds bootstrap to newly authenticated identity instead of expired cache', async () => {
+  globalThis.__apiAccount = 'alice'; document.cookie = 'XSRF-TOKEN=synthetic-csrf';
+  const sent = [];
+  axiosInstance.defaults.adapter = async config => { sent.push(config); return response(config,{ user:{id:'bob'} }); };
+  await api.loginPhone('13800000000','synthetic-password'); await api.getBootstrap();
+  assert.equal(sent[0].headers['X-Expected-User-Id'],undefined);
+  assert.equal(sent[1].headers['X-Expected-User-Id'],'bob');
+});
+
+test('current stale tab receives reauthentication signal when shared cookie changes account', async () => {
+  globalThis.__apiAccount = 'bob';
+  const events = []; const off = onAuthExpired(reason => events.push(reason));
+  axiosInstance.defaults.adapter = async config => { throw Object.assign(new Error('changed'), {config,response:{status:409,data:{code:'ACCOUNT_CHANGED'}}}); };
+  await assert.rejects(axiosInstance.get('/tasks'), error => error.code==='ACCOUNT_CHANGED');
+  assert.deepEqual(events,['account_changed']); off();
+});

@@ -59,6 +59,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
         working-directory: ./frontend
+      - name: Preserve brand and entry animation
+        run: node scripts/verify-brand.mjs
       - name: Frontend tests
         run: npm test
         working-directory: ./frontend
@@ -79,9 +81,40 @@ jobs:
           fi
         working-directory: ./frontend
 
+  ui-browser-check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [desktop-chromium, mobile-reduced-motion]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+      - run: npm ci --prefix backend && npm ci --prefix frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: ./frontend
+      - name: Real browser desktop/mobile and failure-recovery flows
+        run: npm run test:e2e -- --project=${{ matrix.project }}
+        working-directory: ./frontend
+      - name: Save browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-${{ matrix.project }}
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 14
+
   docker:
     runs-on: ubuntu-latest
-    needs: [backend-check, frontend-check]
+    needs: [backend-check, frontend-check, ui-browser-check]
     strategy:
       matrix:
         include:

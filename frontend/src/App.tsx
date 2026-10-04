@@ -1,3 +1,4 @@
+import { clearDiagnostics, observeInteractions, setDiagnosticSurface } from './observability/runtimeDiagnostics';
 import { purgeLegacyPrivateCaches } from './utils/privateCache';
 import { useModelsStore } from './stores/modelsStore';
 import { useTasksStore } from './stores/tasksStore';
@@ -26,7 +27,7 @@ import { PWAInstallPrompt } from './components/Common/PWAInstallPrompt';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useReducedMotion } from './hooks/useReducedMotion';
 import { useSwipeBack } from './components/Common/SwipeTransition';
-import { api, getDevUserId, onAuthExpired } from './services/api';
+import { api, getDevUserId, onAuthExpired, confirmAuthIdentity } from './services/api';
 import { initFontSize } from './stores/fontSizeStore';
 import { useAudioStore } from './stores/audioStore';
 import { setCacheUserId, getCacheUserId, clearAllCachesForUser, saveGroupsCache, savePersonasCache, saveProfileCache } from './utils/cacheUtils';
@@ -128,8 +129,8 @@ function getPersistedSessionInfo(): { userId: string; timestamp: number } | null
 }
 
 function isAuthFailure(error: unknown) {
-  const status = (error as any)?.response?.status;
-  return status === 401 || status === 403;
+  const status = (error as any)?.response?.status ?? (error as any)?.status;
+  return status === 401 || status === 403 || (error as any)?.code === 'ACCOUNT_CHANGED';
 }
 
 const defaultProfileState: UserProfile = {
@@ -147,8 +148,9 @@ const defaultProfileState: UserProfile = {
 };
 
 function hydrateBootstrapData(userId: string, payload: BootstrapPayload) {
-  if (getCacheUserId() !== userId) useAudioStore.getState().clearAll();
+  if (getCacheUserId() !== userId) { useAudioStore.getState().clearAll(); useTasksStore.getState().cleanup(); clearDiagnostics(); }
   setCacheUserId(userId);
+  confirmAuthIdentity(userId);
   setIndexedDBUserId(userId);
 
   const groups = payload.groups || [];
@@ -251,7 +253,8 @@ async function initializeUserData(userId: string) {
   }
 }
 
-async function handleLogout() {
+async function handleLogout(remote = true) {
+  clearDiagnostics();
   useAudioStore.getState().clearAll();
   await purgeLegacyPrivateCaches();
   useTasksStore.getState().cleanup();
@@ -270,7 +273,7 @@ async function handleLogout() {
   useUIStore.getState().clearAllTypingTimeouts();
 
   try {
-    await api.logout();
+    if (remote) await api.logout();
   } catch { }
 
   clearPersistedSessionInfo();
@@ -339,6 +342,7 @@ async function handleLogout() {
   });
 
   setCacheUserId(null);
+  confirmAuthIdentity(null);
   setIndexedDBUserId(null);
 
   if (import.meta.env.DEV) {
@@ -454,8 +458,11 @@ function App() {
   }, [isAuthenticated, appPhase, sessionCheckError]);
 
   useEffect(() => {
-    const unsubscribe = onAuthExpired(async () => {
-      await handleLogout();
+    const unsubscribe = onAuthExpired(async reason => {
+      // Hide account-bound UI before waiting for asynchronous cache cleanup.
+      setIsAuthenticated(false);
+      setAppPhase('auth');
+      await handleLogout(reason !== 'account_changed');
       wsConnectedRef.current = false;
       dataInitializedRef.current = false;
       setIsAuthenticated(false);
@@ -676,6 +683,18 @@ function AppContent({
   const setActiveDesktopView = useNavigationStore((s) => s.setActiveDesktopView);
   const reducedMotion = useReducedMotion();
   const activeDesktopView = useNavigationStore(s => s.activeDesktopView);
+  const [isMobileLayout, setIsMobileLayout] = useState(() => window.matchMedia('(max-width: 767px)').matches);
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 767px)');
+    const update = () => setIsMobileLayout(query.matches);
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+  useEffect(() => observeInteractions(), []);
+  useEffect(() => {
+    const view = isMobileLayout ? (mobileTab === 'chats' ? 'chat' : mobileTab) : activeDesktopView;
+    setDiagnosticSurface(view);
+  }, [activeDesktopView, mobileTab, isMobileLayout]);
   const showAgents = activeDesktopView === 'agents';
   const setShowAgents = (show: boolean) => setActiveDesktopView(show ? 'agents' : 'chat');
   const [showAgentCreate, setShowAgentCreate] = useState(false);
@@ -787,7 +806,7 @@ function AppContent({
       <ConnectionStatus />
 
       {/* 桌面端布局 */}
-      <div className="hidden md:flex h-dvh">
+      {!isMobileLayout && <div className="flex h-dvh">
         <Sidebar
           collapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -913,10 +932,10 @@ function AppContent({
             )}
           </AnimatePresence>
         </div>
-      </div>
+      </div>}
 
       {/* 移动端布局 */}
-      <div className="md:hidden relative h-full overflow-hidden" style={{ willChange: swipeProgress > 0 ? 'transform' : 'auto' }} {...swipeHandlers}>
+      {isMobileLayout && <div className="relative h-full overflow-hidden" style={{ willChange: swipeProgress > 0 ? 'transform' : 'auto' }} {...swipeHandlers}>
         <div
           className="absolute inset-0 pointer-events-none z-50"
           style={{
@@ -1058,7 +1077,7 @@ function AppContent({
         {(mobileView === 'main' || mobileView === 'agents') && (
           <MobileTabBar activeTab={mobileTab} onTabChange={handleTabChange} />
         )}
-      </div>
+      </div>}
 
       {showAgentCreate && (
         <LazyBoundary>

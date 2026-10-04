@@ -1,0 +1,112 @@
+import test, { after, beforeEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { Window } from 'happy-dom';
+import { build } from 'esbuild';
+import { resolve } from 'node:path';
+const root = resolve(import.meta.dirname, '..');
+const window = new Window({ url: 'http://localhost/' });
+Object.assign(globalThis, { window, document: window.document, HTMLElement: window.HTMLElement, Node: window.Node, Element: window.Element, requestAnimationFrame: fn => setTimeout(fn, 0), IS_REACT_ACT_ENVIRONMENT: true });
+Object.defineProperty(globalThis, 'navigator', { value: window.navigator, configurable: true });
+window.HTMLElement.prototype.scrollIntoView = () => {};
+class Channel { port1 = { onmessage: null }; port2 = { postMessage: () => setTimeout(() => this.port1.onmessage?.(), 0) }; }
+Object.defineProperty(globalThis, 'MessageChannel', { value: Channel, configurable: true });
+after(() => window.close());
+globalThis.__workspaceTest = { tasks: [], writes: [], post: async () => ({ data: {} }), user: 'alice' };
+const bundled = await build({ stdin: { contents: `import { createRoot } from 'react-dom/client'; import { act } from 'react'; import { WorkspacePage } from './src/components/Layout/WorkspacePage'; import { useTasksStore } from './src/stores/tasksStore'; export { act, useTasksStore }; export async function mount(element) { const root = createRoot(element); await act(async () => root.render(<WorkspacePage onOpenConversation={() => {}} />)); return root; }`, resolveDir: root, sourcefile: 'test-workspace.tsx', loader: 'tsx' }, bundle: true, format: 'esm', platform: 'browser', jsx: 'automatic', write: false, plugins: [{ name: 'ui-boundaries', setup(build) {
+  build.onResolve({ filter: /services\/api$/ }, () => ({ path: 'api', namespace: 'ui-mock' }));
+  build.onResolve({ filter: /utils\/cacheUtils$/ }, () => ({ path: 'cache', namespace: 'ui-mock' }));
+  build.onResolve({ filter: /(?:^\.\/|stores\/)(modelsStore|groupsStore|profileStore)$/ }, args => ({ path: args.path.split('/').at(-1), namespace: 'ui-mock' }));
+  build.onResolve({ filter: /^\.\/(ModelCenter|PersonalGoalsPanel|MemoryCenter)$/ }, args => ({ path: args.path.slice(2), namespace: 'ui-mock' }));
+  build.onResolve({ filter: /Chat\/MessageContent$/ }, () => ({ path: 'MessageContent', namespace: 'ui-mock' }));
+  build.onResolve({ filter: /^\.\.\/Common$/ }, () => ({ path: 'Common', namespace: 'ui-mock' }));
+  build.onResolve({ filter: /hooks\/useReducedMotion$/ }, () => ({ path: 'reduced', namespace: 'ui-mock' }));
+  build.onResolve({ filter: /^framer-motion$/ }, () => ({ path: 'motion', namespace: 'ui-mock' }));
+  build.onLoad({ filter: /.*/, namespace: 'ui-mock' }, ({ path }) => {
+    const source = {
+      api: `export const axiosInstance = { get: async () => ({data: globalThis.__workspaceTest.tasks}), post: (...args) => globalThis.__workspaceTest.post(...args), patch: async () => ({data:{}}), delete: async () => ({data:{}}) }; export const api = {createGroup: async () => ({id:'group'})};`,
+      cache: `export const getCacheUserId = () => globalThis.__workspaceTest.user;`,
+      modelsStore: `export const useModelsStore = fn => fn({ catalog: {models: [], defaults:{}} }); export const requestError = e => e.message;`,
+      groupsStore: `export const useGroupsStore = fn => fn({ groups: globalThis.__workspaceTest.groups });`,
+      profileStore: `export const useProfileStore = fn => fn({profile:{nickname:'测试用户'}});`,
+      ModelCenter: `export const ModelCenter = () => <div>模型配置测试页</div>;`,
+      PersonalGoalsPanel: `export const PersonalGoalsPanel = () => <div>目标测试页</div>;`,
+      MemoryCenter: `export const MemoryCenter = () => <div>记忆测试页</div>;`,
+      MessageContent: `export const MessageContent = ({content}) => <div>{content}</div>;`,
+      Common: `export const useConfirm = () => ({ confirm: () => globalThis.__workspaceTest.confirm ? new Promise(resolve => { globalThis.__workspaceTest.resolveConfirm = resolve; }) : Promise.resolve(true), ConfirmModal: null });`,
+      reduced: `export const useReducedMotion = () => true;`,
+      motion: `import {forwardRef} from 'react'; const cache = {}; export const motion = new Proxy({}, {get(_, tag) { return cache[tag] ||= forwardRef(({initial,animate,exit,transition,layout,layoutId,...props},ref) => {const Tag=tag; return <Tag ref={ref} {...props}/>;}); }}); export const AnimatePresence = ({children}) => children;`
+    }[path];
+    return { contents: source, loader: 'tsx', resolveDir: root };
+  });
+}}] });
+const { mount, act, useTasksStore: store } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
+let container, mounted;
+const button = text => [...container.querySelectorAll('button')].find(element => element.textContent === text);
+const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+async function type(element, value) { await act(async () => { const proto = element.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, 'value').set.call(element, value); element.dispatchEvent(new window.Event('input', { bubbles: true })); }); }
+beforeEach(async () => { if (mounted) await act(async () => mounted.unmount()); container?.remove(); store.getState().cleanup(); globalThis.__workspaceTest.tasks = []; globalThis.__workspaceTest.groups = [{id:'group-a', name:'来源会话'}]; container = document.createElement('div'); document.body.appendChild(container); mounted = await mount(container); });
+after(async () => { if (mounted) await act(async () => mounted.unmount()); });
+test('draft survives workspace navigation and remount without persistent private storage', async () => {
+  await act(async () => button('＋ 新任务').click());
+  await type(container.querySelector('input[maxlength="150"]'), '尚未保存的标题');
+  await type(container.querySelector('textarea'), '只有当前标签页的私密输入');
+  await act(async () => button('模型中心').click()); assert.match(container.textContent, /模型配置测试页/);
+  await act(async () => button('工作台').click()); assert.equal(container.querySelector('textarea').value, '只有当前标签页的私密输入');
+  await act(async () => mounted.unmount()); mounted = await mount(container);
+  assert.equal(container.querySelector('input[maxlength="150"]').value, '尚未保存的标题');
+  assert.equal(window.localStorage.length, 0);
+});
+test('double form submit is one request; uncertain response locks original input for same-key replay', async () => {
+  await act(async () => button('＋ 新任务').click());
+  await type(container.querySelector('input[maxlength="150"]'), '保存回执测试'); await type(container.querySelector('textarea'), '内容');
+  const calls = []; let rejectFirst;
+  globalThis.__workspaceTest.post = (...args) => { calls.push(args); return new Promise((_, reject) => { rejectFirst = reject; }); };
+  await act(async () => { const form = container.querySelector('form'); form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); });
+  assert.equal(calls.length, 1); assert.equal(calls[0][2].headers['X-Expected-User-Id'], 'alice');
+  await act(async () => { rejectFirst(new Error('连接中断')); await settle(); });
+  assert.equal(container.querySelector('fieldset').disabled, true); assert.ok(button('核验并重试保存'));
+  globalThis.__workspaceTest.post = async (...args) => { calls.push(args); const task = { ...args[1], id:'created', status:'pending', history:[], result:'', run_count:0 }; globalThis.__workspaceTest.tasks = [task]; return {data:task}; };
+  await act(async () => { button('核验并重试保存').click(); await settle(); });
+  assert.equal(calls[0][2].headers['Idempotency-Key'], calls[1][2].headers['Idempotency-Key']);
+  assert.equal(container.querySelector('form'), null); assert.match(container.textContent, /保存回执测试/);
+});
+test('empty filtered results have clear recovery and no fabricated placeholder task', async () => {
+  globalThis.__workspaceTest.tasks = [{id:'existing',title:'真正任务',prompt:'内容',category:'work',status:'pending',history:[],result:'',run_count:0}];
+  await act(async () => store.getState().fetch());
+  await type(container.querySelector('input[type="search"]'), '找不到的词');
+  assert.match(container.textContent, /没有符合条件的任务/); assert.ok(button('清除筛选'));
+  await act(async () => button('清除筛选').click()); assert.match(container.textContent, /真正任务/);
+});
+
+test('unknown-result approval stays bound to the run shown before confirmation', async () => {
+  const first = {id:'existing',title:'待核验',prompt:'内容',category:'work',status:'outcome_unknown',history:[],result:'',run_count:1,run_id:'11111111-1111-4111-8111-111111111111'};
+  globalThis.__workspaceTest.tasks = [first];
+  await act(async () => store.getState().fetch());
+  globalThis.__workspaceTest.confirm = true;
+  await act(async () => button('已核验，允许重试').click());
+  const second = {...first,run_count:2,run_id:'22222222-2222-4222-8222-222222222222'};
+  globalThis.__workspaceTest.tasks = [second];
+  await act(async () => store.getState().fetch());
+  let payload;
+  globalThis.__workspaceTest.post = async (_, body) => { payload = body; throw Object.assign(new Error('待核验运行已变化'), {status:409}); };
+  await act(async () => { globalThis.__workspaceTest.resolveConfirm(true); await settle(); });
+  assert.equal(payload.run_id, first.run_id);
+  assert.match(container.textContent, /待核验运行已变化/);
+  globalThis.__workspaceTest.confirm = false;
+});
+
+test('uncertain create can still verify its original receipt after source group disappears', async () => {
+  await act(async () => store.getState().setComposerDraft({ ...store.getState().composerDraft, title:'有来源的草稿',prompt:'内容',groupId:'group-a' }));
+  await act(async () => button('继续任务草稿').click());
+  const requests = [];
+  globalThis.__workspaceTest.post = async (...args) => { requests.push(args); throw new Error('lost receipt'); };
+  await act(async () => { button('保存任务').click(); await settle(); });
+  globalThis.__workspaceTest.groups = [];
+  await act(async () => store.getState().fetch());
+  assert.equal(button('核验并重试保存').disabled, false);
+  globalThis.__workspaceTest.post = async (...args) => { requests.push(args); throw Object.assign(new Error('来源已删除'), {status:404}); };
+  await act(async () => { button('核验并重试保存').click(); await settle(); });
+  assert.equal(requests[0][2].headers['Idempotency-Key'], requests[1][2].headers['Idempotency-Key']);
+  assert.equal(store.getState().uncertainCreate, false);
+  assert.equal(container.querySelector('fieldset').disabled, false);
+});

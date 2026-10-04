@@ -253,6 +253,11 @@ router.post('/auth/logout', asyncHandler(async (req, res) => {
     const db = getAuthDb();
     await withWriteLock('auth', async () => {
       await db.read();
+      const expectedUser = req.get('X-Expected-User-Id');
+      const session = findSessionByToken(db, token);
+      if (expectedUser !== undefined && session && expectedUser !== session.userId) {
+        throw Object.assign(new Error('账号已切换，未退出另一个账号'), { status: 409, statusCode: 409, code: 'ACCOUNT_CHANGED', isOperational: true });
+      }
       db.data.sessions = db.data.sessions.filter(s => s.token !== token);
       await db.write();
     });
@@ -276,6 +281,7 @@ router.get('/auth/me', asyncHandler(async (req, res) => {
     return res.status(401).json({ user: null, requiresAuth: true });
   }
 
+  if (req.get('X-Expected-User-Id') !== undefined && req.get('X-Expected-User-Id') !== session.userId) return res.status(409).json({ code: 'ACCOUNT_CHANGED', error: '登录账号已改变' });
   const user = db.data.users.find(u => u.id === session.userId);
   if (!user) {
     return res.status(401).json({ user: null, requiresAuth: true });
