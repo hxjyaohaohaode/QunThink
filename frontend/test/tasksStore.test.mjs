@@ -2,19 +2,21 @@ import test, { beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { resolve } from 'node:path';
+import { Window } from 'happy-dom';
+const testWindow = new Window({ url:'http://localhost' }); globalThis.localStorage = testWindow.localStorage;
 const root = resolve(import.meta.dirname, '..');
 globalThis.__taskTest = { user: 'alice', get: async () => ({ data: [] }), post: async () => ({ data: {} }), patch: async () => ({ data: {} }), delete: async () => ({ data: {} }) };
 const result = await build({ entryPoints: [resolve(root, 'src/stores/tasksStore.ts')], bundle: true, write: false, format: 'esm', platform: 'browser', plugins: [{ name: 'task-boundaries', setup(build) {
   build.onResolve({ filter: /services\/api$/ }, () => ({ path: 'api', namespace: 'mock' }));
-  build.onResolve({ filter: /utils\/cacheUtils$/ }, () => ({ path: 'cache', namespace: 'mock' }));
+  build.onResolve({ filter: /(?:utils\/|\.\/)cacheUtils$/ }, () => ({ path: 'cache', namespace: 'mock' }));
   build.onResolve({ filter: /^\.\/modelsStore$/ }, () => ({ path: 'models', namespace: 'mock' }));
-  build.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({ contents: path === 'api' ? `export const axiosInstance = Object.fromEntries(['get','post','patch','delete'].map(method => [method, (...args) => globalThis.__taskTest[method](...args)]));` : path === 'cache' ? 'export const getCacheUserId = () => globalThis.__taskTest.user;' : 'export const requestError = error => error.message;', loader: 'js' }));
+  build.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({ contents: path === 'api' ? `export const getAuthGeneration=()=>globalThis.__taskTest.auth || 0; export const axiosInstance = Object.fromEntries(['get','post','patch','delete'].map(method => [method, (...args) => globalThis.__taskTest[method](...args)]));` : path === 'cache' ? 'export const getCacheUserId = () => globalThis.__taskTest.user;' : 'export const requestError = error => error.message;', loader: 'js' }));
 }}] });
 const { useTasksStore: store } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 const input = { title: '中文任务', prompt: '私密输入不应进入诊断', category: 'work', model_id: null, group_id: null, source_message_id: null, run_at: null, repeat_minutes: null, auto_run: false };
 const task = { id: 'task-a', ...input, status: 'pending', history: [], result: '', run_id: 'run-a' };
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
-beforeEach(() => { store.getState().cleanup(); globalThis.__taskTest.user = 'alice'; for (const method of ['post', 'patch', 'delete']) globalThis.__taskTest[method] = async () => ({ data: task }); globalThis.__taskTest.get = async () => ({ data: [] }); });
+beforeEach(() => { localStorage.clear(); store.getState().cleanup(); globalThis.__taskTest.user = 'alice'; for (const method of ['post', 'patch', 'delete']) globalThis.__taskTest[method] = async () => ({ data: task }); globalThis.__taskTest.get = async () => ({ data: [] }); });
 test('newer task reads win over delayed polling', async () => {
   const reads = []; globalThis.__taskTest.get = () => new Promise(resolve => reads.push(resolve));
   const older = store.getState().fetch(), newer = store.getState().fetch();
@@ -40,22 +42,22 @@ test('definitive validation error unlocks draft for correction', async () => {
   await assert.rejects(store.getState().create({ ...input, title: '改正' }));
   assert.notEqual(keys[0], keys[1]);
 });
-test('double create sends once; account switch rejects late receipt and does not fetch for new account', async () => {
-  let complete, writes = 0, reads = 0;
+test('double create sends once; account switch rejects late receipt and does not fetch for new account', {timeout:2000}, async () => {
+  let complete, writes = 0, reads = 0, entered; const dispatched=new Promise(resolve=>{entered=resolve;});
   globalThis.__taskTest.get = async () => { reads++; return { data: [] }; };
-  globalThis.__taskTest.post = () => { writes++; return new Promise(resolve => { complete = resolve; }); };
+  globalThis.__taskTest.post = () => { writes++; entered(); return new Promise(resolve => { complete = resolve; }); };
   const first = store.getState().create(input);
   await assert.rejects(store.getState().create(input), /正在保存/);
-  assert.equal(writes, 1);
+  await dispatched; assert.equal(writes, 1);
   store.getState().cleanup(); globalThis.__taskTest.user = 'bob';
   complete({ data: task }); await assert.rejects(first, /账号已切换/);
   assert.equal(reads, 0); assert.deepEqual(store.getState().tasks, []); assert.equal(store.getState().composerDraft.prompt, '');
 });
-test('run retry reuses key after timeout and cancellation can be sent while request is pending', async () => {
+test('run retry reuses key after timeout and cancellation can be sent while request is pending', {timeout:2000}, async () => {
   const keys = []; let complete;
   globalThis.__taskTest.post = async (_, __, config) => { keys.push(config.headers['Idempotency-Key']); if (keys.length === 1) throw new Error('timeout'); return new Promise(resolve => { complete = resolve; }); };
   await assert.rejects(store.getState().run(task.id));
-  const retry = store.getState().run(task.id); await tick();
+  const retry = store.getState().run(task.id); while (!complete) await tick();
   assert.equal(keys[0], keys[1]);
   await assert.rejects(store.getState().run(task.id), /正在处理/);
   let cancelled = false; globalThis.__taskTest.patch = async (path, payload) => { assert.equal(payload.status, 'cancelled'); cancelled = true; return { data: task }; };
@@ -76,4 +78,18 @@ test('terminal polling receipt clears admitted retry key before intentional rege
   globalThis.__taskTest.get = async () => ({data:[{ ...task, status:'needs_review', run_request_id:key }]});
   await store.getState().fetch(); await store.getState().run(task.id);
   assert.notEqual(sent[1], sent[2]);
+});
+
+test('reload finds an uncertain create by durable receipt without retaining private input', async()=>{
+ let key;globalThis.__taskTest.post=async(_,body,config)=>{key=config.headers['Idempotency-Key'];throw new Error('lost ACK')};await assert.rejects(store.getState().create(input));store.getState().cleanup();
+ globalThis.__taskTest.get=async path=>path==='/tasks'?{data:[]}:{data:{status:'succeeded',operation:'create',client_request_id:key,task_id:task.id,task_deleted:false,task:{...task,client_request_id:key}}};await store.getState().fetch();assert.equal(store.getState().uncertainCreate,false);assert.equal(store.getState().tasks[0].id,task.id);assert.doesNotMatch(JSON.stringify(Object.values(localStorage)),/私密输入/);
+});
+test('deleted-create receipt is terminal evidence and never recreates its task',async()=>{
+ let key;globalThis.__taskTest.post=async(_,body,config)=>{key=config.headers['Idempotency-Key'];throw new Error('lost ACK')};await assert.rejects(store.getState().create(input));store.getState().cleanup();let writes=0;globalThis.__taskTest.post=async()=>{writes++;return{data:task}};globalThis.__taskTest.get=async path=>path==='/tasks'?{data:[]}:{data:{status:'succeeded',operation:'create',client_request_id:key,task_id:task.id,task_deleted:true,task:null}};await store.getState().fetch();assert.equal(store.getState().uncertainCreate,false);assert.equal(writes,0);assert.deepEqual(store.getState().tasks,[]);
+});
+test('missing create receipt after reload remains unresolved instead of accepting new input',async()=>{
+ globalThis.__taskTest.post=async()=>{throw new Error('lost ACK')};await assert.rejects(store.getState().create(input));store.getState().cleanup();globalThis.__taskTest.get=async path=>{if(path==='/tasks')return{data:[]};throw Object.assign(new Error('not found'),{status:404})};await store.getState().fetch();assert.equal(store.getState().uncertainCreate,true);await assert.rejects(store.getState().create(input),/正文未保存在此设备/);
+});
+test('legacy create cannot dispatch when the minimal durable journal cannot be stored',async()=>{
+ const storage=globalThis.localStorage;let posts=0;globalThis.localStorage={length:0,getItem(){return null},setItem(){throw new Error('quota')},removeItem(){}};globalThis.__taskTest.post=async()=>{posts++;return{data:task}};try{await assert.rejects(store.getState().create(input),/尚未发送/);assert.equal(posts,0)}finally{globalThis.localStorage=storage}
 });

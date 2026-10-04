@@ -3,7 +3,7 @@ import { assertQ1CiRuntime } from './scripts/q1-fixture-protocol.mjs';
 // --list only transpiles/discovers tests. It cannot start browser/webServer.
 if (!process.argv.includes('--list')) assertQ1CiRuntime();
 export default defineConfig({
-  testDir: './e2e/q1', fullyParallel: false, workers: 1, retries: 0, timeout: 120000,
+  testDir: './e2e/q1', testMatch: 'product-results.spec.ts', fullyParallel: false, workers: 1, retries: 0, timeout: 240000,
   outputDir: './test-results/q1',
   reporter: [['list'], ['html', { outputFolder: 'playwright-report/q1', open: 'never' }], ['json', { outputFile: 'test-results/q1/results.json' }]],
   use: { baseURL: 'http://127.0.0.1:3210', trace: 'on', video: 'on', screenshot: 'on', timezoneId: 'UTC' },

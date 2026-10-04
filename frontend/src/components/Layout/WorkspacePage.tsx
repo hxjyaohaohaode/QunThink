@@ -10,7 +10,8 @@ import { ModelCenter } from './ModelCenter';
 import { PersonalGoalsPanel } from './PersonalGoalsPanel';
 import { MemoryCenter } from './MemoryCenter';
 import { RuntimeDiagnostics } from './RuntimeDiagnostics';
-import { MessageContent } from '../Chat/MessageContent';
+import { TaskResultEditor } from '../Writing/TaskResultEditor';
+import { useTaskResultsStore } from '../../stores/taskResultsStore';
 import { useConfirm } from '../Common';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 import { setDiagnosticSurface } from '../../observability/runtimeDiagnostics';
@@ -21,13 +22,18 @@ const viewNames = { overview: '工作台', goals: '个人目标', memory: '记�
 type View = keyof typeof viewNames;
 type Stage = 'all' | 'attention' | 'running' | 'completed';
 function needsReview(task: WorkspaceTask) { return !task.source_stale && (task.result_pending_review === true || task.status === 'needs_review'); }
+function acceptedCurrent(task: WorkspaceTask) {
+  if (task.source_stale) return false;
+  if (task.result_editor_available) return !!task.result_head_version_id && task.result_head_version_id === task.result_accepted_version_id;
+  return !!task.accepted_run_id && task.accepted_run_id === task.result_run_id;
+}
 function attention(task: WorkspaceTask) { return !!task.source_input_stale || !!task.source_stale || needsReview(task) || task.status === 'outcome_unknown' || task.status === 'failed'; }
 function taskStatus(task: WorkspaceTask) {
-  if (task.source_input_stale) return '原始消息已变化';
+  if (task.source_input_stale && !task.result_head_version_id) return '原始消息已变化';
   if (task.source_stale) return '来源已变化';
   if (needsReview(task)) return task.error ? '需要重新生成' : '等你检查';
   if (task.status === 'pending' && task.accepted_run_id === task.result_run_id && task.accepted_run_id) return '等待下次生成';
-  return task.status === 'completed' && !task.accepted_run_id ? '旧成果待核验' : statusNames[task.status];
+  return statusNames[task.status];
 }
 function dateLabel(value: string | null) { if (!value || !Number.isFinite(Date.parse(value))) return '未设置'; return new Date(value).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
 const templates: Array<{ category: TaskCategory; symbol: string; title: string; description: string; prompt: string }> = [
@@ -48,6 +54,7 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
   const incomingDraft = useTasksStore(state => state.draft);
   const draft = useTasksStore(state => state.composerDraft);
   const pending = useTasksStore(state => state.pending);
+  const recoveredCreate = useTasksStore(state => state.recoveredCreate);
   const uncertainCreate = useTasksStore(state => state.uncertainCreate);
   const [view, setView] = useState<View>('overview');
   const [filter, setFilter] = useState<'all' | TaskCategory>('all');
@@ -58,7 +65,6 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
   const [notice, setNotice] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
   const [taskSearch, setTaskSearch] = useState('');
-  const [copiedId, setCopiedId] = useState<string | null>(null);
   const { confirm, ConfirmModal } = useConfirm();
   const reduced = useReducedMotion();
   const titleRef = useRef<HTMLInputElement>(null);
@@ -77,6 +83,12 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
     document.addEventListener('visibilitychange', refresh);
     return () => { clearInterval(timer); window.removeEventListener('online', refresh); document.removeEventListener('visibilitychange', refresh); };
   }, [load]);
+  useEffect(() => {
+    if (!recoveredCreate) return;
+    setError(''); setComposer(false);
+    setNotice(recoveredCreate.deleted ? '上次保存已核验；原任务后来已删除，没有重复创建。' : '已找到上次保存的同一份文稿，可以继续编辑。');
+    if (recoveredCreate.taskId) setSelected(recoveredCreate.taskId);
+  }, [recoveredCreate]);
   useEffect(() => { setDiagnosticSurface(view === 'overview' ? 'workspace' : view); }, [view]);
   useEffect(() => {
     if (!incomingDraft || uncertainCreate || pending.create) return;
@@ -90,11 +102,6 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
     if (composer && view === 'overview') titleRef.current?.focus({ preventScroll: true });
   }, [composer, view]);
   useEffect(() => {
-    if (!copiedId) return;
-    const timer = setTimeout(() => setCopiedId(null), 2500);
-    return () => clearTimeout(timer);
-  }, [copiedId]);
-  useEffect(() => {
     if (!draft.title && !draft.prompt && !uncertainCreate) return;
     const guard = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
     window.addEventListener('beforeunload', guard);
@@ -102,7 +109,7 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
   }, [draft.title, draft.prompt, uncertainCreate]);
 
   const visibleTasks = useMemo(() => tasks.filter(task => (filter === 'all' || task.category === filter) &&
-    (stage === 'all' || (stage === 'attention' && attention(task)) || (stage === 'running' && task.status === 'running') || (stage === 'completed' && !!task.accepted_run_id && !task.source_stale)) &&
+    (stage === 'all' || (stage === 'attention' && attention(task)) || (stage === 'running' && task.status === 'running') || (stage === 'completed' && acceptedCurrent(task))) &&
     `${task.title} ${task.prompt}`.toLocaleLowerCase().includes(taskSearch.trim().toLocaleLowerCase())), [tasks, filter, stage, taskSearch]);
   const attentionCount = tasks.filter(attention).length;
   const runningCount = tasks.filter(task => task.status === 'running').length;
@@ -120,12 +127,11 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
       const saved = await perform(async () => {
         const task = await useTasksStore.getState().create({ title: draft.title, prompt: draft.prompt, category: draft.category, model_id: draft.modelId || null, group_id: draft.groupId || null, source_message_id: draft.sourceMessageId || null, source_message_edited_at: draft.sourceMessageEditedAt, run_at: draft.autoRun && draft.runAt ? new Date(draft.runAt).toISOString() : null, repeat_minutes: draft.autoRun && draft.repeat ? Number(draft.repeat) : null, auto_run: draft.autoRun });
         setSelected(task.id); setComposer(false); setTaskSearch(''); setFilter('all'); setStage('all');
-      }, draft.autoRun ? '任务已保存，定时生成已开启。可随时暂停。' : '任务已保存。准备好后，点击“生成草稿”开始。');
+      }, draft.autoRun ? '任务已保存，定时生成已开启。可随时暂停。' : '任务已保存，可以直接写正文；需要时再生成 AI 候选稿。');
       if (saved) setView('overview');
     } finally { submitLock.current = false; }
   }
   async function createSpace(template: typeof templates[number]) {
-    if (!ready.length) { setView('models'); setNotice('完成对话测试后，就可以创建这个会话。'); return; }
     if (spaceLock.current) return;
     spaceLock.current = true; setSpaceBusy(template.category);
     try {
@@ -161,10 +167,9 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
     await perform(() => useTasksStore.getState().resolveUnknown(task.id, runId, decision), decision === 'allow_retry' ? '已记录核验。你可以主动发起一次新的生成。' : '已停止后续生成');
   }
   async function run(task: WorkspaceTask) {
-    if ((needsReview(task) || task.source_stale) && !await confirm({ title: '重新生成草稿', description: '重新生成后，旧草稿失去确认资格，但历史文本仍可查看。模型服务可能再次收费。' })) return;
+    if ((needsReview(task) || task.source_stale) && !await confirm({ title: '重新生成草稿', description: '将生成新的候选文字，已有版本保留。请在文稿中比较、选择并确认需要使用的版本。模型服务可能再次收费。' })) return;
     await perform(() => useTasksStore.getState().run(task.id));
   }
-  async function copy(task: WorkspaceTask) { if (await perform(() => navigator.clipboard.writeText(task.result))) setCopiedId(task.id); }
 
   return <div className="workspace-page h-full overflow-y-auto bg-bg-primary" data-testid="workspace" data-observe="workspace">
     <div className="max-w-6xl mx-auto px-4 md:px-9 py-6 md:py-9 pb-28">
@@ -178,7 +183,7 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
       {(error || loadError) && <div className="workspace-error mb-4" role="alert"><p>{error || loadError}</p><button className="underline mt-2" onClick={() => { setError(''); void load(); }}>刷新任务状态</button></div>}
       <motion.div key={view} initial={reduced ? false : { opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={transition}>
         {view === 'models' ? <section data-observe="models" className="max-w-3xl"><ModelCenter /></section> : view === 'goals' ? <section data-observe="goals"><PersonalGoalsPanel /></section> : view === 'memory' ? <section data-observe="memory"><MemoryCenter /></section> : view === 'diagnostics' ? <RuntimeDiagnostics /> : <>
-          {!ready.length && <section className="workspace-setup mb-6"><div><span className="text-xs font-semibold text-accent">开始之前</span><h2 className="text-base font-semibold mt-1">连接你的第一个 AI</h2><p className="text-sm text-text-secondary mt-2">添加服务商并完成对话测试。也可以先保存想法，准备好后再生成。</p></div><button className="workspace-button" onClick={() => setView('models')}>设置模型 →</button></section>}
+          {!ready.length && <section className="workspace-setup mb-6"><div><span className="text-xs font-semibold text-accent">需要 AI 时再连接</span><h2 className="text-base font-semibold mt-1">先写作，再选择 AI 助手</h2><p className="text-sm text-text-secondary mt-2">现在就能整理材料、写正文并保存版本。模型连接只在生成 AI 候选稿时需要。</p></div><button className="workspace-button" onClick={() => setView('models')}>设置模型 →</button></section>}
           <div className="grid grid-cols-3 gap-2 md:gap-4 mb-6" aria-label="任务概览">{([{ id: 'attention', label: '需要你处理', value: attentionCount, hint: '检查草稿与异常' }, { id: 'running', label: '正在进行', value: runningCount, hint: '不必停留等待' }, { id: 'all', label: '全部任务', value: tasks.length, hint: '想法与成果' }] as const).map(item => <button key={item.id} aria-pressed={stage === item.id} onClick={() => setStage(stage === item.id ? 'all' : item.id)} className={`workspace-stat ${stage === item.id ? 'is-active' : ''}`}><span className="text-xl md:text-3xl font-semibold tabular-nums">{loading && !tasks.length ? '—' : item.value}</span><span className="block text-xs md:text-sm mt-2">{item.label}</span><span className="hidden sm:block text-xs text-text-muted mt-1">{item.hint}</span></button>)}</div>
           <AnimatePresence initial={false}>{composer && <motion.section ref={composerRef} key="composer" data-observe="task-composer" initial={{ opacity: 0, height: reduced ? 'auto' : 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: reduced ? 'auto' : 0 }} transition={transition} className="overflow-hidden mb-6">
             <form className="workspace-composer" onSubmit={event => { event.preventDefault(); void submit(); }} aria-busy={!!pending.create}>
@@ -195,7 +200,7 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
             </form>
           </motion.section>}</AnimatePresence>
           <section aria-labelledby="tasks-title"><div className="flex flex-wrap justify-between items-end gap-4 mb-4"><div><h2 id="tasks-title" className="text-lg font-semibold">想法与成果</h2><p className="text-xs text-text-muted mt-1">{lastUpdated ? `最近同步 ${dateLabel(lastUpdated)}` : '正在连接任务记录'} · {visibleTasks.length} 项</p></div><div className="flex gap-2 items-center"><input aria-label="搜索任务" type="search" value={taskSearch} onChange={event => setTaskSearch(event.target.value)} placeholder="搜索名称或内容" className="workspace-input max-w-56" /><button className="workspace-button shrink-0" disabled={loading} onClick={() => void load()}>刷新</button></div></div>
-            <div className="flex flex-wrap gap-2 mb-4" aria-label="任务筛选">{(['all', 'work', 'social', 'play'] as const).map(id => <button key={id} aria-pressed={filter === id} className={`workspace-filter ${filter === id ? 'is-active' : ''}`} onClick={() => setFilter(id)}>{id === 'all' ? '全部场景' : categoryNames[id]}</button>)}{stage !== 'all' && <button className="workspace-filter is-active" onClick={() => setStage('all')}>{stage === 'attention' ? '需要处理' : stage === 'running' ? '正在进行' : '已确认'} ×</button>}</div>
+            <div className="flex flex-wrap gap-2 mb-4" aria-label="任务筛选">{(['all', 'work', 'social', 'play'] as const).map(id => <button key={id} aria-pressed={filter === id} className={`workspace-filter ${filter === id ? 'is-active' : ''}`} onClick={() => setFilter(id)}>{id === 'all' ? '全部场景' : categoryNames[id]}</button>)}<button className={`workspace-filter ${stage === 'completed' ? 'is-active' : ''}`} aria-pressed={stage === 'completed'} onClick={() => setStage(stage === 'completed' ? 'all' : 'completed')}>已确认文稿</button>{stage !== 'all' && stage !== 'completed' && <button className="workspace-filter is-active" onClick={() => setStage('all')}>{stage === 'attention' ? '需要处理' : stage === 'running' ? '正在进行' : '已确认'} ×</button>}</div>
             <div className="space-y-3">{visibleTasks.map(task => {
               const isOpen = selected === task.id;
               const taskBusy = !!pending[task.id];
@@ -204,8 +209,8 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
                 <div className="flex justify-between gap-3"><button className="text-left min-w-0 flex-1" aria-expanded={isOpen} aria-controls={`task-detail-${task.id}`} onClick={() => setSelected(isOpen ? null : task.id)}><span className="text-xs text-text-muted">{categoryNames[task.category]}{task.group_id && ` · ${group?.name || '来源会话不可用'}`}</span><h3 className="font-semibold text-base break-words mt-1">{task.title}</h3></button><span className={`workspace-status ${attention(task) ? 'needs-attention' : task.status === 'running' ? 'is-running' : ''}`}>{taskStatus(task)}</span></div>
                 {!isOpen && <p className="text-sm text-text-secondary mt-3 line-clamp-2 break-words">{task.prompt}</p>}
                 {task.auto_run && task.run_at && <p className="text-xs text-text-muted mt-3">下次生成 {dateLabel(task.run_at)}{task.repeat_minutes ? ` · 每 ${task.repeat_minutes >= 1440 ? `${task.repeat_minutes / 1440} 天` : `${task.repeat_minutes} 分钟`}` : ''}</p>}
-                {task.source_input_stale && <p className="workspace-notice mt-3" role="status">创建此任务的原始消息已被更改或撤回，不能继续复用。请打开来源会话，从当前内容重新创建任务。</p>}
-                {task.source_stale && <p className="workspace-notice mt-3" role="status">来源已变化。先打开关联会话核对，再重新生成；旧成果不能继续验收。</p>}
+                {task.source_input_stale && <p className="workspace-notice mt-3" role="status">再次生成所用的原始要求需要复核；这与已保存正文的来源状态分开。请打开文稿核对用途，再决定是否调用 AI。</p>}
+                {task.source_stale && <p className="workspace-notice mt-3" role="status">来源已变化，旧验收需要复核。打开原文稿核对并保存新版本，人工文字不会自动被替换。</p>}
                 {task.status === 'outcome_unknown' && <p className="workspace-notice mt-3" role="status">调用后的连接中断、取消或服务异常，无法证明模型未处理或未计费。请先核对服务商记录，再决定下一步。</p>}
                 {task.error && <p className="text-xs text-red-500 mt-3 break-words" role="status">{task.error}</p>}
                 <div className="flex flex-wrap items-center gap-2 mt-4">
@@ -216,8 +221,8 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
                 </div>
                 <AnimatePresence initial={false}>{isOpen && <motion.div id={`task-detail-${task.id}`} key="details" initial={{ height: reduced ? 'auto' : 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: reduced ? 'auto' : 0, opacity: 0 }} transition={transition} className="overflow-hidden"><div className="pt-5 mt-4 border-t border-border space-y-4">
                   <section><h4 className="text-xs font-semibold text-text-muted mb-2">任务要求</h4><p className="whitespace-pre-wrap text-sm text-text-secondary break-words">{task.prompt}</p></section>
-                  {task.group_id && <button className="text-sm text-accent underline" disabled={!group} onClick={() => onOpenConversation(task.group_id!)}>{group ? '打开来源会话 →' : '来源会话已不可用'}</button>}
-                  {task.result && <section className="workspace-result"><div className="text-xs text-text-secondary mb-4">{task.source_stale ? '来源已变化 · 仅供历史参考' : needsReview(task) ? 'AI 生成草稿 · 请核对内容和来源' : task.accepted_run_id && task.accepted_run_id === task.result_run_id ? '已确认的文字成果 · 未执行外部操作' : '历史文字草稿 · 尚无有效验收'}</div><MessageContent content={task.result} isUser={false} /><div className="flex flex-wrap gap-2 mt-4"><button className="workspace-button" onClick={() => void copy(task)}>{copiedId === task.id ? '已复制 ✓' : '复制文本'}</button>{needsReview(task) && !task.error && <button className="workspace-primary" disabled={!task.run_id || taskBusy} onClick={() => void perform(() => useTasksStore.getState().accept(task.id, task.run_id!), '已记录你对此次文字成果的确认')}>{taskBusy ? pending[task.id] : '确认此稿成果'}</button>}</div>{needsReview(task) && !task.run_id && <p role="alert" className="text-xs text-red-500 mt-2">运行标识缺失，无法安全确认。请刷新核验。</p>}</section>}
+                  {task.group_id && <button className="text-sm text-accent underline" disabled={!group} onClick={() => { useTaskResultsStore.getState().openPanel(task.group_id!, task.id); onOpenConversation(task.group_id!); }}>{group ? '打开来源会话 →' : '来源会话已不可用'}</button>}
+                  <TaskResultEditor taskId={task.id} onOpenConversation={onOpenConversation} />
                   {task.history.length > 0 && <details className="workspace-history"><summary>过程与用量 · 最近 {task.history.length} 次</summary><ol>{[...task.history].reverse().map(history => <li key={history.id} className="py-4 border-b border-border last:border-0"><p className="text-xs font-medium">{dateLabel(history.finished_at)} · {history.source_stale ? '来源已变化，历史内容不可据此验收' : history.status === 'outcome_unknown' ? '结果与费用待核验' : history.status === 'failed' ? '生成失败' : history.status === 'accepted' || history.id === task.accepted_run_id ? '已验收' : '已生成，未验收'}</p><p className="text-xs text-text-muted mt-2">{history.usage_status === 'provider_reported' && history.usage ? `服务商用量：输入 ${history.usage.inputTokens} / 输出 ${history.usage.outputTokens} / 总计 ${history.usage.totalTokens} tokens；费用未核算` : '用量与费用未核实，请以服务商账单为准'}</p>{history.error && <p className="text-xs text-red-500 mt-2">{history.error}</p>}{history.result && <p className="text-xs whitespace-pre-wrap break-words mt-3">{history.result}</p>}</li>)}</ol></details>}
                   {task.run_id && <details className="text-xs text-text-muted"><summary>核验标识</summary><p className="break-all mt-2">{task.run_id}</p></details>}
                   {task.status !== 'running' && task.status !== 'outcome_unknown' && <button className="text-xs text-red-500 hover:underline" disabled={taskBusy} onClick={() => void remove(task)}>删除任务与成果</button>}

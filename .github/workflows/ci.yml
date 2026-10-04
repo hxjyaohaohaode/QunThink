@@ -104,7 +104,7 @@ jobs:
       - name: Real browser desktop/mobile and failure-recovery flows
         run: npm run test:e2e -- --project=${{ matrix.project }}
         working-directory: ./frontend
-      - name: Q1 frozen-product baseline (product gaps must remain red)
+      - name: Q1 same-draft result chain and bounded failure recovery
         if: ${{ !cancelled() }}
         run: npx playwright test --config=playwright.q1.config.ts --project=${{ matrix.project }}
         working-directory: ./frontend

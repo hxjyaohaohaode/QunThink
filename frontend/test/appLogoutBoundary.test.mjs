@@ -20,8 +20,8 @@ export {axiosInstance,confirmAuthIdentity};
 const state=()=>globalThis.__logout;
 const getCacheUserId=()=>state().user;const setCacheUserId=user=>{state().user=user;};
 const store=name=>({getState:()=>({cleanup:()=>{state().cleared.push(name);},clearAll:()=>{},clearAllTypingTimeouts:()=>{}}),setState:value=>{state().stores[name]=value;}});
-const useAudioStore=store('audio'),useProfileStore=store('profile'),useTasksStore=store('tasks'),useMemoryStore=store('memory'),useModelsStore=store('models'),usePersonasStore=store('personas'),useUIStore=store('ui'),useGroupsStore=store('groups'),useMessagesStore=store('messages'),useAgentsStore=store('agents');
-const clearDiagnostics=()=>{},destroyWebSocket=()=>{},stopPersonasAutoRefresh=()=>{},clearMemoryApiConfigs=()=>{},clearPersistedSessionInfo=()=>{},resetMessagesModuleState=()=>{};
+const useAudioStore=store('audio'),useProfileStore=store('profile'),useTasksStore=store('tasks'),useTaskResultsStore=store('results'),useMemoryStore=store('memory'),useModelsStore=store('models'),usePersonasStore=store('personas'),useUIStore=store('ui'),useGroupsStore=store('groups'),useMessagesStore=store('messages'),useAgentsStore=store('agents');
+const clearWritingContent=()=>{},clearDiagnostics=()=>{},destroyWebSocket=()=>{},stopPersonasAutoRefresh=()=>{},clearMemoryApiConfigs=()=>{},clearPersistedSessionInfo=()=>{},resetMessagesModuleState=()=>{};
 const clearAllCachesForUser=user=>state().cacheUsers.push(user);const setIndexedDBUserId=user=>{state().indexedUser=user;};
 const clearAllIndexedDBForUser=user=>{state().dbUsers.push(user);return state().cleanupPromise;};const purgeLegacyPrivateCaches=()=>state().cleanupPromise;
 const wsConnectedRef={get current(){return state().wsConnected;},set current(v){state().wsConnected=v;}};
@@ -38,7 +38,7 @@ beforeEach(()=>{globalThis.__logout={user:'alice',cleared:[],stores:{},cacheUser
 test('expiry clears local identity synchronously and never sends a cookie-clearing server logout',async()=>{
  let clean;let requests=0;globalThis.__logout.cleanupPromise=new Promise(resolve=>{clean=resolve;});
  axiosInstance.defaults.adapter=async()=>{requests++;throw new Error('expiry must not send logout');};
- const pending=handleLogout();assert.equal(globalThis.__logout.user,null);assert.equal(globalThis.__logout.indexedUser,null);assert.deepEqual(globalThis.__logout.cleared,['profile','tasks','memory','models','personas']);await flush();
+ const pending=handleLogout();assert.equal(globalThis.__logout.user,null);assert.equal(globalThis.__logout.indexedUser,null);assert.deepEqual(globalThis.__logout.cleared,['profile','tasks','results','memory','models','personas']);await flush();
  assert.equal(requests,0);globalThis.__logout.user='bob';confirmAuthIdentity('bob');globalThis.__logout.stores.groups={newSession:true};
  clean();assert.equal(await pending,false);assert.equal(globalThis.__logout.user,'bob');assert.deepEqual(globalThis.__logout.stores.groups,{newSession:true});assert.deepEqual(globalThis.__logout.dbUsers,['alice']);
 });

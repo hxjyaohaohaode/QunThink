@@ -1,3 +1,4 @@
+﻿import { useTaskResultsStore } from '../../stores/taskResultsStore';
 import { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
@@ -236,6 +237,7 @@ export function ChatHeader({ showGroupInfoButton = true, onToggleGroupInfo, onBa
           </div>
 
           <div className="flex items-center gap-1 flex-shrink-0">
+            <button className="chat-writing-button" onClick={() => useTaskResultsStore.getState().openPanel(currentGroup.id)} aria-label="打开会话文稿">文稿 ↗</button>
             {isAIPrivateChat && (
               <button
                 onClick={handleToggleChat}

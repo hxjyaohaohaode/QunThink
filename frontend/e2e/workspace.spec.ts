@@ -23,7 +23,7 @@ test('brand login entry remains visible before authentication', async ({ page },
 
 test('real API saves once, preserves draft across views, and restores saved task after reload', async ({ page, context }, info) => {
   const workspace = await openWorkspace(page, context);
-  await expect(workspace.getByText('连接你的第一个 AI')).toBeVisible();
+  await expect(workspace.getByText('先写作，再选择 AI 助手')).toBeVisible();
   await workspace.getByRole('button', { name: '＋ 新任务', exact: true }).click();
   await workspace.getByLabel('任务名称', { exact: true }).fill('中文跨页草稿测试');
   await workspace.getByLabel('希望得到什么').fill('保留这段内容，检查保存结果和来源。');
@@ -47,17 +47,17 @@ test('real API saves once, preserves draft across views, and restores saved task
   expect(overflow).toBe(false);
 });
 
-test('lost save acknowledgment is same-key replay with one persisted task', async ({ page, context }) => {
+test('lost save acknowledgement with unavailable refresh explicitly replays same key once', async ({ page, context }) => {
   const workspace = await openWorkspace(page, context);
   await workspace.getByRole('button', { name: '＋ 新任务', exact: true }).click();
   await workspace.getByLabel('任务名称', { exact: true }).fill('断网核验任务');
   await workspace.getByLabel('希望得到什么').fill('只应创建一次');
-  const keys: string[] = []; let intercepted = false;
+  const keys: string[] = []; let intercepted = false; let allowRefresh = true;
   await page.route('**/api/tasks', async route => {
-    if (route.request().method() !== 'POST') return route.continue();
+    if (route.request().method() !== 'POST') return allowRefresh ? route.continue() : route.abort('connectionreset');
     keys.push(route.request().headers()['idempotency-key']);
-    if (!intercepted) { intercepted = true; await route.fetch(); await route.abort('connectionreset'); }
-    else await route.continue();
+    if (!intercepted) { intercepted = true; await route.fetch(); allowRefresh = false; await route.abort('connectionreset'); }
+    else { allowRefresh = true; await route.continue(); }
   });
   await workspace.getByRole('button', { name: '保存任务', exact: true }).click();
   await expect(workspace.getByRole('button', { name: '核验并重试保存', exact: true })).toBeVisible();

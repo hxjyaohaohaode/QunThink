@@ -1,8 +1,14 @@
+import { useTasksStore } from '../../stores/tasksStore';
+import { writingUpdateBlocker } from '../../utils/writingUpdateGuard';
+import { useTaskResultsStore } from '../../stores/taskResultsStore';
+import { useConfirm } from './useConfirm';
 import { useState, useEffect, useCallback } from 'react';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export function PWAInstallPrompt() {
+  const { confirm, ConfirmModal } = useConfirm();
+  const [updateError, setUpdateError] = useState('');
   const {
     canInstall,
     shouldAutoShow,
@@ -61,8 +67,23 @@ export function PWAInstallPrompt() {
   }, []);
 
   const handleAcceptUpdate = useCallback(async () => {
+    setUpdateError('');
+    const blocker = writingUpdateBlocker(useTaskResultsStore.getState(), useTasksStore.getState());
+    if (blocker) { setUpdateError(blocker); return; }
+    const dirty = Object.entries(useTaskResultsStore.getState().editors).filter(([, editor]) => editor.dirty);
+    if (dirty.length) {
+      if (!await confirm({ title: '保存文稿后再更新？', description: '更新会重新加载页面。先把当前未提交的正文保存成服务器版本；遇到来源或版本冲突时会停下，保留当前页面。', confirmText: '保存并更新', cancelText: '继续编辑' })) return;
+      for (const [id] of dirty) {
+        try { await useTaskResultsStore.getState().save(id); } catch { setUpdateError('请先核验上次保存请求，再更新应用'); return; }
+        if (useTaskResultsStore.getState().editors[id]?.dirty || useTaskResultsStore.getState().uncertain[id]) { setUpdateError('文稿尚未全部保存，请先回到编辑区处理提示，再更新'); return; }
+      }
+    }
+    // Re-check after dialogs and asynchronous saves: another draft or request
+    // may have started while the user was deciding. No automatic resubmission.
+    const finalBlocker = writingUpdateBlocker(useTaskResultsStore.getState(), useTasksStore.getState(), true);
+    if (finalBlocker) { setUpdateError(finalBlocker); return; }
     await acceptUpdate();
-  }, [acceptUpdate]);
+  }, [acceptUpdate, confirm]);
 
   const handleDismissUpdate = useCallback(() => {
     dismissUpdate();
@@ -74,6 +95,7 @@ export function PWAInstallPrompt() {
 
   return (
     <>
+      {ConfirmModal}
       <AnimatePresence>
         {!isOnline && showOfflineBanner && (
           <motion.div
@@ -112,7 +134,7 @@ export function PWAInstallPrompt() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <h3 className="text-sm font-semibold text-text-primary">发现新版本</h3>
-                    <p className="text-xs text-text-secondary mt-0.5">更新后可获得最新功能和修复</p>
+                    <p className="text-xs text-text-secondary mt-0.5">更新后可获得最新功能和修复</p>{updateError && <p role="alert" className="text-xs text-red-500 mt-2">{updateError}</p>}
                   </div>
                 </div>
                 <div className="mt-3 flex gap-2">

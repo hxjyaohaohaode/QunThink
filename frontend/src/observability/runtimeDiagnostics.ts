@@ -1,5 +1,5 @@
 /** Deliberately volatile and local-only. Never store input, text, URLs, IDs or error messages. */
-export const surfaces = ['app', 'workspace', 'models', 'goals', 'memory', 'chat', 'agents', 'settings', 'task-composer', 'task-card', 'diagnostics'] as const;
+export const surfaces = ['app', 'workspace', 'models', 'goals', 'memory', 'chat', 'agents', 'settings', 'task-composer', 'task-card', 'writing', 'diagnostics'] as const;
 export type Surface = typeof surfaces[number];
 export type DiagnosticKind = 'view' | 'interaction' | 'request' | 'runtime' | 'task';
 export type DiagnosticOutcome = 'started' | 'succeeded' | 'failed' | 'unknown';

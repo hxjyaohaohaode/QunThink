@@ -1,7 +1,9 @@
 import express from 'express';
 import { z } from 'zod';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { acceptTaskResult, createTask, deleteTask, listTasks, runTask, updateTask, resolveUnknownTaskRun, taskRunInput } from '../services/tasks.js';
+import { acceptTaskResult, getTaskCreationReceipt, createTask, deleteTask, listTasks, runTask, updateTask, resolveUnknownTaskRun, taskRunInput } from '../services/tasks.js';
+
+import { getTaskResult, getTaskResultCommand, saveTaskResultVersion, acceptTaskResultVersion, adoptTaskResultVersion, rebaseTaskBrief } from '../services/taskResults.js';
 
 const router = express.Router();
 function withRequestId(req) {
@@ -25,6 +27,9 @@ router.use('/tasks', (req, res, next) => {
 router.get('/tasks', asyncHandler(async (req, res) => {
   res.json(await listTasks(req.userId));
 }));
+router.get('/tasks/commands/:requestId', asyncHandler(async (req, res) => {
+  res.json(await getTaskCreationReceipt(req.userId, req.params.requestId));
+}));
 router.post('/tasks', asyncHandler(async (req, res) => {
   res.status(201).json(await createTask(req.userId, withRequestId(req)));
 }));
@@ -40,6 +45,24 @@ router.post('/tasks/:taskId/run', asyncHandler(async (req, res) => {
 router.post('/tasks/:taskId/accept', asyncHandler(async (req, res) => {
   const { run_id } = z.object({ run_id: z.string().uuid() }).strict().parse(req.body);
   res.json(await acceptTaskResult(req.userId, req.params.taskId, run_id));
+}));
+router.get('/tasks/:taskId/result', asyncHandler(async (req, res) => {
+  res.json(await getTaskResult(req.userId, req.params.taskId));
+}));
+router.get('/tasks/:taskId/result/commands/:requestId', asyncHandler(async (req, res) => {
+  res.json(await getTaskResultCommand(req.userId, req.params.taskId, req.params.requestId));
+}));
+router.post('/tasks/:taskId/result/versions', asyncHandler(async (req, res) => {
+  res.json(await saveTaskResultVersion(req.userId, req.params.taskId, withRequestId(req)));
+}));
+router.post('/tasks/:taskId/result/accept', asyncHandler(async (req, res) => {
+  res.json(await acceptTaskResultVersion(req.userId, req.params.taskId, withRequestId(req)));
+}));
+router.post('/tasks/:taskId/result/adopt', asyncHandler(async (req, res) => {
+  res.json(await adoptTaskResultVersion(req.userId, req.params.taskId, withRequestId(req)));
+}));
+router.post('/tasks/:taskId/result/brief', asyncHandler(async (req, res) => {
+  res.json(await rebaseTaskBrief(req.userId, req.params.taskId, withRequestId(req)));
 }));
 router.post('/tasks/:taskId/resolve-unknown', asyncHandler(async (req, res) => {
   const { decision, run_id } = z.object({

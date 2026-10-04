@@ -58,13 +58,16 @@ interface MessageContentProps {
   contentType?: string;
   isUser: boolean;
   isStreaming?: boolean;
+  /** Artifact review must never silently truncate the accepted body. */
+  alwaysExpanded?: boolean;
 }
 
 export const MessageContent = React.memo(function MessageContent({
   content,
   contentType,
   isUser,
-  isStreaming
+  isStreaming,
+  alwaysExpanded = false
 }: MessageContentProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const COLLAPSE_THRESHOLD = 600;
@@ -78,7 +81,7 @@ export const MessageContent = React.memo(function MessageContent({
   }, [content, contentType]);
 
   const collapseThreshold = isUser ? USER_COLLAPSE_THRESHOLD : COLLAPSE_THRESHOLD;
-  const shouldCollapse = processedContent.length > collapseThreshold && !isExpanded && !isStreaming;
+  const shouldCollapse = !alwaysExpanded && processedContent.length > collapseThreshold && !isExpanded && !isStreaming;
   const displayContent = shouldCollapse
     ? processedContent.substring(0, collapseThreshold) + '...'
     : processedContent;

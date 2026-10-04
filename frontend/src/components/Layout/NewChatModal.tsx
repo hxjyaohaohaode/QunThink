@@ -1,4 +1,4 @@
-import { useChatModelIds } from '../../stores/modelsStore';
+﻿import { useChatModelIds } from '../../stores/modelsStore';
 ﻿import { useState, useEffect, useRef } from 'react';
 import { useFocusTrap } from '../Common/useFocusTrap';
 import { useGroupsStore } from '../../stores/groupsStore';
@@ -240,7 +240,7 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
   };
 
   const handleCreateGroup = async () => {
-    if (!newGroupName.trim() || selectedAiMembers.length < 2) return;
+    if (!newGroupName.trim() || creating) return;
     setCreating(true);
     try {
       const avatarUrl = getAvatarToUse();
@@ -453,7 +453,7 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
                 })}
               </div>
               {selectedAiPrivateMembers.length < 2 && (
-                <p className="text-[11px] text-red-500 mt-1">请至少选择 2 个 AI 成员</p>
+                <p className="text-[11px] text-text-muted mt-1">可以先建立会话、放入材料和人工写作；未连接模型时不会自动回复</p>
               )}
             </div>
 
@@ -554,7 +554,7 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
 
             <div>
               <div className="flex items-center justify-between mb-2">
-                <label className="text-xs text-text-secondary">选择 AI 成员 <span className="text-text-muted">（至少 2 个）</span></label>
+                <label className="text-xs text-text-secondary">选择 AI 成员 <span className="text-text-muted">（可选，稍后也能连接）</span></label>
                 <span className="text-xs text-text-muted">{selectedAiMembers.length}/9</span>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -576,14 +576,14 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
                   );
                 })}
               </div>
-              {selectedAiMembers.length < 2 && (
-                <p className="text-[11px] text-red-500 mt-1">请至少选择 2 个 AI 成员</p>
+              {selectedAiMembers.length === 0 && (
+                <p className="text-[11px] text-text-muted mt-1">可以先建立会话、放入材料和人工写作；未连接模型时不会自动回复</p>
               )}
             </div>
 
             <button
               onClick={handleCreateGroup}
-              disabled={creating || !newGroupName.trim() || selectedAiMembers.length < 2}
+              disabled={creating || !newGroupName.trim()}
               className="w-full py-2.5 rounded-[10px] bg-accent hover:bg-accent-hover text-white font-medium text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-all"
             >
               {creating ? '创建中...' : '创建群聊'}

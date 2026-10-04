@@ -3807,6 +3807,280 @@ paths:
                 runId: { type: string }
       responses: *personalRunTransitionResponses
 
+  /api/tasks/commands/{requestId}:
+    get:
+      operationId: getTaskCreationReceipt
+      summary: 按原创建请求核验保存/删除回执，无任务标题或正文的命令号可独立恢复
+      tags:
+        - Tasks
+      parameters:
+        - &a1
+          name: X-Expected-User-Id
+          in: header
+          required: false
+          description: 请求发起时绑定的账号；与会话不符时返回409 ACCOUNT_CHANGED，读写均拒绝
+          schema: &a2
+            type: string
+        - name: requestId
+          in: path
+          required: true
+          schema: &a3
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskCreateCommandReceipt"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+  /api/tasks/{taskId}/result:
+    get:
+      operationId: getTaskResultDocument
+      summary: 打开同一任务的可编辑文稿、不可变版本和当前来源变化
+      tags:
+        - Tasks
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResultDocument"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+  /api/tasks/{taskId}/result/commands/{requestId}:
+    get:
+      operationId: getTaskResultCommandReceipt
+      summary: 核验原保存/确认/采用/要求更新命令；已删任务回执返回document:null
+      tags:
+        - Tasks
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+        - name: requestId
+          in: path
+          required: true
+          schema: *a3
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResultMutationResponse"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+  /api/tasks/{taskId}/result/versions:
+    post:
+      operationId: saveTaskResultVersion
+      summary: 保存人工修订版本；明确reviewed_source_hash才重新绑定已核对来源
+      tags:
+        - Tasks
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: *a3
+          description: 与client_request_id一致的原命令号；同号不同输入拒绝
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResultMutationResponse"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaveTaskResultInput"
+  /api/tasks/{taskId}/result/accept:
+    post:
+      operationId: acceptTaskResultVersion
+      summary: 确认当前指定版本及正文hash；来源改变或运行未知时拒绝
+      tags:
+        - Tasks
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: *a3
+          description: 与client_request_id一致的原命令号；同号不同输入拒绝
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResultMutationResponse"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptTaskResultVersionInput"
+  /api/tasks/{taskId}/result/adopt:
+    post:
+      operationId: adoptTaskResultVersion
+      summary: 明确将候选/历史版本作为当前稿，保留人工版及旧确认记录
+      tags:
+        - Tasks
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: *a3
+          description: 与client_request_id一致的原命令号；同号不同输入拒绝
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResultMutationResponse"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdoptTaskResultVersionInput"
+  /api/tasks/{taskId}/result/brief:
+    post:
+      operationId: rebaseTaskResultBrief
+      summary: 明确更新本稿写作要求和原消息引用；不会替换正文或自动调用模型
+      tags:
+        - Tasks
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: *a3
+          description: 与client_request_id一致的原命令号；同号不同输入拒绝
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResultMutationResponse"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RebaseTaskBriefInput"
+
 components:
   securitySchemes:
     cookieAuth:
@@ -3912,6 +4186,339 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
   schemas:
+    TaskResultSourceRef:
+      type: object
+      additionalProperties: false
+      properties:
+        id: &a1
+          type: string
+        revision: &a2
+          anyOf:
+            - &a6
+              type: integer
+              minimum: 0
+            - type: "null"
+        edited_at: &a3
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+      required:
+        - id
+        - revision
+        - edited_at
+    TaskResultSourceMessage:
+      type: object
+      additionalProperties: false
+      properties:
+        id: *a1
+        revision: *a2
+        edited_at: *a3
+        sender_type: *a1
+        created_at: *a1
+        content: *a1
+        change:
+          enum:
+            - unchanged
+            - changed
+            - added
+      required:
+        - id
+        - revision
+        - edited_at
+        - sender_type
+        - created_at
+        - content
+        - change
+    TaskResultVersion:
+      type: object
+      additionalProperties: false
+      properties:
+        id: &a4
+          type: string
+          format: uuid
+        sequence:
+          type: integer
+          minimum: 1
+        kind:
+          enum:
+            - generated
+            - manual
+        parent_version_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        run_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        content: *a1
+        content_hash: &a5
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        created_at: *a1
+        source_hash:
+          anyOf:
+            - *a5
+            - type: "null"
+        source_messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskResultSourceRef"
+        source_status:
+          enum:
+            - current
+            - changed
+            - blocked
+        content_hidden:
+          type: boolean
+      required:
+        - id
+        - sequence
+        - kind
+        - parent_version_id
+        - run_id
+        - content
+        - content_hash
+        - created_at
+        - source_hash
+        - source_messages
+        - source_status
+        - content_hidden
+    TaskResultDocument:
+      type: object
+      additionalProperties: false
+      properties:
+        task_id: *a4
+        title: *a1
+        group_id:
+          anyOf:
+            - *a1
+            - type: "null"
+        revision: *a6
+        head_version_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        accepted_version_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        accepted_content_hash:
+          anyOf:
+            - *a5
+            - type: "null"
+        accepted_at:
+          anyOf:
+            - *a1
+            - type: "null"
+        versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskResultVersion"
+        source:
+          type: object
+          additionalProperties: false
+          properties:
+            status:
+              enum:
+                - current
+                - changed
+                - blocked
+            hash:
+              anyOf:
+                - *a5
+                - type: "null"
+            messages:
+              type: array
+              items:
+                $ref: "#/components/schemas/TaskResultSourceMessage"
+            missing_message_ids:
+              type: array
+              items: *a1
+            message:
+              anyOf:
+                - *a1
+                - type: "null"
+          required:
+            - status
+            - hash
+            - messages
+            - missing_message_ids
+            - message
+        generation:
+          type: object
+          additionalProperties: false
+          properties:
+            status:
+              enum:
+                - pending
+                - running
+                - needs_review
+                - completed
+                - failed
+                - cancelled
+                - outcome_unknown
+            run_id:
+              anyOf:
+                - *a4
+                - type: "null"
+            source_input_stale:
+              type: boolean
+          required:
+            - status
+            - run_id
+            - source_input_stale
+      required:
+        - task_id
+        - title
+        - group_id
+        - revision
+        - head_version_id
+        - accepted_version_id
+        - accepted_content_hash
+        - accepted_at
+        - versions
+        - source
+        - generation
+    TaskResultCommandReceipt:
+      type: object
+      additionalProperties: false
+      properties:
+        id: *a4
+        operation:
+          enum:
+            - save
+            - accept
+            - adopt
+            - brief
+        task_id: *a4
+        version_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        committed_revision: *a6
+        committed_at: *a1
+        status:
+          const: succeeded
+      required:
+        - id
+        - operation
+        - task_id
+        - version_id
+        - committed_revision
+        - committed_at
+        - status
+    TaskResultMutationResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        receipt:
+          $ref: "#/components/schemas/TaskResultCommandReceipt"
+        document:
+          anyOf:
+            - $ref: "#/components/schemas/TaskResultDocument"
+            - type: "null"
+        task_deleted:
+          type: boolean
+      required:
+        - receipt
+        - document
+    TaskCreateCommandReceipt:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          const: succeeded
+        operation:
+          const: create
+        client_request_id: *a4
+        task_id: *a4
+        task_deleted:
+          type: boolean
+        task:
+          anyOf:
+            - $ref: "#/components/schemas/WorkspaceTask"
+            - type: "null"
+      required:
+        - status
+        - operation
+        - client_request_id
+        - task_id
+        - task_deleted
+        - task
+    SaveTaskResultInput:
+      type: object
+      additionalProperties: false
+      properties:
+        client_request_id: *a4
+        expected_revision: *a6
+        base_version_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        content:
+          type: string
+          minLength: 1
+          maxLength: 64000
+          description: 精确保留人工正文，包括首尾空白；正文须含非空白字符
+        reviewed_source_hash:
+          anyOf:
+            - *a5
+            - type: "null"
+      required:
+        - client_request_id
+        - expected_revision
+        - base_version_id
+        - content
+    AcceptTaskResultVersionInput:
+      type: object
+      additionalProperties: false
+      properties:
+        client_request_id: *a4
+        expected_revision: *a6
+        version_id: *a4
+        content_hash: *a5
+        source_hash:
+          anyOf:
+            - *a5
+            - type: "null"
+      required:
+        - client_request_id
+        - expected_revision
+        - version_id
+        - content_hash
+        - source_hash
+    AdoptTaskResultVersionInput:
+      type: object
+      additionalProperties: false
+      properties:
+        client_request_id: *a4
+        expected_revision: *a6
+        version_id: *a4
+      required:
+        - client_request_id
+        - expected_revision
+        - version_id
+    RebaseTaskBriefInput:
+      type: object
+      additionalProperties: false
+      properties:
+        client_request_id: *a4
+        expected_revision: *a6
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 12000
+        source_hash:
+          anyOf:
+            - *a5
+            - type: "null"
+      required:
+        - client_request_id
+        - expected_revision
+        - prompt
+        - source_hash
     ModelProbeReceipt:
       type: object
       additionalProperties: false
@@ -5106,16 +5713,26 @@ components:
         dispatch_status:
           enum: [not_sent, sent_or_unknown]
         accepted_run_id:
-          type: string
-          description: 最近经用户明确验收的运行标识
+          type: [string, "null"]
+          description: 最近经用户明确验收的生成运行；人工正文确认时为null，请使用result_accepted_version_id
         result_pending_review:
           type: boolean
+        result_editor_available:
+          type: boolean
+        result_head_version_id:
+          type: [string, "null"]
+          format: uuid
+          description: 当前正文版本，可能是人工修订；与已确认版本相同才属于当前已确认文稿
+        result_accepted_version_id:
+          type: [string, "null"]
+          format: uuid
+          description: 最近明确确认的精确正文版本，不随新保存或新候选自动更新
         source_input_stale:
           type: boolean
-          description: 原始来源消息已改变或撤销；隐藏其复制的任务输入及成果，并拒绝继续运行
+          description: 再次生成所用原消息已变化；隐藏旧复制输入并要求显式更新用途，不等同于当前人工正文来源过期
         source_stale:
           type: boolean
-          description: 当前关联会话与产出此结果时的来源快照不同；读取时计算
+          description: 当前正文版本（包括人工稿）的来源快照与可读材料不同；与再次生成用途的source_input_stale独立
         result:
           type: string
         error:

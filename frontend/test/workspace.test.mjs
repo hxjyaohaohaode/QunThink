@@ -5,7 +5,7 @@ import { build } from 'esbuild';
 import { resolve } from 'node:path';
 const root = resolve(import.meta.dirname, '..');
 const window = new Window({ url: 'http://localhost/' });
-Object.assign(globalThis, { window, document: window.document, HTMLElement: window.HTMLElement, Node: window.Node, Element: window.Element, requestAnimationFrame: fn => setTimeout(fn, 0), IS_REACT_ACT_ENVIRONMENT: true });
+Object.assign(globalThis, { window, localStorage: window.localStorage, document: window.document, HTMLElement: window.HTMLElement, Node: window.Node, Element: window.Element, requestAnimationFrame: fn => setTimeout(fn, 0), IS_REACT_ACT_ENVIRONMENT: true });
 Object.defineProperty(globalThis, 'navigator', { value: window.navigator, configurable: true });
 window.HTMLElement.prototype.scrollIntoView = () => {};
 class Channel { port1 = { onmessage: null }; port2 = { postMessage: () => setTimeout(() => this.port1.onmessage?.(), 0) }; }
@@ -14,16 +14,17 @@ after(() => window.close());
 globalThis.__workspaceTest = { tasks: [], writes: [], post: async () => ({ data: {} }), user: 'alice' };
 const bundled = await build({ stdin: { contents: `import { createRoot } from 'react-dom/client'; import { act } from 'react'; import { WorkspacePage } from './src/components/Layout/WorkspacePage'; import { useTasksStore } from './src/stores/tasksStore'; export { act, useTasksStore }; export async function mount(element) { const root = createRoot(element); await act(async () => root.render(<WorkspacePage onOpenConversation={() => {}} />)); return root; }`, resolveDir: root, sourcefile: 'test-workspace.tsx', loader: 'tsx' }, bundle: true, format: 'esm', platform: 'browser', jsx: 'automatic', write: false, plugins: [{ name: 'ui-boundaries', setup(build) {
   build.onResolve({ filter: /services\/api$/ }, () => ({ path: 'api', namespace: 'ui-mock' }));
-  build.onResolve({ filter: /utils\/cacheUtils$/ }, () => ({ path: 'cache', namespace: 'ui-mock' }));
+  build.onResolve({ filter: /(?:utils\/|\.\/)cacheUtils$/ }, () => ({ path: 'cache', namespace: 'ui-mock' }));
   build.onResolve({ filter: /(?:^\.\/|stores\/)(modelsStore|groupsStore|profileStore)$/ }, args => ({ path: args.path.split('/').at(-1), namespace: 'ui-mock' }));
   build.onResolve({ filter: /^\.\/(ModelCenter|PersonalGoalsPanel|MemoryCenter)$/ }, args => ({ path: args.path.slice(2), namespace: 'ui-mock' }));
+  build.onResolve({ filter: /Writing\/TaskResultEditor$/ }, () => ({ path: 'TaskResultEditor', namespace: 'ui-mock' }));
   build.onResolve({ filter: /Chat\/MessageContent$/ }, () => ({ path: 'MessageContent', namespace: 'ui-mock' }));
   build.onResolve({ filter: /^\.\.\/Common$/ }, () => ({ path: 'Common', namespace: 'ui-mock' }));
   build.onResolve({ filter: /hooks\/useReducedMotion$/ }, () => ({ path: 'reduced', namespace: 'ui-mock' }));
   build.onResolve({ filter: /^framer-motion$/ }, () => ({ path: 'motion', namespace: 'ui-mock' }));
   build.onLoad({ filter: /.*/, namespace: 'ui-mock' }, ({ path }) => {
     const source = {
-      api: `export const axiosInstance = { get: async () => ({data: globalThis.__workspaceTest.tasks}), post: (...args) => globalThis.__workspaceTest.post(...args), patch: async () => ({data:{}}), delete: async () => ({data:{}}) }; export const api = {createGroup: async () => ({id:'group'})};`,
+      api: `export const getAuthGeneration=()=>0; export const axiosInstance = { get: async () => ({data: globalThis.__workspaceTest.tasks}), post: (...args) => globalThis.__workspaceTest.post(...args), patch: async () => ({data:{}}), delete: async () => ({data:{}}) }; export const api = {createGroup: async () => ({id:'group'})};`,
       cache: `export const getCacheUserId = () => globalThis.__workspaceTest.user;`,
       modelsStore: `export const useModelsStore = fn => fn({ catalog: {models: [], defaults:{}} }); export const requestError = e => e.message;`,
       groupsStore: `export const useGroupsStore = fn => fn({ groups: globalThis.__workspaceTest.groups });`,
@@ -31,6 +32,7 @@ const bundled = await build({ stdin: { contents: `import { createRoot } from 're
       ModelCenter: `export const ModelCenter = () => <div>模型配置测试页</div>;`,
       PersonalGoalsPanel: `export const PersonalGoalsPanel = () => <div>目标测试页</div>;`,
       MemoryCenter: `export const MemoryCenter = () => <div>记忆测试页</div>;`,
+      TaskResultEditor: `export const TaskResultEditor = () => <div>共享正文编辑器</div>;`,
       MessageContent: `export const MessageContent = ({content}) => <div>{content}</div>;`,
       Common: `export const useConfirm = () => ({ confirm: () => globalThis.__workspaceTest.confirm ? new Promise(resolve => { globalThis.__workspaceTest.resolveConfirm = resolve; }) : Promise.resolve(true), ConfirmModal: null });`,
       reduced: `export const useReducedMotion = () => true;`,
@@ -43,8 +45,9 @@ const { mount, act, useTasksStore: store } = await import(`data:text/javascript;
 let container, mounted;
 const button = text => [...container.querySelectorAll('button')].find(element => element.textContent === text);
 const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+const waitFor = async check => { for (let n=0;n<200&&!check();n++) await new Promise(resolve=>setTimeout(resolve,5)); assert.ok(check(), 'expected request preparation to reach the mock transport'); };
 async function type(element, value) { await act(async () => { const proto = element.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, 'value').set.call(element, value); element.dispatchEvent(new window.Event('input', { bubbles: true })); }); }
-beforeEach(async () => { if (mounted) await act(async () => mounted.unmount()); container?.remove(); store.getState().cleanup(); globalThis.__workspaceTest.tasks = []; globalThis.__workspaceTest.groups = [{id:'group-a', name:'来源会话'}]; container = document.createElement('div'); document.body.appendChild(container); mounted = await mount(container); });
+beforeEach(async () => { localStorage.clear(); if (mounted) await act(async () => mounted.unmount()); container?.remove(); store.getState().cleanup(); globalThis.__workspaceTest.tasks = []; globalThis.__workspaceTest.groups = [{id:'group-a', name:'来源会话'}]; container = document.createElement('div'); document.body.appendChild(container); mounted = await mount(container); });
 after(async () => { if (mounted) await act(async () => mounted.unmount()); });
 test('draft survives workspace navigation and remount without persistent private storage', async () => {
   await act(async () => button('＋ 新任务').click());
@@ -62,6 +65,7 @@ test('double form submit is one request; uncertain response locks original input
   const calls = []; let rejectFirst;
   globalThis.__workspaceTest.post = (...args) => { calls.push(args); return new Promise((_, reject) => { rejectFirst = reject; }); };
   await act(async () => { const form = container.querySelector('form'); form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); });
+  await act(async()=>{await waitFor(()=>calls.length===1);});
   assert.equal(calls.length, 1); assert.equal(calls[0][2].headers['X-Expected-User-Id'], 'alice');
   await act(async () => { rejectFirst(new Error('连接中断')); await settle(); });
   assert.equal(container.querySelector('fieldset').disabled, true); assert.ok(button('核验并重试保存'));
@@ -100,7 +104,7 @@ test('uncertain create can still verify its original receipt after source group 
   await act(async () => button('继续任务草稿').click());
   const requests = [];
   globalThis.__workspaceTest.post = async (...args) => { requests.push(args); throw new Error('lost receipt'); };
-  await act(async () => { button('保存任务').click(); await settle(); });
+  await act(async () => { button('保存任务').click(); await waitFor(()=>requests.length===1); });
   globalThis.__workspaceTest.groups = [];
   await act(async () => store.getState().fetch());
   assert.equal(button('核验并重试保存').disabled, false);
@@ -109,4 +113,11 @@ test('uncertain create can still verify its original receipt after source group 
   assert.equal(requests[0][2].headers['Idempotency-Key'], requests[1][2].headers['Idempotency-Key']);
   assert.equal(store.getState().uncertainCreate, false);
   assert.equal(container.querySelector('fieldset').disabled, false);
+});
+
+test('confirmed document filter includes exact manual head and excludes unconfirmed or source-changed revisions', async () => {
+  const base={category:'work',status:'completed',history:[],result:'人工正文',run_count:0,result_editor_available:true,result_head_version_id:'manual-2',accepted_run_id:null,source_stale:false};
+  globalThis.__workspaceTest.tasks=[{...base,id:'accepted',title:'已确认的人工稿',prompt:'用途',result_accepted_version_id:'manual-2',source_input_stale:true},{...base,id:'old',title:'更新后未确认',prompt:'用途',result_accepted_version_id:'manual-1'},{...base,id:'changed',title:'来源已变化稿',prompt:'用途',result_accepted_version_id:'manual-2',source_stale:true}];
+  await act(async()=>store.getState().fetch()); await act(async()=>button('已确认文稿').click());
+  const cards=[...container.querySelectorAll('[data-observe="task-card"]')];assert.equal(cards.length,1);assert.match(cards[0].textContent,/已确认的人工稿/);assert.match(cards[0].textContent,/已确认成果/);assert.doesNotMatch(cards[0].querySelector('.workspace-status').textContent,/原始消息已变化/);
 });

@@ -1,7 +1,10 @@
-import { clearDiagnostics, observeInteractions, setDiagnosticSurface } from './observability/runtimeDiagnostics';
+﻿import { clearDiagnostics, observeInteractions, setDiagnosticSurface } from './observability/runtimeDiagnostics';
 import { purgeLegacyPrivateCaches } from './utils/privateCache';
 import { useModelsStore } from './stores/modelsStore';
 import { useTasksStore } from './stores/tasksStore';
+import { useTaskResultsStore } from './stores/taskResultsStore';
+import { clearWritingContent } from './utils/taskRecovery';
+import { ConversationWriting } from './components/Writing/ConversationWriting';
 import { useMemoryStore } from './stores/memoryStore';
 ﻿import { lazy, Suspense, useEffect, useLayoutEffect, useState, useRef, useCallback, type ReactNode, type TouchEvent as ReactTouchEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -149,7 +152,7 @@ const defaultProfileState: UserProfile = {
 };
 
 function hydrateBootstrapData(userId: string, payload: BootstrapPayload) {
-  if (getCacheUserId() !== userId) { useAudioStore.getState().clearAll(); useTasksStore.getState().cleanup(); useMemoryStore.getState().cleanup(); useProfileStore.getState().cleanup(); useModelsStore.getState().cleanup(); usePersonasStore.getState().cleanup(); clearDiagnostics(); }
+  if (getCacheUserId() !== userId) { useAudioStore.getState().clearAll(); useTasksStore.getState().cleanup(); useTaskResultsStore.getState().cleanup(); useMemoryStore.getState().cleanup(); useProfileStore.getState().cleanup(); useModelsStore.getState().cleanup(); usePersonasStore.getState().cleanup(); clearDiagnostics(); }
   setCacheUserId(userId);
   confirmAuthIdentity(userId);
   setIndexedDBUserId(userId);
@@ -269,11 +272,12 @@ async function handleLogout() {
   confirmAuthIdentity(null);
   const logoutGeneration = getAuthGeneration();
   const cachedUserId = getCacheUserId();
+  clearWritingContent(cachedUserId);
   const pendingCleanup: Promise<unknown>[] = [];
   clearDiagnostics();
   useAudioStore.getState().clearAll();
   useProfileStore.getState().cleanup();
-  useTasksStore.getState().cleanup();
+  useTasksStore.getState().cleanup(); useTaskResultsStore.getState().cleanup();
   useMemoryStore.getState().cleanup();
   useModelsStore.getState().cleanup();
   usePersonasStore.getState().cleanup();
@@ -370,6 +374,15 @@ async function handleLogout() {
 }
 
 function App() {
+  useEffect(() => {
+    // The editor may be on another page; navigation must not remove its unload guard.
+    const guard = (event: BeforeUnloadEvent) => {
+      const result = useTaskResultsStore.getState(), tasks = useTasksStore.getState();
+      if (Object.values(result.editors).some(editor => editor.dirty) || Object.keys(result.uncertain).length || Object.keys(result.briefs).length || tasks.composerDraft.title || tasks.composerDraft.prompt || tasks.uncertainCreate) { event.preventDefault(); event.returnValue = ''; }
+    };
+    window.addEventListener('beforeunload', guard);
+    return () => window.removeEventListener('beforeunload', guard);
+  }, []);
   const currentGroup = useGroupsStore((s) => s.currentGroup);
   const applyTheme = useUIStore((s) => s.applyTheme);
   useKeyboardShortcuts();
@@ -889,7 +902,7 @@ function AppContent({
                 custom={desktopTransitionDirRef.current}
                 transition={reducedMotion ? reducedMotionTransition : viewTransition}
               >
-                <div className="w-full flex flex-col h-full">
+                <ConversationWriting groupId={currentGroup.id}>
                   <ChatHeader showGroupInfoButton={true} />
                   <ChatModelNotice group={currentGroup} />
                   <MessageList />
@@ -900,7 +913,7 @@ function AppContent({
                   ) : (
                     <MessageInput />
                   )}
-                </div>
+                </ConversationWriting>
               </motion.div>
             ) : (
               <motion.div
@@ -1073,6 +1086,7 @@ function AppContent({
               custom={mobileTransitionDirRef.current}
               transition={reducedMotion ? reducedMotionTransition : viewTransition}
             >
+              <ConversationWriting groupId={currentGroup.id}>
               <ChatHeader onBack={handleMobileBack} onToggleGroupInfo={() => navigateToView('groupInfo')} showGroupInfoButton={true} />
               <ChatModelNotice group={currentGroup} />
               <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
@@ -1085,6 +1099,7 @@ function AppContent({
               ) : (
                 <MessageInput />
               )}
+              </ConversationWriting>
             </motion.div>
           )}
 

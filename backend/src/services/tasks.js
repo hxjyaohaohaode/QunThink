@@ -1,12 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { getUserDb, listUserDatabases, withWriteLock } from '../models/db.js';
+import { getUserDb, listUserDatabases, withWriteLock, beginUserDbWriteBarrier } from '../models/db.js';
 import { encryptText, decryptText } from '../utils/encryption.js';
 import { defaultModelId, resolveModel, catalogError } from './ai/catalog.js';
 import { requestCompletion, describeProviderError } from './ai/transport.js';
 import { runAsUser } from './userScope.js';
 import { safeLog } from '../utils/logger.js';
 import { readableSourceGroups, readableSourceMessages } from './memory/persistentMemory.js';
+import { sourceMessages, linkedFile, sourceHash, sourceSnapshot, taskSourceMessages, isTaskInputSourceStale, isRunSourceStale, isResultSourceStale } from './taskSources.js';
+
+import { currentTaskResultHead, synchronizeTaskResults, taskResultState, TASK_RESULT_LIMITS } from './taskResults.js';
 
 const requestIdInput = z.string().uuid().transform(value => value.toLowerCase());
 export const taskRunInput = z.object({ client_request_id: requestIdInput.optional() }).strict();
@@ -33,76 +36,36 @@ let ticking = false;
 let timer = null;
 const executionKey = (userId, taskId) => JSON.stringify([userId, taskId]);
 
-function sourceMessages(db, groupId) {
-  return groupId ? (db.data.messages || []).filter(m => m.group_id === groupId) : [];
-}
-
-function linkedFile(db, message, attachment) {
-  return (db.data.files || []).find(file => file.id === attachment?.id && file.group_id === message.group_id) || null;
-}
-
-function sourceHash(messages, db, version = 2) {
-  return createHash('sha256').update(JSON.stringify(messages.map(m => ({
-    id: m.id, content: m.content, content_type: m.content_type,
-    ...(version >= 2 ? { sender_type: m.sender_type } : {}),
-    attachments: (m.attachments || []).map(attachment => {
-      const file = linkedFile(db, m, attachment);
-      return { id: attachment.id, file: file ? {
-        filename: file.filename, parsed_content: file.parsed_content,
-        media_description: file.media_description, parse_status: file.parse_status
-      } : null };
-    }),
-    revision: m.revision, edited_at: m.edited_at,
-    deleted_at: m.deleted_at
-  })))).digest('hex');
-}
-
-async function sourceSnapshot(userId, db) {
-  const groups = await readableSourceGroups(userId, db);
-  const messages = await readableSourceMessages(userId, db);
-  return { groupIds: new Set(groups.map(group => group.id)), messages };
-}
-
-async function taskSourceMessages(userId, db, groupId) {
-  return groupId ? (await readableSourceMessages(userId, db, sourceMessages(db, groupId))).slice(-40) : [];
-}
-
-function isTaskInputSourceStale(task, db, snapshot) {
-  if (!task.source_message_id) return false;
-  if (!task.group_id || !snapshot?.groupIds.has(task.group_id)) return true;
-  const source = snapshot.messages.find(message => message.id === task.source_message_id && message.group_id === task.group_id);
-  return !source || !task.source_input_hash || sourceHash([source], db) !== task.source_input_hash;
-}
-
-function isRunSourceStale(task, run, db, snapshot) {
-  if (!task.group_id) return false;
-  if (!snapshot?.groupIds.has(task.group_id)) return true;
-  const messages = snapshot.messages.filter(message => message.group_id === task.group_id).slice(-40);
-  return !run?.source_hash || sourceHash(messages, db, run.source_hash_version || 1) !== run.source_hash;
-}
-
-function isResultSourceStale(task, db, snapshot) {
-  if (!task.result_run_id) return false;
-  return isRunSourceStale(task, task.history?.find(item => item.id === task.result_run_id), db, snapshot);
-}
-
 function runEvidence(task) {
   return {
     id: task.run_id, client_request_id: task.run_request_id || null,
     retry_of_run_id: task.retry_of_run_id || null, started_at: task.started_at,
     source_hash: task.source_hash, source_hash_version: task.source_hash_version || 1, source_messages: task.source_messages || [],
-    dispatch_status: task.dispatch_status || 'sent_or_unknown'
+    dispatch_status: task.dispatch_status || 'sent_or_unknown',
+    result_base_version_id: task.result_base_version_id || null, source_file_ids: task.source_file_ids || []
   };
 }
 
 // A failed local write must not leave a phantom success in the cached database.
 async function writeOrRestore(db, before) {
+  const releaseReaders = beginUserDbWriteBarrier(db);
   try { await db.write(); }
-  catch (error) {
-    db.data = before;
-    try { await db.read({ force: true }); } catch { /* Keep the conservative snapshot. */ }
-    throw error;
-  }
+  catch (error) { db.data = before; db.invalidateReadCache?.(); throw error; }
+  finally { releaseReaders(); }
+}
+
+async function stableTaskSnapshot(db, action) {
+  const releaseReaders = beginUserDbWriteBarrier(db);
+  const before = structuredClone(db.data);
+  try { return await action(); }
+  catch (error) { db.data = before; db.invalidateReadCache?.(); throw error; }
+  finally { releaseReaders(); }
+}
+async function withStableTaskLock(userId, db, action) {
+  return withWriteLock(userId, async () => {
+    await db.read({ force: true });
+    return stableTaskSnapshot(db, action);
+  });
 }
 
 function compileTaskContext(messages, db, config, prompt, system) {
@@ -136,8 +99,17 @@ function compileTaskContext(messages, db, config, prompt, system) {
 function unpack(value) { return value ? decryptText(value) : ''; }
 export function publicTask(task, db = null, snapshot = null) {
   const inputStale = db ? isTaskInputSourceStale(task, db, snapshot) : false;
-  const sourceStale = inputStale || (db ? isResultSourceStale(task, db, snapshot) : false);
-  return { ...task, ...(db ? { source_stale: sourceStale, source_input_stale: inputStale } : {}),
+  // Editing/confirming a manual result and refreshing a generation brief are
+  // separate decisions. An old brief must not mark a reviewed manual body stale.
+  const hasEditorHead = !!task.result_editor?.head_version_id;
+  // Origin identity remains a revocation boundary even after it ages out of
+  // the latest40-message context. Editing it only affects the next brief;
+  // deleting/revoking it must still hide derived bodies in legacy summaries.
+  const originBlocked = !!db && !!task.source_message_id && (!snapshot?.groupIds.has(task.group_id) ||
+    !snapshot.messages.some(message => message.id === task.source_message_id && message.group_id === task.group_id));
+  const sourceStale = originBlocked || (!hasEditorHead && inputStale) || (db ? isResultSourceStale(task, db, snapshot) : false);
+  const { result_editor, ...visible } = task;
+  return { ...visible, ...(result_editor ? { result_editor_available: true, result_head_version_id: result_editor.head_version_id, result_accepted_version_id: result_editor.accepted_version_id } : {}), ...(db ? { source_stale: sourceStale, source_input_stale: inputStale } : {}),
     prompt: inputStale ? '' : unpack(task.prompt), result: sourceStale ? '' : unpack(task.result),
     history: (task.history || []).map(h => {
       const stale = inputStale || (db ? isRunSourceStale(task, h, db, snapshot) : false);
@@ -156,6 +128,21 @@ export async function listTasks(userId) {
     const snapshot = await sourceSnapshot(userId, db);
     return db.data.tasks.map(task => publicTask(task, db, snapshot))
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  });
+}
+export async function getTaskCreationReceipt(userId, requestId) {
+  requestId = requestIdInput.parse(requestId);
+  const db = await getUserDb(userId);
+  return withWriteLock(userId, async () => {
+    await db.read({ force: true });
+    const releaseReaders = beginUserDbWriteBarrier(db);
+    try {
+      const receipt = db.data.taskCreateRequests?.find(item => item.id === requestId);
+      if (!receipt) throw taskError('TASK_CREATE_COMMAND_NOT_FOUND', '尚未找到这次创建请求，请保留原编号核验；不会自动重建', 404);
+      const task = db.data.tasks?.find(item => item.id === receipt.task_id);
+      return { status: 'succeeded', operation: 'create', client_request_id: requestId, task_id: receipt.task_id,
+        task_deleted: !task, task: task ? await viewTask(userId, task, db) : null };
+    } finally { releaseReaders(); }
   });
 }
 export async function createTask(userId, input) {
@@ -279,8 +266,8 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
   return runAsUser(userId, async () => {
     const db = await getUserDb(userId);
     const controller = new AbortController(), key = executionKey(userId, taskId), runId = randomUUID();
-    const prepared = await withWriteLock(userId, async () => {
-      await db.read(); const task = db.data.tasks?.find(t => t.id === taskId);
+    const prepared = await withStableTaskLock(userId, db, async () => {
+      const task = db.data.tasks?.find(t => t.id === taskId);
       if (!task) throw catalogError('任务不存在', 404);
       if (requestId && task.cancelled_run_requests?.includes(requestId)) return { replay: await viewTask(userId, task, db) };
       if (requestId && (task.run_request_id === requestId || task.history?.some(run => run.client_request_id === requestId))) {
@@ -295,6 +282,8 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
       if (task.source_message_id && isTaskInputSourceStale(task, db, await sourceSnapshot(userId, db))) {
         throw taskError('TASK_SOURCE_CHANGED', '任务原始消息已更新或撤销，请从当前消息重新创建任务');
       }
+      const resultState = taskResultState(task, db);
+      if (resultState.versions.length >= TASK_RESULT_LIMITS.versions) throw taskError('RESULT_VERSION_LIMIT', '文稿版本记录已满，请先导出并归档；不会继续产生收费调用');
       const today = new Date().toISOString().slice(0, 10);
       const budget = db.data.taskDailyBudget?.date === today ? db.data.taskDailyBudget : { date: today, count: 0 };
       const limit = Math.max(1, Number(process.env.TASK_DAILY_RUN_LIMIT) || 24);
@@ -305,6 +294,8 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
       Object.assign(task, { status: 'running', error: null, retry_of_run_id: task.run_id || null,
         run_id: runId, run_request_id: requestId, dispatch_status: 'not_sent', source_hash_version: 2,
         source_messages: messages.map(message => ({ id: message.id, revision: message.revision ?? null, edited_at: message.edited_at ?? null })),
+        source_file_ids: [...new Set(messages.flatMap(message => (message.attachments || []).filter(attachment => linkedFile(db, message, attachment)).map(attachment => attachment.id)))],
+        result_base_version_id: currentTaskResultHead(task, db),
         source_hash: task.group_id ? sourceHash(messages, db) : null,
         result_pending_review: false, started_at: new Date().toISOString(), updated_at: new Date().toISOString() });
       activeRuns.set(key, controller);
@@ -338,6 +329,7 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
           if (!latest || latest.run_id !== runId || latest.status !== 'running' ||
               controller.signal.aborted) throw sourceChanged();
           const currentConfig = await resolveModel(userId, modelId, 'chat');
+          return stableTaskSnapshot(db, async () => {
           // Catalog resolution re-reads PgLow/MongoLow and can replace db.data.
           latest = db.data.tasks?.find(item => item.id === taskId);
           if (!latest || latest.run_id !== runId || latest.status !== 'running' || controller.signal.aborted) throw sourceChanged();
@@ -363,6 +355,7 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
           catch { throw Object.assign(new Error('无法保存调用记录，未发送模型请求'), { code: 'TASK_SOURCE_CHANGED' }); }
           dispatched = true;
           return { responsePromise: send() };
+          });
         }),
         onContextAudit: audit => { contextAudit = { ...contextAudit, ...audit }; },
         onUsage: usage => { receivedResponse = true; observedUsage = usage; }
@@ -376,8 +369,8 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
         : controller.signal.aborted ? '任务已停止'
         : error?.code === 'TASK_SOURCE_CHANGED' ? error.message : describeProviderError(error);
     }
-    return withWriteLock(userId, async () => {
-      await db.read(); const latest = db.data.tasks?.find(t => t.id === taskId);
+    return withStableTaskLock(userId, db, async () => {
+      const latest = db.data.tasks?.find(t => t.id === taskId);
       if (!latest || latest.run_id !== runId || latest.status !== 'running')
         return latest ? viewTask(userId, latest, db) : null;
       const currentMessages = await taskSourceMessages(userId, db, latest.group_id);
@@ -407,27 +400,23 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
         latest.run_at = new Date(Date.now() + latest.repeat_minutes * 60000).toISOString();
         latest.status = 'pending';
       } else { latest.auto_run = false; }
-      try { await db.write(); }
-      catch (error) {
-        // The provider may have completed while persisting its receipt failed.
-        // Keep the run fenced even if a second write also fails.
-        latest.status = 'outcome_unknown';
-        latest.auto_run = false;
-        latest.result_pending_review = false;
-        latest.error = '模型回执保存失败，调用可能已执行或计费；请核验后决定是否重试';
-        Object.assign(latest.history.at(-1), { status: 'outcome_unknown', error: latest.error });
-        try { await db.write(); } catch { throw error; }
+      if (content && !failure) {
+        synchronizeTaskResults(latest, db);
+        const manualHead = latest.result_editor.versions.find(version => version.id === latest.result_editor.head_version_id && version.kind === 'manual');
+        if (manualHead) { latest.result = manualHead.content; latest.result_run_id = manualHead.run_id; latest.accepted_run_id = null; }
       }
+      try { await db.write(); }
+      catch (error) { error.taskFinalizationWriteFailed = true; throw error; }
       return viewTask(userId, latest, db);
     }).catch(async error => {
       if (dispatched) {
         // A storage/source-read outage after sending must not strand an idle
         // task as running or allow an unacknowledged effect to be sent again.
         try {
-          await withWriteLock(userId, async () => {
-            await db.read();
+          const recovered = await withStableTaskLock(userId, db, async () => {
             const latest = db.data.tasks?.find(item => item.id === taskId);
-            if (!latest || latest.run_id !== runId || latest.status !== 'running') return;
+            if (!latest || latest.run_id !== runId) return null;
+            if (latest.status !== 'running') return viewTask(userId, latest, db);
             const now = new Date().toISOString();
             const message = '模型调用已发出，但成果保存或来源核验未完成；请先核验再决定是否重试';
             if (!latest.history?.some(run => run.id === runId)) {
@@ -439,7 +428,9 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
             Object.assign(latest, { status: 'outcome_unknown', auto_run: false,
               result_pending_review: false, error: message, updated_at: now });
             await db.write();
+            return viewTask(userId, latest, db);
           });
+          if (recovered && error.taskFinalizationWriteFailed) return recovered;
         } catch { /* The durable running checkpoint still blocks new dispatch. */ }
       }
       throw error;
@@ -450,10 +441,11 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
 export async function acceptTaskResult(userId, taskId, runId) {
   runId = requestIdInput.parse(runId);
   const db = await getUserDb(userId);
-  return withWriteLock(userId, async () => {
-    await db.read();
+  return withStableTaskLock(userId, db, async () => {
     const task = db.data.tasks?.find(t => t.id === taskId);
     if (!task) throw catalogError('任务不存在', 404);
+    const editor = taskResultState(task, db);
+    if (editor.head_version_id && editor.head_version_id !== runId) throw taskError('RESULT_VERSION_REQUIRED', '当前有人工修订或另一份文稿，请在文稿编辑区核对并确认具体版本');
     const snapshot = await sourceSnapshot(userId, db);
     if (isTaskInputSourceStale(task, db, snapshot)) throw taskError('TASK_SOURCE_CHANGED', '任务原始消息已更新或撤销，请从当前消息重新创建任务');
     if (task.accepted_run_id === runId) {
@@ -479,6 +471,11 @@ export async function acceptTaskResult(userId, taskId, runId) {
     task.result_pending_review = false;
     task.status = task.auto_run && task.repeat_minutes ? 'pending' : 'completed';
     task.updated_at = run.accepted_at;
+    synchronizeTaskResults(task, db);
+    task.result_editor.accepted_version_id = runId;
+    task.result_editor.accepted_content_hash = task.result_editor.versions.find(version => version.id === runId)?.content_hash || null;
+    task.result_editor.accepted_at = run.accepted_at;
+    task.result_editor.revision++;
     await writeOrRestore(db, before);
     return viewTask(userId, task, db);
   });
