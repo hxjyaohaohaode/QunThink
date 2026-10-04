@@ -59,6 +59,8 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
         working-directory: ./frontend
+      - name: Artifact packaging integrity tests (no browser or listener)
+        run: node --test scripts/pack-ci-evidence.test.mjs
       - name: Preserve brand and entry animation
         run: node scripts/verify-brand.mjs
       - name: Frontend tests
@@ -114,6 +116,387 @@ jobs:
           path: |
             frontend/playwright-report/
             frontend/test-results/
+          retention-days: 14
+      - name: Losslessly package all browser evidence into bounded parts
+        id: package-evidence
+        if: always()
+        env:
+          EVIDENCE_PROJECT: ${{ matrix.project }}
+        run: node scripts/pack-ci-evidence.mjs archive .ci-evidence frontend/playwright-report frontend/test-results
+      - name: Save browser-evidence-parts manifest
+        if: ${{ always() && steps.package-evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-manifest
+          path: .ci-evidence/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 001
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-001') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-001
+          path: .ci-evidence/evidence.part-001
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 002
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-002') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-002
+          path: .ci-evidence/evidence.part-002
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 003
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-003') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-003
+          path: .ci-evidence/evidence.part-003
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 004
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-004') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-004
+          path: .ci-evidence/evidence.part-004
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 005
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-005') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-005
+          path: .ci-evidence/evidence.part-005
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 006
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-006') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-006
+          path: .ci-evidence/evidence.part-006
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 007
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-007') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-007
+          path: .ci-evidence/evidence.part-007
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 008
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-008') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-008
+          path: .ci-evidence/evidence.part-008
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 009
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-009') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-009
+          path: .ci-evidence/evidence.part-009
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 010
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-010') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-010
+          path: .ci-evidence/evidence.part-010
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 011
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-011') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-011
+          path: .ci-evidence/evidence.part-011
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 012
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-012') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-012
+          path: .ci-evidence/evidence.part-012
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 013
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-013') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-013
+          path: .ci-evidence/evidence.part-013
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 014
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-014') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-014
+          path: .ci-evidence/evidence.part-014
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 015
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-015') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-015
+          path: .ci-evidence/evidence.part-015
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 016
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-016') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence-parts-${{ matrix.project }}-part-016
+          path: .ci-evidence/evidence.part-016
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+
+  recover-original-q1-evidence:
+    # Temporary evidence recovery for the existing draft PR only. These exact
+    # historical artifacts are read-only inputs, never executed or extracted.
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.number == 1 && github.repository == 'hxjyaohaohaode/QunThink' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [desktop-chromium, mobile-reduced-motion]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read and verify the exact original Q1 artifact ZIP
+        id: recover-evidence
+        uses: actions/github-script@v7
+        env:
+          EVIDENCE_PROJECT: ${{ matrix.project }}
+        with:
+          # The official action uses only the built-in ephemeral GITHUB_TOKEN.
+          # A 403/other error ends this job; there is no alternate download route.
+          retries: 0
+          debug: false
+          script: |
+            const { recoverKnownArtifact } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/recover-ci-evidence.mjs`);
+            const manifest = await recoverKnownArtifact({
+              github, context, project: process.env.EVIDENCE_PROJECT,
+              outputDir: '.ci-recovered-evidence',
+            });
+            core.info(`Verified original artifact ${manifest.source.artifactId}: ${manifest.archive.bytes} bytes, ${manifest.parts.length} lossless parts, SHA-256 ${manifest.archive.sha256}`);
+      - name: Save original-q1-evidence manifest
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-manifest
+          path: .ci-recovered-evidence/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 001
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-001') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-001
+          path: .ci-recovered-evidence/evidence.part-001
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 002
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-002') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-002
+          path: .ci-recovered-evidence/evidence.part-002
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 003
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-003') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-003
+          path: .ci-recovered-evidence/evidence.part-003
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 004
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-004') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-004
+          path: .ci-recovered-evidence/evidence.part-004
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 005
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-005') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-005
+          path: .ci-recovered-evidence/evidence.part-005
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 006
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-006') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-006
+          path: .ci-recovered-evidence/evidence.part-006
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 007
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-007') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-007
+          path: .ci-recovered-evidence/evidence.part-007
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 008
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-008') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-008
+          path: .ci-recovered-evidence/evidence.part-008
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 009
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-009') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-009
+          path: .ci-recovered-evidence/evidence.part-009
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 010
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-010') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-010
+          path: .ci-recovered-evidence/evidence.part-010
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 011
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-011') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-011
+          path: .ci-recovered-evidence/evidence.part-011
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 012
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-012') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-012
+          path: .ci-recovered-evidence/evidence.part-012
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 013
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-013') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-013
+          path: .ci-recovered-evidence/evidence.part-013
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 014
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-014') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-014
+          path: .ci-recovered-evidence/evidence.part-014
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 015
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-015') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-015
+          path: .ci-recovered-evidence/evidence.part-015
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save original-q1-evidence part 016
+        if: ${{ always() && steps.recover-evidence.outcome == 'success' && hashFiles('.ci-recovered-evidence/evidence.part-016') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-original-q1-evidence-${{ matrix.project }}-part-016
+          path: .ci-recovered-evidence/evidence.part-016
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
           retention-days: 14
 
   docker:

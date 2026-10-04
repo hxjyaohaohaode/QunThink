@@ -29,3 +29,10 @@ export function completionBody(content) {
 export function streamBody(content) {
   return `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\ndata: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } })}\n\ndata: [DONE]\n\n`;
 }
+
+// MessageList and MessageBubble both identify a message. Actions belong to the
+// inner MessageBubble's existing .group element, never an arbitrary first match.
+export function messageBubbleSelector(id) {
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new Error('Expected a server message UUID');
+  return `.group[data-message-id="${id}"]`;
+}

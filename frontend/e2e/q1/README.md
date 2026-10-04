@@ -24,3 +24,19 @@ The fixture invitation body is predetermined. Its corrected date is not evidence
 - Clipboard readback is performed only if permission was already granted. No new browser permissions are requested; a copy-button acknowledgment alone is not readback proof
 
 Actual browser evidence is produced by CI, not by local static checks. CI-operated traces remain scripted browser evidence, not a manual usability review. A passing partial fault case does not complete Q1, the other product scenarios, real provider semantics, production persistence, or all-component acceptance.
+
+
+## Lossless CI evidence downloads
+
+The original combined `qunthink-browser-evidence-<project>` artifact is still uploaded. CI additionally archives **all** files in `frontend/playwright-report/` and `frontend/test-results/` using lossless tar/gzip, including hidden files, full-size screenshots, videos and traces. It emits a manifest and up to 16 separately uploaded parts with a maximum **20 MiB raw payload per artifact**, leaving room for GitHub's ZIP wrapper below a 32 MiB download limit. Each upload contains exactly one part; downloading an individual part never downloads the combined archive.
+
+The `qunthink-browser-evidence-parts-<project>-manifest` artifact contains the archive and per-part SHA-256 checksums, exact byte counts, ordered filenames, source run/checkout/project and included/missing evidence roots. Extract the manifest and every `...-part-001`, `...-part-002`, etc. ZIP into the same directory, then run:
+
+```sh
+node scripts/pack-ci-evidence.mjs restore /path/to/extracted-parts /path/to/new-evidence.tar.gz
+tar -xzf /path/to/new-evidence.tar.gz -C /path/to/empty-evidence-directory
+```
+
+Restoration validates every part and the full archive and refuses to overwrite an existing output. Missing, corrupt, truncated or reordered parts fail. CI verifies its own parts before publishing the manifest. Exceeding 16 parts is an explicit packaging failure; nothing is truncated or recompressed with loss, and the independently uploaded full artifact remains available. Expand both the script limit and fixed workflow upload slots together if ever needed. Pure local packaging tests are `node --test scripts/pack-ci-evidence.test.mjs`; they use only synthetic temporary files and never start a browser, listener, provider or application.
+
+A temporary PR #1-only recovery job reads the two exact artifacts from run `37228163396` using GitHub's official REST API through `actions/github-script`, with only `contents: read` and `actions: read` and the built-in ephemeral token. It verifies the pinned artifact ID, name, source run, unexpired status, original size and SHA-256, then splits the **original ZIP bytes without extraction or modification**. The `qunthink-original-q1-evidence-<project>-manifest` and separate part artifacts use the same restore command with a new `.zip` output. This is historical evidence from the failed run, not a new test result. HTTP 403 or any other failed read stops the job without another route; tokens and temporary signed download URLs are never saved in evidence. Remove this temporary recovery job after the verified historical evidence has been retrieved, before the originals expire.

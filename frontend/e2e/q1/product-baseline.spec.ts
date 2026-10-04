@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { registerSyntheticAccount } from '../authFixture';
-import { assertQ1CiRuntime, Q1_ORIGIN, ORIGINAL, CORRECTION, LATER_CORRECTION, PURPOSE, INVITATION } from '../../scripts/q1-fixture-protocol.mjs';
+import { assertQ1CiRuntime, Q1_ORIGIN, ORIGINAL, CORRECTION, LATER_CORRECTION, PURPOSE, INVITATION, messageBubbleSelector } from '../../scripts/q1-fixture-protocol.mjs';
 
 if (!process.argv.includes('--list')) assertQ1CiRuntime();
 const BASELINE = '5056661e681665b7c82c25460af3ea6bc9112f4e';
@@ -30,7 +30,22 @@ class Evidence {
     await this.info.attach(`${name}-viewport`, { path: viewport, contentType: 'image/png' });
     if (target) {
       // Natural frames first: screenshots must never fast-forward/cancel animations.
-      await expect.poll(() => target.evaluate(el => { let opacity = 1; for (let node: Element | null = el; node; node = node.parentElement) opacity *= Number(getComputedStyle(node).opacity); return opacity; }), { timeout: 4000, message: `${label}: natural visible opacity` }).toBeGreaterThan(0.98);
+      const visualState = await target.evaluate(el => {
+        let cumulativeOpacity = 1;
+        const ancestors = [];
+        for (let node: Element | null = el; node; node = node.parentElement) {
+          const style = getComputedStyle(node);
+          cumulativeOpacity *= Number(style.opacity);
+          const bounds = node.getBoundingClientRect();
+          ancestors.push({ tag: node.tagName, className: node.getAttribute('class'), opacity: style.opacity, visibility: style.visibility, rect: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } });
+        }
+        const rect = el.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        const identify = (node: Element | null) => node ? { tag: node.tagName, id: node.id, className: node.getAttribute('class'), role: node.getAttribute('role') } : null;
+        return { cumulativeOpacity, ancestors, activeElement: identify(document.activeElement), centerHitElement: identify(hit), centerHitTarget: hit === el || !!hit && el.contains(hit), rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
+      });
+      this.entries.push({ stage: 'natural-screenshot-observation', at: new Date().toISOString(), label, visualState,
+        interpretation: 'Observed opacity/geometry, not a visibility pass. Review natural pixels/video; do not impose a generic fully-opaque threshold on every design.' });
       if (clickable) await target.click({ trial: true });
     }
     const full = this.info.outputPath(`${name}-full.png`);
@@ -71,6 +86,9 @@ async function get(context: BrowserContext, path: string) {
 async function fixtureCalls(context: BrowserContext, model: string) { return (await get(context, `${Q1_ORIGIN}/__q1/observations`)).calls.filter((call: Json) => call.model === model); }
 async function tasks(context: BrowserContext) { return get(context, '/api/tasks') as Promise<Json[]>; }
 async function taskById(context: BrowserContext, id: string) { const task = (await tasks(context)).find(t => t.id === id); expect(task, 'Original task still exists').toBeTruthy(); return task!; }
+// Both MessageList and MessageBubble expose data-message-id. Select the actual
+// .group MessageBubble (MessageBubble.tsx), never an arbitrary first match.
+function messageBubble(page: Page, id: string) { return page.locator(messageBubbleSelector(id)); }
 function card(page: Page, title: string) { return page.locator('[data-observe="task-card"]').filter({ has: page.getByRole('heading', { name: title, exact: true }) }); }
 async function workspace(page: Page, info: TestInfo) {
   if (await page.getByTestId('workspace').isVisible()) return;
@@ -146,7 +164,7 @@ async function setup(page: Page, context: BrowserContext, info: TestInfo, e: Evi
     const response = page.waitForResponse(r => r.url().endsWith(`/api/groups/${group.id}/messages`) && r.request().method() === 'POST');
     await input.fill(note); await input.press('Enter');
     const sent = await response; expect(sent.status()).toBe(201); const message = await sent.json(); messages.push(message);
-    await expect(page.locator(`[data-message-id="${message.id}"]`)).toContainText(note);
+    await expect(messageBubble(page, message.id)).toContainText(note);
     // Observe normal scheduling without replacing it by a store flag. A fixture
     // responses/silence are recorded from durable messages in a bounded observation window.
     let previousSignature = '', stableSince = Date.now();
@@ -169,12 +187,12 @@ async function setup(page: Page, context: BrowserContext, info: TestInfo, e: Evi
   expect(observedCalls.filter((call: Json) => call.kind === 'other')).toHaveLength(0);
   await e.record('conversation-notes-and-normal-replies', { messages: visibleMessages.messages, fixtureCalls: observedCalls, group: await get(context, `/api/groups/${group.id}`),
     controls: await e.inventory(page.locator('.glass-header')), forbiddenBrowserRequests: forbiddenRequests });
-  await e.shot('conversation-after-notes', page.locator(`[data-message-id="${messages[1].id}"]`));
+  await e.shot('conversation-after-notes', messageBubble(page, messages[1].id));
   expect(forbiddenRequests).toEqual([]);
   return { model, group, messages, user };
 }
 async function composeFromMessage(page: Page, context: BrowserContext, e: Evidence, origin: Json, title: string, purpose = PURPOSE) {
-  const source = page.locator(`[data-message-id="${origin.id}"]`); await source.hover();
+  const source = messageBubble(page, origin.id); await source.hover();
   await source.getByTitle('创建任务', { exact: true }).click();
   const work = page.getByTestId('workspace'); await expect(work).toBeVisible();
   await expect(work.getByLabel('希望得到什么')).toHaveValue(origin.content);
@@ -239,7 +257,7 @@ test('Q1 product outcome: source conversation to editable invitation and same-dr
     await e.record('partial-accept-unedited-run', { request: acceptedResponse.request().postDataJSON(), task: accepted, q1EditedVersionAcceptance: 'blocked' });
     await e.shot('partial-unedited-run-accepted', target.locator('.workspace-result'));
     await target.getByRole('button', { name: '打开来源会话 →', exact: true }).click();
-    const source = page.locator(`[data-message-id="${state.messages[1].id}"]`); await expect(source).toBeVisible(); await source.hover();
+    const source = messageBubble(page, state.messages[1].id); await expect(source).toBeVisible(); await source.hover();
     await source.getByTitle('编辑', { exact: true }).click(); await source.locator('textarea').fill(LATER_CORRECTION);
     await e.shot('source-edit-before-save', source.getByRole('button', { name: '保存', exact: true }), true);
     const change = page.waitForResponse(r => r.url().endsWith(`/api/messages/${state.messages[1].id}`) && r.request().method() === 'PUT');
