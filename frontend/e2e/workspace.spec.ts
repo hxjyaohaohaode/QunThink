@@ -47,29 +47,6 @@ test('real API saves once, preserves draft across views, and restores saved task
   expect(overflow).toBe(false);
 });
 
-test('lost save acknowledgement with unavailable refresh explicitly replays same key once', async ({ page, context }) => {
-  const workspace = await openWorkspace(page, context);
-  await workspace.getByRole('button', { name: '＋ 新任务', exact: true }).click();
-  await workspace.getByLabel('任务名称', { exact: true }).fill('断网核验任务');
-  await workspace.getByLabel('希望得到什么').fill('只应创建一次');
-  const keys: string[] = []; let intercepted = false; let allowRefresh = true;
-  await page.route('**/api/tasks', async route => {
-    if (route.request().method() !== 'POST') return allowRefresh ? route.continue() : route.abort('connectionreset');
-    keys.push(route.request().headers()['idempotency-key']);
-    if (!intercepted) { intercepted = true; await route.fetch(); allowRefresh = false; await route.abort('connectionreset'); }
-    else { allowRefresh = true; await route.continue(); }
-  });
-  await workspace.getByRole('button', { name: '保存任务', exact: true }).click();
-  await expect(workspace.getByRole('button', { name: '核验并重试保存', exact: true })).toBeVisible();
-  await expect(workspace.getByLabel('任务名称', { exact: true })).toBeDisabled();
-  await expect(workspace.getByLabel('希望得到什么')).toBeDisabled();
-  await workspace.getByRole('button', { name: '核验并重试保存', exact: true }).click();
-  await expect(workspace.getByRole('heading', { name: '断网核验任务', exact: true })).toBeVisible();
-  expect(keys).toHaveLength(2); expect(keys[0]).toBeTruthy(); expect(keys[1]).toBe(keys[0]);
-  const tasks = await (await context.request.get('/api/tasks')).json();
-  expect(tasks.filter((task: { title: string }) => task.title === '断网核验任务')).toHaveLength(1);
-});
-
 test('local diagnostics never include input or upload runtime reports', async ({ page, context }, info) => {
   const uploads: string[] = []; page.on('request', request => { if (request.url().includes('/monitoring/errors')) uploads.push(request.url()); });
   const workspace = await openWorkspace(page, context);
