@@ -93,9 +93,10 @@ const bodyRecovery = (page: Page) => page.getByRole('region', { name: '待确认
 const taskCard = (page: Page, title: string) => page.locator('[data-observe="task-card"]').filter({ has: page.getByRole('heading', { level: 3, name: title, exact: true }) });
 async function openComposer(page: Page) {
   const opener = page.getByTestId('workspace').getByRole('button', { name: /^(＋ 新任务|继续任务草稿)$/ });
-  let state = 'waiting';
-  await expect.poll(async () => { state = await composer(page).isVisible() ? 'composer' : await opener.isVisible() ? 'opener' : 'waiting'; return state; }, { timeout: 20000, intervals: [100, 250, 500] }).not.toBe('waiting');
-  if (state === 'opener') await opener.click();
+  // A saved form may still be visible during its exit animation. Start the
+  // next user intent through the real, idempotent opener, not that old DOM.
+  await expect(opener).toBeVisible();
+  await opener.click();
   await expect(composer(page)).toBeVisible();
 }
 async function fillComposer(page: Page, title: string, purpose: string) { await openComposer(page); await composer(page).getByLabel('任务名称', { exact: true }).fill(title); await composer(page).getByLabel('希望得到什么').fill(purpose); }
