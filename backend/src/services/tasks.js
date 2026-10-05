@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { getUserDb, listUserDatabases, withWriteLock, beginUserDbWriteBarrier } from '../models/db.js';
 import { encryptText, decryptText } from '../utils/encryption.js';
-import { defaultModelId, resolveModel, catalogError } from './ai/catalog.js';
+import { defaultModelId, defaultModelIdSnapshot, resolveModel, resolveModelSnapshot, catalogError } from './ai/catalog.js';
 import { requestCompletion, describeProviderError } from './ai/transport.js';
 import { runAsUser } from './userScope.js';
 import { safeLog } from '../utils/logger.js';
@@ -12,6 +12,7 @@ import { sourceMessages, linkedFile, sourceHash, sourceSnapshot, taskSourceMessa
 import { currentTaskResultHead, synchronizeTaskResults, taskResultState, TASK_RESULT_LIMITS } from './taskResults.js';
 
 const requestIdInput = z.string().uuid().transform(value => value.toLowerCase());
+const CREATE_COMMAND_LIMIT = 10000;
 export const taskRunInput = z.object({ client_request_id: requestIdInput.optional() }).strict();
 const taskError = (code, message, status = 409) => Object.assign(new Error(message), {
   code, status, statusCode: status, isOperational: true
@@ -130,6 +131,20 @@ export async function listTasks(userId) {
       .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   });
 }
+function createCommands(db) {
+  const receipts = db.data.taskCreateRequests || [];
+  if (!Array.isArray(receipts) || new Set(receipts.map(item => item.id)).size !== receipts.length) {
+    throw taskError('TASK_CREATE_STORAGE_UNCERTAIN', '创建请求记录需要核验，暂时不能再次提交', 503);
+  }
+  return receipts;
+}
+async function creationResponse(userId, receipt, db) {
+  if (receipt.status === 'cancelled') return { status: 'cancelled', operation: 'create',
+    client_request_id: receipt.id, task_id: null, task_deleted: false, task: null, closed_at: receipt.closed_at };
+  const task = db.data.tasks?.find(item => item.id === receipt.task_id);
+  return { status: 'succeeded', operation: 'create', client_request_id: receipt.id, task_id: receipt.task_id,
+    task_deleted: !task, task: task ? await viewTask(userId, task, db) : null };
+}
 export async function getTaskCreationReceipt(userId, requestId) {
   requestId = requestIdInput.parse(requestId);
   const db = await getUserDb(userId);
@@ -137,29 +152,46 @@ export async function getTaskCreationReceipt(userId, requestId) {
     await db.read({ force: true });
     const releaseReaders = beginUserDbWriteBarrier(db);
     try {
-      const receipt = db.data.taskCreateRequests?.find(item => item.id === requestId);
+      const receipt = createCommands(db).find(item => item.id === requestId);
       if (!receipt) throw taskError('TASK_CREATE_COMMAND_NOT_FOUND', '尚未找到这次创建请求，请保留原编号核验；不会自动重建', 404);
-      const task = db.data.tasks?.find(item => item.id === receipt.task_id);
-      return { status: 'succeeded', operation: 'create', client_request_id: requestId, task_id: receipt.task_id,
-        task_deleted: !task, task: task ? await viewTask(userId, task, db) : null };
+      return await creationResponse(userId, receipt, db);
     } finally { releaseReaders(); }
+  });
+}
+// This closes only a not-yet-committed create command. A committed document is
+// returned unchanged; cancelling admission never deletes it or stops AI work.
+export async function closeTaskCreationCommand(userId, requestId) {
+  requestId = requestIdInput.parse(requestId);
+  const db = await getUserDb(userId);
+  return withStableTaskLock(userId, db, async () => {
+    const list = createCommands(db), receipt = list.find(item => item.id === requestId);
+    if (receipt) return creationResponse(userId, receipt, db);
+    if (list.length >= CREATE_COMMAND_LIMIT) throw taskError('TASK_CREATE_COMMAND_LIMIT', '创建请求记录已满，请联系管理员核验；不会遗忘原请求后重新提交', 429);
+    const before = structuredClone(db.data);
+    const closed = { id: requestId, status: 'cancelled', closed_at: new Date().toISOString() };
+    db.data.taskCreateRequests = [...list, closed];
+    await writeOrRestore(db, before);
+    return creationResponse(userId, closed, db);
   });
 }
 export async function createTask(userId, input) {
   const { client_request_id: requestId, ...data } = taskInput.parse(input);
   const inputHash = createHash('sha256').update(JSON.stringify(data)).digest('hex');
   const db = await getUserDb(userId);
-  return withWriteLock(userId, async () => {
-    await db.read();
-    const receipt = requestId && db.data.taskCreateRequests?.find(item => item.id === requestId);
+  return withStableTaskLock(userId, db, async () => {
+    const list = createCommands(db), receipt = requestId && list.find(item => item.id === requestId);
     if (receipt) {
+      if (receipt.status === 'cancelled') throw taskError('TASK_CREATE_COMMAND_CLOSED', '这次创建请求已封存，迟到的提交不会生效。请核验原请求后以新内容重新开始', 410);
       if (receipt.input_hash !== inputHash) throw taskError('IDEMPOTENCY_CONFLICT', '此请求标识已用于不同任务内容，请刷新后重新提交');
       const existing = db.data.tasks?.find(task => task.id === receipt.task_id);
       if (!existing) throw taskError('TASK_DELETED', '此请求创建的任务已删除，不会重复创建', 410);
       return viewTask(userId, existing, db);
     }
-    if (data.model_id) await resolveModel(userId, data.model_id, 'chat');
-    if (data.auto_run) await resolveModel(userId, data.model_id || await defaultModelId(userId), 'chat');
+    if (requestId && list.length >= CREATE_COMMAND_LIMIT) throw taskError('TASK_CREATE_COMMAND_LIMIT', '创建请求记录已满，请联系管理员核验；不会遗忘原请求后重新提交', 429);
+    // No replacing read may advance the CAS revision after the absent-receipt
+    // decision. The outer read barrier also excludes unrelated in-flight reads.
+    if (data.model_id) resolveModelSnapshot(db.data, data.model_id, 'chat');
+    if (data.auto_run) resolveModelSnapshot(db.data, data.model_id || defaultModelIdSnapshot(db.data), 'chat');
     if ((db.data.tasks?.length || 0) >= 200) throw catalogError('任务已达 200 个，请先删除不需要的任务', 409);
     if (data.group_id && !(await readableSourceGroups(userId, db)).some(g => g.id === data.group_id))
       throw catalogError('关联会话不存在', 404);

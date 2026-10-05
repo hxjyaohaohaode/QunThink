@@ -59,7 +59,7 @@ test('draft survives workspace navigation and remount without persistent private
   assert.equal(container.querySelector('input[maxlength="150"]').value, '尚未保存的标题');
   assert.equal(window.localStorage.length, 0);
 });
-test('double form submit is one request; uncertain response locks original input for same-key replay', async () => {
+test('double form submit sends once; new typing stays separate from explicit frozen same-key replay', async () => {
   await act(async () => button('＋ 新任务').click());
   await type(container.querySelector('input[maxlength="150"]'), '保存回执测试'); await type(container.querySelector('textarea'), '内容');
   const calls = []; let rejectFirst;
@@ -68,11 +68,11 @@ test('double form submit is one request; uncertain response locks original input
   await act(async()=>{await waitFor(()=>calls.length===1);});
   assert.equal(calls.length, 1); assert.equal(calls[0][2].headers['X-Expected-User-Id'], 'alice');
   await act(async () => { rejectFirst(new Error('连接中断')); await settle(); });
-  assert.equal(container.querySelector('fieldset').disabled, true); assert.ok(button('核验并重试保存'));
-  globalThis.__workspaceTest.post = async (...args) => { calls.push(args); const task = { ...args[1], id:'created', status:'pending', history:[], result:'', run_count:0 }; globalThis.__workspaceTest.tasks = [task]; return {data:task}; };
-  await act(async () => { button('核验并重试保存').click(); await settle(); });
+  assert.equal(container.querySelector('fieldset').disabled, false); assert.ok(button('按原内容重试')); await type(container.querySelector('textarea'),'这次新输入');
+  globalThis.__workspaceTest.post = async (...args) => { calls.push(args); const task = { ...args[1], client_request_id:args[2].headers['Idempotency-Key'], id:'created', status:'pending', history:[], result:'', run_count:0 }; globalThis.__workspaceTest.tasks = [task]; return {data:task}; };
+  await act(async () => { button('按原内容重试').click(); await settle(); });
   assert.equal(calls[0][2].headers['Idempotency-Key'], calls[1][2].headers['Idempotency-Key']);
-  assert.equal(container.querySelector('form'), null); assert.match(container.textContent, /保存回执测试/);
+  assert.equal(calls[1][1].prompt,'内容'); assert.equal(container.querySelector('textarea').value,'这次新输入'); assert.match(container.textContent, /保存回执测试/);
 });
 test('empty filtered results have clear recovery and no fabricated placeholder task', async () => {
   globalThis.__workspaceTest.tasks = [{id:'existing',title:'真正任务',prompt:'内容',category:'work',status:'pending',history:[],result:'',run_count:0}];
@@ -107,11 +107,13 @@ test('uncertain create can still verify its original receipt after source group 
   await act(async () => { button('保存任务').click(); await waitFor(()=>requests.length===1); });
   globalThis.__workspaceTest.groups = [];
   await act(async () => store.getState().fetch());
-  assert.equal(button('核验并重试保存').disabled, false);
+  assert.equal(button('按原内容重试').disabled, false);
   globalThis.__workspaceTest.post = async (...args) => { requests.push(args); throw Object.assign(new Error('来源已删除'), {status:404}); };
-  await act(async () => { button('核验并重试保存').click(); await settle(); });
+  await act(async () => { button('按原内容重试').click(); await settle(); });
   assert.equal(requests[0][2].headers['Idempotency-Key'], requests[1][2].headers['Idempotency-Key']);
-  assert.equal(store.getState().uncertainCreate, false);
+  assert.equal(store.getState().uncertainCreate, true);
+  const key=requests[0][2].headers['Idempotency-Key'];globalThis.__workspaceTest.post=async path=>({data:{status:'cancelled',operation:'create',client_request_id:key,task_id:null,task_deleted:false,task:null,closed_at:'2026-10-04'}});
+  await act(async()=>store.getState().closeCreate(key));assert.equal(store.getState().uncertainCreate,false);
   assert.equal(container.querySelector('fieldset').disabled, false);
 });
 
@@ -128,7 +130,7 @@ test('zero-model workspace offers writing first and replaces the large setup car
  assert.equal(container.querySelector('.workspace-setup'),null);assert.ok(button('继续最近文稿'));await act(async()=>button('继续最近文稿').click());assert.match(container.textContent,/共享正文编辑器/);
 });
 test('minimal unresolved receipt prioritizes the original document without starting a model or new task',async()=>{
- const requestId='11111111-1111-4111-8111-111111111111';localStorage.setItem('qunthink_command_v1_alice:'+requestId,JSON.stringify({key:requestId,action:'save_revision',taskId:'pending-doc',payloadHash:'digest-only',createdAt:'2026-10-04T12:00:00Z'}));
+ const requestId='11111111-1111-4111-8111-111111111111';localStorage.setItem('qunthink_command_v1_alice:'+requestId,JSON.stringify({key:requestId,action:'save_revision',taskId:'pending-doc',payloadHash:'a'.repeat(64),createdAt:'2026-10-04T12:00:00Z'}));
  globalThis.__workspaceTest.tasks=[{id:'recent',title:'另一较新文稿',prompt:'用途',category:'work',status:'needs_review',history:[],result:'文字',run_count:0,group_id:null},{id:'pending-doc',title:'原回执对应文稿',prompt:'用途',category:'work',status:'needs_review',history:[],result:'待核验正文',run_count:0,group_id:null}];await act(async()=>store.getState().fetch());
  assert.ok(button('打开文稿核验'));assert.equal(container.querySelector('.workspace-setup'),null);await act(async()=>button('打开文稿核验').click());
  assert.ok(container.querySelector('#task-detail-pending-doc'));assert.equal(container.querySelector('#task-detail-recent'),null);assert.ok(localStorage.getItem('qunthink_command_v1_alice:'+requestId));

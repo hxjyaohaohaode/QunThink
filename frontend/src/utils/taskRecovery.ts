@@ -45,17 +45,46 @@ export async function textHash(value: string): Promise<string> {
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, '0')).join('');
 }
+const receiptFields = new Set(['key', 'action', 'taskId', 'baseRevisionId', 'revisionId', 'contentHash', 'payloadHash', 'createdAt']);
+const receiptActions = new Set(['create', 'run', 'save_revision', 'accept_revision', 'adopt_revision', 'review_brief']);
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const hashPattern = /^[0-9a-f]{64}$/i;
+const objectId = (value: unknown): value is string => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(value);
+class InvalidTaskReceiptError extends Error {
+  constructor() { super('此设备的待核验记录不完整，已暂停新的提交。请保留当前文字，检查浏览器存储后重新读取；不要清除请求记录或站点数据'); }
+}
+function validReceipt(value: unknown, storedKey: string): value is TaskCommandReceipt {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Record<string, unknown>;
+  if (Object.keys(item).some(key => !receiptFields.has(key)) || typeof item.key !== 'string' || !uuidPattern.test(item.key) || item.key !== storedKey || typeof item.action !== 'string' || !receiptActions.has(item.action)) return false;
+  if (item.action === 'create' ? item.taskId !== null : !objectId(item.taskId)) return false;
+  if (typeof item.payloadHash !== 'string' || !hashPattern.test(item.payloadHash) || typeof item.createdAt !== 'string' || !/^\d{4}-\d{2}-\d{2}(?:T.*)?$/.test(item.createdAt) || !Number.isFinite(Date.parse(item.createdAt))) return false;
+  if ('baseRevisionId' in item && item.baseRevisionId !== null && (typeof item.baseRevisionId !== 'string' || !uuidPattern.test(item.baseRevisionId))) return false;
+  if ('revisionId' in item && (typeof item.revisionId !== 'string' || !uuidPattern.test(item.revisionId))) return false;
+  if ('contentHash' in item && (typeof item.contentHash !== 'string' || !hashPattern.test(item.contentHash))) return false;
+  if (['create', 'run'].includes(item.action) && ['baseRevisionId', 'revisionId', 'contentHash'].some(key => key in item)) return false;
+  if (['accept_revision', 'adopt_revision'].includes(item.action) && !objectId(item.revisionId)) return false;
+  if (item.action === 'accept_revision' && (typeof item.contentHash !== 'string' || !hashPattern.test(item.contentHash))) return false;
+  return true;
+}
 export function readTaskReceipts(): TaskCommandReceipt[] {
   const user = getCacheUserId(); if (!user) return [];
   try {
     const prefix = accountKey(journalPrefix, user), items: TaskCommandReceipt[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i); if (!key?.startsWith(prefix)) continue;
-      const item = JSON.parse(localStorage.getItem(key) || 'null');
-      if (item && typeof item.key === 'string' && typeof item.payloadHash === 'string' && ['create', 'run', 'save_revision', 'accept_revision', 'adopt_revision', 'review_brief'].includes(item.action)) items.push(item);
+      const raw = localStorage.getItem(key);
+      // A concurrent tab can remove a confirmed key between enumeration and read.
+      if (raw === null) continue;
+      let item: unknown; try { item = JSON.parse(raw); } catch { throw new InvalidTaskReceiptError(); }
+      if (!validReceipt(item, key.slice(prefix.length))) throw new InvalidTaskReceiptError();
+      items.push(item);
     }
-    return items;
-  } catch { throw new Error('无法读取待核验记录。请允许此浏览器保存必要的请求编号后重试'); }
+    return items.sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.key.localeCompare(b.key));
+  } catch (error) {
+    if (error instanceof InvalidTaskReceiptError) throw error;
+    throw new Error('无法读取待核验记录，已暂停新的提交。请检查浏览器存储后重新读取；不要清除请求记录');
+  }
 }
 export function persistTaskReceipt(receipt: TaskCommandReceipt): void {
   const user = requireUser(), key = accountKey(journalPrefix, user) + receipt.key;

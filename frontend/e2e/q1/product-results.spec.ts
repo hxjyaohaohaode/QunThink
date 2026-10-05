@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { registerSyntheticAccount } from '../authFixture';
-import { pickWorkspaceNavigationState, sessionRetryAt, CONTEXT_DISCLOSURE } from '../../scripts/q1-navigation.mjs';
+import { observeSessionLimits, clearSessionLimit, retryVisibleRateLimitedSession } from '../sessionRecovery';
+import { pickWorkspaceNavigationState, CONTEXT_DISCLOSURE } from '../../scripts/q1-navigation.mjs';
 import { assertQ1CiRuntime, Q1_ORIGIN, ORIGINAL, CORRECTION, LATER_CORRECTION, PURPOSE, INVITATION, messageBubbleSelector, observeNewChatCalls } from '../../scripts/q1-fixture-protocol.mjs';
 
 if (!process.argv.includes('--list')) assertQ1CiRuntime();
@@ -15,7 +16,6 @@ const BASELINE = git('rev-parse', 'HEAD');
 // Start/end gates still reject modified or untracked production/brand bytes.
 const TREES = Object.fromEntries(['frontend/src', 'backend/src', 'shared', 'frontend/public'].map(path => [path, git('rev-parse', `HEAD:${path}`)]));
 type Json = Record<string, any>;
-const sessionLimits = new WeakMap<Page, { path: string; status: number; retryAfter: string; observedAt: number; retryAt: number | null }>();
 class Evidence {
   entries: Json[] = []; gaps: Json[] = []; sequence = 0; stage = 'initialization'; outcome = 'running';
   constructor(readonly page: Page, readonly info: TestInfo) {}
@@ -110,23 +110,11 @@ async function workspace(page: Page, info: TestInfo, e: Evidence) {
       return next;
     }, { timeout: 20000, intervals: [100, 250, 500], message: 'Observe a known authenticated workspace/chat navigation state; do not infer Back from an unready workspace' }).not.toBe('waiting');
     if (next === 'workspace') {
-      sessionLimits.delete(page);
+      clearSessionLimit(page);
       await e.record('workspace-navigation-observed', { observations, elapsedMs: Date.now() - started, meaning: 'Readiness observation only, not an acceptable user waiting-time verdict' });
       await e.shot('workspace-ready-for-original-draft', controls.workspace); return;
     }
-    if (next === 'session-retry') {
-      const limit = sessionLimits.get(page);
-      await e.record('session-recovery-screen', { observedResponse: limit || null });
-      await e.shot('session-rate-limit-before-wait', controls.sessionRetry);
-      if (!limit || limit.retryAt === null) throw new Error('Session recovery requires triage: no bounded server Retry-After observation');
-      sessionLimits.delete(page);
-      const waitStarted = Date.now();
-      await new Promise(resolve => setTimeout(resolve, Math.max(0, limit.retryAt! - Date.now()) + 100));
-      await e.record('session-rate-limit-wait-completed', { ...limit, waitStarted, waitFinished: Date.now(), meaning: 'Actual server-directed waiting, not an unchanged no-wait success or an acceptable speed claim' });
-      await e.shot('session-rate-limit-before-real-retry', controls.sessionRetry, true);
-      await controls.sessionRetry.click();
-      await expect(controls.sessionRetry).not.toBeVisible();
-    }
+    if (next === 'session-retry') await retryVisibleRateLimitedSession(page, e);
     else if (next === 'close-writing') { await controls.writingClose.click({ timeout: 20000 }); await expect(controls.writingClose).not.toBeVisible(); }
     else if (next === 'mobile-home') { await controls.mobileWorkspace.click({ timeout: 20000 }); await expect(controls.workspace).toBeVisible({ timeout: 20000 }); }
     else if (next === 'mobile-chat') { await controls.mobileBack.click({ timeout: 20000 }); await expect(controls.mobileWorkspace).toBeVisible({ timeout: 20000 }); }
@@ -188,12 +176,7 @@ async function waitForLoginForm(page: Page, e: Evidence) {
 }
 
 async function setup(page: Page, context: BrowserContext, info: TestInfo, e: Evidence, withModel = true) {
-  page.on('response', response => {
-    const url = new URL(response.url());
-    if (url.origin !== new URL(page.url()).origin || response.request().method() !== 'GET' || !url.pathname.startsWith('/api/auth/') || response.status() !== 429) return;
-    const observedAt = Date.now(), retryAfter = response.headers()['retry-after'] || '';
-    sessionLimits.set(page, { path: url.pathname, status: 429, retryAfter, observedAt, retryAt: sessionRetryAt(retryAfter, observedAt) });
-  });
+  observeSessionLimits(page);
   const providerCallCountAtStart = (await get(context, `${Q1_ORIGIN}/__q1/observations`)).calls.length;
   const protection = protectedSnapshot(); await e.record('protected-start', protection);
   expect(protection.unchanged).toBe(true);
@@ -489,10 +472,10 @@ test('Q1 partial fault evidence: lost save ACK, reload, dispatched cancellation 
       await route.abort('connectionreset');
     });
     await work.getByRole('button', { name: '保存用途，开始写正文', exact: true }).click();
-    await expect(work.getByRole('button', { name: '核验并重试保存', exact: true })).toBeVisible();
-    await expect(work.getByLabel('用途与检查要求')).toBeDisabled();
+    await expect(work.getByRole('region', { name: '待确认的文稿创建请求', exact: true }).getByRole('button', { name: '核验这次创建', exact: true })).toBeEnabled();
+    await expect(work.getByLabel('用途与检查要求')).toBeEditable();
     await e.record('save-committed-ack-lost', { createIntents, savedTask: saved, additionalFault: 'Browser task-list GET blocked until intentional reload, so the unknown banner is observed before automatic authoritative receipt recovery' });
-    await e.shot('lost-ack-before-reload', work.getByRole('button', { name: '核验并重试保存', exact: true }), true);
+    await e.shot('lost-ack-before-reload', work.getByRole('region', { name: '待确认的文稿创建请求', exact: true }).getByRole('button', { name: '核验这次创建', exact: true }), true);
     expect(saved).toBeTruthy(); const savedId = (saved as unknown as Json).id;
     const reloadDialog = async (dialog: import('@playwright/test').Dialog) => {
       const expected = dialog.type() === 'beforeunload';

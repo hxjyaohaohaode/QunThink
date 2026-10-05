@@ -151,7 +151,9 @@ test('workflow uploads each bounded part separately, preserves full evidence and
     }
   }
   assert.equal(workflow.split('project: [desktop-chromium, mobile-reduced-motion]').length - 1, 1, 'current evidence matrix covers both projects');
-  assert.match(workflow, /name: qunthink-browser-evidence-\$\{\{ matrix.project \}\}/);
+  assert.match(workflow, /name: qunthink-browser-evidence.*-\$\{\{ matrix.project \}\}/);
+  assert.match(workflow, /suite: \[core, q2\]/);
+  assert.match(workflow, /playwright.q2.config.ts/);
   assert.match(workflow, /node --test scripts\/pack-ci-evidence.test.mjs/);
   assert.doesNotMatch(workflow, /actions: write|pull_request_target|workflow_run:|workflow_dispatch:/);
   assert.doesNotMatch(workflow, /recover-original-q1-evidence|recover-ci-evidence|actions\/github-script/, 'completed historical recovery is not repeated');

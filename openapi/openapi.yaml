@@ -3846,6 +3846,33 @@ paths:
           description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
         "503":
           description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+  /api/tasks/commands/{requestId}/close:
+    post:
+      operationId: closeTaskCreationCommand
+      summary: 核对并结束原创建请求；已提交返回原稿，未提交才永久封存同一UUID
+      tags: [Tasks]
+      parameters:
+        - *a1
+        - name: requestId
+          in: path
+          required: true
+          schema: *a3
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        "200":
+          description: 仅succeeded/cancelled是权威终态；不删除已存文稿、不停止AI或撤销费用；Cache-Control:no-store
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskCreateCommandReceipt" }
+        "400": { description: 严格UUID/空正文约束不符 }
+        "409": { description: 账号变化或并发CAS冲突；保留原UUID继续核验，不能推断已封存 }
+        "429": { description: 账号创建回执达到10000条，不清除旧回执 }
+        "500": { description: 存储写入未确认；保留原UUID继续核验 }
+        "503": { description: 存储或来源读取不确定；保留原UUID继续核验 }
   /api/tasks/{taskId}/result:
     get:
       operationId: getTaskResultDocument
@@ -3912,6 +3939,41 @@ paths:
           description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
         "503":
           description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+  /api/tasks/{taskId}/result/commands/{requestId}/close:
+    post:
+      operationId: closeTaskResultCommand
+      summary: 核对并结束原文稿命令；已提交返回原版本，未提交才永久封存迟到写入
+      tags: [Tasks]
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+        - name: requestId
+          in: path
+          required: true
+          schema: *a3
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operation]
+              properties:
+                operation: { enum: [save, accept, adopt, brief] }
+      responses:
+        "200":
+          description: 仅匹配UUID/任务/操作的succeeded或cancelled释放待核验记录；正文遵守当前来源撤回边界
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskResultMutationResponse" }
+        "400": { description: UUID或操作不符合严格字段约束 }
+        "409": { description: 账号/操作绑定冲突或并发写入；保留原UUID核验 }
+        "429": { description: 账号文稿命令达到10000条，不清除旧回执 }
+        "503": { description: 存储或来源状态未知；保留原UUID，不宣告封存成功 }
   /api/tasks/{taskId}/result/versions:
     post:
       operationId: saveTaskResultVersion
@@ -4384,6 +4446,18 @@ components:
     TaskResultCommandReceipt:
       type: object
       additionalProperties: false
+      oneOf:
+        - properties:
+            status: { const: succeeded }
+            committed_revision: { type: integer, minimum: 0 }
+            committed_at: { type: string }
+            closed_at: false
+        - required: [closed_at]
+          properties:
+            status: { const: cancelled }
+            version_id: { type: "null" }
+            committed_revision: { type: "null" }
+            committed_at: { type: "null" }
       properties:
         id: *a4
         operation:
@@ -4397,10 +4471,20 @@ components:
           anyOf:
             - *a4
             - type: "null"
-        committed_revision: *a6
-        committed_at: *a1
+        committed_revision:
+          anyOf:
+            - *a6
+            - type: "null"
+        committed_at:
+          anyOf:
+            - *a1
+            - type: "null"
         status:
-          const: succeeded
+          enum: [succeeded, cancelled]
+        closed_at:
+          type: string
+          format: date-time
+          description: 仅cancelled时存在；此时间表示原命令封存，不是正文提交
       required:
         - id
         - operation
@@ -4427,13 +4511,30 @@ components:
     TaskCreateCommandReceipt:
       type: object
       additionalProperties: false
+      oneOf:
+        - properties:
+            status: { const: succeeded }
+            task_id: { type: string, format: uuid }
+            closed_at: false
+        - required: [closed_at]
+          properties:
+            status: { const: cancelled }
+            task_id: { type: "null" }
+            task: { type: "null" }
+            task_deleted: { const: false }
       properties:
         status:
-          const: succeeded
+          enum: [succeeded, cancelled]
         operation:
           const: create
         client_request_id: *a4
-        task_id: *a4
+        task_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        closed_at:
+          type: string
+          format: date-time
         task_deleted:
           type: boolean
         task:

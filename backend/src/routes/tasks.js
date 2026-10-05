@@ -1,9 +1,9 @@
 import express from 'express';
 import { z } from 'zod';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { acceptTaskResult, getTaskCreationReceipt, createTask, deleteTask, listTasks, runTask, updateTask, resolveUnknownTaskRun, taskRunInput } from '../services/tasks.js';
+import { acceptTaskResult, getTaskCreationReceipt, closeTaskCreationCommand, createTask, deleteTask, listTasks, runTask, updateTask, resolveUnknownTaskRun, taskRunInput } from '../services/tasks.js';
 
-import { getTaskResult, getTaskResultCommand, saveTaskResultVersion, acceptTaskResultVersion, adoptTaskResultVersion, rebaseTaskBrief } from '../services/taskResults.js';
+import { getTaskResult, getTaskResultCommand, closeTaskResultCommand, saveTaskResultVersion, acceptTaskResultVersion, adoptTaskResultVersion, rebaseTaskBrief } from '../services/taskResults.js';
 
 const router = express.Router();
 function withRequestId(req) {
@@ -30,6 +30,10 @@ router.get('/tasks', asyncHandler(async (req, res) => {
 router.get('/tasks/commands/:requestId', asyncHandler(async (req, res) => {
   res.json(await getTaskCreationReceipt(req.userId, req.params.requestId));
 }));
+router.post('/tasks/commands/:requestId/close', asyncHandler(async (req, res) => {
+  z.object({}).strict().parse(req.body || {});
+  res.json(await closeTaskCreationCommand(req.userId, req.params.requestId));
+}));
 router.post('/tasks', asyncHandler(async (req, res) => {
   res.status(201).json(await createTask(req.userId, withRequestId(req)));
 }));
@@ -51,6 +55,9 @@ router.get('/tasks/:taskId/result', asyncHandler(async (req, res) => {
 }));
 router.get('/tasks/:taskId/result/commands/:requestId', asyncHandler(async (req, res) => {
   res.json(await getTaskResultCommand(req.userId, req.params.taskId, req.params.requestId));
+}));
+router.post('/tasks/:taskId/result/commands/:requestId/close', asyncHandler(async (req, res) => {
+  res.json(await closeTaskResultCommand(req.userId, req.params.taskId, req.params.requestId, req.body));
 }));
 router.post('/tasks/:taskId/result/versions', asyncHandler(async (req, res) => {
   res.json(await saveTaskResultVersion(req.userId, req.params.taskId, withRequestId(req)));

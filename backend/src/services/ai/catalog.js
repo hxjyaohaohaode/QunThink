@@ -246,7 +246,13 @@ export async function resolveProviderConnection(userId, providerId) {
 }
 
 export async function defaultModelId(userId, capability = 'chat') {
-  const catalog = await readCatalog(userId || 'default');
+  const db = await getUserDb(userId || 'default');
+  return readCommittedUserDb(db, data => defaultModelIdSnapshot(data, capability));
+}
+
+// Admission must choose defaults from the same snapshot as its command ledger.
+export function defaultModelIdSnapshot(data, capability = 'chat') {
+  const catalog = publicCatalog(data);
   const explicitId = catalog.defaults[capability];
   const preferred = catalog.models.find(m => m.id === explicitId && m.ready && m.verifiedCapabilities.includes(capability));
   if (explicitId && !preferred) {

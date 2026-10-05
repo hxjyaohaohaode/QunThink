@@ -14,6 +14,7 @@ export const saveTaskResultInput = z.object({ ...commandBase, base_version_id: u
 export const acceptTaskResultVersionInput = z.object({ ...commandBase, version_id: uuid, content_hash: hash, source_hash: hash.nullable() }).strict();
 export const adoptTaskResultVersionInput = z.object({ ...commandBase, version_id: uuid }).strict();
 export const rebaseTaskBriefInput = z.object({ ...commandBase, prompt: z.string().trim().min(1).max(12000), source_hash: hash.nullable() }).strict();
+export const closeTaskResultCommandInput = z.object({ operation: z.enum(['save', 'accept', 'adopt', 'brief']) }).strict();
 const digest = value => createHash('sha256').update(value, 'utf8').digest('hex');
 function resultError(code, message, status = 409) { return Object.assign(new Error(message), { code, status, statusCode: status, isOperational: true }); }
 function storageError() { return resultError('RESULT_STORAGE_UNCERTAIN', '文稿保存记录暂时无法核实，请核验原保存请求；不会自动提交另一份', 503); }
@@ -124,7 +125,8 @@ function commands(db) {
 }
 function publicReceipt(command) {
   return { id: command.id, operation: command.operation, task_id: command.task_id, version_id: command.version_id,
-    committed_revision: command.committed_revision, committed_at: command.committed_at, status: command.status };
+    committed_revision: command.committed_revision, committed_at: command.committed_at, status: command.status,
+    ...(command.status === 'cancelled' ? { closed_at: command.closed_at } : {}) };
 }
 async function commandResponse(userId, receipt, db) {
   const task = db.data.tasks?.find(task => task.id === receipt.task_id);
@@ -163,11 +165,32 @@ export async function getTaskResultCommand(userId, taskId, requestId) {
     return commandResponse(userId, receipt, db);
   });
 }
+export async function closeTaskResultCommand(userId, taskId, requestId, raw) {
+  taskId = z.string().min(1).max(100).parse(taskId);
+  requestId = uuid.parse(requestId);
+  const { operation } = closeTaskResultCommandInput.parse(raw);
+  return locked(userId, async db => {
+    const list = commands(db), existing = list.find(command => command.id === requestId);
+    if (existing) {
+      if (existing.task_id !== taskId || existing.operation !== operation) throw resultError('RESULT_IDEMPOTENCY_CONFLICT', '原请求编号绑定了另一项操作，请先核验原保存记录');
+      return commandResponse(userId, existing, db);
+    }
+    if (list.length >= TASK_RESULT_LIMITS.commands) throw resultError('RESULT_COMMAND_LIMIT', '保存回执记录已满，需要归档核验；不会遗忘旧请求后盲目重试', 429);
+    const before = structuredClone(db.data);
+    const receipt = { id: requestId, task_id: taskId, operation, status: 'cancelled', version_id: null,
+      committed_revision: null, committed_at: null, closed_at: new Date().toISOString() };
+    db.data.taskResultCommands = [...list, receipt];
+    await persist(db, before);
+    return commandResponse(userId, receipt, db);
+  });
+}
 async function mutate(userId, taskId, operation, input, apply) {
   const inputHash = digest(JSON.stringify({ task_id: taskId, operation, input }));
   return locked(userId, async db => {
     const list = commands(db), existing = list.find(command => command.id === input.client_request_id);
     if (existing) {
+      if (existing.task_id !== taskId || existing.operation !== operation) throw resultError('RESULT_IDEMPOTENCY_CONFLICT', '原请求编号绑定了另一项操作，请先核验原保存记录');
+      if (existing.status === 'cancelled') throw resultError('RESULT_COMMAND_CLOSED', '这次文稿请求已封存，迟到的写入不会生效。请核验原请求后继续编辑', 410);
       if (existing.input_hash !== inputHash || existing.task_id !== taskId) throw resultError('RESULT_IDEMPOTENCY_CONFLICT', '原请求编号绑定了另一份内容，请先核验原保存记录');
       return commandResponse(userId, existing, db);
     }

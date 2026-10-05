@@ -15,7 +15,7 @@ const built=await build({entryPoints:[resolve(root,'src/utils/taskRecovery.ts')]
 const recovery=await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
 const secondRecovery=await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text+'\n// second isolated tab').toString('base64')}`);
 const value={body:'私密邀请：10月20日，人工备注',baseRevisionId:'version-1',savedAt:'2026-10-04'};
-const receipt={key:'4abc6c19-d370-49b8-8bc5-e6172bf12c5c',action:'save_revision',taskId:'task-1',baseRevisionId:'version-1',payloadHash:'a'.repeat(64),createdAt:'2026-10-04'};
+const receipt={key:'4abc6c19-d370-49b8-8bc5-e6172bf12c5c',action:'save_revision',taskId:'task-1',baseRevisionId:'d44c8f45-11a3-4521-9368-f23f7b27c45a',payloadHash:'a'.repeat(64),createdAt:'2026-10-04'};
 const keys=()=>Object.keys(localStorage);const tick=()=>new Promise(resolve=>setTimeout(resolve,0));
 beforeEach(()=>{localStorage.clear();databases.clear();globalThis.__recovery={user:'alice',auth:globalThis.__recovery.auth+1};setCrypto();recovery.clearWritingContent();});
 
@@ -48,4 +48,15 @@ test('one tab clearing content retires an in-flight encrypted write in another t
 });
 test('revoking one document retires its cross-tab writes without deleting unrelated drafts',async()=>{
  recovery.setWritingPreferences({recoverDrafts:true,offlineCopies:false});await recovery.saveWritingContent('unrelated',value);let release;setCrypto({encrypt:(...args)=>new Promise(resolve=>{release=async()=>resolve(await webcrypto.subtle.encrypt(...args))})});const saving=secondRecovery.saveWritingContent('task-1',value);while(!release)await tick();assert.equal(recovery.removeWritingDraft('task-1'),true);await release();assert.equal(await saving,false);assert.equal(await recovery.loadWritingContent('task-1'),null);assert.deepEqual(await recovery.loadWritingContent('unrelated'),value);
+});
+
+const ownedReceiptKey = key => `qunthink_command_v1_alice:${key}`;
+const corruptions = {
+ null:()=>null, array:()=>[], primitive:()=>42, actionMissing:value=>{delete value.action;return value}, actionTypo:value=>({...value,action:'save_revison'}), keyMissing:value=>{delete value.key;return value}, keyType:value=>({...value,key:12}), keyInvalid:value=>({...value,key:'not-uuid'}), keyMismatch:value=>({...value,key:'13392498-3319-4a0e-ab22-3551a0438203'}), hashMissing:value=>{delete value.payloadHash;return value}, hashType:value=>({...value,payloadHash:12}), hashInvalid:value=>({...value,payloadHash:'nope'}), timeMissing:value=>{delete value.createdAt;return value}, timeType:value=>({...value,createdAt:12}), timeInvalid:value=>({...value,createdAt:'never'}), taskMissing:value=>{delete value.taskId;return value}, taskNull:value=>({...value,taskId:null}), taskType:value=>({...value,taskId:12}), taskEmpty:value=>({...value,taskId:''}), taskLong:value=>({...value,taskId:'x'.repeat(101)}), taskPath:value=>({...value,taskId:'../foreign-task'}), createWrongTask:value=>({...value,action:'create',taskId:'wrong'}), baseType:value=>({...value,baseRevisionId:12}), baseInvalid:value=>({...value,baseRevisionId:'not-uuid'}), versionType:value=>({...value,revisionId:12}), versionInvalid:value=>({...value,revisionId:'not-uuid'}), versionNull:value=>({...value,revisionId:null}), contentHashType:value=>({...value,contentHash:12}), contentHashInvalid:value=>({...value,contentHash:'nope'}), acceptMissingVersion:value=>({...value,action:'accept_revision'}), adoptMissingVersion:value=>({...value,action:'adopt_revision'}), privateUnexpectedField:value=>({...value,body:'PRIVATE_MUST_NOT_LEAK'})
+};
+for(const [name,corrupt]of Object.entries(corruptions))test(`owned malformed receipt fails closed without losing bytes: ${name}`,()=>{
+ const key=ownedReceiptKey(receipt.key),raw=JSON.stringify(corrupt(structuredClone(receipt)));localStorage.setItem(key,raw);assert.throws(()=>recovery.readTaskReceipts(),error=>/待核验记录不完整/.test(error.message)&&!/PRIVATE_MUST_NOT_LEAK|save_revison|not-uuid/.test(error.message));assert.equal(localStorage.getItem(key),raw);
+});
+test('foreign malformed records are ignored without reading their bytes and corrected owned storage is recoverable',()=>{
+ localStorage.setItem('qunthink_command_v1_bob:private-key','NOT_JSON_PRIVATE');localStorage.setItem('qunthink_command_v1_alice-other:private-key','NOT_JSON_PRIVATE');recovery.persistTaskReceipt(receipt);assert.deepEqual(recovery.readTaskReceipts(),[receipt]);const key=ownedReceiptKey(receipt.key);localStorage.setItem(key,'{"action":"save_revison"}');assert.throws(()=>recovery.readTaskReceipts());localStorage.setItem(key,JSON.stringify(receipt));assert.deepEqual(recovery.readTaskReceipts(),[receipt]);assert.equal(localStorage.getItem('qunthink_command_v1_bob:private-key'),'NOT_JSON_PRIVATE');
 });

@@ -108,25 +108,36 @@ export interface TaskResultDocument {
     source_input_stale: boolean;
   };
 }
-export interface TaskResultCommandReceipt {
+export type TaskResultCommandReceipt = {
   id: string;
   operation: 'save' | 'accept' | 'adopt' | 'brief';
   task_id: string;
+} & ({
+  /** Historical receipt; never infer that the newest version is accepted. */
+  status: 'succeeded';
   version_id: string | null;
   committed_revision: number;
   committed_at: string;
-  /** Historical receipt; never infer that the newest version is accepted. */
-  status: 'succeeded';
-}
+} | {
+  /** Only this authoritative receipt proves the original command is closed. */
+  status: 'cancelled';
+  version_id: null;
+  committed_revision: null;
+  committed_at: null;
+  closed_at: string;
+});
 export interface TaskResultMutationResponse {
   receipt: TaskResultCommandReceipt;
   document: TaskResultDocument | null;
   task_deleted?: boolean;
 }
-export interface TaskCreateCommandReceipt {
-  status: 'succeeded'; operation: 'create'; client_request_id: string;
-  task_id: string; task_deleted: boolean; task: WorkspaceTask | null;
-}
+export type TaskCreateCommandReceipt = {
+  operation: 'create'; client_request_id: string;
+} & ({
+  status: 'succeeded'; task_id: string; task_deleted: boolean; task: WorkspaceTask | null;
+} | {
+  status: 'cancelled'; task_id: null; task_deleted: false; task: null; closed_at: string;
+});
 export interface SaveTaskResultInput {
   client_request_id: string;
   expected_revision: number;
