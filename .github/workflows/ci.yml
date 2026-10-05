@@ -115,9 +115,9 @@ jobs:
         if: ${{ !cancelled() && matrix.suite == 'q2' }}
         run: npx playwright test --config=playwright.q2.config.ts --project=${{ matrix.project }}
         working-directory: ./frontend
-      - name: Capture frozen memory baseline gap (not candidate acceptance)
+      - name: Memory same-ID recovery and two-tab late-response privacy
         if: ${{ !cancelled() && matrix.suite == 'q2' }}
-        run: npx playwright test --config=playwright.memory-baseline.config.ts --project=${{ matrix.project }}
+        run: npx playwright test --config=playwright.memory-recovery.config.ts --project=${{ matrix.project }}
         working-directory: ./frontend
       - name: Save browser evidence
         if: always()

@@ -370,3 +370,234 @@ test('a stale old-account input event cannot carry its text into the newly obser
   assert.equal(store.getState().accountId, 'bob'); assert.equal(store.getState().note, '');
   store.getState().setNote('当前Bob输入'); assert.equal(store.getState().note, '当前Bob输入');
 });
+
+
+test('pending forgetting survives a new app session with only owned ID metadata, never old body', async () => {
+  await prime();
+  override = config => config.url.endsWith('/forget') ? network(config) : undefined;
+  await store.getState().forget('note-1', { accountId: store.getState().accountId, generation: store.getState().generation });
+  assert.equal(writes.length, 1); assert.equal(localStorage.length, 1);
+  const key = localStorage.key(0), receipt = JSON.parse(localStorage.getItem(key));
+  assert.deepEqual(Object.keys(receipt).sort(), ['accountId', 'memoryId', 'startedAt', 'state', 'version']);
+  assert.equal(receipt.memoryId, 'note-1'); assert.equal(receipt.accountId, 'alice');
+  assert.doesNotMatch(localStorage.getItem(key), /旧日期/);
+  store.getState().cleanup(); store.getState().activate(); await store.getState().refresh();
+  assert.deepEqual(store.getState().deferredForget, ['note-1']); assert.deepEqual(store.getState().memories, []);
+  assert.equal(writes.length, 1, 'restore never automatically dispatches a mutation');
+  override = null; await store.getState().resumeForget('note-1');
+  assert.equal(writes.length, 2); assert.equal(writes[1].config.url, '/memory/note-1/forget');
+  assert.equal(JSON.parse(localStorage.getItem(key)).state, 'confirmed'); assert.deepEqual(store.getState().deferredForget, []);
+});
+
+test('committed forget with lost ACK is explicitly recovered after reload even when the list is empty', async t => {
+  await prime(); override = config => {
+    if (config.url.endsWith('/forget')) { records = []; return network(config); }
+  };
+  await store.getState().forget('note-1', { accountId: store.getState().accountId, generation: store.getState().generation });
+  store.getState().cleanup(); store.getState().activate(); override = null;
+  const container = await render(t);
+  assert.match(container.textContent, /刷新或重开后仍可核对/);
+  assert.doesNotMatch(container.textContent, /旧日期/);
+  await click(container, '继续核对遗忘（1）');
+  assert.match(container.textContent, /当前保存的正文已清除/); assert.equal(JSON.parse(localStorage.getItem(localStorage.key(0))).state, 'confirmed');
+});
+
+test('foreign-account receipts stay isolated and an old A response cannot clear a restored A request', async () => {
+  await prime(); const held = deferred(); let config;
+  override = value => { if (value.url.endsWith('/forget')) { config = value; return held.promise; } };
+  const pending = store.getState().forget('note-1', { accountId: store.getState().accountId, generation: store.getState().generation }); await flush();
+  store.getState().cleanup(); globalThis.__memoryTest.user = 'bob'; store.getState().activate();
+  assert.deepEqual(store.getState().deferredForget, []); assert.equal(localStorage.length, 1);
+  store.getState().cleanup(); globalThis.__memoryTest.user = 'alice'; store.getState().activate();
+  held.resolve(response(config, { memoryId: 'note-1', forgotten: true })); await pending;
+  assert.deepEqual(store.getState().deferredForget, ['note-1']); assert.equal(localStorage.length, 1);
+});
+
+const foreignForget = (id = 'note-1', accountId = 'alice') => {
+  const key = `qunthink_memory_forget_v1:${encodeURIComponent(accountId)}:${encodeURIComponent(id)}`;
+  localStorage.setItem(key, JSON.stringify({ version: 1, accountId, memoryId: id, startedAt: '2026-10-05T00:00:00.000Z', state: 'pending' }));
+  window.dispatchEvent(new browserWindow.StorageEvent('storage', { key, newValue: localStorage.getItem(key), storageArea: localStorage }));
+  return key;
+};
+
+test('another-tab forget hides an open editor and fences an older list response without automatic POST', async () => {
+  await prime(); store.getState().beginEdit(records[0]);
+  const old = deferred(); let config;
+  override = value => { if (value.url === '/memory') { config = value; return old.promise; } };
+  const reading = store.getState().refresh(); await flush();
+  foreignForget(); assert.equal(store.getState().editing, null); assert.deepEqual(store.getState().memories, []);
+  old.resolve(response(config, { total: 1, offset: 0, memories: [record('note-1', '旧日期')] })); await reading;
+  assert.deepEqual(store.getState().memories, []); assert.deepEqual(store.getState().deferredForget, ['note-1']); assert.equal(writes.length, 0);
+});
+
+test('late correction success cannot republish a body hidden by another-tab privacy request', async () => {
+  await prime(); store.getState().beginEdit(records[0]); store.getState().setEditText('更正中的私密正文');
+  const old = deferred(); let config;
+  override = value => { if (value.url.endsWith('/correct')) { config = value; return old.promise; } };
+  const saving = store.getState().saveCorrection(); await flush(); foreignForget();
+  old.resolve(response(config, { memory: record('note-1', '更正中的私密正文', 1) })); await saving;
+  assert.deepEqual(store.getState().memories, []); assert.equal(store.getState().editing, null);
+  assert.match(store.getState().notice, /已有遗忘请求/); assert.deepEqual(store.getState().deferredForget, ['note-1']);
+});
+
+test('own corrupted journal fails closed while another account malformed journal is ignored', async () => {
+  localStorage.setItem('qunthink_memory_forget_v1:bob:bad', '{broken');
+  await prime(); assert.equal(store.getState().memories.length, 1);
+  localStorage.setItem('qunthink_memory_forget_v1:alice:bad', '{broken');
+  const count = reads.length; await store.getState().refresh();
+  assert.deepEqual(store.getState().memories, []); assert.match(store.getState().recoveryError, /暂不可读/); assert.equal(reads.length, count);
+});
+
+test('404 and wrong-ID success do not settle a restored forget request', async () => {
+  foreignForget(); store.getState().cleanup(); store.getState().activate();
+  override = config => config.url.endsWith('/forget') ? reject(config, 404, 'MEMORY_NOT_FOUND') : undefined;
+  await store.getState().resumeForget('note-1'); assert.equal(localStorage.length, 1); assert.equal(store.getState().pending.id, 'note-1');
+  override = config => config.url.endsWith('/forget') ? response(config, { memoryId: 'another', forgotten: true }) : undefined;
+  await store.getState().retry(); assert.equal(localStorage.length, 1); assert.equal(store.getState().pending.id, 'note-1');
+});
+
+test('removing device metadata elsewhere is not treated as a confirmed privacy result', async () => {
+  const key = foreignForget(); localStorage.removeItem(key);
+  window.dispatchEvent(new browserWindow.StorageEvent('storage', { key, newValue: localStorage.getItem(key), storageArea: localStorage }));
+  assert.deepEqual(store.getState().deferredForget, ['note-1']); assert.doesNotMatch(store.getState().notice, /已遗忘/);
+  await store.getState().refresh(); assert.deepEqual(store.getState().memories, []);
+});
+
+test('device metadata write failure prevents dispatch without claiming server deletion', async () => {
+  await prime(); const original = globalThis.localStorage;
+  globalThis.localStorage = new Proxy(original, { get(target, key) { if (key === 'setItem') return () => { throw new Error('quota'); }; const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value; } });
+  try {
+    await store.getState().forget('note-1', { accountId: store.getState().accountId, generation: store.getState().generation });
+    assert.equal(writes.length, 0); assert.match(store.getState().error, /尚未发送/); assert.equal(store.getState().memories[0].content, '旧日期');
+  } finally { globalThis.localStorage = original; }
+});
+
+test('server-confirmed forgetting with device cleanup failure stays recoverable and accurately labelled', async () => {
+  await prime(); const original = globalThis.localStorage;
+  globalThis.localStorage = new Proxy(original, { get(target, key) { if (key === 'setItem') return (k, v) => { if (JSON.parse(v).state === 'confirmed') throw new Error('locked'); target.setItem(k, v); }; const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value; } });
+  try {
+    await store.getState().forget('note-1', { accountId: store.getState().accountId, generation: store.getState().generation });
+    assert.equal(writes.length, 1); assert.match(store.getState().error, /服务器已确认遗忘/); assert.equal(store.getState().pending.id, 'note-1'); assert.equal(original.length, 1);
+  } finally { globalThis.localStorage = original; }
+  await store.getState().retry(); assert.equal(JSON.parse(original.getItem(original.key(0))).state, 'confirmed'); assert.equal(store.getState().pending, null);
+});
+
+test('two recovered forget requests settle individually and keep the other hidden', async () => {
+  records.push(record('note-2', '第二条私密正文')); foreignForget('note-1'); foreignForget('note-2');
+  store.getState().cleanup(); store.getState().activate(); await store.getState().refresh();
+  assert.deepEqual(store.getState().deferredForget, ['note-1', 'note-2']); assert.deepEqual(store.getState().memories, []);
+  await store.getState().resumeForget('note-1'); assert.deepEqual(store.getState().deferredForget, ['note-2']); assert.equal(localStorage.length, 2);
+  assert.deepEqual(store.getState().memories, []); assert.equal(writes.length, 1);
+});
+
+
+test('delayed start and removal storage events hide forgotten content even after the durable key is already gone', async () => {
+  await prime(); const old = deferred(); let config;
+  override = value => { if (value.url === '/memory') { config = value; return old.promise; } };
+  const reading = store.getState().refresh(); await flush();
+  const key = 'qunthink_memory_forget_v1:alice:note-1';
+  const serialized = JSON.stringify({ version: 1, accountId: 'alice', memoryId: 'note-1', startedAt: new Date().toISOString(), state: 'pending' });
+  // The other tab's complete request/ACK/removal happens before this event loop resumes.
+  localStorage.setItem(key, serialized); localStorage.removeItem(key);
+  window.dispatchEvent(new browserWindow.StorageEvent('storage', { key, newValue: serialized, storageArea: localStorage }));
+  window.dispatchEvent(new browserWindow.StorageEvent('storage', { key, oldValue: serialized, newValue: null, storageArea: localStorage }));
+  old.resolve(response(config, { total: 1, offset: 0, memories: [record('note-1', '旧日期')] })); await reading;
+  assert.deepEqual(store.getState().memories, []); assert.deepEqual(store.getState().deferredForget, ['note-1']); assert.equal(writes.length, 0);
+});
+
+test('delayed completed-forget storage event fences an old correction body after its durable key disappeared', async () => {
+  await prime(); store.getState().beginEdit(records[0]); store.getState().setEditText('不能回来的旧更正正文');
+  const old = deferred(); let config;
+  override = value => { if (value.url.endsWith('/correct')) { config = value; return old.promise; } };
+  const saving = store.getState().saveCorrection(); await flush();
+  const key = 'qunthink_memory_forget_v1:alice:note-1';
+  const serialized = JSON.stringify({ version: 1, accountId: 'alice', memoryId: 'note-1', startedAt: new Date().toISOString(), state: 'pending' });
+  window.dispatchEvent(new browserWindow.StorageEvent('storage', { key, oldValue: serialized, newValue: null, storageArea: localStorage }));
+  old.resolve(response(config, { memory: record('note-1', '不能回来的旧更正正文', 1) })); await saving;
+  assert.deepEqual(store.getState().memories, []); assert.equal(store.getState().editing, null); assert.deepEqual(store.getState().deferredForget, ['note-1']);
+});
+
+
+function completedElsewhereWithoutEvent(id = 'note-1') {
+  localStorage.setItem(`qunthink_memory_forget_v1:alice:${encodeURIComponent(id)}`, JSON.stringify({ version: 1, accountId: 'alice', memoryId: id, startedAt: '2026-10-05T00:00:00.000Z', state: 'confirmed', confirmedAt: '2026-10-05T00:01:00.000Z' }));
+}
+
+test('confirmed durable barrier fences a pre-forget list even before any storage event is delivered', async () => {
+  await prime(); const old = deferred(); let config;
+  override = value => { if (value.url === '/memory') { config = value; return old.promise; } };
+  const reading = store.getState().refresh(); await flush(); completedElsewhereWithoutEvent();
+  old.resolve(response(config, { total: 1, offset: 0, memories: [record('note-1', '旧日期')] })); await reading;
+  assert.deepEqual(store.getState().memories, []); assert.deepEqual(store.getState().deferredForget, []); assert.equal(writes.length, 0);
+});
+
+test('confirmed durable barrier fences a late correction ACK before storage event delivery', async () => {
+  await prime(); store.getState().beginEdit(records[0]); store.getState().setEditText('不得回显的修订');
+  const old = deferred(); let config;
+  override = value => { if (value.url.endsWith('/correct')) { config = value; return old.promise; } };
+  const saving = store.getState().saveCorrection(); await flush(); completedElsewhereWithoutEvent();
+  old.resolve(response(config, { memory: record('note-1', '不得回显的修订', 1) })); await saving;
+  assert.deepEqual(store.getState().memories, []); assert.equal(store.getState().editing, null); assert.deepEqual(store.getState().deferredForget, []);
+});
+
+test('confirmed barrier fences checkCorrection current-version comparison before storage event delivery', async () => {
+  await prime(); store.getState().beginEdit(records[0]); store.getState().setEditText('本页草稿');
+  override = config => config.url.endsWith('/correct') ? network(config) : undefined;
+  await store.getState().saveCorrection();
+  const old = deferred(); let config;
+  override = value => { if (value.url === '/memory/note-1') { config = value; return old.promise; } };
+  const checking = store.getState().retry(); await flush(); completedElsewhereWithoutEvent();
+  old.resolve(response(config, { memory: record('note-1', '另一端旧版本正文', 2) })); await checking;
+  assert.deepEqual(store.getState().memories, []); assert.equal(store.getState().editing, null); assert.equal(store.getState().pending, null);
+});
+
+test('confirmed barriers hide stale records after logout and same-account login without sending any mutation', async () => {
+  completedElsewhereWithoutEvent(); store.getState().cleanup(); store.getState().activate(); await store.getState().refresh();
+  assert.deepEqual(store.getState().memories, []); assert.deepEqual(store.getState().deferredForget, []); assert.equal(writes.length, 0);
+});
+
+test('an unrelated-key removal cannot hide a confirmed barrier from a late list publication', async () => {
+  await prime(); const old = deferred(); let config;
+  override = value => { if (value.url === '/memory') { config = value; return old.promise; } };
+  const reading = store.getState().refresh(); await flush();
+  localStorage.setItem('unrelated-cache', '{}'); completedElsewhereWithoutEvent();
+  const original = globalThis.localStorage; let removed = false;
+  globalThis.localStorage = new Proxy(original, { get(target, property) {
+    if (property === 'key') return index => { const key = target.key(index); if (!removed && key === 'unrelated-cache') { removed = true; target.removeItem(key); } return key; };
+    const value = Reflect.get(target, property); return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  try {
+    old.resolve(response(config, { total: 1, offset: 0, memories: [record('note-1', '旧日期')] })); await reading;
+    assert.equal(removed, true); assert.deepEqual(store.getState().memories, []);
+    assert.equal(JSON.parse(original.getItem('qunthink_memory_forget_v1:alice:note-1')).state, 'confirmed');
+  } finally { globalThis.localStorage = original; }
+});
+
+test('a create ACK after another-tab forgetting reports the later privacy state without republishing body', async () => {
+  const old = deferred(); let config;
+  override = value => { if (value.url === '/memory/store') { config = value; return old.promise; } };
+  store.getState().setNote('旧保存回执的私密正文'); const saving = store.getState().saveNote(); await flush();
+  completedElsewhereWithoutEvent('created-one');
+  old.resolve(response(config, { memoryId: 'created-one', memory: record('created-one', '旧保存回执的私密正文') })); await saving;
+  assert.equal(store.getState().note, ''); assert.equal(store.getState().pending, null);
+  assert.ok(!store.getState().memories.some(memory => memory.id === 'created-one'));
+  assert.match(store.getState().notice, /已有遗忘操作/); assert.doesNotMatch(store.getState().notice, /笔记已保存/);
+});
+
+
+test('another-tab confirmed receipt gives an explicit refresh action instead of a silent empty projection', async t => {
+  const container = await render(t); completedElsewhereWithoutEvent();
+  const key = 'qunthink_memory_forget_v1:alice:note-1';
+  await act(async () => window.dispatchEvent(new browserWindow.StorageEvent('storage', { key, newValue: localStorage.getItem(key), storageArea: localStorage })));
+  assert.match(container.textContent, /其他窗口已记录这条记忆的遗忘回执/); assert.match(container.textContent, /可刷新查看最新记录/);
+  assert.doesNotMatch(container.textContent, /旧日期/); assert.equal(writes.length, 0);
+  records = []; await click(container, '刷新'); assert.match(container.textContent, /暂无可查看记录/); assert.equal(writes.length, 0);
+});
+
+
+test('recovered privacy intent shows unambiguous local calendar time and the original ID before replay', async t => {
+  foreignForget(); const container = await render(t); const queue = container.querySelector('[aria-label="尚未确认的遗忘请求"]');
+  assert.ok(queue); assert.match(queue.textContent, /再次请求遗忘对应的同一记录并核对结果/);
+  assert.match(queue.textContent, /请求时间（本地）：2026-10-05 \d{2}:\d{2}/); assert.equal(queue.querySelector('time').getAttribute('datetime'), '2026-10-05T00:00:00.000Z');
+  assert.match(queue.textContent, /note-1/); assert.equal(writes.length, 0);
+  assert.ok(queue.compareDocumentPosition(container.querySelector('form')) & window.Node.DOCUMENT_POSITION_FOLLOWING);
+});

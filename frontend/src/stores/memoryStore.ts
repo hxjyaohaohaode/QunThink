@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { memoryApi, type MemoryRecord } from '../services/memory';
 import { getCacheUserId } from '../utils/cacheUtils';
 import { recordDiagnostic } from '../observability/runtimeDiagnostics';
+import { MEMORY_FORGET_PREFIX, getMemoryForgetReceipt, type MemoryForgetReceipt, parseMemoryForgetReceipt, readMemoryForgetReceipts, rememberMemoryForget, confirmMemoryForget } from '../utils/memoryForgetRecovery';
 
 export interface MemoryScope { accountId: string | null; generation: number; }
 interface EditDraft { id: string; text: string; baseContent: string; revision: number; current: MemoryRecord | null; unavailable: boolean; }
@@ -14,6 +15,8 @@ interface MemoryState extends MemoryScope {
   loading: boolean; loadingMore: boolean; loadError: string;
   note: string; editing: EditDraft | null; pending: Intent | null; busy: boolean;
   error: string; notice: string; hiddenIds: string[]; deferredForget: string[];
+  recoveryError: string; forgetStartedAt: Record<string, string>; syncForgetReceipts: () => void;
+  observeForgetStorage: (key: string | null, value: string | null) => void;
   activate: () => void; cleanup: () => void;
   refresh: () => Promise<void>; loadMore: () => Promise<void>;
   setNote: (text: string) => void; beginEdit: (memory: MemoryRecord) => void;
@@ -25,7 +28,8 @@ interface MemoryState extends MemoryScope {
 }
 const blank = () => ({ memories: [] as MemoryRecord[], total: 0, nextOffset: 0, loaded: false,
   loading: false, loadingMore: false, loadError: '', note: '', editing: null as EditDraft | null,
-  pending: null as Intent | null, busy: false, error: '', notice: '', hiddenIds: [] as string[], deferredForget: [] as string[] });
+  pending: null as Intent | null, busy: false, error: '', notice: '', hiddenIds: [] as string[], deferredForget: [] as string[],
+  recoveryError: '', forgetStartedAt: {} as Record<string, string> });
 function details(error: unknown) {
   const value = error as { status?: number; code?: string; response?: { status?: number; data?: { code?: string } } };
   return { status: value?.status ?? value?.response?.status, code: value?.response?.data?.code ?? value?.code };
@@ -35,12 +39,13 @@ function definitive(error: unknown) {
   return typeof status === 'number' && status >= 400 && status < 500 && status !== 408;
 }
 
-// Deliberately current-tab memory only: no persistence middleware, browser storage or body telemetry.
+// Note and correction bodies stay in this tab. Only minimal pending-forget IDs survive reload.
 export const useMemoryStore = create<MemoryState>((set, get) => {
   let generation = 0, readSequence = 0;
   const reset = (accountId: string | null) => {
     readSequence++;
     set({ ...blank(), accountId, generation: ++generation });
+    if (accountId) syncForgetReceipts();
   };
   const scope = (): MemoryScope => ({ accountId: get().accountId, generation: get().generation });
   const current = (origin: MemoryScope) => {
@@ -53,11 +58,53 @@ export const useMemoryStore = create<MemoryState>((set, get) => {
     const user = getCacheUserId();
     const unchanged = get().accountId === user;
     if (!unchanged) reset(user);
+    else if (user) syncForgetReceipts();
     return !!user && unchanged;
   };
   const invalidateReads = () => { readSequence++; set({ loading: false, loadingMore: false }); };
+  function absorbForgetReceipts(receipts: MemoryForgetReceipt[], clearRecoveryError = false) {
+    const state = get();
+    const hiddenIds = [...new Set([...state.hiddenIds, ...receipts.map(receipt => receipt.memoryId)])];
+    const activeId = state.pending?.type === 'forget' ? state.pending.id : null;
+    const confirmedIds = new Set(receipts.filter(receipt => receipt.state === 'confirmed').map(receipt => receipt.memoryId));
+    // Removal in another tab (or clearing browser storage) is not a server
+    // receipt. Keep already-observed pending IDs until this tab verifies them.
+    const deferredForget = [...new Set([...state.deferredForget, ...receipts.filter(receipt => receipt.state === 'pending').map(receipt => receipt.memoryId)])].filter(id => id !== activeId && !confirmedIds.has(id));
+    const forgetStartedAt = { ...state.forgetStartedAt, ...Object.fromEntries(receipts.map(receipt => [receipt.memoryId, receipt.startedAt])) };
+    if (hiddenIds.length !== state.hiddenIds.length || JSON.stringify(deferredForget) !== JSON.stringify(state.deferredForget) || (clearRecoveryError && state.recoveryError)) {
+      readSequence++;
+      set({ hiddenIds, deferredForget, forgetStartedAt, recoveryError: clearRecoveryError ? '' : state.recoveryError, loading: false, loadingMore: false,
+        memories: state.memories.filter(memory => !hiddenIds.includes(memory.id)),
+        editing: state.editing && hiddenIds.includes(state.editing.id) ? null : state.editing, loaded: false });
+    }
+  }
+  function failedRecoveryRead() {
+    readSequence++;
+    set({ recoveryError: '此设备的遗忘核验记录暂不可读，已暂停展示记忆正文。请恢复浏览器存储后重新读取，核验完成前不会把未知结果当作成功。',
+      memories: [], loading: false, loadingMore: false, loaded: false });
+  }
+  function syncForgetReceipts() {
+    const accountId = get().accountId;
+    if (!accountId || accountId !== getCacheUserId()) return;
+    try { absorbForgetReceipts(readMemoryForgetReceipts(accountId), true); }
+    catch { failedRecoveryRead(); }
+  }
+  function checkBodyBarriers(ids: string[]) {
+    const accountId = get().accountId;
+    if (!accountId || accountId !== getCacheUserId()) return false;
+    try {
+      // localStorage key enumeration is not a cross-tab snapshot. An unrelated
+      // key removal can shift an ID out of that scan, so every body publication
+      // checks its exact barrier key independently before touching UI state.
+      const receipts = [...new Set(ids)].map(id => getMemoryForgetReceipt(accountId, id)).filter((value): value is MemoryForgetReceipt => value !== null);
+      absorbForgetReceipts(receipts);
+      return !get().recoveryError;
+    } catch { failedRecoveryRead(); return false; }
+  }
   const put = (memory: MemoryRecord) => set(state => ({
-    memories: [memory, ...state.memories.filter(item => item.id !== memory.id)],
+    memories: state.hiddenIds.includes(memory.id) || state.recoveryError
+      ? state.memories.filter(item => item.id !== memory.id)
+      : [memory, ...state.memories.filter(item => item.id !== memory.id)],
   }));
   const hide = (id: string) => set(state => ({
     hiddenIds: [...new Set([...state.hiddenIds, id])], loaded: false,
@@ -66,7 +113,7 @@ export const useMemoryStore = create<MemoryState>((set, get) => {
   }));
   async function read(more: boolean) {
     activate();
-    if (!get().accountId) return;
+    if (!get().accountId || get().recoveryError) return;
     if (more && (get().loading || get().loadingMore || get().nextOffset >= get().total)) return;
     const origin = scope(), sequence = ++readSequence;
     // Offset pagination is not a snapshot. Re-read the already viewed prefix so a
@@ -84,6 +131,8 @@ export const useMemoryStore = create<MemoryState>((set, get) => {
         offset += result.memories.length;
         if (!result.memories.length) break;
       } while (offset < target && offset < total);
+      syncForgetReceipts();
+      if (!checkBodyBarriers(collected.map(memory => memory.id)) || !current(origin) || sequence !== readSequence) return;
       const unique = new Map(collected.map(memory => [memory.id, memory]));
       const visible = [...unique.values()].filter(memory => !get().hiddenIds.includes(memory.id));
       set({ memories: visible, total, nextOffset: offset, loaded: true, loadError: '' });
@@ -94,7 +143,18 @@ export const useMemoryStore = create<MemoryState>((set, get) => {
     }
   }
   function done(intent: Intent, memory?: MemoryRecord, observed = false) {
+    syncForgetReceipts();
+    checkBodyBarriers([...(memory ? [memory.id] : []), ...(intent.type !== 'create' ? [intent.id] : [])]);
     invalidateReads();
+    if (intent.type === 'create' && memory && get().hiddenIds.includes(memory.id)) {
+      set(state => ({ pending: null, error: '', note: state.note === intent.draft ? '' : state.note,
+        notice: '原保存对应的记录已有遗忘操作，正文保持隐藏，本次没有重新创建。' }));
+      return;
+    }
+    if (intent.type === 'correct' && get().hiddenIds.includes(intent.id)) {
+      set({ pending: null, editing: null, error: '', notice: '该记录已有遗忘请求，旧正文继续隐藏。' });
+      return;
+    }
     if (memory) put(memory);
     set(state => ({ pending: null, error: '', loaded: false,
       deferredForget: intent.type === 'forget' ? state.deferredForget.filter(id => id !== intent.id) : state.deferredForget,
@@ -109,6 +169,10 @@ export const useMemoryStore = create<MemoryState>((set, get) => {
     try {
       const memory = await memoryApi.get(intent.id, origin.accountId!);
       if (!current(origin)) return;
+      syncForgetReceipts();
+      checkBodyBarriers([memory.id]);
+      if (get().recoveryError) { set({ error: '设备核验记录不可读，更正结果仍待核对；请恢复设备存储后重试。' }); return; }
+      if (get().hiddenIds.includes(intent.id)) { done(intent); return; }
       invalidateReads(); put(memory);
       if (memory.content === intent.content && memory.revision === intent.revision + 1) {
         done(intent, memory, true); return;
@@ -143,7 +207,11 @@ export const useMemoryStore = create<MemoryState>((set, get) => {
         if (current(origin)) done(intent, memory);
       } else {
         await memoryApi.forget(intent.id, origin.accountId!);
-        if (current(origin)) done(intent);
+        if (current(origin)) {
+          try { confirmMemoryForget(origin.accountId!, intent.id); }
+          catch { set({ pending: { ...intent, uncertain: true }, error: '服务器已确认遗忘，设备尚未记录完成回执；可继续核对同一记录。' }); return; }
+          done(intent);
+        }
       }
     } catch (error) {
       if (!current(origin)) return;
@@ -169,7 +237,15 @@ export const useMemoryStore = create<MemoryState>((set, get) => {
     }
   }
   async function run(intent: Intent, isRetry = false) {
-    if (!activate() || get().busy) return;
+    if (!activate() || get().busy || get().recoveryError) return;
+    if (intent.type === 'forget') {
+      try {
+        const receipt = rememberMemoryForget(get().accountId!, intent.id);
+        set(state => ({ forgetStartedAt: { ...state.forgetStartedAt, [intent.id]: receipt.startedAt } }));
+      } catch { set({ error: '尚未发送这次遗忘请求：设备无法保存核验编号。请恢复浏览器存储后重试。' }); return; }
+      hide(intent.id);
+      if (get().editing?.id === intent.id) set({ editing: null });
+    }
     const origin = scope(), started = performance.now();
     invalidateReads();
     set({ busy: true, pending: intent, error: '', notice: '' });
@@ -188,12 +264,43 @@ export const useMemoryStore = create<MemoryState>((set, get) => {
   }
   return {
     ...blank(), accountId: null, generation,
-    activate: () => { activate(); }, cleanup: () => reset(null),
+    activate: () => { activate(); }, cleanup: () => reset(null), syncForgetReceipts,
+    observeForgetStorage: (key, value) => {
+      const accountId = get().accountId;
+      if (!accountId || accountId !== getCacheUserId()) return;
+      // Queued storage events retain the actual old/new receipt after the
+      // other tab has already received its ACK and removed the durable key.
+      // Re-reading only current storage would miss the entire privacy action.
+      if (key && !key.startsWith(`${MEMORY_FORGET_PREFIX}${encodeURIComponent(accountId)}:`)) return;
+      invalidateReads();
+      if (key && value !== null) {
+        try {
+          const receipt = parseMemoryForgetReceipt(accountId, key, value);
+          hide(receipt.memoryId);
+          set(state => ({
+            editing: state.editing?.id === receipt.memoryId ? null : state.editing,
+            deferredForget: [...new Set([...state.deferredForget, receipt.memoryId])].filter(id => !(state.pending?.type === 'forget' && state.pending.id === id)),
+            forgetStartedAt: { ...state.forgetStartedAt, [receipt.memoryId]: receipt.startedAt },
+            notice: receipt.state === 'confirmed'
+              ? '其他窗口已记录这条记忆的遗忘回执，旧正文已隐藏。可刷新查看最新记录。'
+              : '其他窗口正在核对一条遗忘请求，相关正文已隐藏。',
+          }));
+        } catch {
+          set({ memories: [], loaded: false, recoveryError: '收到的遗忘核验记录无法确认，已暂停展示记忆正文。请恢复设备记录后重新核验。' });
+          return;
+        }
+      } else if (key === null) {
+        // Clearing storage is not a deletion receipt. Drop stale projections,
+        // keep known pending IDs, and require a fresh authoritative list.
+        set({ memories: [], editing: null, loaded: false });
+      }
+      syncForgetReceipts();
+    },
     refresh: () => read(false), loadMore: () => read(true),
     setNote: note => { if (activate() && get().pending?.type !== 'create') set({ note: note.slice(0, 5000) }); },
     beginEdit: memory => {
       if (!activate() || get().pending || get().editing || memory.kind !== 'user_note') return;
-      if (!get().memories.some(item => item.id === memory.id && item.revision === memory.revision)) return;
+      if (!checkBodyBarriers([memory.id]) || get().hiddenIds.includes(memory.id) || !get().memories.some(item => item.id === memory.id && item.revision === memory.revision)) return;
       set({ editing: { id: memory.id, text: memory.content, baseContent: memory.content, revision: memory.revision, current: null, unavailable: false }, error: '', notice: '' });
     },
     setEditText: text => { if (activate() && get().editing && !get().pending && !get().editing!.unavailable) set(state => ({ editing: { ...state.editing!, text: text.slice(0, 5000) } })); },
@@ -204,13 +311,13 @@ export const useMemoryStore = create<MemoryState>((set, get) => {
       set(state => ({ editing: { ...state.editing!, revision: memory.revision, baseContent: memory.content, current: null }, error: '', notice: '已保留你的草稿。请确认内容，再保存到当前版本。' }));
     },
     saveNote: async () => {
-      if (!activate() || get().pending || get().busy) return;
+      if (!activate() || get().pending || get().busy || get().recoveryError) return;
       const draft = get().note, content = draft.trim();
       if (!content || content.length > 5000) return;
       await run({ type: 'create', content, draft, key: crypto.randomUUID(), uncertain: false });
     },
     saveCorrection: async () => {
-      if (!activate() || get().pending || get().busy) return;
+      if (!activate() || get().pending || get().busy || get().recoveryError) return;
       const edit = get().editing, content = edit?.text.trim();
       if (!edit || edit.current || edit.unavailable || !content || content.length > 5000 || content === edit.baseContent) return;
       await run({ type: 'correct', id: edit.id, content, draft: edit.text, revision: edit.revision, baseContent: edit.baseContent, uncertain: false });
@@ -218,9 +325,6 @@ export const useMemoryStore = create<MemoryState>((set, get) => {
     retry: async () => { if (activate() && get().pending && !get().busy) await run(get().pending!, true); },
     forget: async (id, origin) => {
       if (!current(origin) || !activate() || get().pending || get().busy || !get().memories.some(item => item.id === id)) return;
-      hide(id);
-      // Discard the deleted record's local editor too; only its ID is retained for recovery.
-      if (get().editing?.id === id) set({ editing: null });
       await run({ type: 'forget', id, uncertain: false });
     },
     deferForget: () => {
@@ -246,5 +350,16 @@ if (typeof window !== 'undefined') {
     const state = useMemoryStore.getState();
     if (!state.note && !state.editing && !state.pending && !state.deferredForget.length) return;
     event.preventDefault(); event.returnValue = '';
+  });
+}
+
+// Cross-tab pending privacy commands must hide their body before a stale list
+// response can republish it. No network mutation is triggered by this event.
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', event => {
+    const accountId = useMemoryStore.getState().accountId;
+    if (accountId && (event.key === null || event.key?.startsWith(`${MEMORY_FORGET_PREFIX}${encodeURIComponent(accountId)}:`))) {
+      useMemoryStore.getState().observeForgetStorage(event.key, event.newValue ?? event.oldValue);
+    }
   });
 }

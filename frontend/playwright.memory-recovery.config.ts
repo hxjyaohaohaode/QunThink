@@ -2,9 +2,9 @@ import { defineConfig, devices } from '@playwright/test';
 import { assertQ1CiRuntime } from './scripts/q1-fixture-protocol.mjs';
 if (!process.argv.includes('--list')) assertQ1CiRuntime();
 export default defineConfig({
-  testDir: './e2e/q2', testMatch: 'memory-forget-baseline.spec.ts', fullyParallel: false, workers: 1, retries: 0, timeout: 120000,
-  outputDir: './test-results/memory-baseline',
-  reporter: [['list'], ['html', { outputFolder: 'playwright-report/memory-baseline', open: 'never' }], ['json', { outputFile: 'test-results/memory-baseline/results.json' }]],
+  testDir: './e2e/q2', testMatch: 'memory-forget-recovery.spec.ts', fullyParallel: false, workers: 1, retries: 0, timeout: 150000,
+  outputDir: './test-results/memory-recovery',
+  reporter: [['list'], ['html', { outputFolder: 'playwright-report/memory-recovery', open: 'never' }], ['json', { outputFile: 'test-results/memory-recovery/results.json' }]],
   use: { baseURL: 'http://127.0.0.1:3210', trace: 'on', video: 'on', screenshot: 'on', timezoneId: 'UTC' },
   projects: [
     { name: 'desktop-chromium', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 1000 } } },
