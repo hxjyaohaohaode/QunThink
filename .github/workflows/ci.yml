@@ -115,6 +115,10 @@ jobs:
         if: ${{ !cancelled() && matrix.suite == 'q2' }}
         run: npx playwright test --config=playwright.q2.config.ts --project=${{ matrix.project }}
         working-directory: ./frontend
+      - name: Capture frozen memory baseline gap (not candidate acceptance)
+        if: ${{ !cancelled() && matrix.suite == 'q2' }}
+        run: npx playwright test --config=playwright.memory-baseline.config.ts --project=${{ matrix.project }}
+        working-directory: ./frontend
       - name: Save browser evidence
         if: always()
         uses: actions/upload-artifact@v4
