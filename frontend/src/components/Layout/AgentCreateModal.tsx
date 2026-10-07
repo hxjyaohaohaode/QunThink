@@ -1,5 +1,5 @@
 import { useModelsStore, requestError } from '../../stores/modelsStore';
-﻿import { useState, useRef, useEffect } from 'react';
+﻿import { useState, useRef } from 'react';
 import { useFocusTrap } from '../Common/useFocusTrap';
 import { useAgentsStore } from '../../stores/agentsStore';
 import { AgentQuestion, Agent } from '../../types';
@@ -24,7 +24,6 @@ function getAvatarColor(name: string): string {
 }
 
 export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
-  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isOpen);
   const generateQuestions = useAgentsStore((s) => s.generateQuestions);
   const createAgent = useAgentsStore((s) => s.createAgent);
   const creatingAgent = useAgentsStore((s) => s.creatingAgent);
@@ -145,11 +144,14 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
   };
 
   const handleClose = () => {
-    if (step === 1 && (name || description || openingMessage)) {
+    if (creatingRef.current) return;
+    const hasDraft = Boolean(name || description || openingMessage || avatarFile || avatarPreview || modelId || !enableSuggestions || Object.values(answers).some(Boolean));
+    if (!createdAgent && hasDraft) {
       if (!window.confirm('放弃已填写的内容？')) return;
     }
     setStep(1);
     setName('');
+    setModelId('');
     setAvatarFile(null);
     setAvatarPreview(null);
     setDescription('');
@@ -163,19 +165,7 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
     onClose();
   };
 
-  // ESC键关闭弹窗（创建过程中禁用）
-  useEffect(() => {
-    if (!isOpen || creating) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        handleClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, creating, step, name, description, openingMessage]);
+  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isOpen, handleClose);
 
   if (!isOpen) return null;
 
@@ -203,6 +193,7 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
           </div>
           <button
             onClick={handleClose}
+            aria-label="关闭创建智能体"
             className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-bg-surface2 transition-colors"
             disabled={creating}
           >
