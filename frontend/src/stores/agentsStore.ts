@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../services/api';
+import { readAgentStream } from '../services/agentStream';
 import { Agent, AgentChatMessage, AgentQuestion, AgentMessageAttachment } from '../types';
 
 interface AgentUpdateData {
@@ -32,7 +33,8 @@ interface AgentsState {
 }
 
 // 按 agentId 存储活跃的 AbortController，确保新消息发送时中断旧流
-const activeStreamControllers = new Map<string, AbortController>();
+const activeStreamControllers = new Map<string, { controller: AbortController; messageId: string }>();
+const messageReadVersions = new Map<string, number>();
 
 export const useAgentsStore = create<AgentsState>((set, get) => ({
   agents: [],
@@ -122,203 +124,93 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
   },
 
   fetchAgentMessages: async (agentId: string) => {
+    const snapshot = get().agentMessages.get(agentId);
+    if (activeStreamControllers.has(agentId)) return;
+    const version = (messageReadVersions.get(agentId) || 0) + 1;
+    messageReadVersions.set(agentId, version);
+    const identity = get().agents.find(agent => agent.id === agentId) || get().currentAgent;
     try {
       const messages = await api.getAgentMessages(agentId);
+      if (messageReadVersions.get(agentId) !== version || get().agentMessages.get(agentId) !== snapshot ||
+          (get().agents.find(agent => agent.id === agentId) || get().currentAgent) !== identity) return;
       set(state => {
-        const newAgentMessages = new Map(state.agentMessages);
-        newAgentMessages.set(agentId, messages);
-        return { agentMessages: newAgentMessages };
+        const agentMessages = new Map(state.agentMessages);
+        agentMessages.set(agentId, messages);
+        return { agentMessages };
       });
     } catch (error) {
-      if (import.meta.env.DEV) console.error('Failed to fetch agent messages:', error);
-      set({ error: error instanceof Error ? error.message : '获取智能体消息失败' });
+      if (messageReadVersions.get(agentId) === version && get().agentMessages.get(agentId) === snapshot && get().currentAgent?.id === agentId) {
+        set({ error: error instanceof Error ? error.message : '获取智能体消息失败' });
+      }
     }
   },
 
   sendAgentMessage: async (agentId: string, message: string, files?: File[]) => {
-    let attachments: AgentMessageAttachment[] | undefined;
-    if (files && files.length > 0) {
-      attachments = files.map(f => {
-        const ext = f.name.split('.').pop()?.toLowerCase() || '';
-        const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext);
-        const isAudio = ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext);
-        const isVideo = ['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext);
-        return {
-          filename: f.name,
-          type: isImage ? 'image' as const : isAudio ? 'audio' as const : isVideo ? 'video' as const : 'file' as const,
-        };
-      });
+    const previous = activeStreamControllers.get(agentId);
+    if (previous && get().agentMessages.get(agentId)?.some(m => m.id === previous.messageId)) {
+      throw new Error('当前回复仍在进行，请等待完成后再发送');
     }
-
-    const userMessage: AgentChatMessage = {
-      id: `temp_${Date.now()}`,
-      agent_id: agentId,
-      sender_type: 'user',
-      content: message,
-      created_at: new Date().toISOString(),
-      attachments,
-    };
-
-    const agentMessageId = `temp_agent_${Date.now()}`;
-    const agentMessage: AgentChatMessage = {
-      id: agentMessageId,
-      agent_id: agentId,
-      sender_type: 'agent',
-      content: '',
-      created_at: new Date().toISOString(),
-      is_streaming: true
-    };
-
+    previous?.controller.abort();
+    const controller = new AbortController();
+    const intentId = crypto.randomUUID();
+    const userMessageId = `temp_${intentId}`;
+    const agentMessageId = `temp_agent_${intentId}`;
+    activeStreamControllers.set(agentId, { controller, messageId: agentMessageId });
+    const attachments: AgentMessageAttachment[] | undefined = files?.length ? files.map(file => {
+      const ext = file.name.split('.').pop()?.toLowerCase() || '';
+      const type = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext) ? 'image'
+        : ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'].includes(ext) ? 'audio'
+        : ['mp4', 'avi', 'mov', 'mkv', 'webm'].includes(ext) ? 'video' : 'file';
+      return { filename: file.name, type };
+    }) : undefined;
+    const createdAt = new Date().toISOString();
     set(state => {
-      const newAgentMessages = new Map(state.agentMessages);
-      const existing = newAgentMessages.get(agentId) || [];
-      newAgentMessages.set(agentId, [...existing, userMessage, agentMessage]);
-      return { agentMessages: newAgentMessages };
+      const agentMessages = new Map(state.agentMessages);
+      agentMessages.set(agentId, [...(agentMessages.get(agentId) || []),
+        { id: userMessageId, agent_id: agentId, sender_type: 'user', content: message, created_at: createdAt, attachments },
+        { id: agentMessageId, agent_id: agentId, sender_type: 'agent', content: '', created_at: createdAt, is_streaming: true }]);
+      return { agentMessages, error: null };
     });
-
-    let abortController: AbortController | null = null;
-
-    try {
-      // 中断同一 agent 的旧流请求
-      const oldController = activeStreamControllers.get(agentId);
-      if (oldController) {
-        oldController.abort();
-      }
-      abortController = new AbortController();
-      activeStreamControllers.set(agentId, abortController);
-
-      let response;
-      if (files && files.length > 0) {
-        response = await api.sendAgentMessageWithFiles(agentId, message, files, abortController.signal);
-      } else {
-        response = await api.sendAgentMessage(agentId, message, abortController.signal);
-      }
-
-      if (!response.ok) {
-        throw new Error('Failed to send message');
-      }
-
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      let fullContent = '';
-
-      if (reader) {
-        let sseBuffer = '';
-        const processSseLine = (line: string) => {
-          if (!line.startsWith('data: ')) return;
-          const data = line.slice(6);
-          if (data.trim() === '[DONE]') return;
-
-          try {
-            const parsed = JSON.parse(data);
-            if (parsed.content) {
-              fullContent += parsed.content;
-              set(state => {
-                const newAgentMessages = new Map(state.agentMessages);
-                const messages = newAgentMessages.get(agentId) || [];
-                const updatedMessages = messages.map(m =>
-                  m.id === agentMessageId
-                    ? { ...m, content: fullContent }
-                    : m
-                );
-                newAgentMessages.set(agentId, updatedMessages);
-                return { agentMessages: newAgentMessages };
-              });
-            }
-          } catch {
-            fullContent += data;
-            set(state => {
-              const newAgentMessages = new Map(state.agentMessages);
-              const messages = newAgentMessages.get(agentId) || [];
-              const updatedMessages = messages.map(m =>
-                m.id === agentMessageId
-                  ? { ...m, content: fullContent }
-                  : m
-              );
-              newAgentMessages.set(agentId, updatedMessages);
-              return { agentMessages: newAgentMessages };
-            });
-          }
-        };
-
-        try {
-          while (true) {
-            // 30秒超时读取
-            const readResult = await Promise.race([
-              reader.read(),
-              new Promise<never>((_, reject) =>
-                setTimeout(() => reject(new Error('SSE read timeout')), 30000)
-              )
-            ]);
-            const { done, value } = readResult;
-            if (done) break;
-
-            sseBuffer += decoder.decode(value, { stream: true });
-
-            const lastNewlineIndex = sseBuffer.lastIndexOf('\n');
-            if (lastNewlineIndex === -1) continue;
-
-            const completeLines = sseBuffer.slice(0, lastNewlineIndex);
-            sseBuffer = sseBuffer.slice(lastNewlineIndex + 1);
-
-            for (const line of completeLines.split('\n')) {
-              processSseLine(line);
-            }
-          }
-
-          if (sseBuffer.trim().length > 0) {
-            processSseLine(sseBuffer);
-            sseBuffer = '';
-          }
-        } catch (readError) {
-          console.error('SSE流读取错误:', readError);
-        } finally {
-          reader.releaseLock();
-          if (abortController && activeStreamControllers.get(agentId) === abortController) {
-            activeStreamControllers.delete(agentId);
-          }
-        }
-      }
-
-      // 流式完成后，从后端重新加载消息以获取真实 ID（替换临时 ID）
+    const current = () => activeStreamControllers.get(agentId)?.controller === controller &&
+      Boolean(get().agentMessages.get(agentId)?.some(m => m.id === agentMessageId));
+    const updateReply = (changes: Partial<AgentChatMessage>, error?: string) => {
+      if (!current()) return;
       set(state => {
-        const newAgentMessages = new Map(state.agentMessages);
-        const messages = newAgentMessages.get(agentId) || [];
-        const updatedMessages = messages.map(m =>
-          m.id === agentMessageId
-            ? { ...m, content: fullContent || 'No response', is_streaming: false }
-            : m
-        );
-        newAgentMessages.set(agentId, updatedMessages);
-        return { agentMessages: newAgentMessages };
+        const agentMessages = new Map(state.agentMessages);
+        agentMessages.set(agentId, (agentMessages.get(agentId) || []).map(m => m.id === agentMessageId ? { ...m, ...changes } : m));
+        return { agentMessages, ...(error && state.currentAgent?.id === agentId ? { error } : {}) };
       });
-
-      // 同步后端真实消息数据，替换前端临时 ID
+    };
+    let partial = '';
+    try {
+      const response = files?.length
+        ? await api.sendAgentMessageWithFiles(agentId, message, files, controller.signal)
+        : await api.sendAgentMessage(agentId, message, controller.signal);
+      if (!current()) throw new Error('回复所属会话已改变');
+      const content = await readAgentStream(response, value => {
+        if (!current()) throw new Error('回复所属会话已改变');
+        partial = value;
+        updateReply({ content: value });
+      });
+      if (!current()) throw new Error('回复所属会话已改变');
+      updateReply({ content, is_streaming: false });
+      const snapshot = get().agentMessages.get(agentId);
       try {
-        const backendMessages = await api.getAgentMessages(agentId);
-        if (backendMessages && backendMessages.length > 0) {
+        const messages = await api.getAgentMessages(agentId);
+        if (current() && get().agentMessages.get(agentId) === snapshot && messages?.length) {
           set(state => {
-            const newAgentMessages = new Map(state.agentMessages);
-            newAgentMessages.set(agentId, backendMessages);
-            return { agentMessages: newAgentMessages };
+            const agentMessages = new Map(state.agentMessages); agentMessages.set(agentId, messages);
+            return { agentMessages };
           });
         }
-      } catch { /* 静默失败，前端临时消息仍然可用 */ }
+      } catch { /* Keep the displayed reply if authoritative history is temporarily unavailable. */ }
     } catch (error) {
-      if (abortController && activeStreamControllers.get(agentId) === abortController) {
-        activeStreamControllers.delete(agentId);
-      }
-      set(state => {
-        const newAgentMessages = new Map(state.agentMessages);
-        const messages = newAgentMessages.get(agentId) || [];
-        const updatedMessages = messages.map(m =>
-          m.id === agentMessageId
-            ? { ...m, content: 'Failed to get response', is_streaming: false }
-            : m
-        );
-        newAgentMessages.set(agentId, updatedMessages);
-        return { agentMessages: newAgentMessages, error: (error as Error).message };
-      });
+      const reason = error instanceof Error ? error.message : '回复未完成';
+      updateReply({ content: partial, is_streaming: false, response_state: partial ? 'incomplete' : 'failed', response_error: reason }, reason);
+      throw error;
+    } finally {
+      controller.abort();
+      if (activeStreamControllers.get(agentId)?.controller === controller) activeStreamControllers.delete(agentId);
     }
   },
 

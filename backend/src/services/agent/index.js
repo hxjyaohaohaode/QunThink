@@ -325,6 +325,12 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
 
   const finalMessage = intentContext ? `${messageContent}${intentContext}` : messageContent;
 
+  let emittedContent = '';
+  const emitChunk = chunk => {
+    if (typeof chunk !== 'string') return;
+    emittedContent += chunk;
+    onChunk?.(chunk);
+  };
   const response = await callAIStream(
     replyModelId,
     replyPersona,
@@ -333,7 +339,7 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
     'free_chat',
     null, [], null, null, false, [],
     enhancedSystemPrompt,
-    [], onChunk, null, userId
+    [], emitChunk, null, userId
   );
 
   const agentMsg = {
@@ -351,6 +357,12 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
     await db.write();
   });
 
+  // callAIStream can append a truthful interruption notice to its returned text.
+  // Emit only the actual saved suffix, never repeat chunks or invent a result.
+  if (typeof response === 'string' && response.startsWith(emittedContent)) {
+    const savedTail = response.slice(emittedContent.length);
+    if (savedTail) emitChunk(savedTail);
+  }
   return { content: response };
 }
 
