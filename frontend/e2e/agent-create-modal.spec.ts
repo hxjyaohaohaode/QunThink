@@ -63,10 +63,14 @@ test('agent wizard retains drafts and blocks dismissal while creating', async ({
   await expect(page.getByRole('button', { name: '创建智能体', exact: true })).toBeEnabled();
   await expect(page.getByPlaceholder('是/否')).toHaveValue('是，保留答案');
   await decline(() => close.click());
+  await expect(page.getByText('受控创建失败', { exact: true })).toBeVisible();
   await page.screenshot({ path: info.outputPath('agent-failure-draft.png'), fullPage: true });
   await page.getByRole('button', { name: '创建智能体', exact: true }).click();
   await expect(page.getByRole('button', { name: '完成', exact: true })).toBeVisible();
   expect(creates).toBe(2); expect(submitted[1]).toEqual(submitted[0]);
+  // A prior failed attempt must not contradict the successful receipt.
+  // Snapshot assertion: do not wait for the 2500ms toast auto-expiry.
+  expect(await page.getByText('受控创建失败', { exact: true }).count()).toBe(0);
   await page.screenshot({ path: info.outputPath('agent-success.png'), fullPage: true });
   page.on('dialog', rejectUnexpected);
   await page.getByRole('button', { name: '完成', exact: true }).click();

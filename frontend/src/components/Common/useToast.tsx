@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { Toast, ToastType, pushGlobalToast } from './Toast';
+import { Toast, ToastType, pushGlobalToast, dismissToast } from './Toast';
 
 interface ToastOptions {
   message: string;
@@ -13,7 +13,7 @@ interface ToastOptions {
  */
 export function useToast() {
   const showToast = useCallback((options: ToastOptions) => {
-    pushGlobalToast({
+    return pushGlobalToast({
       message: options.message,
       type: options.type,
       duration: options.duration,
@@ -22,5 +22,5 @@ export function useToast() {
 
   const ToastComponent = <Toast />;
 
-  return { showToast, Toast: ToastComponent };
+  return { showToast, dismissToast, Toast: ToastComponent };
 }

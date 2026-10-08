@@ -27,7 +27,7 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
   const generateQuestions = useAgentsStore((s) => s.generateQuestions);
   const createAgent = useAgentsStore((s) => s.createAgent);
   const creatingAgent = useAgentsStore((s) => s.creatingAgent);
-  const { showToast, Toast } = useToast();
+  const { showToast, dismissToast, Toast } = useToast();
 
   const catalog = useModelsStore(s => s.catalog);
   const [modelId, setModelId] = useState('');
@@ -44,6 +44,13 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
   const [creating, setCreating] = useState(false);
   const [createdAgent, setCreatedAgent] = useState<Agent | null>(null);
   const creatingRef = useRef(false);
+  const createFailureToastRef = useRef<number | null>(null);
+  const clearCreateFailureToast = () => {
+    if (createFailureToastRef.current !== null) {
+      dismissToast(createFailureToastRef.current);
+      createFailureToastRef.current = null;
+    }
+  };
   const avatarFileInputRef = useRef<HTMLInputElement>(null);
 
   const isStep1Valid = name.trim() && description.trim() && openingMessage.trim();
@@ -99,6 +106,7 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
   const handleCreate = async () => {
     if (creatingRef.current) return;
     creatingRef.current = true;
+    clearCreateFailureToast();
     let capabilities = {
       scheduled_tasks: false,
       web_search: false,
@@ -132,10 +140,11 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
         capabilities,
         avatarUrl: avatarFile || null,
       });
+      clearCreateFailureToast();
       setCreatedAgent(created);
     } catch (error: unknown) {
       const msg = requestError(error);
-      showToast({ message: msg, type: 'error' });
+      createFailureToastRef.current = showToast({ message: msg, type: 'error' });
       setStep(2);
     } finally {
       setCreating(false);
