@@ -129,8 +129,8 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   const [messagesLoaded, setMessagesLoaded] = useState(false);
 
   const mountedRef = useRef(true);
-  const initialFetchedRef = useRef(false);
-  const historyFetchKeyRef = useRef('');
+  const [suggestionRevision, setSuggestionRevision] = useState(0);
+  const suggestionRequestRef = useRef<{ key: string; promise: Promise<string[]> } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -165,8 +165,6 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
     setInitialSuggestions([]);
     setActiveSuggestions(null);
     setLoadingSuggestions(false);
-    initialFetchedRef.current = false;
-    historyFetchKeyRef.current = '';
     selectAgent(agentId);
     fetchAgentMessages(agentId).then(() => {
       if (!isCancelled && mountedRef.current) setMessagesLoaded(true);
@@ -200,70 +198,36 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   }, [agent]);
 
   useEffect(() => {
-    if (!agent || !agent.enable_suggestions || !messagesLoaded) return;
-
-    if (messages.length === 0 && !initialFetchedRef.current) {
-      let isCancelled = false;
-      initialFetchedRef.current = true;
-      setLoadingSuggestions(true);
-      const fetchWithRetry = async (retries = 1): Promise<string[]> => {
-        const suggestions = await fetchAgentSuggestions(agentId);
-        if (suggestions.length === 0 && retries > 0) {
-          return fetchWithRetry(retries - 1);
-        }
-        return suggestions;
-      };
-      fetchWithRetry().then(suggestions => {
-        if (isCancelled || !mountedRef.current) return;
-        if (suggestions.length === 0) {
-          suggestions = getLocalSuggestions(true);
-        }
-        setInitialSuggestions(suggestions);
-        setLoadingSuggestions(false);
-      }).catch(() => {
-        if (!isCancelled && mountedRef.current) {
-          setInitialSuggestions(getLocalSuggestions(true));
-        }
-        if (mountedRef.current) setLoadingSuggestions(false);
-      });
-      return () => { isCancelled = true; };
+    // Loading/output are results of this effect, never triggers for cancelling it.
+    if (!agent?.enable_suggestions || !messagesLoaded || isSending || isAgentStreaming) {
+      setLoadingSuggestions(false);
+      return;
     }
-
-    if (lastFinishedAgentMsgId && !activeSuggestions && !loadingSuggestions) {
-      const fetchKey = `${agentId}:${lastFinishedAgentMsgId}`;
-      if (historyFetchKeyRef.current !== fetchKey) {
-        historyFetchKeyRef.current = fetchKey;
-        let isCancelled = false;
-        setLoadingSuggestions(true);
-        const fetchWithRetry2 = async (retries = 1): Promise<string[]> => {
-          const suggestions = await fetchAgentSuggestions(agentId);
-          if (suggestions.length === 0 && retries > 0) {
-            return fetchWithRetry2(retries - 1);
-          }
-          return suggestions;
-        };
-        fetchWithRetry2().then(suggestions => {
-          if (isCancelled || !mountedRef.current) return;
-          if (suggestions.length === 0) {
-            suggestions = getLocalSuggestions(false);
-          }
-          if (suggestions.length > 0) {
-            setActiveSuggestions({ msgId: lastFinishedAgentMsgId, items: suggestions });
-          }
-          setLoadingSuggestions(false);
-        }).catch(() => {
-          if (!isCancelled && mountedRef.current) {
-            const fallback = getLocalSuggestions(false);
-            if (fallback.length > 0) {
-              setActiveSuggestions({ msgId: lastFinishedAgentMsgId, items: fallback });
-            }
-          }
-          if (mountedRef.current) setLoadingSuggestions(false);
-        });
-        return () => { isCancelled = true; };
-      }
+    const isInitial = messages.length === 0;
+    if (!isInitial && !lastFinishedAgentMsgId) {
+      setLoadingSuggestions(false);
+      return;
     }
-  }, [agent?.id, agent?.enable_suggestions, messagesLoaded, lastFinishedAgentMsgId, activeSuggestions, loadingSuggestions]);
+    const key = JSON.stringify([agentId, isInitial ? 'initial' : lastFinishedAgentMsgId, suggestionRevision]);
+    let cancelled = false;
+    setLoadingSuggestions(true);
+    // Reattach to the same request after effect replay; never dispatch twice for
+    // a loading-state render or StrictMode. An explicit refresh gets a new key.
+    if (suggestionRequestRef.current?.key !== key) {
+      suggestionRequestRef.current = { key, promise: fetchAgentSuggestions(agentId) };
+    }
+    const apply = (received: string[]) => {
+      if (cancelled || !mountedRef.current) return;
+      const items = received.length ? received : getLocalSuggestions(isInitial);
+      if (isInitial) setInitialSuggestions(items);
+      else if (lastFinishedAgentMsgId) setActiveSuggestions({ msgId: lastFinishedAgentMsgId, items });
+      setLoadingSuggestions(false);
+    };
+    suggestionRequestRef.current.promise.then(apply, () => apply([]));
+    return () => { cancelled = true; };
+  }, [agentId, agent?.enable_suggestions, messagesLoaded, messages.length,
+    lastFinishedAgentMsgId, isSending, isAgentStreaming, suggestionRevision,
+    fetchAgentSuggestions, getLocalSuggestions]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -316,7 +280,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
 
   const refreshSuggestions = useCallback(() => {
     if (!agent?.enable_suggestions || loadingSuggestions) return;
-    historyFetchKeyRef.current = '';
+    setSuggestionRevision(value => value + 1);
     setActiveSuggestions(null);
     setInitialSuggestions([]);
   }, [agent?.enable_suggestions, loadingSuggestions]);

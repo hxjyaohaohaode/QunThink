@@ -345,15 +345,15 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
                   <div className="mt-3 space-y-2 w-full max-w-[280px]">
                     <div className="flex items-center gap-2 text-xs text-text-muted">
                       <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse flex-shrink-0" />
-                      <span>deepseek-v4-pro 正在分析需求，设计架构...</span>
+                      <span>正在根据你的说明创建配置...</span>
                     </div>
                     <div className="flex items-center gap-2 text-xs text-text-muted">
                       <span className="w-1.5 h-1.5 rounded-full bg-bg-surface2 flex-shrink-0" />
-                      <span>从系统全部AI中筛选最优模型组合...</span>
+                      <span>使用你选择的模型，未指定时使用默认模型。</span>
                     </div>
                     <div className="flex items-center gap-2 text-xs text-text-muted">
                       <span className="w-1.5 h-1.5 rounded-full bg-bg-surface2 flex-shrink-0" />
-                      <span>Qwen3.5-Flash 正在评审优化系统提示词...</span>
+                      <span>创建结果与提示词来源将在完成后显示。</span>
                     </div>
                   </div>
                 </div>
@@ -372,13 +372,13 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
                     </div>
                     <div>
                       <p className="text-sm font-semibold text-text-primary">{createdAgent.name}</p>
-                      <p className="text-xs text-text-muted">多AI协同创建完成</p>
+                      <p className="text-xs text-text-muted">智能体创建完成</p>
                     </div>
                   </div>
-                  {createdAgent.model_roles && createdAgent.model_roles.length > 0 && (
+                  {(Boolean(createdAgent.model_roles?.length) || Boolean(createdAgent.model_selection_reasoning)) && (
                     <div className="bg-bg-surface2 rounded-xl p-3 space-y-2">
-                      <p className="text-xs font-medium text-text-secondary">多AI协同筛选的模型团队：</p>
-                      {createdAgent.model_roles.map((role, i) => (
+                      {Boolean(createdAgent.model_roles?.length) && <p className="text-xs font-medium text-text-secondary">使用的模型：</p>}
+                      {createdAgent.model_roles?.map((role, i) => (
                         <div key={i} className="flex items-center gap-2 text-xs">
                           <span className="w-1.5 h-1.5 rounded-full bg-accent flex-shrink-0"></span>
                           <span className="text-text-primary font-medium">{role.modelId}</span>

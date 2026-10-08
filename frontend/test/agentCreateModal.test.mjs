@@ -68,3 +68,22 @@ test('declined discard preserves suggestion setting in submitted draft; hidden/r
  await act(async()=>button('完成').click());mounted=await render(container,false,mounted);assert.equal(overlay(),null);mounted=await render(container,true,mounted);
  assert.equal(container.querySelector('select').value,'');assert.equal(container.querySelector('input[type="text"]').value,'');await fill();await next();await act(async()=>button('创建智能体').click());assert.equal(state.creates[1].enableSuggestions,true);
 });
+
+for (const receipt of ['由所选模型根据你的需求生成，可在设置中修改', '根据用户说明创建']) {
+ test(`success displays returned receipt independently of model roles: ${receipt}`,async()=>{
+  state.create=async()=>({id:'receipt',name:'测试助手',model_selection_reasoning:receipt});
+  await fill();await next();await act(async()=>button('创建智能体').click());
+  assert.ok(container.textContent.includes(receipt));
+  assert.ok(container.textContent.includes('智能体创建完成'));
+  assert.doesNotMatch(container.textContent,/多AI协同|筛选最优|deepseek-v4-pro|Qwen3.5-Flash/);
+ });
+}
+test('pending is neutral and success shows actual returned model instead of selected model',async()=>{
+ let release;state.create=()=>new Promise(resolve=>{release=resolve;});
+ await fill();await input(container.querySelector('select'),'fixture');await next();
+ await act(async()=>button('创建智能体').click());
+ assert.ok(container.textContent.includes('使用你选择的模型，未指定时使用默认模型。'));
+ assert.doesNotMatch(container.textContent,/多AI协同|筛选最优|deepseek-v4-pro|Qwen3.5-Flash/);
+ await act(async()=>release({id:'returned',name:'测试助手',model_roles:[{modelId:'server-returned-model',role:'主回复'}],model_selection_reasoning:'根据用户说明创建'}));
+ assert.ok(container.textContent.includes('server-returned-model'));assert.ok(container.textContent.includes('根据用户说明创建'));
+});

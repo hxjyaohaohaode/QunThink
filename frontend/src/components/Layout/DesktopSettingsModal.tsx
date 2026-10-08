@@ -330,7 +330,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
         </div>
         <div className="flex items-center justify-between px-4 py-2.5">
           <span className="text-sm text-text-secondary">AI模型</span>
-          <span className="text-sm text-text-primary">{totalAIModels} 个已配置</span>
+          <span className="text-sm text-text-primary">{totalAIModels} 个目录条目</span>
         </div>
         <div className="flex items-center justify-between px-4 py-2.5">
           <span className="text-sm text-text-secondary">群聊</span>
@@ -342,7 +342,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
         </div>
         <div className="px-4 py-2.5">
           <p className="text-xs text-text-muted">
-            聊天AI：{chatAIMembers.length} 个已加入群聊 · 专用AI：4 个（TTS语音、视觉识别、全模态分析）
+            聊天AI：{chatAIMembers.length} 个已加入群聊 · 已验证其他能力：{models?.filter(model => model.verifiedCapabilities?.some(capability => capability !== 'chat')).length || 0} 个模型
           </p>
         </div>
       </div>
