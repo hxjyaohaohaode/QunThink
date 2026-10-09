@@ -453,7 +453,7 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
                 })}
               </div>
               {selectedAiPrivateMembers.length < 2 && (
-                <p className="text-[11px] text-text-muted mt-1">可以先建立会话、放入材料和人工写作；未连接模型时不会自动回复</p>
+                <p className="text-[11px] text-text-muted mt-1">请至少选择 2 个 AI 后创建；暂不连接模型时，可切换到「创建群聊」。</p>
               )}
             </div>
 
