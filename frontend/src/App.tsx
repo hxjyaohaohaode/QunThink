@@ -16,6 +16,7 @@ import { ensurePersonasAutoRefresh, stopAutoRefresh as stopPersonasAutoRefresh, 
 import { useMessagesStore, resetMessagesModuleState } from './stores/messagesStore';
 import { useAgentsStore } from './stores/agentsStore';
 import { useNavigationStore } from './stores/navigationStore';
+import { resolveMobileRoute, mobileRouteKey } from './utils/mobileNavigation';
 import { connectWebSocket, destroyWebSocket, joinGroup, leaveGroup } from './services/websocket';
 import { Sidebar } from './components/Layout/Sidebar';
 import { MobileTabBar } from './components/Layout/MobileTabBar';
@@ -747,10 +748,13 @@ function AppContent({
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 
+  const mobileRoute = resolveMobileRoute(mobileTab, mobileView, !!currentGroup, !!selectedAgentId);
+  const mobileViewKey = mobileRouteKey(mobileRoute, currentGroup?.id);
+
   // 方向感知过渡：追踪历史栈，前进=1，后退=-1
   // 分离桌面端和移动端的视图栈和方向引用，避免互相污染
   const desktopStackRef = useRef<string[]>(['welcome']);
-  const mobileStackRef = useRef<string[]>(['mobile-chat-list']);
+  const mobileStackRef = useRef<string[]>([mobileViewKey]);
   const desktopTransitionDirRef = useRef<1 | -1>(1);
   const mobileTransitionDirRef = useRef<1 | -1>(1);
 
@@ -760,14 +764,7 @@ function AppContent({
     return 'welcome';
   }, [showAgents, selectedAgentId, currentGroup]);
 
-  const deriveMobileViewKey = useCallback(() => {
-    if (mobileView === 'groupInfo') return 'mobile-group-info';
-    if (mobileView === 'agentChat') return 'mobile-agent-chat';
-    if (mobileView === 'chat' && currentGroup) return `mobile-chat-${currentGroup.id}`;
-    if (mobileView === 'agents' || mobileTab === 'agents') return 'mobile-agents';
-    if (mobileTab === 'settings') return 'mobile-settings';
-    return 'mobile-chat-list';
-  }, [mobileView, mobileTab, currentGroup]);
+  const deriveMobileViewKey = useCallback(() => mobileViewKey, [mobileViewKey]);
 
   const prevDesktopKeyRef = useRef(deriveDesktopViewKey());
   const prevMobileKeyRef = useRef(deriveMobileViewKey());
@@ -993,14 +990,14 @@ function AppContent({
 
         <AnimatePresence mode="wait">
           {/* Chat List (Main Tab) */}
-          {mobileTab === 'workspace' && (
-            <motion.div key="mobile-workspace" className="h-full min-h-0 pb-14" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+          {mobileRoute === 'workspace' && (
+            <motion.div key={mobileViewKey} className="h-full min-h-0 pb-14" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
               <LazyBoundary><WorkspacePage onOpenConversation={handleMobileSelectGroup} /></LazyBoundary>
             </motion.div>
           )}
-          {mobileView === 'main' && mobileTab === 'chats' && (
+          {mobileRoute === 'chats' && (
             <motion.div
-              key="mobile-chat-list"
+              key={mobileViewKey}
               className="absolute inset-0 z-10 bg-bg-primary flex flex-col"
               style={{ paddingBottom: '56px' }}
               variants={viewTransitionVariants}
@@ -1015,9 +1012,9 @@ function AppContent({
           )}
 
           {/* Settings Page */}
-          {mobileView === 'main' && mobileTab === 'settings' && (
+          {mobileRoute === 'settings' && (
             <motion.div
-              key="mobile-settings"
+              key={mobileViewKey}
               className="absolute inset-0 z-10 bg-bg-primary flex flex-col"
               style={{ paddingBottom: '56px' }}
               variants={viewTransitionVariants}
@@ -1034,9 +1031,9 @@ function AppContent({
           )}
 
           {/* Agents Page */}
-          {((mobileView === 'main' && mobileTab === 'agents') || mobileView === 'agents') && (
+          {mobileRoute === 'agents' && (
             <motion.div
-              key="mobile-agents"
+              key={mobileViewKey}
               className="absolute inset-0 z-10 bg-bg-primary flex flex-col"
               style={{ paddingBottom: '56px' }}
               variants={viewTransitionVariants}
@@ -1056,9 +1053,9 @@ function AppContent({
           )}
 
           {/* Agent Chat */}
-          {mobileView === 'agentChat' && selectedAgentId && (
+          {mobileRoute === 'agentChat' && selectedAgentId && (
             <motion.div
-              key="mobile-agent-chat"
+              key={mobileViewKey}
               className="fixed inset-0 z-10 bg-bg-primary flex flex-col h-[100dvh]"
               variants={viewTransitionVariants}
               initial="initial"
@@ -1074,9 +1071,9 @@ function AppContent({
           )}
 
           {/* Chat View */}
-          {mobileView === 'chat' && currentGroup && (
+          {mobileRoute === 'chat' && currentGroup && (
             <motion.div
-              key={`mobile-chat-${currentGroup.id}`}
+              key={mobileViewKey}
               className="fixed inset-0 z-10 bg-bg-primary flex flex-col"
               style={{ height: '100dvh' }}
               variants={viewTransitionVariants}
@@ -1104,9 +1101,9 @@ function AppContent({
           )}
 
           {/* Group Info (full-screen overlay) */}
-          {mobileView === 'groupInfo' && currentGroup && (
+          {mobileRoute === 'groupInfo' && currentGroup && (
             <motion.div
-              key="mobile-group-info"
+              key={mobileViewKey}
               className="fixed inset-0 z-50 bg-bg-primary"
               variants={viewTransitionVariants}
               initial="initial"
@@ -1122,7 +1119,7 @@ function AppContent({
           )}
         </AnimatePresence>
 
-        {(mobileView === 'main' || mobileView === 'agents') && (
+        {(['workspace', 'chats', 'agents', 'settings'] as const).some(route => route === mobileRoute) && (
           <MobileTabBar activeTab={mobileTab} onTabChange={handleTabChange} />
         )}
       </div>}

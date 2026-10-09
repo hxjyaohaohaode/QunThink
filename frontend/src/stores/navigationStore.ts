@@ -31,7 +31,22 @@ interface NavigationState {
 
 export const useNavigationStore = create<NavigationState>()(
   persist(
-    (set, get) => ({
+    (set, get) => {
+      const transitions = new Map<'desktop' | 'mobile', symbol>();
+      const transitionTo = (surface: 'desktop' | 'mobile', commit: () => void) => {
+        const intent = Symbol(surface);
+        transitions.set(surface, intent);
+        // Commit with the caller's local view state. Framer Motion owns the
+        // visual exit; a deferred store write can resurrect an older intent.
+        commit();
+        set({ isTransitioning: true });
+        setTimeout(() => {
+          if (transitions.get(surface) !== intent) return;
+          transitions.delete(surface);
+          set({ isTransitioning: transitions.size > 0 });
+        }, 250);
+      };
+      return {
       sidebarOpen: true,
       searchPanelOpen: false,
       commandPaletteOpen: false,
@@ -59,24 +74,15 @@ export const useNavigationStore = create<NavigationState>()(
       setTimeFormat: (format) => set({ timeFormat: format }),
       setActiveDesktopView: (view) => {
         if (get().activeDesktopView === view) return;
-        set({ isTransitioning: true });
-        // 短暂延迟后设置新视图，让退出动画先播放
-        requestAnimationFrame(() => {
-          set({ activeDesktopView: view });
-          // 过渡完成后清除标记
-          setTimeout(() => set({ isTransitioning: false }), 250);
-        });
+        transitionTo('desktop', () => set({ activeDesktopView: view }));
       },
       setActiveMobileTab: (tab) => {
         if (get().activeMobileTab === tab) return;
-        set({ isTransitioning: true });
-        requestAnimationFrame(() => {
-          set({ activeMobileTab: tab });
-          setTimeout(() => set({ isTransitioning: false }), 250);
-        });
+        transitionTo('mobile', () => set({ activeMobileTab: tab }));
       },
       setIsTransitioning: (v) => set({ isTransitioning: v }),
-    }),
+      };
+    },
     { name: 'navigation-storage', partialize: (state) => ({ timeFormat: state.timeFormat }) }
   )
 );
