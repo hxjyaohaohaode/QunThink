@@ -25,7 +25,7 @@ export async function tickInternalGoalRun(pool, {
         typeof before.run.checkpoint.grantId !== 'string')) {
     return { runId, state: 'unsupported_step', stepKey: next.step_key, advanced: false };
   }
-  const claim = await claimRun(pool, { ...scope, leaseSeconds });
+  const claim = await claimRun(pool, { ...scope, leaseSeconds, expectedStepKey: next.step_key });
   if (!claim) return { runId, state: 'busy', advanced: false };
   if (claim.state === 'reconciling') return { runId, state: 'effect_unknown', advanced: false };
   let briefStarted = false;

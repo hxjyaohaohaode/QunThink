@@ -333,9 +333,10 @@ async function runAccess(client, spaceId, actorId, runId, action = 'write') {
 }
 
 export async function claimRun(pool, {
-  schema = schemaDefault, spaceId, actorId, runId, leaseSeconds = 30
+  schema = schemaDefault, spaceId, actorId, runId, leaseSeconds = 30, expectedStepKey
 }) {
   [spaceId, actorId, runId].forEach((v, i) => id(v, ['SPACE_ID','ACTOR_ID','RUN_ID'][i]));
+  if (expectedStepKey !== undefined) id(expectedStepKey, 'STEP_KEY');
   if (!Number.isInteger(leaseSeconds) || leaseSeconds < 1 || leaseSeconds > 3600) fail('INVALID_LEASE', 400);
   return inSpaceTransaction(pool, schema, spaceId, actorId, async client => {
     const actor = await runAccess(client, spaceId, actorId, runId);
@@ -364,6 +365,17 @@ export async function claimRun(pool, {
     const unknown = await client.query(
       `SELECT 1 FROM effects WHERE space_id=$1 AND run_id=$2 AND state='unknown' LIMIT 1`, [spaceId, runId]);
     const state = unresolved.rowCount || unknown.rowCount ? 'reconciling' : 'running';
+    if (state === 'running') {
+      // Settlement holds this same run lock. Recheck the next step here so a
+      // late tick cannot lease finished work or a step it has not inspected.
+      // Unknown effects must still be claimed for reconciliation first.
+      const next = await client.query(
+        `SELECT step_key FROM steps WHERE space_id=$1 AND run_id=$2
+         AND state<>'completed' ORDER BY position LIMIT 1`, [spaceId, runId]);
+      if (!next.rowCount || (expectedStepKey !== undefined && next.rows[0].step_key !== expectedStepKey)) {
+        return null;
+      }
+    }
     const briefTakeover = state === 'running' && run.rows[0].state === 'running' &&
       run.rows[0].checkpoint?.origin === 'personal_goal_brief_v1';
     let briefRetryExhausted = false;
