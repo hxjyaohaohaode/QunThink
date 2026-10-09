@@ -1,5 +1,7 @@
 # 群想 QunThink
 
+软件材料准备见[当前技术说明](docs/COPYRIGHT_CURRENT.md)与[操作手册草稿](docs/USER_MANUAL_DRAFT.md)。它们依据文档同步前的430文件工程基线（提交6646d89f03c0b29e39df3a466b2d81b4f2d8e28b；原427文件加3项第三方告知）整理；本次文档补充新增5文件、修改6文件，整库为435文件，430文件及其树哈希仅标识补充前基线；正式名称、版本、个人主体身份及权属依据仍待确认，尚非提交版。
+
 群想是一个以 AI 为核心的社交与工作空间原型。当前可用的主线是多模型群聊、单模型对话、AI 角色、智能体、辩论、文件辅助理解、语音合成和任务工作台。模型由用户在**模型中心**配置，不再受内置厂商名单限制；旧模型 ID 保留，以免历史会话失效。
 
 项目正在向真人社交、组织协作和可执行 AI 工作流演进。现在的群聊仍以每个用户自己的数据为边界，**不等同于多人共享群聊**；工作台任务当前执行模型请求与会话摘要，尚不能自动操控浏览器、文件系统或第三方办公软件。完整能力与已知边界见 [优化记录](docs/optimization-2026-09.md)。
@@ -86,6 +88,6 @@ node scripts/verify-brand.mjs
 
 [OpenAPI 3.1 文档](openapi/openapi.yaml)覆盖后端接口；`shared/` 提供前后端共用契约。后端为 Node.js/Express/WebSocket，前端为 React/TypeScript/Vite。详细的实现、验证结果和下一阶段能力缺口记录在 [优化记录](docs/optimization-2026-09.md)。
 
-## 开源协议
+## 许可说明
 
-MIT License
+仓库顶层 [LICENSE](LICENSE) 保持原有 MIT License 声明；第三方代码仍分别遵守其适用条款。Lightfall、Radar、Strands 的历史来源与 MIT + Commons Clause 许可见 [第三方告知](THIRD_PARTY_NOTICES.md)，不得将这些组件描述为纯 MIT 或全部自主原创。项目权属与其他依赖、素材授权仍须另行核对。
