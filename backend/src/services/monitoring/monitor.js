@@ -177,17 +177,14 @@ class SystemMonitor {
    * 获取网络活动（简化）
    */
   getNetworkActivity() {
-    const networkInterfaces = os.networkInterfaces();
-    let activeInterfaces = 0;
-    
-    Object.values(networkInterfaces).forEach(iface => {
-      iface.forEach(addr => {
-        if (!addr.internal && addr.family === 'IPv4') {
-          activeInterfaces++;
-        }
-      });
-    });
-    
+    // Restricted containers may deny interface enumeration. Keep independently
+    // measurable request/database metrics available; missing evidence is unknown.
+    let activeInterfaces = null;
+    try {
+      activeInterfaces = Object.values(os.networkInterfaces()).reduce((count, addresses) =>
+        count + (addresses || []).filter(address => !address.internal && address.family === 'IPv4').length, 0);
+    } catch { /* No interface permissions does not make the app unavailable. */ }
+
     const elapsed = (Date.now() - this._requestCounter.lastReset) / 1000;
     const requestsPerSecond = elapsed > 0 ? this._requestCounter.total / elapsed : 0;
     

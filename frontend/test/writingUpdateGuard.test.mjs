@@ -1,0 +1,13 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { build } from 'esbuild';
+import { resolve } from 'node:path';
+const output = await build({ entryPoints: [resolve(import.meta.dirname, '../src/utils/writingUpdateGuard.ts')], bundle: true, format: 'esm', write: false });
+const { writingUpdateBlocker } = await import(`data:text/javascript;base64,${Buffer.from(output.outputFiles[0].text).toString('base64')}`);
+const clean = () => [{ pending: {}, uncertain: {}, editors: {} }, { pending: {}, uncertainCreate: false, composerDraft: { title: '', prompt: '' } }];
+test('a clean writing state permits the explicit app update', () => { const args = clean(); assert.equal(writingUpdateBlocker(...args), null); assert.equal(writingUpdateBlocker(...args, true), null); });
+test('unknown acceptance blocks update even with no dirty body', () => { const args = clean(); args[0].uncertain.doc = { action: 'accept_revision' }; assert.match(writingUpdateBlocker(...args), /原请求/); });
+test('live save, query or provider request blocks before update', () => { for (const index of [0, 1]) { const args = clean(); args[index].pending.doc = '处理中'; assert.match(writingUpdateBlocker(...args), /正在处理/); } });
+test('unknown create and unsaved purpose stay protected independently of body recovery choice', () => { const args = clean(); args[1].uncertainCreate = true; assert.match(writingUpdateBlocker(...args), /原请求/); args[1].uncertainCreate = false; args[1].composerDraft.prompt = 'private purpose'; const message = writingUpdateBlocker(...args); assert.match(message, /未保存/); assert.doesNotMatch(message, /private/); });
+test('dirty text can enter save-confirmation, but a dirty draft appearing during await blocks final reload', () => { const args = clean(); args[0].editors.doc = { dirty: true }; assert.equal(writingUpdateBlocker(...args), null); assert.match(writingUpdateBlocker(...args, true), /未保存的正文/); args[0].editors.doc.dirty = false; assert.equal(writingUpdateBlocker(...args, true), null); args[0].editors.other = { dirty: true }; assert.match(writingUpdateBlocker(...args, true), /未保存的正文/); });
+test('existing document purpose draft blocks update with an otherwise clean editor', () => { const args=clean(); args[0].briefs={doc:'不能遗失的新用途'}; assert.match(writingUpdateBlocker(...args),/未保存的文稿用途/); assert.match(writingUpdateBlocker(...args,true),/未保存的文稿用途/); });

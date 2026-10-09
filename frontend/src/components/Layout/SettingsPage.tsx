@@ -1,4 +1,4 @@
-import { clearCurrentUserCache } from '../../utils/privateCache';
+import { useLocalCacheClear } from '../../hooks/useLocalCacheClear';
 ﻿import { useState, useEffect, useRef } from 'react';
 import { useThemeStore } from '../../stores/themeStore';
 import { useGroupsStore } from '../../stores/groupsStore';
@@ -6,7 +6,7 @@ import { usePersonasStore } from '../../stores/personasStore';
 import { AIPersonaEditor } from './AIPersonaEditor';
 import { UserProfileEditor } from './UserProfileEditor';
 import { FontSizeSelector } from './FontSizeToggle';
-import { useConfirm, useToast, ErrorBoundary } from '../Common';
+import { useToast, ErrorBoundary } from '../Common';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
 import { AI_NAMES } from '../../types';
 import { ModelCenter } from './ModelCenter';
@@ -21,7 +21,7 @@ export function SettingsPage() {
   const personas = usePersonasStore((s) => s.personas);
   const fetchPersonas = usePersonasStore((s) => s.fetchPersonas);
   const personasLoading = usePersonasStore((s) => s.loading);
-  const { confirm, ConfirmModal } = useConfirm();
+  const { clear: handleClearData, clearing: clearingCache, ConfirmModal } = useLocalCacheClear();
   const { showToast, Toast } = useToast();
   const [expandedPersona, setExpandedPersona] = useState<string | null>(null);
   const [isPageEntered, setIsPageEntered] = useState(false);
@@ -81,17 +81,7 @@ export function SettingsPage() {
     }, 300);
   };
 
-  const handleClearData = async () => {
-    const confirmed = await confirm({
-      title: '清理本地缓存',
-      description: '仅清理当前浏览器缓存，服务器上的会话与文件会在下次加载时恢复。是否继续？',
-      danger: true,
-    });
-    if (confirmed) {
-      await clearCurrentUserCache();
-      showToast({ message: '本地缓存已清理', type: 'success' });
-    }
-  };
+
 
   const handlePersonaToggle = (id: string) => {
     setPrevExpandedPersona(expandedPersona);
@@ -157,7 +147,7 @@ export function SettingsPage() {
                     </div>
                     <div className="flex-1 text-left">
                       <span className="text-sm text-text-primary settings-theme-transition">安装到桌面</span>
-                      <p className="text-xs text-text-secondary mt-0.5 settings-theme-transition">快速访问，离线可用，享受原生应用体验</p>
+                      <p className="text-xs text-text-secondary mt-0.5 settings-theme-transition">快速访问；离线时仅显示公开静态页面</p>
                     </div>
                     <svg className="w-4 h-4 text-text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="m9 18 6-6-6-6" />
@@ -531,7 +521,7 @@ export function SettingsPage() {
                 </div>
                 <div className="mt-2 space-y-1">
                   <p className="text-xs text-text-muted">
-                    聊天AI：{chatAIMembers.length} 个已加入群聊 · 专用AI：4 个（TTS语音、视觉识别、全模态分析）
+                    聊天AI：{chatAIMembers.length} 个已加入群聊 · 已验证其他能力：{models?.filter(model => model.verifiedCapabilities?.some(capability => capability !== 'chat')).length || 0} 个模型
                   </p>
                   {notInGroups.length > 0 && (
                     <p className="text-xs text-amber-500">
@@ -636,10 +626,11 @@ export function SettingsPage() {
               className="px-4 pb-4"
             >
               <button
-                onClick={handleClearData}
+                onClick={() => void handleClearData()}
+                disabled={clearingCache}
                 className="w-full py-3 text-sm text-error btn-secondary hover:bg-error/5"
               >
-                清空所有聊天数据
+                {clearingCache ? '正在清理…' : '清理当前浏览器缓存'}
               </button>
             </div>
           </div>

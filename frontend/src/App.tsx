@@ -1,6 +1,11 @@
+﻿import { clearDiagnostics, observeInteractions, setDiagnosticSurface } from './observability/runtimeDiagnostics';
 import { purgeLegacyPrivateCaches } from './utils/privateCache';
 import { useModelsStore } from './stores/modelsStore';
 import { useTasksStore } from './stores/tasksStore';
+import { useTaskResultsStore } from './stores/taskResultsStore';
+import { clearWritingContent } from './utils/taskRecovery';
+import { ConversationWriting } from './components/Writing/ConversationWriting';
+import { useMemoryStore } from './stores/memoryStore';
 ﻿import { lazy, Suspense, useEffect, useLayoutEffect, useState, useRef, useCallback, type ReactNode, type TouchEvent as ReactTouchEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { Group } from './types';
@@ -26,7 +31,7 @@ import { PWAInstallPrompt } from './components/Common/PWAInstallPrompt';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useReducedMotion } from './hooks/useReducedMotion';
 import { useSwipeBack } from './components/Common/SwipeTransition';
-import { api, getDevUserId, onAuthExpired } from './services/api';
+import { api, getDevUserId, onAuthExpired, confirmAuthIdentity, getAuthGeneration } from './services/api';
 import { initFontSize } from './stores/fontSizeStore';
 import { useAudioStore } from './stores/audioStore';
 import { setCacheUserId, getCacheUserId, clearAllCachesForUser, saveGroupsCache, savePersonasCache, saveProfileCache } from './utils/cacheUtils';
@@ -128,8 +133,8 @@ function getPersistedSessionInfo(): { userId: string; timestamp: number } | null
 }
 
 function isAuthFailure(error: unknown) {
-  const status = (error as any)?.response?.status;
-  return status === 401 || status === 403;
+  const status = (error as any)?.response?.status ?? (error as any)?.status;
+  return status === 401 || status === 403 || (error as any)?.code === 'ACCOUNT_CHANGED';
 }
 
 const defaultProfileState: UserProfile = {
@@ -147,8 +152,9 @@ const defaultProfileState: UserProfile = {
 };
 
 function hydrateBootstrapData(userId: string, payload: BootstrapPayload) {
-  if (getCacheUserId() !== userId) useAudioStore.getState().clearAll();
+  if (getCacheUserId() !== userId) { useAudioStore.getState().clearAll(); useTasksStore.getState().cleanup(); useTaskResultsStore.getState().cleanup(); useMemoryStore.getState().cleanup(); useProfileStore.getState().cleanup(); useModelsStore.getState().cleanup(); usePersonasStore.getState().cleanup(); clearDiagnostics(); }
   setCacheUserId(userId);
+  confirmAuthIdentity(userId);
   setIndexedDBUserId(userId);
 
   const groups = payload.groups || [];
@@ -213,12 +219,20 @@ export function clearMemoryApiConfigs(userId?: string): void {
   }
 }
 
+function assertCurrentAuthGeneration(generation: number) {
+  if (generation !== getAuthGeneration()) throw Object.assign(new Error('登录会话已更新，忽略较早的初始化'), { code: 'STALE_ACCOUNT_RESPONSE' });
+}
+
 async function initializeUserData(userId: string) {
+  let generation = getAuthGeneration();
   try {
     const payload = await api.getBootstrap();
+    assertCurrentAuthGeneration(generation);
     const resolvedUserId = payload.user?.id || userId;
     hydrateBootstrapData(resolvedUserId, payload);
+    generation = getAuthGeneration();
   } catch (bootstrapError) {
+    assertCurrentAuthGeneration(generation);
     if (AUTH_MODE === 'session' && isAuthFailure(bootstrapError)) {
       throw bootstrapError;
     }
@@ -234,7 +248,7 @@ async function initializeUserData(userId: string) {
         fetchPersonas()
       ]);
     } catch (error) {
-      console.error('[App] Failed to initialize user data:', error);
+      console.error('[App] Failed to initialize user data');
       throw error;
     }
 
@@ -242,22 +256,31 @@ async function initializeUserData(userId: string) {
       throw bootstrapError;
     }
 
-    console.warn('[App] Bootstrap endpoint failed, fallback stores used:', bootstrapError);
+    console.warn('[App] Bootstrap endpoint failed, fallback stores used');
   }
 
   await useModelsStore.getState().fetch();
+  assertCurrentAuthGeneration(generation);
   if (import.meta.env.DEV) {
-    console.log(`[App] User data initialized for: ${userId}`);
+    console.log('[App] User data initialized');
   }
+  return generation;
 }
 
 async function handleLogout() {
+  // Fence older requests before asynchronous cache deletion or remote logout.
+  confirmAuthIdentity(null);
+  const logoutGeneration = getAuthGeneration();
+  const cachedUserId = getCacheUserId();
+  clearWritingContent(cachedUserId);
+  const pendingCleanup: Promise<unknown>[] = [];
+  clearDiagnostics();
   useAudioStore.getState().clearAll();
-  await purgeLegacyPrivateCaches();
-  useTasksStore.getState().cleanup();
+  useProfileStore.getState().cleanup();
+  useTasksStore.getState().cleanup(); useTaskResultsStore.getState().cleanup();
+  useMemoryStore.getState().cleanup();
   useModelsStore.getState().cleanup();
   usePersonasStore.getState().cleanup();
-  const cachedUserId = getCacheUserId();
 
   destroyWebSocket();
   stopPersonasAutoRefresh();
@@ -269,15 +292,15 @@ async function handleLogout() {
 
   useUIStore.getState().clearAllTypingTimeouts();
 
-  try {
-    await api.logout();
-  } catch { }
+  // Expiry/account-change is local cleanup, not an explicit server sign-out.
+  // A delayed logout Set-Cookie could otherwise clear a newer login before JS
+  // can reject its obsolete response. Do not send /auth/logout from this path.
 
   clearPersistedSessionInfo();
 
   if (cachedUserId) {
     clearAllCachesForUser(cachedUserId);
-    await clearAllIndexedDBForUser(cachedUserId);
+    pendingCleanup.push(clearAllIndexedDBForUser(cachedUserId));
   }
 
   try {
@@ -340,13 +363,26 @@ async function handleLogout() {
 
   setCacheUserId(null);
   setIndexedDBUserId(null);
+  pendingCleanup.push(purgeLegacyPrivateCaches());
+  await Promise.allSettled(pendingCleanup);
+  if (logoutGeneration !== getAuthGeneration()) return false;
 
   if (import.meta.env.DEV) {
     console.log('[App] User logged out, caches cleared');
   }
+  return true;
 }
 
 function App() {
+  useEffect(() => {
+    // The editor may be on another page; navigation must not remove its unload guard.
+    const guard = (event: BeforeUnloadEvent) => {
+      const result = useTaskResultsStore.getState(), tasks = useTasksStore.getState();
+      if (Object.values(result.editors).some(editor => editor.dirty) || Object.keys(result.uncertain).length || Object.keys(result.briefs).length || tasks.composerDraft.title || tasks.composerDraft.prompt || tasks.uncertainCreate) { event.preventDefault(); event.returnValue = ''; }
+    };
+    window.addEventListener('beforeunload', guard);
+    return () => window.removeEventListener('beforeunload', guard);
+  }, []);
   const currentGroup = useGroupsStore((s) => s.currentGroup);
   const applyTheme = useUIStore((s) => s.applyTheme);
   useKeyboardShortcuts();
@@ -374,15 +410,16 @@ function App() {
     let cancelled = false;
 
     const bootstrapSession = async () => {
+      let generation = getAuthGeneration();
       setSessionCheckError(false);
       try {
         const authStatus = await api.getAuthStatus();
-        if (cancelled) return;
+        if (cancelled || generation !== getAuthGeneration()) return;
 
         if (authStatus?.enabled === false) {
           const devUserId = getDevUserId();
-          await initializeUserData(devUserId);
-          if (!cancelled) {
+          generation = await initializeUserData(devUserId);
+          if (!cancelled && generation === getAuthGeneration()) {
             dataInitializedRef.current = true;
             setIsAuthenticated(true);
           }
@@ -398,6 +435,7 @@ function App() {
         }
 
         const currentUser = await api.getCurrentUser();
+        if (cancelled || generation !== getAuthGeneration()) return;
         const userId = currentUser?.user?.id || getCacheUserId() || getPersistedSessionInfo()?.userId;
         if (!userId) {
           if (!cancelled) {
@@ -407,14 +445,16 @@ function App() {
           return;
         }
 
-        await initializeUserData(userId);
+        generation = await initializeUserData(userId);
+        if (cancelled || generation !== getAuthGeneration()) return;
         persistSessionInfo(userId);
         if (!cancelled) {
           dataInitializedRef.current = true;
           setIsAuthenticated(true);
         }
       } catch (error) {
-        console.warn('[App] Session bootstrap failed:', error);
+        if (cancelled || generation !== getAuthGeneration()) return;
+        console.warn('[App] Session bootstrap failed');
         if (!cancelled) {
           dataInitializedRef.current = false;
           if (isAuthFailure(error)) setIsAuthenticated(false);
@@ -455,7 +495,13 @@ function App() {
 
   useEffect(() => {
     const unsubscribe = onAuthExpired(async () => {
-      await handleLogout();
+      // Hide account-bound UI before waiting for asynchronous cache cleanup.
+      setIsAuthenticated(false);
+      setAppPhase('auth');
+      wsConnectedRef.current = false;
+      dataInitializedRef.current = false;
+      const stillLoggedOut = await handleLogout();
+      if (!stillLoggedOut) return;
       wsConnectedRef.current = false;
       dataInitializedRef.current = false;
       setIsAuthenticated(false);
@@ -474,6 +520,8 @@ function App() {
   useEffect(() => {
     return () => {
       leaveGroup(currentGroupRef.current?.id || '');
+      destroyWebSocket();
+      wsConnectedRef.current = false;
     };
   }, []);
 
@@ -560,21 +608,26 @@ function App() {
   }, []);
 
   const handleLoginSuccess = useCallback(async () => {
+    let generation = getAuthGeneration();
     try {
       const response = await api.getBootstrap();
+      if (generation !== getAuthGeneration()) return;
       const userId = response.user?.id;
       if (!userId) {
         throw new Error('登录后未获取到用户信息');
       }
       dataInitializedRef.current = true;
       hydrateBootstrapData(userId, response);
+      generation = getAuthGeneration();
       await useModelsStore.getState().fetch();
+      if (generation !== getAuthGeneration()) return;
       persistSessionInfo(userId);
       splashCompletedRef.current = true;
       setIsAuthenticated(true);
       setAppPhase('app');
     } catch (error) {
-      console.error('Failed to get user info after login:', error);
+      if (generation !== getAuthGeneration()) return;
+      console.error('Failed to get user info after login');
       dataInitializedRef.current = false;
       setIsAuthenticated(false);
       throw error;
@@ -676,6 +729,18 @@ function AppContent({
   const setActiveDesktopView = useNavigationStore((s) => s.setActiveDesktopView);
   const reducedMotion = useReducedMotion();
   const activeDesktopView = useNavigationStore(s => s.activeDesktopView);
+  const [isMobileLayout, setIsMobileLayout] = useState(() => window.matchMedia('(max-width: 767px)').matches);
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 767px)');
+    const update = () => setIsMobileLayout(query.matches);
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+  useEffect(() => observeInteractions(), []);
+  useEffect(() => {
+    const view = isMobileLayout ? (mobileTab === 'chats' ? 'chat' : mobileTab) : activeDesktopView;
+    setDiagnosticSurface(view);
+  }, [activeDesktopView, mobileTab, isMobileLayout]);
   const showAgents = activeDesktopView === 'agents';
   const setShowAgents = (show: boolean) => setActiveDesktopView(show ? 'agents' : 'chat');
   const [showAgentCreate, setShowAgentCreate] = useState(false);
@@ -787,7 +852,7 @@ function AppContent({
       <ConnectionStatus />
 
       {/* 桌面端布局 */}
-      <div className="hidden md:flex h-dvh">
+      {!isMobileLayout && <div className="flex h-dvh">
         <Sidebar
           collapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -837,7 +902,7 @@ function AppContent({
                 custom={desktopTransitionDirRef.current}
                 transition={reducedMotion ? reducedMotionTransition : viewTransition}
               >
-                <div className="w-full flex flex-col h-full">
+                <ConversationWriting groupId={currentGroup.id}>
                   <ChatHeader showGroupInfoButton={true} />
                   <ChatModelNotice group={currentGroup} />
                   <MessageList />
@@ -848,7 +913,7 @@ function AppContent({
                   ) : (
                     <MessageInput />
                   )}
-                </div>
+                </ConversationWriting>
               </motion.div>
             ) : (
               <motion.div
@@ -913,10 +978,10 @@ function AppContent({
             )}
           </AnimatePresence>
         </div>
-      </div>
+      </div>}
 
       {/* 移动端布局 */}
-      <div className="md:hidden relative h-full overflow-hidden" style={{ willChange: swipeProgress > 0 ? 'transform' : 'auto' }} {...swipeHandlers}>
+      {isMobileLayout && <div className="relative h-full overflow-hidden" style={{ willChange: swipeProgress > 0 ? 'transform' : 'auto' }} {...swipeHandlers}>
         <div
           className="absolute inset-0 pointer-events-none z-50"
           style={{
@@ -1021,6 +1086,7 @@ function AppContent({
               custom={mobileTransitionDirRef.current}
               transition={reducedMotion ? reducedMotionTransition : viewTransition}
             >
+              <ConversationWriting groupId={currentGroup.id}>
               <ChatHeader onBack={handleMobileBack} onToggleGroupInfo={() => navigateToView('groupInfo')} showGroupInfoButton={true} />
               <ChatModelNotice group={currentGroup} />
               <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
@@ -1033,6 +1099,7 @@ function AppContent({
               ) : (
                 <MessageInput />
               )}
+              </ConversationWriting>
             </motion.div>
           )}
 
@@ -1058,7 +1125,7 @@ function AppContent({
         {(mobileView === 'main' || mobileView === 'agents') && (
           <MobileTabBar activeTab={mobileTab} onTabChange={handleTabChange} />
         )}
-      </div>
+      </div>}
 
       {showAgentCreate && (
         <LazyBoundary>

@@ -1,5 +1,5 @@
 import { useModelsStore, requestError } from '../../stores/modelsStore';
-﻿import { useState, useRef, useEffect } from 'react';
+﻿import { useState, useRef } from 'react';
 import { useFocusTrap } from '../Common/useFocusTrap';
 import { useAgentsStore } from '../../stores/agentsStore';
 import { AgentQuestion, Agent } from '../../types';
@@ -24,11 +24,10 @@ function getAvatarColor(name: string): string {
 }
 
 export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
-  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isOpen);
   const generateQuestions = useAgentsStore((s) => s.generateQuestions);
   const createAgent = useAgentsStore((s) => s.createAgent);
   const creatingAgent = useAgentsStore((s) => s.creatingAgent);
-  const { showToast, Toast } = useToast();
+  const { showToast, dismissToast, Toast } = useToast();
 
   const catalog = useModelsStore(s => s.catalog);
   const [modelId, setModelId] = useState('');
@@ -45,6 +44,13 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
   const [creating, setCreating] = useState(false);
   const [createdAgent, setCreatedAgent] = useState<Agent | null>(null);
   const creatingRef = useRef(false);
+  const createFailureToastRef = useRef<number | null>(null);
+  const clearCreateFailureToast = () => {
+    if (createFailureToastRef.current !== null) {
+      dismissToast(createFailureToastRef.current);
+      createFailureToastRef.current = null;
+    }
+  };
   const avatarFileInputRef = useRef<HTMLInputElement>(null);
 
   const isStep1Valid = name.trim() && description.trim() && openingMessage.trim();
@@ -100,6 +106,7 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
   const handleCreate = async () => {
     if (creatingRef.current) return;
     creatingRef.current = true;
+    clearCreateFailureToast();
     let capabilities = {
       scheduled_tasks: false,
       web_search: false,
@@ -133,10 +140,11 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
         capabilities,
         avatarUrl: avatarFile || null,
       });
+      clearCreateFailureToast();
       setCreatedAgent(created);
     } catch (error: unknown) {
       const msg = requestError(error);
-      showToast({ message: msg, type: 'error' });
+      createFailureToastRef.current = showToast({ message: msg, type: 'error' });
       setStep(2);
     } finally {
       setCreating(false);
@@ -145,11 +153,14 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
   };
 
   const handleClose = () => {
-    if (step === 1 && (name || description || openingMessage)) {
+    if (creatingRef.current) return;
+    const hasDraft = Boolean(name || description || openingMessage || avatarFile || avatarPreview || modelId || !enableSuggestions || Object.values(answers).some(Boolean));
+    if (!createdAgent && hasDraft) {
       if (!window.confirm('放弃已填写的内容？')) return;
     }
     setStep(1);
     setName('');
+    setModelId('');
     setAvatarFile(null);
     setAvatarPreview(null);
     setDescription('');
@@ -163,19 +174,7 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
     onClose();
   };
 
-  // ESC键关闭弹窗（创建过程中禁用）
-  useEffect(() => {
-    if (!isOpen || creating) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        handleClose();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, creating, step, name, description, openingMessage]);
+  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isOpen, handleClose);
 
   if (!isOpen) return null;
 
@@ -203,6 +202,7 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
           </div>
           <button
             onClick={handleClose}
+            aria-label="关闭创建智能体"
             className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-bg-surface2 transition-colors"
             disabled={creating}
           >
@@ -354,15 +354,15 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
                   <div className="mt-3 space-y-2 w-full max-w-[280px]">
                     <div className="flex items-center gap-2 text-xs text-text-muted">
                       <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse flex-shrink-0" />
-                      <span>deepseek-v4-pro 正在分析需求，设计架构...</span>
+                      <span>正在根据你的说明创建配置...</span>
                     </div>
                     <div className="flex items-center gap-2 text-xs text-text-muted">
                       <span className="w-1.5 h-1.5 rounded-full bg-bg-surface2 flex-shrink-0" />
-                      <span>从系统全部AI中筛选最优模型组合...</span>
+                      <span>使用你选择的模型，未指定时使用默认模型。</span>
                     </div>
                     <div className="flex items-center gap-2 text-xs text-text-muted">
                       <span className="w-1.5 h-1.5 rounded-full bg-bg-surface2 flex-shrink-0" />
-                      <span>Qwen3.5-Flash 正在评审优化系统提示词...</span>
+                      <span>创建结果与提示词来源将在完成后显示。</span>
                     </div>
                   </div>
                 </div>
@@ -381,13 +381,13 @@ export function AgentCreateModal({ isOpen, onClose }: AgentCreateModalProps) {
                     </div>
                     <div>
                       <p className="text-sm font-semibold text-text-primary">{createdAgent.name}</p>
-                      <p className="text-xs text-text-muted">多AI协同创建完成</p>
+                      <p className="text-xs text-text-muted">智能体创建完成</p>
                     </div>
                   </div>
-                  {createdAgent.model_roles && createdAgent.model_roles.length > 0 && (
+                  {(Boolean(createdAgent.model_roles?.length) || Boolean(createdAgent.model_selection_reasoning)) && (
                     <div className="bg-bg-surface2 rounded-xl p-3 space-y-2">
-                      <p className="text-xs font-medium text-text-secondary">多AI协同筛选的模型团队：</p>
-                      {createdAgent.model_roles.map((role, i) => (
+                      {Boolean(createdAgent.model_roles?.length) && <p className="text-xs font-medium text-text-secondary">使用的模型：</p>}
+                      {createdAgent.model_roles?.map((role, i) => (
                         <div key={i} className="flex items-center gap-2 text-xs">
                           <span className="w-1.5 h-1.5 rounded-full bg-accent flex-shrink-0"></span>
                           <span className="text-text-primary font-medium">{role.modelId}</span>

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { LEGACY_AI_CONFIGS } from '../../config/legacyModels.js';
 import { AI_PERSONAS } from '../../config/personas.js';
-import { getUserDb, withWriteLock } from '../../models/db.js';
+import { getUserDb, withWriteLock, readCommittedUserDb } from '../../models/db.js';
 import { decryptStoredApiKey, encryptApiKeyForStorage } from '../../utils/apiConfigSecurity.js';
 import { getSafeAiRequestOptions } from '../../utils/safeExternalUrl.js';
 import { normalizeBaseUrl, normalizeEndpoint } from './endpoints.js';
@@ -86,7 +86,7 @@ export function capabilityFingerprint(model, provider, data = {}) {
   const connection = resolveProvider(provider, data);
   return createHash('sha256').update(JSON.stringify([
     model.model, model.providerId, model.contextWindow, model.maxTokens, model.ttsMode, model.ttsVoice,
-    model.tokenParameter, provider?.protocol, provider?.baseUrl,
+    model.tokenParameter, model.temperature, provider?.protocol, provider?.baseUrl,
     connection.source, connection.apiKey
   ])).digest('hex');
 }
@@ -140,8 +140,7 @@ export function publicCatalog(data) {
 
 export async function readCatalog(userId) {
   const db = await getUserDb(userId);
-  await db.read();
-  return publicCatalog(db.data);
+  return readCommittedUserDb(db, publicCatalog);
 }
 
 export async function saveCatalog(userId, input) {
@@ -206,25 +205,31 @@ export async function saveCatalog(userId, input) {
   });
 }
 
-export async function resolveModel(userId, modelId, capability = null, { allowUnverified = false } = {}) {
+export async function resolveModel(userId, modelId, capability = null, options = {}) {
   const db = await getUserDb(userId || 'default');
-  await db.read();
-  const catalog = getCatalogData(db.data);
+  return readCommittedUserDb(db, data => resolveModelSnapshot(data, modelId, capability, options));
+}
+
+// Pure resolution lets paid-effect admission use the same authoritative data
+// and CAS revision for configuration, idempotency and the intent checkpoint.
+// Do not insert an additional DB read between those decisions and their write.
+export function resolveModelSnapshot(data, modelId, capability = null, { allowUnverified = false } = {}) {
+  const catalog = getCatalogData(data);
   const model = catalog.models.find(m => m.id === modelId);
   if (!model) throw catalogError('模型不存在，请在模型中心重新选择', 404);
   const provider = catalog.providers.find(p => p.id === model.providerId);
   if (!model.enabled || !provider?.enabled) throw catalogError('模型或服务商已停用，请在模型中心启用', 409);
   if (capability && !model.capabilities.includes(capability)) throw catalogError(`所选模型不支持 ${capability}`);
-  const check = capability && db.data.modelCapabilityChecks?.[model.id]?.[capability];
+  const check = capability && data.modelCapabilityChecks?.[model.id]?.[capability];
   if (capability && !allowUnverified &&
-      (check?.status !== 'verified' || check.fingerprint !== capabilityFingerprint(model, provider, db.data))) {
+      (check?.status !== 'verified' || check.fingerprint !== capabilityFingerprint(model, provider, data))) {
     throw catalogError(`所选模型的 ${capability} 能力尚未通过当前连接的测试，请在模型中心测试`, 409);
   }
-  const secret = resolveProvider(provider, db.data);
+  const secret = resolveProvider(provider, data);
   if (!secret.ready) throw catalogError('请先在模型中心为这个服务商配置 API Key', 409);
   return {
     ...model, catalogRevision: catalog.revision,
-    capabilityFingerprint: capabilityFingerprint(model, provider, db.data),
+    capabilityFingerprint: capabilityFingerprint(model, provider, data),
     apiKey: secret.apiKey, protocol: provider.protocol, keyRequired: provider.keyRequired,
     endpoint: normalizeEndpoint(provider.baseUrl, provider.protocol), baseUrl: provider.baseUrl,
     params: { max_tokens: model.maxTokens, ...(model.temperature === null ? {} : { temperature: model.temperature }) }
@@ -241,9 +246,19 @@ export async function resolveProviderConnection(userId, providerId) {
 }
 
 export async function defaultModelId(userId, capability = 'chat') {
-  const catalog = await readCatalog(userId || 'default');
-  const preferred = catalog.models.find(m => m.id === catalog.defaults[capability] && m.ready && m.verifiedCapabilities.includes(capability));
-  const selected = preferred || catalog.models.find(m => m.ready && m.verifiedCapabilities.includes(capability));
+  const db = await getUserDb(userId || 'default');
+  return readCommittedUserDb(db, data => defaultModelIdSnapshot(data, capability));
+}
+
+// Admission must choose defaults from the same snapshot as its command ledger.
+export function defaultModelIdSnapshot(data, capability = 'chat') {
+  const catalog = publicCatalog(data);
+  const explicitId = catalog.defaults[capability];
+  const preferred = catalog.models.find(m => m.id === explicitId && m.ready && m.verifiedCapabilities.includes(capability));
+  if (explicitId && !preferred) {
+    throw catalogError(`你选择的默认 ${capability} 模型暂不可用或尚未通过测试。请重新测试或明确更改默认模型；不会自动改用其他服务商。`, 409);
+  }
+  const selected = explicitId ? preferred : catalog.models.find(m => m.ready && m.verifiedCapabilities.includes(capability));
   if (!selected) throw catalogError(`还没有经过测试的 ${capability} 模型，请在模型中心配置并测试，或明确选择模型`, 409);
   return selected.id;
 }

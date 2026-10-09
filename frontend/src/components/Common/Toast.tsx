@@ -64,7 +64,7 @@ function pushToast(message: string, type: ToastType, duration: number): number {
   return id;
 }
 
-function dismissToast(id: number) {
+export function dismissToast(id: number) {
   clearDismissTimer(id);
   toastQueue.setState((state) => ({ items: state.items.filter((t) => t.id !== id) }));
 }

@@ -1,3 +1,5 @@
+import { mockProviderDns } from './helpers/mockProviderDns.js';
+mockProviderDns(['api.xiaomimimo.com']);
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
@@ -99,10 +101,10 @@ test('TTS synthesis persists metadata and transcript is searchable', async () =>
     })).status, 409);
     validAudio = false;
     assert.equal((await request.post('/api/user/model-catalog/test').set('Cookie', cookies)
-      .send({ modelId: 'mimo_tts', capability: 'tts' })).status, 502);
+      .send({ clientRequestId: crypto.randomUUID(), modelId: 'mimo_tts', capability: 'tts' })).status, 502);
     validAudio = true;
     const probe = await request.post('/api/user/model-catalog/test').set('Cookie', cookies)
-      .send({ modelId: 'mimo_tts', capability: 'tts' });
+      .send({ clientRequestId: crypto.randomUUID(), modelId: 'mimo_tts', capability: 'tts' });
     assert.equal(probe.status, 200);
     assert.equal(probe.body.capability, 'tts');
     const callsBeforeMissingMessage = providerCalls;

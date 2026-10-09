@@ -3254,57 +3254,75 @@ paths:
   /api/user/model-catalog/test:
     post:
       operationId: testCatalogModel
-      summary: 调用保存的模型做一次连通性测试，可能计费
-      tags:
-        - Models
+      summary: 发起有持久请求号的能力测试（可能计费），重复请求不重发
+      description: >-
+        必须在 Idempotency-Key 或 clientRequestId 提供 UUID；两者同时存在必须相同。
+        测试只使用固定的合成输入。视觉测试最多发送两次请求，每次超时 20 秒，整体截止 60 秒。
+        浏览器停止等待不会取消已授权测试。相同请求号重放记录；同模型、能力及配置的 running/unknown 请求即使换号也返回原请求，别名号持久关联。
+        unknown 只允许查询核验，没有自动重试或清空入口；可能一直阻止同配置新测试。
+      tags: [Models]
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          description: 每次新测试意图的 UUID；中断后保留并查询，不能为了重试换号
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
+              required: [modelId]
               properties:
-                modelId:
-                  type: string
-                  maxLength: 80
-                capability:
-                  type: string
-                  enum: [chat, tts]
-                  default: chat
-              required:
-                - modelId
+                clientRequestId: { type: string, format: uuid }
+                modelId: { type: string, maxLength: 80 }
+                capability: { type: string, enum: [chat, vision, tts], default: chat }
+                expectedRevision: { type: integer, minimum: 0, description: 新准入必须匹配目录修订；同请求号重放必须保持原值 }
       responses:
-        "200":
-          description: 成功
+        '200':
+          description: 已完成或已完成记录的重放；只有 healthy=true 验证当前配置
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  healthy:
-                    type: boolean
-                  capability:
-                    type: string
-                    enum: [chat, tts]
-                  model:
-                    type: string
-                  responseTime:
-                    type: number
-                required:
-                  - healthy
-                  - capability
-                  - model
-                  - responseTime
-        "400":
-          description: 请求无效
-        "401":
-          description: 需要登录
-        "404":
-          description: 资源不属于当前用户或不存在
-        "409":
-          description: 配置版本冲突、任务运行中或模型被引用
-        "429":
-          description: 达到执行次数或请求限制
+              schema: { $ref: '#/components/schemas/ModelProbeReceipt' }
+        '202':
+          description: 仍在运行或结果未知；保留 requestId，仅查询，不自动重发
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelProbeReceipt' }
+        '400': { description: 请求号缺失、无效、头体不一致或参数无效 }
+        '401': { description: 需要登录 }
+        '404': { description: 模型不存在 }
+        '409':
+          description: 请求号用于不同模型/能力/版本条件、配置不可用或测试已过时；新准入版本不匹配返回 PROBE_CONFIG_CHANGED、possibleCharge=false 回执（未创建效果）
+        '429':
+          description: 每账号最多 10 次新测试/分钟、100 次/UTC日、2 次并发、2000 条效果或 10000 个请求号；旧记录不会自动淘汰
+        '502':
+          description: 已知测试失败，当前能力未验证；仍可能产生费用
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelProbeReceipt' }
+        '503': { description: 无法可靠读取或写入记录，禁止新付费调用；保留原请求号查询 }
+  /api/user/model-catalog/tests/{requestId}:
+    get:
+      operationId: getCatalogModelProbe
+      summary: 查询当前账号的能力测试效果（不会调用服务商）
+      tags: [Models]
+      parameters:
+        - in: path
+          name: requestId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: 当前持久记录（Cache-Control no-store）；running 超过截止时间后保守转为 unknown 或未发送的 failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ModelProbeReceipt' }
+        '400': { description: 请求号无效 }
+        '401': { description: 需要登录 }
+        '404': { description: 本账号没有此请求号 }
+        '503': { description: 记录不可可靠读取或写入；不能把查询失败当成可以重试 }
   /api/user/model-catalog/discover:
     post:
       operationId: discoverProviderModels
@@ -3348,6 +3366,13 @@ paths:
         "429":
           description: 达到执行次数或请求限制
   /api/tasks:
+    parameters:
+      - name: X-Expected-User-Id
+        in: header
+        required: false
+        description: 写操作提交前捕获的账号标识；与认证账号不符时返回 409 ACCOUNT_CHANGED，不改变任何任务
+        schema:
+          type: string
     get:
       operationId: listWorkspaceTasks
       summary: 读取当前用户的任务和最近执行结果
@@ -3374,6 +3399,14 @@ paths:
           description: 达到执行次数或请求限制
     post:
       operationId: createWorkspaceTask
+      description: 同账号内复用相同 UUID 和相同内容返回原任务；不同内容返回 409。任务删除后保留请求回执并返回 410，不会重新创建。
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            format: uuid
       summary: 创建待办或明确授权的主动任务
       tags:
         - Tasks
@@ -3398,9 +3431,18 @@ paths:
           description: 资源不属于当前用户或不存在
         "409":
           description: 配置版本冲突、任务运行中或模型被引用
+        "410":
+          description: 此请求创建的任务已删除
         "429":
           description: 达到执行次数或请求限制
   /api/tasks/{taskId}:
+    parameters:
+      - name: X-Expected-User-Id
+        in: header
+        required: false
+        description: 写操作提交前捕获的账号标识；与认证账号不符时返回 409 ACCOUNT_CHANGED，不改变任何任务
+        schema:
+          type: string
     patch:
       operationId: updateWorkspaceTask
       summary: 修改任务状态、暂停或停止执行
@@ -3449,8 +3491,16 @@ paths:
         "409":
           description: 请先停止运行中的任务
   /api/tasks/{taskId}/run:
+    parameters:
+      - name: X-Expected-User-Id
+        in: header
+        required: false
+        description: 写操作提交前捕获的账号标识；与认证账号不符时返回 409 ACCOUNT_CHANGED，不改变任何任务
+        schema:
+          type: string
     post:
       operationId: runWorkspaceTask
+      description: 每次新生成意图使用新 UUID；同一任务复用请求号只返回任务当前状态，不再次调用模型。网络断开、5xx 或发送后停止可能返回 outcome_unknown，须先核验才能显式重试。此保证限于当前单进程用户存储，未证明多 Worker 并发。
       summary: 生成一次待验收的 AI 草稿并等待结果，可能计费
       tags:
         - Tasks
@@ -3460,6 +3510,23 @@ paths:
           required: true
           schema:
             type: string
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                client_request_id:
+                  type: string
+                  format: uuid
+              additionalProperties: false
       responses:
         "200":
           description: 成功
@@ -3478,6 +3545,13 @@ paths:
         "429":
           description: 达到执行次数或请求限制
   /api/tasks/{taskId}/accept:
+    parameters:
+      - name: X-Expected-User-Id
+        in: header
+        required: false
+        description: 写操作提交前捕获的账号标识；与认证账号不符时返回 409 ACCOUNT_CHANGED，不改变任何任务
+        schema:
+          type: string
     post:
       operationId: acceptWorkspaceTaskResult
       summary: 当前用户验收本次生成的草稿；来源变化时拒绝
@@ -3515,9 +3589,16 @@ paths:
         "409":
           description: 成果不是当前运行的草稿或来源已变化
   /api/tasks/{taskId}/resolve-unknown:
+    parameters:
+      - name: X-Expected-User-Id
+        in: header
+        required: false
+        description: 写操作提交前捕获的账号标识；与认证账号不符时返回 409 ACCOUNT_CHANGED，不改变任何任务
+        schema:
+          type: string
     post:
       operationId: resolveUnknownWorkspaceTaskRun
-      summary: 人工处理重启后结果未知的运行；允许重试前须确认重复调用与费用风险
+      summary: 人工处理结果未知的运行；允许重试前须确认重复调用与费用风险
       tags:
         - Tasks
       parameters:
@@ -3535,7 +3616,11 @@ paths:
               properties:
                 decision:
                   enum: [allow_retry, abandon]
-              required: [decision]
+                run_id:
+                  type: string
+                  format: uuid
+                  description: 必须传入用户检查时的待核验运行标识，拒绝将旧决定应用到新的运行
+              required: [decision, run_id]
               additionalProperties: false
       responses:
         "200":
@@ -3722,6 +3807,342 @@ paths:
                 runId: { type: string }
       responses: *personalRunTransitionResponses
 
+  /api/tasks/commands/{requestId}:
+    get:
+      operationId: getTaskCreationReceipt
+      summary: 按原创建请求核验保存/删除回执，无任务标题或正文的命令号可独立恢复
+      tags:
+        - Tasks
+      parameters:
+        - &a1
+          name: X-Expected-User-Id
+          in: header
+          required: false
+          description: 请求发起时绑定的账号；与会话不符时返回409 ACCOUNT_CHANGED，读写均拒绝
+          schema: &a2
+            type: string
+        - name: requestId
+          in: path
+          required: true
+          schema: &a3
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskCreateCommandReceipt"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+  /api/tasks/commands/{requestId}/close:
+    post:
+      operationId: closeTaskCreationCommand
+      summary: 核对并结束原创建请求；已提交返回原稿，未提交才永久封存同一UUID
+      tags: [Tasks]
+      parameters:
+        - *a1
+        - name: requestId
+          in: path
+          required: true
+          schema: *a3
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        "200":
+          description: 仅succeeded/cancelled是权威终态；不删除已存文稿、不停止AI或撤销费用；Cache-Control:no-store
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskCreateCommandReceipt" }
+        "400": { description: 严格UUID/空正文约束不符 }
+        "409": { description: 账号变化或并发CAS冲突；保留原UUID继续核验，不能推断已封存 }
+        "429": { description: 账号创建回执达到10000条，不清除旧回执 }
+        "500": { description: 存储写入未确认；保留原UUID继续核验 }
+        "503": { description: 存储或来源读取不确定；保留原UUID继续核验 }
+  /api/tasks/{taskId}/result:
+    get:
+      operationId: getTaskResultDocument
+      summary: 打开同一任务的可编辑文稿、不可变版本和当前来源变化
+      tags:
+        - Tasks
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResultDocument"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+  /api/tasks/{taskId}/result/commands/{requestId}:
+    get:
+      operationId: getTaskResultCommandReceipt
+      summary: 核验原保存/确认/采用/要求更新命令；已删任务回执返回document:null
+      tags:
+        - Tasks
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+        - name: requestId
+          in: path
+          required: true
+          schema: *a3
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResultMutationResponse"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+  /api/tasks/{taskId}/result/commands/{requestId}/close:
+    post:
+      operationId: closeTaskResultCommand
+      summary: 核对并结束原文稿命令；已提交返回原版本，未提交才永久封存迟到写入
+      tags: [Tasks]
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+        - name: requestId
+          in: path
+          required: true
+          schema: *a3
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operation]
+              properties:
+                operation: { enum: [save, accept, adopt, brief] }
+      responses:
+        "200":
+          description: 仅匹配UUID/任务/操作的succeeded或cancelled释放待核验记录；正文遵守当前来源撤回边界
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskResultMutationResponse" }
+        "400": { description: UUID或操作不符合严格字段约束 }
+        "409": { description: 账号/操作绑定冲突或并发写入；保留原UUID核验 }
+        "429": { description: 账号文稿命令达到10000条，不清除旧回执 }
+        "503": { description: 存储或来源状态未知；保留原UUID，不宣告封存成功 }
+  /api/tasks/{taskId}/result/versions:
+    post:
+      operationId: saveTaskResultVersion
+      summary: 保存人工修订版本；明确reviewed_source_hash才重新绑定已核对来源
+      tags:
+        - Tasks
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: *a3
+          description: 与client_request_id一致的原命令号；同号不同输入拒绝
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResultMutationResponse"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaveTaskResultInput"
+  /api/tasks/{taskId}/result/accept:
+    post:
+      operationId: acceptTaskResultVersion
+      summary: 确认当前指定版本及正文hash；来源改变或运行未知时拒绝
+      tags:
+        - Tasks
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: *a3
+          description: 与client_request_id一致的原命令号；同号不同输入拒绝
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResultMutationResponse"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptTaskResultVersionInput"
+  /api/tasks/{taskId}/result/adopt:
+    post:
+      operationId: adoptTaskResultVersion
+      summary: 明确将候选/历史版本作为当前稿，保留人工版及旧确认记录
+      tags:
+        - Tasks
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: *a3
+          description: 与client_request_id一致的原命令号；同号不同输入拒绝
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResultMutationResponse"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdoptTaskResultVersionInput"
+  /api/tasks/{taskId}/result/brief:
+    post:
+      operationId: rebaseTaskResultBrief
+      summary: 明确更新本稿写作要求和原消息引用；不会替换正文或自动调用模型
+      tags:
+        - Tasks
+      parameters:
+        - *a1
+        - name: taskId
+          in: path
+          required: true
+          schema: *a2
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: *a3
+          description: 与client_request_id一致的原命令号；同号不同输入拒绝
+      responses:
+        "200":
+          description: 当前账号的权威文稿或最小回执；Cache-Control:no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskResultMutationResponse"
+        "400":
+          description: 请求不符合严格字段/UUID/正文约束，或头与正文请求号不同
+        "404":
+          description: 文稿/原请求不存在或不属于当前账号；无回执不等于可换UUID盲目重交
+        "409":
+          description: ACCOUNT_CHANGED、RESULT_REVISION_CONFLICT、RESULT_IDEMPOTENCY_CONFLICT、RESULT_SOURCE_CHANGED或RESULT_RUN_PENDING；保留人工缓冲，核验指定版本
+        "410":
+          description: RESULT_SOURCE_BLOCKED：来源撤回或不可读，不得重用隐藏正文
+        "429":
+          description: 100个不可变正文版本或10000个账号回执写入限额；不会覆盖旧版本或删除未知回执
+        "503":
+          description: RESULT_STORAGE_UNCERTAIN或来源核验暂不可用；保存原UUID查询，不自动再提交
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RebaseTaskBriefInput"
+
 components:
   securitySchemes:
     cookieAuth:
@@ -3827,6 +4248,396 @@ components:
           schema:
             $ref: '#/components/schemas/ApiError'
   schemas:
+    TaskResultSourceRef:
+      type: object
+      additionalProperties: false
+      properties:
+        id: &a1
+          type: string
+        revision: &a2
+          anyOf:
+            - &a6
+              type: integer
+              minimum: 0
+            - type: "null"
+        edited_at: &a3
+          anyOf:
+            - type: string
+              format: date-time
+            - type: "null"
+      required:
+        - id
+        - revision
+        - edited_at
+    TaskResultSourceMessage:
+      type: object
+      additionalProperties: false
+      properties:
+        id: *a1
+        revision: *a2
+        edited_at: *a3
+        sender_type: *a1
+        created_at: *a1
+        content: *a1
+        change:
+          enum:
+            - unchanged
+            - changed
+            - added
+      required:
+        - id
+        - revision
+        - edited_at
+        - sender_type
+        - created_at
+        - content
+        - change
+    TaskResultVersion:
+      type: object
+      additionalProperties: false
+      properties:
+        id: &a4
+          type: string
+          format: uuid
+        sequence:
+          type: integer
+          minimum: 1
+        kind:
+          enum:
+            - generated
+            - manual
+        parent_version_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        run_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        content: *a1
+        content_hash: &a5
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        created_at: *a1
+        source_hash:
+          anyOf:
+            - *a5
+            - type: "null"
+        source_messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskResultSourceRef"
+        source_status:
+          enum:
+            - current
+            - changed
+            - blocked
+        content_hidden:
+          type: boolean
+      required:
+        - id
+        - sequence
+        - kind
+        - parent_version_id
+        - run_id
+        - content
+        - content_hash
+        - created_at
+        - source_hash
+        - source_messages
+        - source_status
+        - content_hidden
+    TaskResultDocument:
+      type: object
+      additionalProperties: false
+      properties:
+        task_id: *a4
+        title: *a1
+        group_id:
+          anyOf:
+            - *a1
+            - type: "null"
+        revision: *a6
+        head_version_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        accepted_version_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        accepted_content_hash:
+          anyOf:
+            - *a5
+            - type: "null"
+        accepted_at:
+          anyOf:
+            - *a1
+            - type: "null"
+        versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskResultVersion"
+        source:
+          type: object
+          additionalProperties: false
+          properties:
+            status:
+              enum:
+                - current
+                - changed
+                - blocked
+            hash:
+              anyOf:
+                - *a5
+                - type: "null"
+            messages:
+              type: array
+              items:
+                $ref: "#/components/schemas/TaskResultSourceMessage"
+            missing_message_ids:
+              type: array
+              items: *a1
+            message:
+              anyOf:
+                - *a1
+                - type: "null"
+          required:
+            - status
+            - hash
+            - messages
+            - missing_message_ids
+            - message
+        generation:
+          type: object
+          additionalProperties: false
+          properties:
+            status:
+              enum:
+                - pending
+                - running
+                - needs_review
+                - completed
+                - failed
+                - cancelled
+                - outcome_unknown
+            run_id:
+              anyOf:
+                - *a4
+                - type: "null"
+            source_input_stale:
+              type: boolean
+          required:
+            - status
+            - run_id
+            - source_input_stale
+      required:
+        - task_id
+        - title
+        - group_id
+        - revision
+        - head_version_id
+        - accepted_version_id
+        - accepted_content_hash
+        - accepted_at
+        - versions
+        - source
+        - generation
+    TaskResultCommandReceipt:
+      type: object
+      additionalProperties: false
+      oneOf:
+        - properties:
+            status: { const: succeeded }
+            committed_revision: { type: integer, minimum: 0 }
+            committed_at: { type: string }
+            closed_at: false
+        - required: [closed_at]
+          properties:
+            status: { const: cancelled }
+            version_id: { type: "null" }
+            committed_revision: { type: "null" }
+            committed_at: { type: "null" }
+      properties:
+        id: *a4
+        operation:
+          enum:
+            - save
+            - accept
+            - adopt
+            - brief
+        task_id: *a4
+        version_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        committed_revision:
+          anyOf:
+            - *a6
+            - type: "null"
+        committed_at:
+          anyOf:
+            - *a1
+            - type: "null"
+        status:
+          enum: [succeeded, cancelled]
+        closed_at:
+          type: string
+          format: date-time
+          description: 仅cancelled时存在；此时间表示原命令封存，不是正文提交
+      required:
+        - id
+        - operation
+        - task_id
+        - version_id
+        - committed_revision
+        - committed_at
+        - status
+    TaskResultMutationResponse:
+      type: object
+      additionalProperties: false
+      properties:
+        receipt:
+          $ref: "#/components/schemas/TaskResultCommandReceipt"
+        document:
+          anyOf:
+            - $ref: "#/components/schemas/TaskResultDocument"
+            - type: "null"
+        task_deleted:
+          type: boolean
+      required:
+        - receipt
+        - document
+    TaskCreateCommandReceipt:
+      type: object
+      additionalProperties: false
+      oneOf:
+        - properties:
+            status: { const: succeeded }
+            task_id: { type: string, format: uuid }
+            closed_at: false
+        - required: [closed_at]
+          properties:
+            status: { const: cancelled }
+            task_id: { type: "null" }
+            task: { type: "null" }
+            task_deleted: { const: false }
+      properties:
+        status:
+          enum: [succeeded, cancelled]
+        operation:
+          const: create
+        client_request_id: *a4
+        task_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        closed_at:
+          type: string
+          format: date-time
+        task_deleted:
+          type: boolean
+        task:
+          anyOf:
+            - $ref: "#/components/schemas/WorkspaceTask"
+            - type: "null"
+      required:
+        - status
+        - operation
+        - client_request_id
+        - task_id
+        - task_deleted
+        - task
+    SaveTaskResultInput:
+      type: object
+      additionalProperties: false
+      properties:
+        client_request_id: *a4
+        expected_revision: *a6
+        base_version_id:
+          anyOf:
+            - *a4
+            - type: "null"
+        content:
+          type: string
+          minLength: 1
+          maxLength: 64000
+          description: 精确保留人工正文，包括首尾空白；正文须含非空白字符
+        reviewed_source_hash:
+          anyOf:
+            - *a5
+            - type: "null"
+      required:
+        - client_request_id
+        - expected_revision
+        - base_version_id
+        - content
+    AcceptTaskResultVersionInput:
+      type: object
+      additionalProperties: false
+      properties:
+        client_request_id: *a4
+        expected_revision: *a6
+        version_id: *a4
+        content_hash: *a5
+        source_hash:
+          anyOf:
+            - *a5
+            - type: "null"
+      required:
+        - client_request_id
+        - expected_revision
+        - version_id
+        - content_hash
+        - source_hash
+    AdoptTaskResultVersionInput:
+      type: object
+      additionalProperties: false
+      properties:
+        client_request_id: *a4
+        expected_revision: *a6
+        version_id: *a4
+      required:
+        - client_request_id
+        - expected_revision
+        - version_id
+    RebaseTaskBriefInput:
+      type: object
+      additionalProperties: false
+      properties:
+        client_request_id: *a4
+        expected_revision: *a6
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 12000
+        source_hash:
+          anyOf:
+            - *a5
+            - type: "null"
+      required:
+        - client_request_id
+        - expected_revision
+        - prompt
+        - source_hash
+    ModelProbeReceipt:
+      type: object
+      additionalProperties: false
+      required: [requestId, modelId, capability, status, healthy, stale, possibleCharge, replayed]
+      properties:
+        requestId: { type: string, format: uuid, description: 原请求的规范 UUID，别名也返回此值 }
+        modelId: { type: string }
+        capability: { type: string, enum: [chat, vision, tts] }
+        status: { type: string, enum: [running, succeeded, failed, unknown] }
+        healthy: { type: boolean, description: 仅当成功回执仍验证当前配置时为 true }
+        stale: { type: boolean, description: 配置或验证结果已过时；历史成功不能替代当前能力测试 }
+        possibleCharge: { type: boolean, description: 可能已发送/计费，不是供应商账单或准确费用回执 }
+        replayed: { type: boolean }
+        responseTime: { type: integer, minimum: 0 }
+        code:
+          type: string
+          enum: [PROBE_UNKNOWN, PROBE_FAILED, PROBE_REJECTED, PROBE_NOT_SENT, PROBE_STALE, PROBE_CONFIG_CHANGED, PROBE_STORAGE_UNCERTAIN]
+        error: { type: string, description: 固定脱敏提示，不含供应商原始错误或凭据 }
     PersonalGoalInput:
       type: object
       required: [outcome, checks]
@@ -4871,6 +5682,10 @@ components:
     WorkspaceTaskInput:
       type: object
       properties:
+        client_request_id:
+          type: string
+          format: uuid
+          description: 创建意图的 UUID，也可通过 Idempotency-Key 请求头传入；两者同时存在时必须相同
         title:
           type: string
           maxLength: 150
@@ -4894,6 +5709,15 @@ components:
             - string
             - "null"
           maxLength: 100
+        source_message_id:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 100
+          description: 从消息创建任务时传入；必须与 group_id 同属当前账号
+        source_message_edited_at:
+          type: [string, "null"]
+          format: date-time
+          description: 选择来源消息时的 edited_at，未编辑时显式传 null；来源已更新则创建被拒绝
         run_at:
           type:
             - string
@@ -4915,6 +5739,10 @@ components:
     WorkspaceTask:
       type: object
       properties:
+        client_request_id:
+          type: string
+          format: uuid
+          description: 创建意图的 UUID，也可通过 Idempotency-Key 请求头传入；两者同时存在时必须相同
         title:
           type: string
           maxLength: 150
@@ -4938,6 +5766,15 @@ components:
             - string
             - "null"
           maxLength: 100
+        source_message_id:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 100
+          description: 从消息创建任务时传入；必须与 group_id 同属当前账号
+        source_message_edited_at:
+          type: [string, "null"]
+          format: date-time
+          description: 选择来源消息时的 edited_at，未编辑时显式传 null；来源已更新则创建被拒绝
         run_at: &a1
           type:
             - string
@@ -4965,14 +5802,38 @@ components:
         run_id:
           type: string
           description: 当前或最近一次运行标识
+        run_request_id:
+          type: [string, "null"]
+          format: uuid
+        retry_of_run_id:
+          type: [string, "null"]
+          format: uuid
+        result_run_id:
+          type: [string, "null"]
+          format: uuid
+        dispatch_status:
+          enum: [not_sent, sent_or_unknown]
         accepted_run_id:
-          type: string
-          description: 最近经用户明确验收的运行标识
+          type: [string, "null"]
+          description: 最近经用户明确验收的生成运行；人工正文确认时为null，请使用result_accepted_version_id
         result_pending_review:
           type: boolean
+        result_editor_available:
+          type: boolean
+        result_head_version_id:
+          type: [string, "null"]
+          format: uuid
+          description: 当前正文版本，可能是人工修订；与已确认版本相同才属于当前已确认文稿
+        result_accepted_version_id:
+          type: [string, "null"]
+          format: uuid
+          description: 最近明确确认的精确正文版本，不随新保存或新候选自动更新
+        source_input_stale:
+          type: boolean
+          description: 再次生成所用原消息已变化；隐藏旧复制输入并要求显式更新用途，不等同于当前人工正文来源过期
         source_stale:
           type: boolean
-          description: 当前关联会话与产出此结果时的来源快照不同；读取时计算
+          description: 当前正文版本（包括人工稿）的来源快照与可读材料不同；与再次生成用途的source_input_stale独立
         result:
           type: string
         error:
@@ -4988,6 +5849,42 @@ components:
             properties:
               id:
                 type: string
+              client_request_id:
+                type: [string, "null"]
+                format: uuid
+              retry_of_run_id:
+                type: [string, "null"]
+                format: uuid
+              started_at: *a1
+              source_stale:
+                type: boolean
+                description: 独立检查此运行的来源；新结果不会使旧失效草稿重新可读
+              source_messages:
+                type: array
+                description: 来源快照的消息标识与修订；实际上下文省略情况见 context_audit
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    revision:
+                      type: [integer, "null"]
+                    edited_at:
+                      type: [string, "null"]
+                      format: date-time
+                  required: [id, revision, edited_at]
+              dispatch_status:
+                enum: [not_sent, sent_or_unknown]
+              context_audit:
+                type: [object, "null"]
+              usage:
+                type: [object, "null"]
+              usage_status:
+                enum: [provider_reported, unknown]
+              cost:
+                type: "null"
+              resolution:
+                enum: [allow_retry, abandon]
               finished_at: *a1
               status:
                 enum:
@@ -4995,6 +5892,8 @@ components:
                   - accepted
                   - completed
                   - failed
+                  - cancelled
+                  - outcome_unknown
               result:
                 type: string
               error:
@@ -5036,6 +5935,14 @@ components:
         status:
           enum:
             - cancelled
+        cancel_request_id:
+          type: string
+          format: uuid
+          description: 精确停止该生成请求；即使停止先于运行请求到达，也会保留拒绝后续派发的记录
+        run_id:
+          type: string
+          format: uuid
+          description: 停止已接收运行时的标识；停止时必须提供此字段或 cancel_request_id
         auto_run:
           type: boolean
         run_at:

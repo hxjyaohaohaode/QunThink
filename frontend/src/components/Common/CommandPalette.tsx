@@ -21,7 +21,7 @@ export function CommandPalette() {
   const [activeIndex, setActiveIndex] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const trapRef = useFocusTrap<HTMLDivElement>(open);
+  const trapRef = useFocusTrap<HTMLDivElement>(open, () => setOpen(false));
 
   const commands = useMemo<CommandItem[]>(() => {
     const items: CommandItem[] = [

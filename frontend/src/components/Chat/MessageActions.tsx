@@ -2,13 +2,14 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useMessagesStore } from '../../stores/messagesStore';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { useUIStore } from '../../stores/uiStore';
-import { api } from '../../services/api';
 import { useToast } from '../Common';
-import { useTasksStore } from '../../stores/tasksStore';
-import { useNavigationStore } from '../../stores/navigationStore';
+import { useTaskResultsStore } from '../../stores/taskResultsStore';
 
 interface MessageActionsProps {
   messageId: string;
+  editedAt?: string | null;
+  onSynthesize?: () => void;
+  ttsLoading?: boolean;
   isUser: boolean;
   content: string;
   likes?: string[];
@@ -26,6 +27,8 @@ interface MessageActionsProps {
 
 export const MessageActions = React.memo(function MessageActions({
   messageId,
+  onSynthesize,
+  ttsLoading,
   isUser,
   content,
   likes = [],
@@ -81,11 +84,7 @@ export const MessageActions = React.memo(function MessageActions({
         setIsLikeAnimating(true);
         likeAnimTimerRef.current = setTimeout(() => setIsLikeAnimating(false), 300);
         likeMessage(messageId, currentGroup.id);
-        try {
-          await api.performAutoLike(messageId, currentGroup.id);
-        } catch (e) {
-          // Silently fail
-        }
+
       }
     } finally {
       likeProcessingRef.current = false;
@@ -129,17 +128,22 @@ export const MessageActions = React.memo(function MessageActions({
         ta.style.opacity = '0';
         document.body.appendChild(ta);
         ta.select();
-        document.execCommand('copy');
+        const copied = document.execCommand('copy');
         document.body.removeChild(ta);
+        if (!copied) throw new Error();
       }
       showToast({ message: '已复制到剪贴板', type: 'success' });
     } catch {
-      showToast({ message: '复制失败', type: 'error' });
+      showToast({ message: '浏览器未允许自动复制，请选择消息文字后使用系统复制菜单', type: 'error' });
     }
   }, [content, showToast]);
 
   return (
-    <div className={`flex items-center gap-0.5 md:gap-1 bg-bg-surface rounded-lg shadow-sm border border-border p-0.5 md:p-1 md:opacity-0 md:group-hover:opacity-100 transition-opacity`}>
+    <div className="message-contextual-actions">
+      <button className="message-contextual-primary" onClick={handleReply} aria-pressed={isReplying}>{isReplying ? '取消引用' : '回复'}</button>
+      <button className="message-contextual-primary" onClick={() => { if (currentGroup) useTaskResultsStore.getState().openPanel(currentGroup.id, undefined, messageId); }}>写成文稿 ↗</button>
+      <details className="message-actions-more"><summary aria-label="更多消息操作">更多</summary><div className="message-actions-menu">
+      {onSynthesize && <button className="message-contextual-primary" disabled={ttsLoading} onClick={onSynthesize}>{ttsLoading ? '语音生成中…' : '生成语音'}</button>}
       <ActionButton
         onClick={handleLike}
         active={hasLiked}
@@ -158,7 +162,7 @@ export const MessageActions = React.memo(function MessageActions({
         active={hasDisliked}
         activeColor="text-blue-500"
         title="点踩"
-        className="hidden md:inline-flex"
+
         count={dislikeCount > 0 ? dislikeCount : undefined}
       >
         <svg className="w-4 h-4 md:w-3.5 md:h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
@@ -178,18 +182,7 @@ export const MessageActions = React.memo(function MessageActions({
         </svg>
       </ActionButton>
 
-      <ActionButton title="创建任务" onClick={() => {
-        useTasksStore.getState().setDraft({ prompt: content, groupId: currentGroup?.id || null });
-        useNavigationStore.getState().setActiveDesktopView('workspace');
-        useNavigationStore.getState().setActiveMobileTab('workspace');
-      }}><span className="text-sm">↗</span></ActionButton>
-      <ActionButton onClick={handleReply} title={isReplying ? '取消引用' : '回复引用'} active={isReplying} activeColor="text-accent">
-        <svg className="w-4 h-4 md:w-3.5 md:h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M9 15L3 9m0 0l6-6M3 9h12a6 6 0 010 12h-3" />
-        </svg>
-      </ActionButton>
-
-      <ActionButton onClick={handleCopy} title="复制" className="hidden md:inline-flex">
+      <ActionButton onClick={handleCopy} title="复制" >
         <svg className="w-4 h-4 md:w-3.5 md:h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
           <path strokeLinecap="round" strokeLinejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9.75a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184" />
         </svg>
@@ -210,7 +203,7 @@ export const MessageActions = React.memo(function MessageActions({
           </svg>
         </ActionButton>
       )}
-    </div>
+    </div></details></div>
   );
 });
 
@@ -240,6 +233,7 @@ function ActionButton({ onClick, children, active, activeColor, title, danger, i
         ${className}
       `}
       title={title}
+      aria-label={title}
     >
       <span className="text-base md:text-sm inline-flex items-center gap-0.5">
         {children}

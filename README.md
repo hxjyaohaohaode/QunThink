@@ -45,6 +45,8 @@ node scripts/migrate-foundations.mjs --schema qunthink_core
 
 命令会校验迁移文件的 SHA-256，重复运行不会重建表。迁移完成后，可在后端设置 `QUNTHINK_FOUNDATIONS_RUNTIME_URL` 连接该数据库，启用会话认证的 `/api/goals` 个人目标 API；它从当前登录用户推导个人空间，提供目标创建、状态与验收记录。用户可在目标详情明确授权 `internal.goal_brief.v1` 生成零费用的确定性目标简报，API 为 `POST /api/goals/:goalId/briefs` 和 `GET /api/goals/:goalId/runs/:runId/brief`。简报正文、来源、哈希、Artifact、Step 与事件同事务保存；它仍须由用户核对，**不能充当目标完成验收证据**。设置 `QUNTHINK_GOAL_BRIEF_SCHEDULER=1` 可开启仅扫描此类已授权运行的恢复调度，默认关闭；还可配置 `QUNTHINK_GOAL_BRIEF_POLL_MS`、`QUNTHINK_GOAL_BRIEF_USERS_PER_TICK` 和 `QUNTHINK_GOAL_BRIEF_RUNS_PER_USER`，容量尚未压测。响应中的 `executionAvailable: false` 表示通用 Agent、模型及外部工具执行尚未接通。原有 `internal.goal_preflight.v1` 只记录目标修订核对，不生成成果。现有工作台 Task 和其他 Web API 仍使用原用户存储，尚未与目标运行表联动。生产切换还需可信身份映射、受限数据库角色、旧数据核对、回退演练、通用 Worker/工具接入及更多业务接口迁移。
 
+模型能力测试也要求每次新意图的 UUID（`Idempotency-Key` 或 `clientRequestId`），通过 `/api/user/model-catalog/tests/:requestId` 查询当前账号的结果。同一请求号不会再次调用；同模型、能力及配置的运行中或未知请求即使换号也会返回原请求号。测试开始前撤下旧能力验证，视觉需两次正确识别；超时、断网、重启后无可靠回执时为 `unknown`，不能自动重试。记录和次数有硬上限，不会通过淘汰旧请求号释放付费重试入口。当前未知结果仅能查询，没有服务商费用核对或安全重发入口；持久存储、并发与恢复边界见 [模型测试恢复说明](docs/model-probe-recovery.md)。
+
 语音合成要求客户端为每次意图生成 UUID `clientRequestId`。同一请求号重复提交不会再次调用供应商；同账号、同输入的未核验请求即使换了请求号，也会返回原请求号与状态。超时或结果无法确定时返回 `unknown`，可用 `/api/tts/effects/:requestId` 查询本账号的记录。该机制尚无供应商侧回执核验、未知请求的安全重发入口和准确费用结算；遇到未知结果时应先核对服务商账单。
 
 工作台的“记忆记录”可保存、查看、更正和遗忘当前账号的个人笔记。消息摘录带来源群及消息版本，标为未经核验；来源消息或群被修改、删除时，关联摘录会撤销，正文从当前用户库清除。群资料页与会话检索只使用该群有效来源的摘录，个人笔记不会自动进入群聊上下文。本地 LowDB 记忆在删除前同步写入独立账本；即使只恢复旧用户 JSON，读取也会先核对账本并拒绝复活。账本损坏时受账本保护的读取返回 503；删除后主库写入失败可能使密文暂留在磁盘，但 API 会拒绝读取并在恢复后清除。首次启动仅在本地认证库和用户库均为空时自动初始化删除注册簿；既有安装缺注册簿需审计迁移，受账本保护的读取和删除会返回 503。新注册账号先建立账本再开放会话；未登记的旧账号不会因记忆记录为空而自动创建账本。部署时须将 `MEMORY_DELETION_DIR` 配到不随用户 JSON 旧快照回滚的持久绝对路径，并同时备份、保护该账本；整个数据卷与账本一起回滚仍不安全。当前账本只支持本地单进程，MongoDB/PostgreSQL 模式下记忆接口返回 503，待实现各自的事务性删除账本。此处还没有双时间事实、跨产物纠错传播、共享团队权限或自动语义事实确认；旧版记忆性能、配置及自动保存接口目前明确返回 501。
@@ -56,6 +58,10 @@ node scripts/migrate-foundations.mjs --schema qunthink_core
 后端设置 `NODE_ENV=production`、`AUTH_MODE=session`、稳定的 32 字节 Base64 `ENCRYPTION_KEY`、持久化数据存储以及正确的 `CORS_ORIGINS`。注册/登录链路依赖短信服务配置；若未配置，应先完成认证部署方案再开放公网。前端设置 `VITE_AUTH_MODE=session` 与实际后端地址 `VITE_BACKEND_URL`。Render、Docker、Netlify、Vercel 的模板仍需按实际域名、认证及持久化存储检查；不能仅用默认占位符直接上线。
 
 推送 `main` 会运行 GitHub Actions：后端测试使用临时 PostgreSQL，前端运行测试与构建，随后构建两个 Docker 镜像。仓库中的 Render API 部署工作流只在该次 `main` CI 成功且提交仍是最新版本时触发；`render.yaml` 将 Blueprint 服务的自动部署设置为检查通过后触发。已有 Render 服务的实际自动部署设置、数据迁移与运行状态须在服务端核实；GitHub CI 通过不代表生产部署成功。
+
+## 2026-10 工作台与任务可靠性
+
+本次改进覆盖任务请求幂等、取消/未知结果核验、消息来源修订、跨标签账号保护、任务草稿连续性和本地脱敏诊断。品牌与登录动画设有字节校验。真实实现、测试与未完成边界见 [本次迭代记录](docs/optimization-2026-10.md)。
 
 ## 验证
 
@@ -71,6 +77,7 @@ npm audit --omit=dev --registry=https://registry.npmjs.org
 
 cd ..
 node scripts/validate-openapi.mjs
+node scripts/verify-brand.mjs
 ```
 
 真实 PostgreSQL 专项测试需另行设置隔离库的 `QUNTHINK_TEST_PG_URL`。当前 Windows Node v24.15 的 `node --test` 跨文件 IPC 偶发反序列化失败；`npm test` 将每个测试文件放在独立进程执行，并核对全部退出码。隔离真实 PostgreSQL 下本轮为 136/136、37/37 文件、0 跳过；这不证明多 Worker 生产竞争或 100 人团队容量。

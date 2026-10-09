@@ -1,4 +1,4 @@
-import { clearCurrentUserCache } from '../../utils/privateCache';
+import { useLocalCacheClear } from '../../hooks/useLocalCacheClear';
 ﻿import { useState, useEffect } from 'react';
 import { useFocusTrap } from '../Common/useFocusTrap';
 import { useThemeStore } from '../../stores/themeStore';
@@ -8,7 +8,7 @@ import { useProfileStore } from '../../stores/profileStore';
 import { AIPersonaEditor } from './AIPersonaEditor';
 import { UserProfileEditor } from './UserProfileEditor';
 import { FontSizeSelector } from './FontSizeToggle';
-import { useConfirm, useToast, ErrorBoundary } from '../Common';
+import { useToast, ErrorBoundary } from '../Common';
 import { ModelCenter } from './ModelCenter';
 import { useModelsStore, useChatModelIds } from '../../stores/modelsStore';
 import { useModalAnimation } from '../../hooks/useModalAnimation';
@@ -31,7 +31,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
   const personasLoading = usePersonasStore((s) => s.loading);
   const userProfile = useProfileStore(state => state.profile);
   const fetchProfile = useProfileStore(state => state.fetchProfile);
-  const { confirm, ConfirmModal } = useConfirm();
+  const { clear: handleClearData, clearing: clearingCache, ConfirmModal } = useLocalCacheClear();
   const { showToast } = useToast();
   const [activeTab, setActiveTab] = useState<SettingsTab>('api');
   const [editingPersonaId, setEditingPersonaId] = useState<string | null>(null);
@@ -39,7 +39,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
 
   const [expandedPersona, setExpandedPersona] = useState<string | null>(null);
   const { isVisible, close: handleClose, overlayClass, contentClass } = useModalAnimation(isOpen, onClose);
-  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isVisible);
+  const overlayTrapRef = useFocusTrap<HTMLDivElement>(isVisible, handleClose);
 
   const chatIds = useChatModelIds();
   const models = useModelsStore(s => s.catalog?.models);
@@ -61,30 +61,11 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
     }
   }, [isOpen, fetchPersonas]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') handleClose();
-    };
-    window.addEventListener('keydown', handleEsc);
-    return () => window.removeEventListener('keydown', handleEsc);
-  }, [isOpen, onClose]);
-
   const handleThemeModeSelect = (mode: 'light' | 'dark' | 'system') => {
     if (theme !== mode) setTheme(mode);
   };
 
-  const handleClearData = async () => {
-    const confirmed = await confirm({
-      title: '清理本地缓存',
-      description: '仅清理当前浏览器缓存，服务器上的会话与文件会在下次加载时恢复。是否继续？',
-      danger: true,
-    });
-    if (confirmed) {
-      await clearCurrentUserCache();
-      showToast({ message: '本地缓存已清理', type: 'success' });
-    }
-  };
+
 
   if (!isVisible) return null;
 
@@ -349,7 +330,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
         </div>
         <div className="flex items-center justify-between px-4 py-2.5">
           <span className="text-sm text-text-secondary">AI模型</span>
-          <span className="text-sm text-text-primary">{totalAIModels} 个已配置</span>
+          <span className="text-sm text-text-primary">{totalAIModels} 个目录条目</span>
         </div>
         <div className="flex items-center justify-between px-4 py-2.5">
           <span className="text-sm text-text-secondary">群聊</span>
@@ -361,7 +342,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
         </div>
         <div className="px-4 py-2.5">
           <p className="text-xs text-text-muted">
-            聊天AI：{chatAIMembers.length} 个已加入群聊 · 专用AI：4 个（TTS语音、视觉识别、全模态分析）
+            聊天AI：{chatAIMembers.length} 个已加入群聊 · 已验证其他能力：{models?.filter(model => model.verifiedCapabilities?.some(capability => capability !== 'chat')).length || 0} 个模型
           </p>
         </div>
       </div>
@@ -396,10 +377,11 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
           导出数据
         </button>
         <button
-          onClick={handleClearData}
+          onClick={() => void handleClearData()}
+          disabled={clearingCache}
           className="flex-1 py-2.5 text-sm text-red-500 border border-red-500/20 rounded-xl hover:bg-red-500/5 transition-colors"
         >
-          清空数据
+          {clearingCache ? '正在清理…' : '清理当前浏览器缓存'}
         </button>
       </div>
     </div>
@@ -418,7 +400,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
   return (
     <>
       <div
-        ref={overlayTrapRef} role="dialog" aria-modal="true" className={`fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm ${overlayClass}`}
+        ref={overlayTrapRef} role="dialog" aria-modal="true" aria-label="设置" data-observe="settings" className={`fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm ${overlayClass}`}
         onClick={handleClose}
       >
         <div

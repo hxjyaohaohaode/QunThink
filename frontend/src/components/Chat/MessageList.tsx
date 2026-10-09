@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useMemo, useState, useCallback } from 'react';
+﻿import React, { useEffect, useRef, useMemo, useState, useCallback } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import { motion, AnimatePresence } from 'framer-motion';
 import dayjs from 'dayjs';
@@ -709,9 +709,9 @@ export function MessageList() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" />
                   </svg>
                 </div>
-                <p className="text-text-secondary mb-2">开始你的第一个问题吧！</p>
+                <p className="text-text-secondary mb-2">从一条消息、一个想法开始</p>
                 <p className="text-text-muted text-sm">
-                  试试问：「帮我分析一下这段代码有什么问题」
+                  {currentGroup?.space_category === 'play' ? '聊一个故事或角色设定，也可以一起写出下一幕。' : currentGroup?.space_category === 'social' ? '放进活动材料、交流想法，再从「文稿」整理成邀请或记录。' : '讨论计划、保存材料，或打开「文稿」直接写作。'}
                 </p>
               </div>
             </motion.div>

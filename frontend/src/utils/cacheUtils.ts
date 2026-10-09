@@ -160,35 +160,12 @@ export function setCacheUserId(userId: string | null): void {
     try {
       localStorage.setItem(USER_ID_STORAGE_KEY, userId);
     } catch {}
-    if (previousUserId !== userId) {
-      migrateOldCaches(userId);
-    }
+    // Legacy unscoped cache has no reliable owner. Leave its bytes isolated;
+    // never attach another person's history or draft to the next login.
   } else {
     try {
       localStorage.removeItem(USER_ID_STORAGE_KEY);
     } catch {}
-  }
-}
-
-function migrateOldCaches(userId: string): void {
-  try {
-    const cacheKeys = ['messages_cache', 'groups_cache', 'personas_cache'];
-    for (const key of cacheKeys) {
-      const oldFullKey = CACHE_PREFIX + key;
-      const raw = localStorage.getItem(oldFullKey);
-      if (raw) {
-        const newFullKey = CACHE_PREFIX + userId + '_' + key;
-        if (!localStorage.getItem(newFullKey)) {
-          localStorage.setItem(newFullKey, raw);
-        }
-        localStorage.removeItem(oldFullKey);
-      }
-    }
-    if (import.meta.env.DEV) {
-      console.log(`[Cache] Migrated old caches for user: ${userId}`);
-    }
-  } catch (e) {
-    console.warn('[Cache] Migration failed:', e);
   }
 }
 
@@ -257,30 +234,27 @@ export function removeCache(key: string): void {
   }
 }
 
-export function clearAllCachesForUser(userId?: string): void {
+export function clearAllCachesForUser(userId?: string): boolean {
   clearMemoryMirrors();
   try {
     const prefix = userId ? `${CACHE_PREFIX}${userId}_` : `${CACHE_PREFIX}${getUserPrefix()}`;
     const keysToRemove: string[] = [];
-
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
-      if (key && key.startsWith(prefix)) {
-        keysToRemove.push(key);
-      }
+      if (key && key.startsWith(prefix)) keysToRemove.push(key);
     }
-
-    keysToRemove.forEach(key => {
+    let cleared = true;
+    for (const key of keysToRemove) {
       try {
         localStorage.removeItem(key);
-      } catch {}
-    });
-
-    if (import.meta.env.DEV) {
-      console.log(`[Cache] Cleared ${keysToRemove.length} cache entries for user: ${userId || 'current'}`);
+        if (localStorage.getItem(key) !== null) cleared = false;
+      } catch { cleared = false; }
     }
-  } catch (e) {
-    console.warn('clearAllCachesForUser failed:', e);
+    if (!cleared) console.warn('[Cache] Local cleanup incomplete');
+    return cleared;
+  } catch {
+    console.warn('[Cache] Local cleanup unavailable');
+    return false;
   }
 }
 

@@ -19,6 +19,15 @@ const publicPaths = [
   '/api/files/public'
 ];
 
+function accountMatches(req, res, userId) {
+  const expected = req.get('X-Expected-User-Id');
+  if (expected !== undefined && expected !== userId) {
+    res.status(409).json({ success: false, code: 'ACCOUNT_CHANGED', error: '登录账号已在其他页面改变，请重新打开当前页面' });
+    return false;
+  }
+  return true;
+}
+
 async function refreshSessionIfNeeded(session, req, res) {
   const now = Date.now();
   const expiresAt = new Date(session.expires_at).getTime();
@@ -90,6 +99,7 @@ const authMiddleware = async (req, res, next) => {
     if (!userId || !/^dev_[a-zA-Z0-9_-]+$/.test(userId)) {
       return res.status(401).json({ error: '开发模式需要提供有效的用户标识', requiresAuth: true });
     }
+    if (!accountMatches(req, res, userId)) return;
     req.userId = userId;
     return next();
   }
@@ -110,6 +120,7 @@ const authMiddleware = async (req, res, next) => {
       });
     }
 
+    if (!accountMatches(req, res, session.userId)) return;
     req.userId = session.userId;
     req.session = session;
 
@@ -145,6 +156,7 @@ export const requireAuth = async (req, res, next) => {
       });
     }
 
+    if (!accountMatches(req, res, session.userId)) return;
     req.userId = session.userId;
     req.session = session;
 

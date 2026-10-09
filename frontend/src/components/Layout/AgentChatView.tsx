@@ -118,7 +118,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   const sendAgentMessage = useAgentsStore((s) => s.sendAgentMessage);
   const fetchAgentSuggestions = useAgentsStore((s) => s.fetchAgentSuggestions);
   const agentMessages = useAgentsStore((s) =>
-    (currentAgent?.id ?? agentId) ? s.agentMessages.get(currentAgent?.id ?? agentId) : undefined
+    s.agentMessages.get(agentId)
   );
   const [inputValue, setInputValue] = useState('');
   const [isSending, setIsSending] = useState(false);
@@ -127,31 +127,28 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   const [activeSuggestions, setActiveSuggestions] = useState<ActiveSuggestions | null>(null);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [messagesLoaded, setMessagesLoaded] = useState(false);
+  const [sendNotice, setSendNotice] = useState<string | null>(null);
+  const viewRef = useRef({ agentId, generation: 0 });
+  if (viewRef.current.agentId !== agentId) viewRef.current = { agentId, generation: viewRef.current.generation + 1 };
+  const sendAttemptRef = useRef(0);
+  const composerRevisionRef = useRef(0);
 
   const mountedRef = useRef(true);
-  const initialFetchedRef = useRef(false);
-  const historyFetchKeyRef = useRef('');
+  const [suggestionRevision, setSuggestionRevision] = useState(0);
+  const suggestionRequestRef = useRef<{ key: string; promise: Promise<string[]> } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sendingRef = useRef(false);
 
-  const agent = currentAgent || agents.find((a) => a.id === agentId);
+  const agent = currentAgent?.id === agentId ? currentAgent : agents.find((a) => a.id === agentId);
 
-  if (!agent) {
-    return (
-      <div className="h-full flex flex-col bg-bg-primary items-center justify-center">
-        <div className="text-text-muted text-sm">该智能体不存在或已被删除</div>
-        <button onClick={onBack} className="mt-4 px-4 py-2 text-sm text-accent hover:underline">返回</button>
-      </div>
-    );
-  }
 
   const messages = agentMessages || [];
   const isAgentStreaming = messages.some((m) => m.is_streaming);
 
   const lastFinishedAgentMsgId = messages.length > 0
-    ? [...messages].reverse().find(m => m.sender_type === 'agent' && !m.is_streaming)?.id
+    ? [...messages].reverse().find(m => m.sender_type === 'agent' && !m.is_streaming && !m.response_state)?.id
     : null;
 
   useEffect(() => {
@@ -160,13 +157,18 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   }, []);
 
   useEffect(() => {
+    sendAttemptRef.current++;
+    composerRevisionRef.current++;
+    sendingRef.current = false;
+    setIsSending(false);
+    setInputValue('');
+    setAttachedFiles([]);
+    setSendNotice(null);
     let isCancelled = false;
     setMessagesLoaded(false);
     setInitialSuggestions([]);
     setActiveSuggestions(null);
     setLoadingSuggestions(false);
-    initialFetchedRef.current = false;
-    historyFetchKeyRef.current = '';
     selectAgent(agentId);
     fetchAgentMessages(agentId).then(() => {
       if (!isCancelled && mountedRef.current) setMessagesLoaded(true);
@@ -200,76 +202,43 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   }, [agent]);
 
   useEffect(() => {
-    if (!agent || !agent.enable_suggestions || !messagesLoaded) return;
-
-    if (messages.length === 0 && !initialFetchedRef.current) {
-      let isCancelled = false;
-      initialFetchedRef.current = true;
-      setLoadingSuggestions(true);
-      const fetchWithRetry = async (retries = 1): Promise<string[]> => {
-        const suggestions = await fetchAgentSuggestions(agentId);
-        if (suggestions.length === 0 && retries > 0) {
-          return fetchWithRetry(retries - 1);
-        }
-        return suggestions;
-      };
-      fetchWithRetry().then(suggestions => {
-        if (isCancelled || !mountedRef.current) return;
-        if (suggestions.length === 0) {
-          suggestions = getLocalSuggestions(true);
-        }
-        setInitialSuggestions(suggestions);
-        setLoadingSuggestions(false);
-      }).catch(() => {
-        if (!isCancelled && mountedRef.current) {
-          setInitialSuggestions(getLocalSuggestions(true));
-        }
-        if (mountedRef.current) setLoadingSuggestions(false);
-      });
-      return () => { isCancelled = true; };
+    // Loading/output are results of this effect, never triggers for cancelling it.
+    if (!agent?.enable_suggestions || !messagesLoaded || isSending || isAgentStreaming || messages[messages.length - 1]?.response_state) {
+      setLoadingSuggestions(false);
+      return;
     }
-
-    if (lastFinishedAgentMsgId && !activeSuggestions && !loadingSuggestions) {
-      const fetchKey = `${agentId}:${lastFinishedAgentMsgId}`;
-      if (historyFetchKeyRef.current !== fetchKey) {
-        historyFetchKeyRef.current = fetchKey;
-        let isCancelled = false;
-        setLoadingSuggestions(true);
-        const fetchWithRetry2 = async (retries = 1): Promise<string[]> => {
-          const suggestions = await fetchAgentSuggestions(agentId);
-          if (suggestions.length === 0 && retries > 0) {
-            return fetchWithRetry2(retries - 1);
-          }
-          return suggestions;
-        };
-        fetchWithRetry2().then(suggestions => {
-          if (isCancelled || !mountedRef.current) return;
-          if (suggestions.length === 0) {
-            suggestions = getLocalSuggestions(false);
-          }
-          if (suggestions.length > 0) {
-            setActiveSuggestions({ msgId: lastFinishedAgentMsgId, items: suggestions });
-          }
-          setLoadingSuggestions(false);
-        }).catch(() => {
-          if (!isCancelled && mountedRef.current) {
-            const fallback = getLocalSuggestions(false);
-            if (fallback.length > 0) {
-              setActiveSuggestions({ msgId: lastFinishedAgentMsgId, items: fallback });
-            }
-          }
-          if (mountedRef.current) setLoadingSuggestions(false);
-        });
-        return () => { isCancelled = true; };
-      }
+    const isInitial = messages.length === 0;
+    if (!isInitial && !lastFinishedAgentMsgId) {
+      setLoadingSuggestions(false);
+      return;
     }
-  }, [agent?.id, agent?.enable_suggestions, messagesLoaded, lastFinishedAgentMsgId, activeSuggestions, loadingSuggestions]);
+    const key = JSON.stringify([agentId, isInitial ? 'initial' : lastFinishedAgentMsgId, suggestionRevision]);
+    let cancelled = false;
+    setLoadingSuggestions(true);
+    // Reattach to the same request after effect replay; never dispatch twice for
+    // a loading-state render or StrictMode. An explicit refresh gets a new key.
+    if (suggestionRequestRef.current?.key !== key) {
+      suggestionRequestRef.current = { key, promise: fetchAgentSuggestions(agentId) };
+    }
+    const apply = (received: string[]) => {
+      if (cancelled || !mountedRef.current) return;
+      const items = received.length ? received : getLocalSuggestions(isInitial);
+      if (isInitial) setInitialSuggestions(items);
+      else if (lastFinishedAgentMsgId) setActiveSuggestions({ msgId: lastFinishedAgentMsgId, items });
+      setLoadingSuggestions(false);
+    };
+    suggestionRequestRef.current.promise.then(apply, () => apply([]));
+    return () => { cancelled = true; };
+  }, [agentId, agent?.enable_suggestions, messagesLoaded, messages.length,
+    lastFinishedAgentMsgId, messages[messages.length - 1]?.response_state, isSending, isAgentStreaming, suggestionRevision,
+    fetchAgentSuggestions, getLocalSuggestions]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, initialSuggestions, activeSuggestions]);
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    composerRevisionRef.current++;
     const files = Array.from(e.target.files || []);
     if (attachedFiles.length + files.length > MAX_FILES) return;
     const allAllowedTypes = [...ALLOWED_FILE_TYPES.images, ...ALLOWED_FILE_TYPES.audio, ...ALLOWED_FILE_TYPES.video, ...ALLOWED_FILE_TYPES.documents];
@@ -286,6 +255,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   }, [attachedFiles.length]);
 
   const removeAttachedFile = useCallback((index: number) => {
+    composerRevisionRef.current++;
     setAttachedFiles(prev => prev.filter((_, i) => i !== index));
   }, []);
 
@@ -316,16 +286,22 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
 
   const refreshSuggestions = useCallback(() => {
     if (!agent?.enable_suggestions || loadingSuggestions) return;
-    historyFetchKeyRef.current = '';
+    setSuggestionRevision(value => value + 1);
     setActiveSuggestions(null);
     setInitialSuggestions([]);
   }, [agent?.enable_suggestions, loadingSuggestions]);
 
   const handleSend = useCallback(async (overrideMessage?: string) => {
-    const content = (overrideMessage || inputValue).trim();
+    const originalInput = overrideMessage ?? inputValue;
+    const content = originalInput.trim();
     if ((!content && attachedFiles.length === 0) || isSending || isAgentStreaming) return;
     if (sendingRef.current) return;
     sendingRef.current = true;
+    const view = viewRef.current;
+    const attempt = ++sendAttemptRef.current;
+    const revision = composerRevisionRef.current;
+    const ownsView = () => mountedRef.current && viewRef.current === view && sendAttemptRef.current === attempt;
+    setSendNotice(null);
 
     const messageText = content || (attachedFiles.length > 0 ? `请分析我上传的${attachedFiles.length}个文件` : '');
     const filesToSend = [...attachedFiles];
@@ -336,10 +312,15 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
     setIsSending(true);
     try {
       await sendAgentMessage(agentId, messageText, filesToSend);
-    } catch {
+    } catch (error) {
+      if (ownsView() && composerRevisionRef.current === revision) {
+        setInputValue(originalInput);
+        setAttachedFiles(filesToSend);
+        const reason = error instanceof Error ? error.message : '回复未完成';
+        setSendNotice(`${reason}。原输入已保留；消息可能已经保存，请先核对会话，再决定是否重新发送。`);
+      }
     } finally {
-      if (mountedRef.current) setIsSending(false);
-      sendingRef.current = false;
+      if (ownsView()) { setIsSending(false); sendingRef.current = false; }
     }
   }, [inputValue, attachedFiles, isSending, isAgentStreaming, agentId, clearSuggestions, sendAgentMessage]);
 
@@ -351,6 +332,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   }, [handleSend]);
 
   const handleSuggestionClick = useCallback((suggestion: string) => {
+    composerRevisionRef.current++;
     setInputValue(suggestion);
     setAttachedFiles([]);
     clearSuggestions();
@@ -374,6 +356,16 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   const avatarColor = agent ? getAvatarColor(agent.name) : '#737373';
   const showInitialSuggestions = messages.length === 0 && initialSuggestions.length > 0 && !loadingSuggestions;
   const isSuggestionDisabled = isSending || isAgentStreaming;
+
+  if (!agent) {
+    return (
+      <div className="h-full flex flex-col bg-bg-primary items-center justify-center">
+        <div className="text-text-muted text-sm">该智能体不存在或已被删除</div>
+        <button onClick={onBack} className="mt-4 px-4 py-2 text-sm text-accent hover:underline">返回</button>
+      </div>
+    );
+  }
+
 
   return (
     <div className="h-full flex flex-col bg-bg-primary">
@@ -477,6 +469,10 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
                         </div>
                       )}
                       {msg.content}
+                      {msg.response_state && <p role="status" className="mt-2 text-sm text-red-500">
+                        {msg.response_state === 'incomplete' ? '回复未完成，已收到的内容仅供参考。' : '未能完成回复。'}
+                        {msg.response_error}
+                      </p>}
                       {msg.is_streaming && msg.content && (
                         <span className="inline-block w-0.5 h-4 bg-text-primary ml-0.5 animate-pulse align-text-bottom" />
                       )}
@@ -534,6 +530,8 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
         <div ref={messagesEndRef} />
       </div>
 
+      {sendNotice && <div role="alert" className="mx-4 mt-2 rounded-lg border border-border-subtle bg-bg-surface px-3 py-2 text-sm text-text-secondary">{sendNotice}</div>}
+
       {attachedFiles.length > 0 && (
         <div className="flex-shrink-0 px-4 py-2 bg-bg-surface border-t border-border-subtle">
           <div className="flex flex-wrap gap-2">
@@ -572,7 +570,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
             ref={inputRef}
             type="text"
             value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
+            onChange={(e) => { composerRevisionRef.current++; setInputValue(e.target.value); }}
             onKeyDown={handleKeyDown}
             placeholder="输入消息或上传附件..."
             disabled={isSending || isAgentStreaming}

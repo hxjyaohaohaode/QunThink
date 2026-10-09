@@ -8,9 +8,13 @@ import { Mutex } from 'async-mutex';
 import { isMongoEnabled, getMongoDb, MongoLow } from './mongoAdapter.js';
 import { isSupabaseEnabled, PgLow, listAllKeys, getPool } from './supabaseAdapter.js';
 import { encryptText, decryptText } from '../utils/encryption.js';
+import { readWithWriteBarrier } from './readBarrier.js';
+import { createUserDbRegistry } from './userDbRegistry.js';
+export { beginUserDbWriteBarrier, readCommittedUserDb } from './readBarrier.js';
 
 const _writeTimestamps = new WeakMap();
 const _lastReadTimestamps = new WeakMap();
+
 
 function isEncryptedEnvelope(value) {
   return typeof value === 'string'
@@ -40,11 +44,19 @@ function encryptStoredValue(plaintext) {
 }
 
 class CustomLow extends Low {
+  invalidateReadCache() {
+    // A write can commit without an acknowledgement. Callers recovering from
+    // that uncertainty must not expose a pre-write snapshot as cached truth.
+    // A failed read never restores this timestamp; only a durable read does.
+    _lastReadTimestamps.delete(this);
+  }
+
   async write() {
     try {
       await super.write();
       _writeTimestamps.set(this, Date.now());
     } catch (err) {
+      this.assertCurrentLease?.();
       if ((err.code === 'ENOENT' || err.code === 'EPERM') && err.syscall === 'rename') {
         let filePath = null;
         if (err.dest) {
@@ -61,11 +73,14 @@ class CustomLow extends Low {
             const dir = path.dirname(filePath);
             const tmpFallback = path.join(dir, `.${path.basename(filePath)}.fb-${Date.now()}.tmp`);
             await fs.mkdir(dir, { recursive: true });
+            this.assertCurrentLease?.();
             await fs.writeFile(tmpFallback, JSON.stringify(this.data, null, 2), 'utf-8');
+            this.assertCurrentLease?.();
             await fs.rename(tmpFallback, filePath);
             _writeTimestamps.set(this, Date.now());
             return;
           } catch (writeErr) {
+            if (writeErr.code === 'USER_DB_REPLACED') throw writeErr;
             console.warn(`Fallback write also failed: ${writeErr.message}`);
           }
         }
@@ -76,27 +91,33 @@ class CustomLow extends Low {
   }
 
   async read({ force = false } = {}) {
-    const lastWrite = _writeTimestamps.get(this);
-    const lastRead = _lastReadTimestamps.get(this);
-    if (!force && lastWrite && lastRead && lastRead >= lastWrite && this.data) {
-      return;
-    }
-
-    const maxRetries = 3;
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      try {
-        await super.read();
-        _lastReadTimestamps.set(this, Date.now());
-        return;
-      } catch (err) {
-        if (err instanceof SyntaxError && err.message.includes('JSON') && attempt < maxRetries - 1) {
-          await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
-          continue;
+    return readWithWriteBarrier(this, async () => {
+      this.assertCurrentLease?.();
+      const lastWrite = _writeTimestamps.get(this);
+      const lastRead = _lastReadTimestamps.get(this);
+      if (!force && lastWrite && lastRead && lastRead >= lastWrite && this.data) return { cached: true };
+      const maxRetries = 3;
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          this.assertCurrentLease?.();
+          return { data: await this.adapter.read() };
         }
-        throw err;
+        catch (err) {
+          if (err instanceof SyntaxError && err.message.includes('JSON') && attempt < maxRetries - 1) {
+            await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+            continue;
+          }
+          throw err;
+        }
       }
-    }
+    }, result => {
+      if (!result.cached) {
+        if (result.data) this.data = result.data;
+        _lastReadTimestamps.set(this, Date.now());
+      }
+    });
   }
+
 }
 
 const BACKUP_INTERVAL_MS = 60 * 60 * 1000;
@@ -145,32 +166,13 @@ const usersDataDir = path.join(dataDir, 'users');
 const legacyDbFile = path.join(dataDir, 'db.json');
 const uploadsDir = path.join(dataDir, 'uploads');
 
-const userDbs = new Map();
 const userMutexes = new Map();
-const MAX_DB_CACHE_SIZE = 50;
-
-function evictLeastRecentlyUsed() {
-  if (userDbs.size <= MAX_DB_CACHE_SIZE) return;
-
-  const entries = [...userDbs.entries()];
-  entries.sort((a, b) => (a[1]._lastAccess || 0) - (b[1]._lastAccess || 0));
-
-  const excess = userDbs.size - MAX_DB_CACHE_SIZE;
-  const toEvict = [];
-  for (const entry of entries) {
-    if (toEvict.length >= excess) break;
-    const mutex = userMutexes.get(entry[0]);
-    if (mutex?.isLocked()) continue;
-    toEvict.push(entry);
-  }
-  for (const [userId] of toEvict) {
-    userDbs.delete(userId);
-  }
-
-  if (toEvict.length > 0) {
-    console.log(`🗑️ LRU缓存淘汰: 移除了 ${toEvict.length} 个用户数据库缓存`);
-  }
-}
+const userDbRegistry = createUserDbRegistry({
+  maxSize: 50,
+  isLocked: userId => Boolean(userMutexes.get(userId)?.isLocked()),
+  onEvict: count => console.log(`🗑️ LRU缓存淘汰: 移除了 ${count} 个用户数据库缓存`)
+});
+const userDbs = userDbRegistry.cache;
 
 let defaultDb = null;
 
@@ -343,68 +345,8 @@ function createDefaultGroups() {
 }
 
 export async function initUserDatabase(userId) {
-  if (isSupabaseEnabled()) {
-    const key = `user:${userId}`;
-    const pgLow = new PgLow(key, defaultUserData);
-    try {
-      await pgLow.read();
-    } catch (err) {
-      console.warn(`⚠️ Supabase 用户 ${userId} 数据读取失败: ${err.message}`);
-      throw err;
-    }
-
-    if (!pgLow._degradedRead && pgLow.data.groups.length === 0) {
-      pgLow.data.groups = createDefaultGroups();
-      try {
-        await pgLow.write();
-        console.log(`✅ Supabase: 用户 ${userId} 数据库初始化完成`);
-      } catch (writeErr) {
-        console.error(`❌ Supabase 用户 ${userId} 数据写入失败: ${writeErr.message}`);
-        throw writeErr;
-      }
-    }
-
-    return getUserDb(userId);
-  }
-
-  if (isMongoEnabled()) {
-    const mongoDb = await getMongoDb();
-    const collection = mongoDb.collection('users_data');
-    const existing = await collection.findOne({ userId });
-    if (!existing) {
-      const initialData = JSON.parse(JSON.stringify(defaultUserData));
-      initialData.groups = createDefaultGroups();
-      const mongoLow = new MongoLow(collection, { userId }, defaultUserData);
-      mongoLow.data = initialData;
-      await mongoLow.write();
-      userDbs.set(userId, mongoLow);
-      console.log(`✅ MongoDB: 用户 ${userId} 数据库初始化完成`);
-    }
-    return getUserDb(userId);
-  }
-
-  const dbPath = getUserDbPath(userId);
-  
-  try {
-    await fs.access(dbPath);
-    console.log(`✅ 用户数据库文件已存在: ${userId}`);
-  } catch (error) {
-    console.log(`📁 创建用户数据库文件: ${userId}`);
-    const adapter = new JSONFile(dbPath);
-    const db = new CustomLow(adapter, JSON.parse(JSON.stringify(defaultUserData)));
-    
-    db.data.groups = createDefaultGroups();
-    
-    try {
-      await fs.writeFile(dbPath, JSON.stringify(db.data, null, 2), 'utf-8');
-      console.log(`✅ 用户数据库初始化完成: ${userId}`);
-    } catch (writeError) {
-      console.warn(`⚠️ 直接写入失败，尝试使用lowdb写入: ${writeError.message}`);
-      await db.write();
-      console.log(`✅ 用户数据库初始化完成: ${userId}`);
-    }
-  }
-  
+  // Initialization uses the same guarded single-flight loader as every read.
+  // Separate bootstrap objects could otherwise outlive a cache/source change.
   return getUserDb(userId);
 }
 
@@ -437,15 +379,14 @@ export async function initUserDatabase(userId) {
  * @returns {Promise<Low>} Lowdb 数据库实例
  */
 export async function getUserDb(userId) {
-  if (userDbs.has(userId)) {
-    const db = userDbs.get(userId);
-    db._lastAccess = Date.now();
-    return db;
-  }
+  return userDbRegistry.get(userId, protect => loadUserDb(userId, protect));
+}
+
+async function loadUserDb(userId, protect) {
 
   if (isSupabaseEnabled()) {
     const key = `user:${userId}`;
-    const db = new PgLow(key, defaultUserData);
+    const db = protect(new PgLow(key, defaultUserData));
 
     try {
       await db.read();
@@ -482,9 +423,6 @@ export async function getUserDb(userId) {
       console.warn(`⚠️ [Supabase] 用户 ${userId} 处于降级读取状态，跳过初始化写入以保护远端数据`);
     }
 
-    userDbs.set(userId, db);
-    db._lastAccess = Date.now();
-    evictLeastRecentlyUsed();
 
     console.log(`📖 [Supabase] 用户 ${userId} 数据加载完成 - 消息: ${db.data.messages.length}, 群组: ${db.data.groups.length}`);
     return db;
@@ -493,7 +431,7 @@ export async function getUserDb(userId) {
   if (isMongoEnabled()) {
     const mongoDb = await getMongoDb();
     const collection = mongoDb.collection('users_data');
-    const db = new MongoLow(collection, { userId }, defaultUserData);
+    const db = protect(new MongoLow(collection, { userId }, defaultUserData));
 
     try {
       await db.read();
@@ -530,9 +468,6 @@ export async function getUserDb(userId) {
       console.warn(`⚠️ [MongoDB] 用户 ${userId} 处于降级读取状态，跳过初始化写入以保护远端数据`);
     }
 
-    userDbs.set(userId, db);
-    db._lastAccess = Date.now();
-    evictLeastRecentlyUsed();
 
     console.log(`📖 [MongoDB] 用户 ${userId} 数据加载完成 - 消息: ${db.data.messages.length}, 群组: ${db.data.groups.length}`);
     return db;
@@ -540,15 +475,17 @@ export async function getUserDb(userId) {
   
   const dbPath = getUserDbPath(userId);
   const adapter = new JSONFile(dbPath);
-  const db = new CustomLow(adapter, JSON.parse(JSON.stringify(defaultUserData)));
+  const db = protect(new CustomLow(adapter, JSON.parse(JSON.stringify(defaultUserData))));
   
   try {
     await db.read();
     db._degradedRead = false;
   } catch (err) {
+    if (err.code === 'USER_DB_REPLACED') throw err;
     console.warn(`⚠️ 用户 ${userId} 数据库读取失败，尝试恢复: ${err.message}`);
     try {
       const raw = await fs.readFile(dbPath, 'utf-8');
+      db.assertCurrentLease?.();
       const firstObjEnd = raw.indexOf('}{');
       if (firstObjEnd > -1) {
         const clean = raw.substring(0, firstObjEnd + 1);
@@ -556,8 +493,9 @@ export async function getUserDb(userId) {
         try {
           const backupPath = dbPath + '.corrupted.' + Date.now();
           await fs.copyFile(dbPath, backupPath);
+          db.assertCurrentLease?.();
           console.log(`📦 恢复前已备份损坏文件到: ${backupPath}`);
-        } catch {}
+        } catch (error) { if (error.code === 'USER_DB_REPLACED') throw error; }
         db.data = recovered;
         await db.write();
         db._degradedRead = false;
@@ -566,12 +504,15 @@ export async function getUserDb(userId) {
         throw err;
       }
     } catch (recoverErr) {
+      if (recoverErr.code === 'USER_DB_REPLACED') throw recoverErr;
+      db.assertCurrentLease?.();
       console.error(`用户 ${userId} 数据库损坏且恢复失败，拒绝提供空白数据: ${recoverErr.message}`);
       try {
         const backupPath = dbPath + '.corrupted.' + Date.now();
         await fs.copyFile(dbPath, backupPath);
+        db.assertCurrentLease?.();
         console.log(`📦 损坏的用户数据库已备份到: ${backupPath}`);
-      } catch {}
+      } catch (error) { if (error.code === 'USER_DB_REPLACED') throw error; }
       throw new Error(`用户 ${userId} 数据库损坏且恢复失败: ${recoverErr.message}`, { cause: recoverErr });
     }
   }
@@ -604,11 +545,6 @@ export async function getUserDb(userId) {
   } else if (needsWrite && db._degradedRead) {
     console.warn(`⚠️ 用户 ${userId} 处于降级读取状态，跳过初始化写入以保护本地数据`);
   }
-
-  userDbs.set(userId, db);
-  db._lastAccess = Date.now();
-
-  evictLeastRecentlyUsed();
 
   console.log(`📖 用户 ${userId} 数据加载完成 - 消息: ${db.data.messages.length}, 群组: ${db.data.groups.length}`);
 
@@ -723,10 +659,10 @@ export function getUploadsDir() {
 
 export function clearUserDbCache(userId) {
   if (userId) {
-    userDbs.delete(userId);
+    userDbRegistry.clear(userId);
     console.log(`🗑️ 已清除用户 ${userId} 的数据库缓存`);
   } else {
-    userDbs.clear();
+    userDbRegistry.clear();
     console.log('🗑️ 已清除所有用户的数据库缓存');
   }
 }

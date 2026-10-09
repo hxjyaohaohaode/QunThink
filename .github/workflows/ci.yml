@@ -59,6 +59,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
         working-directory: ./frontend
+      - name: Artifact packaging integrity tests (no browser or listener)
+        run: node --test scripts/pack-ci-evidence.test.mjs
+      - name: Preserve brand and entry animation
+        run: node scripts/verify-brand.mjs
       - name: Frontend tests
         run: npm test
         working-directory: ./frontend
@@ -79,9 +83,231 @@ jobs:
           fi
         working-directory: ./frontend
 
+  ui-browser-check:
+    name: ui-browser-check (${{ matrix.project }}${{ matrix.suite == 'q2' && ', Q2' || '' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [desktop-chromium, mobile-reduced-motion]
+        suite: [core, q2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+      - run: npm ci --prefix backend && npm ci --prefix frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: ./frontend
+      - name: Real browser desktop/mobile and failure-recovery flows
+        if: matrix.suite == 'core'
+        run: npm run test:e2e -- --project=${{ matrix.project }}
+        working-directory: ./frontend
+      - name: Q1 same-draft result chain and bounded failure recovery
+        if: ${{ !cancelled() && matrix.suite == 'core' }}
+        run: npx playwright test --config=playwright.q1.config.ts --project=${{ matrix.project }}
+        working-directory: ./frontend
+      - name: Q2 original-command closure and same-document recovery
+        if: ${{ !cancelled() && matrix.suite == 'q2' }}
+        run: npx playwright test --config=playwright.q2.config.ts --project=${{ matrix.project }}
+        working-directory: ./frontend
+      - name: Memory same-ID recovery and two-tab late-response privacy
+        if: ${{ !cancelled() && matrix.suite == 'q2' }}
+        run: npx playwright test --config=playwright.memory-recovery.config.ts --project=${{ matrix.project }}
+        working-directory: ./frontend
+      - name: Save browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-${{ matrix.project }}
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 14
+      - name: Losslessly package all browser evidence into bounded parts
+        id: package-evidence
+        if: always()
+        env:
+          EVIDENCE_PROJECT: ${{ matrix.suite }}-${{ matrix.project }}
+        run: node scripts/pack-ci-evidence.mjs archive .ci-evidence frontend/playwright-report frontend/test-results
+      - name: Save browser-evidence-parts manifest
+        if: ${{ always() && steps.package-evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-manifest
+          path: .ci-evidence/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 001
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-001') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-001
+          path: .ci-evidence/evidence.part-001
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 002
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-002') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-002
+          path: .ci-evidence/evidence.part-002
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 003
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-003') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-003
+          path: .ci-evidence/evidence.part-003
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 004
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-004') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-004
+          path: .ci-evidence/evidence.part-004
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 005
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-005') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-005
+          path: .ci-evidence/evidence.part-005
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 006
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-006') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-006
+          path: .ci-evidence/evidence.part-006
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 007
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-007') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-007
+          path: .ci-evidence/evidence.part-007
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 008
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-008') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-008
+          path: .ci-evidence/evidence.part-008
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 009
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-009') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-009
+          path: .ci-evidence/evidence.part-009
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 010
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-010') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-010
+          path: .ci-evidence/evidence.part-010
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 011
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-011') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-011
+          path: .ci-evidence/evidence.part-011
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 012
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-012') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-012
+          path: .ci-evidence/evidence.part-012
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 013
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-013') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-013
+          path: .ci-evidence/evidence.part-013
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 014
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-014') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-014
+          path: .ci-evidence/evidence.part-014
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 015
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-015') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-015
+          path: .ci-evidence/evidence.part-015
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+      - name: Save browser-evidence-parts part 016
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-016') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-016
+          path: .ci-evidence/evidence.part-016
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 14
+
   docker:
     runs-on: ubuntu-latest
-    needs: [backend-check, frontend-check]
+    needs: [backend-check, frontend-check, ui-browser-check]
     strategy:
       matrix:
         include:

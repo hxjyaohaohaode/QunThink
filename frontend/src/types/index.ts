@@ -190,6 +190,8 @@ export interface Agent {
 }
 
 export interface AgentChatMessage {
+  response_state?: 'failed' | 'incomplete';
+  response_error?: string;
   id: string;
   agent_id: string;
   sender_type: 'user' | 'agent' | 'system';

@@ -1,3 +1,5 @@
+import { mockProviderDns } from './helpers/mockProviderDns.js';
+mockProviderDns(['api.deepseek.com', 'api.openai.com']);
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -99,7 +101,7 @@ async function configure(userId, overrides = {}) {
 }
 async function probeChat(s) {
   const result = await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie)
-    .send({ modelId: 'custom', capability: 'chat' });
+    .send({ clientRequestId: crypto.randomUUID(), modelId: 'custom', capability: 'chat' });
   assert.equal(result.status, 200);
 }
 async function eventually(fn) {
@@ -250,7 +252,7 @@ test('model declaration is not a verified capability; only a successful probe en
   assert.equal((await listTasks(s.userId)).length, 0);
   // Even an explicit default selection is a routing policy, not proof of ability.
   await assert.rejects(defaultModelId(s.userId, 'chat'), error => error.status === 409);
-  const probe = await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie).send({ modelId: 'custom' });
+  const probe = await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie).send({ clientRequestId: crypto.randomUUID(), modelId: 'custom' });
   assert.equal(probe.status, 200);
   const tested = await readCatalog(s.userId);
   assert.deepEqual(tested.models.find(m => m.id === 'custom').verifiedCapabilities, ['chat']);
@@ -260,13 +262,13 @@ test('model declaration is not a verified capability; only a successful probe en
   const rotated = await saveCatalog(s.userId, tested);
   assert.deepEqual(rotated.models.find(m => m.id === 'custom').verifiedCapabilities, []);
   await assert.rejects(defaultModelId(s.userId, 'chat'), error => error.status === 409);
-  assert.equal((await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie).send({ modelId: 'custom' })).status, 200);
+  assert.equal((await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie).send({ clientRequestId: crypto.randomUUID(), modelId: 'custom' })).status, 200);
   const retested = await readCatalog(s.userId);
   assert.deepEqual(retested.models.find(m => m.id === 'custom').verifiedCapabilities, ['chat']);
   retested.models.find(m => m.id === 'custom').model = 'broken-model';
   await saveCatalog(s.userId, retested);
   assert.deepEqual((await readCatalog(s.userId)).models.find(m => m.id === 'custom').verifiedCapabilities, []);
-  const failed = await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie).send({ modelId: 'custom' });
+  const failed = await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie).send({ clientRequestId: crypto.randomUUID(), modelId: 'custom' });
   assert.equal(failed.status, 502);
   await assert.rejects(defaultModelId(s.userId, 'chat'), error => error.status === 409);
 });
@@ -276,7 +278,7 @@ test('vision requires two matching image probes and is invalidated by a model ch
   await assert.rejects(resolveModel(s.userId, 'custom', 'vision'), error => error.status === 409);
   const before = calls.length;
   const probe = await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie)
-    .send({ modelId: 'custom', capability: 'vision' });
+    .send({ clientRequestId: crypto.randomUUID(), modelId: 'custom', capability: 'vision' });
   assert.equal(probe.status, 200);
   assert.equal(calls.slice(before).filter(call => call.body.model === 'vision-probe').length, 2);
   assert.deepEqual((await readCatalog(s.userId)).models.find(model => model.id === 'custom').verifiedCapabilities, ['vision']);
@@ -287,7 +289,7 @@ test('vision requires two matching image probes and is invalidated by a model ch
   await saveCatalog(s.userId, changed);
   await assert.rejects(resolveModel(s.userId, 'custom', 'vision'), error => error.status === 409);
   const bad = await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie)
-    .send({ modelId: 'custom', capability: 'vision' });
+    .send({ clientRequestId: crypto.randomUUID(), modelId: 'custom', capability: 'vision' });
   assert.equal(bad.status, 502);
   assert.deepEqual((await readCatalog(s.userId)).models.find(model => model.id === 'custom').verifiedCapabilities, []);
 });
@@ -297,7 +299,7 @@ test('a late probe for an earlier model revision cannot verify the replacement c
   const initial = await configure(s.userId, { model: 'slow-model' });
   initial.defaults.chat = null;
   await saveCatalog(s.userId, initial);
-  const pending = request.post('/api/user/model-catalog/test').set('Cookie', s.cookie).send({ modelId: 'custom' });
+  const pending = request.post('/api/user/model-catalog/test').set('Cookie', s.cookie).send({ clientRequestId: crypto.randomUUID(), modelId: 'custom' });
   const response = pending.then(value => value);
   await eventually(() => slow.length > 0);
   const changed = await readCatalog(s.userId);
@@ -313,7 +315,7 @@ test('a late probe for an earlier model revision cannot verify the replacement c
 test('a late probe cannot reverify a rotated credential at the same model endpoint', async () => {
   const s = await session(); await configure(s.userId, { model: 'slow-model' });
   const before = slow.length;
-  const pending = request.post('/api/user/model-catalog/test').set('Cookie', s.cookie).send({ modelId: 'custom' }).then(value => value);
+  const pending = request.post('/api/user/model-catalog/test').set('Cookie', s.cookie).send({ clientRequestId: crypto.randomUUID(), modelId: 'custom' }).then(value => value);
   await eventually(() => slow.length > before);
   const changed = await readCatalog(s.userId);
   changed.providers.find(p => p.id === 'custom_provider').apiKey = 'replacement-secret';
@@ -332,7 +334,7 @@ test('a one-model group answers once; idle autonomous chat requires explicit opt
     { queued: 0, reason: 'no_verified_chat_models' });
   assert.equal(calls.length, before);
   assert.equal((await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie)
-    .send({ modelId: 'custom' })).status, 200);
+    .send({ clientRequestId: crypto.randomUUID(), modelId: 'custom' })).status, 200);
   const afterProbe = calls.length;
   await queueAIMessages(one.body.id, '请回答一次', null, s.userId);
   assert.equal(calls.slice(afterProbe).filter(call => call.body.model === 'future/model-v99').length, 1);
@@ -358,14 +360,17 @@ test('a multi-model group does not start additional paid AI rounds without opt-i
   catalog.models.push(customModel({ id: 'custom_partner', name: '协作模型', model: 'future/partner-v100' }));
   await saveCatalog(s.userId, catalog);
   assert.equal((await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie)
-    .send({ modelId: 'custom_partner', capability: 'chat' })).status, 200);
+    .send({ clientRequestId: crypto.randomUUID(), modelId: 'custom_partner', capability: 'chat' })).status, 200);
 
   const group = await request.post('/api/groups').set('Cookie', s.cookie)
     .send({ name: '普通双模型会话', ai_members: ['custom', 'custom_partner'] });
   assert.equal(group.status, 201);
   assert.notEqual(group.body.autonomous_chat_enabled, true);
   const before = calls.length;
-  await queueAIMessages(group.body.id, '每个模型只回答一次', null, s.userId);
+  // Natural group replies intentionally cap participation probability at 0.98.
+  // Explicit mentions make the first-round fixture deterministic while still
+  // asserting that no additional paid round starts without autonomous opt-in.
+  await queueAIMessages(group.body.id, '@custom @custom_partner 每个模型只回答一次', null, s.userId);
   const generated = calls.slice(before).filter(call => call.body.stream);
   assert.equal(generated.length, 2);
   assert.deepEqual(new Set(generated.map(call => call.body.model)),
@@ -401,7 +406,7 @@ test('AI private chat stops after bounded failed attempts instead of charging in
   catalog.models.push(customModel({ id: 'empty_partner', name: '空回复协作模型', model: 'empty-model' }));
   await saveCatalog(s.userId, catalog);
   assert.equal((await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie)
-    .send({ modelId: 'empty_partner', capability: 'chat' })).status, 200);
+    .send({ clientRequestId: crypto.randomUUID(), modelId: 'empty_partner', capability: 'chat' })).status, 200);
   const group = await request.post('/api/groups').set('Cookie', s.cookie)
     .send({ name: '失败有限次会话', ai_members: ['custom', 'empty_partner'] });
   assert.equal(group.status, 201);
@@ -426,7 +431,7 @@ test('turning off autonomous chat stops further model calls in an active continu
   catalog.models.push(customModel({ id: 'slow_partner', name: '慢速协作模型', model: 'slow-continuation' }));
   await saveCatalog(s.userId, catalog);
   assert.equal((await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie)
-    .send({ modelId: 'slow_partner', capability: 'chat' })).status, 200);
+    .send({ clientRequestId: crypto.randomUUID(), modelId: 'slow_partner', capability: 'chat' })).status, 200);
   const group = await request.post('/api/groups').set('Cookie', s.cookie)
     .send({ name: '运行中关闭主动对话', ai_members: ['custom', 'slow_partner'] });
   assert.equal(group.status, 201);
@@ -461,7 +466,7 @@ test('one-response persona limits bound each model even with autonomous chat ena
   catalog.models.push(customModel({ id: 'one_partner', name: '单次协作模型', model: 'future/one-partner' }));
   await saveCatalog(s.userId, catalog);
   assert.equal((await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie)
-    .send({ modelId: 'one_partner', capability: 'chat' })).status, 200);
+    .send({ clientRequestId: crypto.randomUUID(), modelId: 'one_partner', capability: 'chat' })).status, 200);
   const db = await getUserDb(s.userId);
   await withWriteLock(s.userId, async () => {
     await db.read();
@@ -497,7 +502,7 @@ test('overlapping idle timer ticks claim one autonomous run before asynchronous 
   catalog.models.push(customModel({ id: 'idle_partner', name: '闲聊协作模型', model: 'slow-task-model' }));
   await saveCatalog(s.userId, catalog);
   assert.equal((await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie)
-    .send({ modelId: 'idle_partner', capability: 'chat' })).status, 200);
+    .send({ clientRequestId: crypto.randomUUID(), modelId: 'idle_partner', capability: 'chat' })).status, 200);
   const group = await request.post('/api/groups').set('Cookie', s.cookie)
     .send({ name: '重叠定时器会话', ai_members: ['custom', 'idle_partner'] });
   assert.equal(group.status, 201);
@@ -541,7 +546,7 @@ test('manual autonomous starter respects verified models, stop, and group deleti
   assert.equal(calls.length, beforeUnverified);
   await probeChat(s);
   assert.equal((await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie)
-    .send({ modelId: 'manual_partner', capability: 'chat' })).status, 200);
+    .send({ clientRequestId: crypto.randomUUID(), modelId: 'manual_partner', capability: 'chat' })).status, 200);
 
   for (const action of ['stop', 'delete']) {
     const beforeSlow = slow.length, beforeCalls = calls.length;
@@ -567,7 +572,7 @@ test('stopping during a manual reply commit reports the result as unknown', { ti
   catalog.models.push(customModel({ id: 'commit_partner', name: '并发协作模型', model: 'future/commit-partner' }));
   await saveCatalog(s.userId, catalog);
   assert.equal((await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie)
-    .send({ modelId: 'commit_partner', capability: 'chat' })).status, 200);
+    .send({ clientRequestId: crypto.randomUUID(), modelId: 'commit_partner', capability: 'chat' })).status, 200);
   const group = await request.post('/api/groups').set('Cookie', s.cookie)
     .send({ name: '提交期停止', ai_members: ['custom', 'commit_partner'] });
   assert.equal(group.status, 201);
@@ -1039,11 +1044,13 @@ test('task cancellation defeats late completions, duplicate runs are rejected an
   const s = await session(); await configure(s.userId, { model: 'slow-task-model' });
   await probeChat(s);
   const task = await createTask(s.userId, { title: '慢请求', prompt: '执行', model_id: 'custom' });
+  const slowBefore = slow.length;
   const running = runTask(s.userId, task.id);
-  await eventually(async () => (await listTasks(s.userId))[0]?.status === 'running');
+  await eventually(() => slow.length > slowBefore);
   await assert.rejects(runTask(s.userId, task.id), e => e.status === 409);
-  await updateTask(s.userId, task.id, { status: 'cancelled' });
-  await running; assert.equal((await listTasks(s.userId))[0].status, 'cancelled');
+  await updateTask(s.userId, task.id, { status: 'cancelled', run_id: (await listTasks(s.userId)).find(item => item.id === task.id).run_id });
+  await running; assert.equal((await listTasks(s.userId))[0].status, 'outcome_unknown');
+  assert.equal((await listTasks(s.userId))[0].history.at(-1).dispatch_status, 'sent_or_unknown');
   const db = await getUserDb(s.userId);
   await withWriteLock(s.userId, async () => { await db.read(); db.data.tasks[0].status = 'running'; db.data.tasks[0].auto_run = true; await db.write(); });
   await startTaskScheduler(); stopTaskScheduler();
@@ -1052,8 +1059,8 @@ test('task cancellation defeats late completions, duplicate runs are rejected an
   await assert.rejects(runTask(s.userId, task.id), error => error.status === 409);
   assert.equal((await request.post(`/api/tasks/${task.id}/resolve-unknown`).set('Cookie', s.cookie).send({ decision: 'retry' })).status, 400);
   const other = await session();
-  assert.equal((await request.post(`/api/tasks/${task.id}/resolve-unknown`).set('Cookie', other.cookie).send({ decision: 'allow_retry' })).status, 404);
-  const resolved = await request.post(`/api/tasks/${task.id}/resolve-unknown`).set('Cookie', s.cookie).send({ decision: 'allow_retry' });
+  assert.equal((await request.post(`/api/tasks/${task.id}/resolve-unknown`).set('Cookie', other.cookie).send({ decision: 'allow_retry', run_id: recovered.run_id })).status, 404);
+  const resolved = await request.post(`/api/tasks/${task.id}/resolve-unknown`).set('Cookie', s.cookie).send({ decision: 'allow_retry', run_id: recovered.run_id });
   assert.equal(resolved.status, 200); assert.equal(resolved.body.status, 'failed');
   assert.equal(resolved.body.history.at(-1).resolution, 'allow_retry');
 });
@@ -1233,4 +1240,20 @@ test('queued user replies stop before dispatch and discard responses after sourc
     await new Promise(resolve => wss.close(resolve));
     await new Promise(resolve => socketServer.close(resolve));
   }
+});
+
+test('an explicit unavailable default never silently reroutes input to another verified provider', async () => {
+  const s = await session(); await configure(s.userId); await probeChat(s);
+  const catalog = await readCatalog(s.userId);
+  catalog.providers.push({id:'private_provider',name:'明确选择的服务商',baseUrl:`${origin}/private`,protocol:'openai',enabled:true,keyRequired:true,apiKey:'isolated-private-test-key'});
+  catalog.models.push(customModel({id:'private_model',providerId:'private_provider',name:'明确默认但未测试'}));
+  catalog.defaults.chat = 'private_model';
+  await saveCatalog(s.userId,catalog);
+  assert.deepEqual((await readCatalog(s.userId)).models.find(model=>model.id==='custom').verifiedCapabilities,['chat']);
+  const before = calls.length;
+  await assert.rejects(defaultModelId(s.userId), error=>error.status===409 && error.message.includes('不会自动改用其他服务商'));
+  await assert.rejects(createTask(s.userId,{title:'不得换服务商',prompt:'属于用户选定服务商的内容',auto_run:true,run_at:new Date(Date.now()+60000).toISOString()}),error=>error.status===409);
+  assert.equal(calls.length,before);
+  const automatic=await readCatalog(s.userId);automatic.defaults.chat=null;await saveCatalog(s.userId,automatic);
+  assert.equal(await defaultModelId(s.userId),'custom');
 });

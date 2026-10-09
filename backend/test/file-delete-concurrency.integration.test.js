@@ -44,6 +44,17 @@ async function fixture() {
 
 test('a lost file write acknowledgement keeps the tombstone and refuses a blind retry', async () => {
   const f = await fixture();
+  const otherPath = path.join(path.dirname(f.filePath), `other_${f.fileId}.txt`);
+  await fs.writeFile(otherPath, 'unrelated file bytes', 'utf8');
+  await withWriteLock(f.userId, async () => {
+    await f.db.read({ force: true });
+    const target = f.db.data.files.find(file => file.id === f.fileId);
+    f.db.data.files.push({ ...target, id: `other_${f.fileId}`, stored_filename: path.basename(otherPath),
+      filename: path.basename(otherPath), original_path: otherPath });
+    await f.db.write();
+  });
+  const originalFiles = structuredClone(f.db.data.files);
+  const originalGroups = structuredClone(f.db.data.groups);
   const originalWrite = f.db.write.bind(f.db);
   f.db.write = async () => { throw new Error('injected write failure'); };
   try {
@@ -53,8 +64,17 @@ test('a lost file write acknowledgement keeps the tombstone and refuses a blind 
   } finally {
     f.db.write = originalWrite;
   }
-  await f.db.read();
-  assert.equal(f.db.data.files.filter(file => file.id === f.fileId).length, 1);
+  // The uncertain source mutation retires this handle. Verify both the old
+  // request fence and authoritative persisted state through the new instance.
+  await assert.rejects(f.db.read(), error => error.code === 'USER_DB_REPLACED');
+  await assert.rejects(f.db.write(), error => error.code === 'USER_DB_REPLACED');
+  const current = await getUserDb(f.userId);
+  assert.notEqual(current, f.db);
+  await current.read({ force: true });
+  assert.equal(current.data.files.filter(file => file.id === f.fileId).length, 1);
+  assert.deepEqual(current.data.files, originalFiles, 'recovery preserves target and unrelated file rows');
+  assert.deepEqual(current.data.groups, originalGroups, 'recovery does not overwrite other account data');
+  assert.equal(await fs.readFile(otherPath, 'utf8'), 'unrelated file bytes');
   assert.equal(await fs.readFile(f.filePath, 'utf8'), 'retained until authoritative deletion');
   const read = await request.get(`/api/files/${f.fileId}`).set('Cookie', f.cookie)
     .query({ group_id: f.groupId });

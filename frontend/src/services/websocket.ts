@@ -1,15 +1,15 @@
-import { useMessagesStore } from '../stores/messagesStore';
+import { useMessagesStore, recoverCachedMessage } from '../stores/messagesStore';
 import { useAudioStore } from '../stores/audioStore';
-import type { Message } from '../types';
+import type { Group, Message } from '../types';
 import { useUIStore } from '../stores/uiStore';
 import { useGroupsStore } from '../stores/groupsStore';
 import { usePersonasStore, PersonaConfig } from '../stores/personasStore';
-import { api, axiosInstance, notifyAuthExpired, getDevUserId } from './api';
+import { axiosInstance, notifyAuthExpired, getDevUserId, getAuthGeneration } from './api';
 import { getWebSocketUrl } from './runtimeConfig';
 import { getCacheUserId } from '../utils/cacheUtils';
-import { saveGroupsCache } from '../utils/cacheUtils';
+import { saveGroupsCache, savePersonasCache } from '../utils/cacheUtils';
 import { findMatchingLocalMessage } from './messageCorrelation';
-import { deleteMessageFromIndexedDB } from '../utils/indexedDB';
+import { loadMessagesFromIndexedDB } from '../utils/indexedDB';
 
 interface WSIncomingMessage {
   type: string;
@@ -66,19 +66,45 @@ interface WSIncomingMessage {
   all_personas?: Record<string, PersonaConfig>;
 }
 
-let ws: WebSocket | null = null;
+// A lifetime belongs to one explicit connection session and authentication generation.
+// Socket identity alone is insufficient when the same account logs out and back in.
+interface ConnectionOwner {
+  userId: string;
+  authGeneration: number;
+}
+interface GapFillChanges {
+  touched: Set<string>;
+  deleted: Set<string>;
+  pendingEvents: WSIncomingMessage[];
+  confirmedClientIds: Set<string>;
+  cleared: boolean;
+}
+interface ConnectionContext {
+  owner: ConnectionOwner;
+  socket: WebSocket;
+  closed: boolean;
+  openedAt: number | null;
+  lastMessageAt: number;
+  connectionTimer: ReturnType<typeof setTimeout> | null;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+  heartbeatTimer: ReturnType<typeof setInterval> | null;
+  errorTimer: ReturnType<typeof setTimeout> | null;
+  gapFills: Map<string, Promise<void>>;
+  gapFillChanges: Map<string, GapFillChanges>;
+  abort: AbortController;
+}
+
+let owner: ConnectionOwner | null = null;
+let connection: ConnectionContext | null = null;
 let reconnectAttempts = 0;
 let currentGroupId: string | null = null;
 let pendingGroupId: string | null = null;
-let subscribedGroupIds: Set<string> = new Set();
-let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-let heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+const subscribedGroupIds = new Set<string>();
 let lastMessageTimestamp: Record<string, string> = {};
-let isReconnecting = false;
 let connectionError: string | null = null;
-let connectionTimer: ReturnType<typeof setTimeout> | null = null;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let lastMessageReceivedTime = Date.now();
+let mobileListenersSetup = false;
+let wasHidden = false;
+let hiddenAt = 0;
 
 const MAX_RECONNECT_ATTEMPTS = 30;
 const BASE_RECONNECT_DELAY = 1000;
@@ -88,401 +114,435 @@ const HEARTBEAT_TIMEOUT = 45000;
 const CONNECTION_TIMEOUT = 20000;
 const CONNECTION_STABLE_THRESHOLD_MS = 30000;
 const MAX_GAP_FILL_PAGES = 5;
-let isCleanDisconnect = false;
 
-let connectedSince = 0;
-
-function markConnected(): void {
-  connectedSince = Date.now();
+function currentUserId(): string | null {
+  return getCacheUserId() || (import.meta.env.DEV && import.meta.env.VITE_AUTH_MODE === 'dev' ? getDevUserId() : null);
 }
 
-function consumeStableConnectionReset(): boolean {
-  const wasStable = connectedSince > 0 && Date.now() - connectedSince > CONNECTION_STABLE_THRESHOLD_MS;
-  connectedSince = 0;
-  if (wasStable) {
-    reconnectAttempts = 0;
-  }
-  return wasStable;
+function isOwnerCurrent(candidate: ConnectionOwner): boolean {
+  return owner === candidate && candidate.userId === currentUserId() && candidate.authGeneration === getAuthGeneration();
 }
 
-function clearConnectedMarker(): void {
-  connectedSince = 0;
+function isCurrent(context: ConnectionContext): boolean {
+  return connection === context && !context.closed && isOwnerCurrent(context.owner);
+}
+
+function isOpen(context: ConnectionContext): boolean {
+  return isCurrent(context) && context.socket.readyState === WebSocket.OPEN;
+}
+
+function clearTimers(context: ConnectionContext) {
+  if (context.connectionTimer !== null) clearTimeout(context.connectionTimer);
+  if (context.reconnectTimer !== null) clearTimeout(context.reconnectTimer);
+  if (context.heartbeatTimer !== null) clearInterval(context.heartbeatTimer);
+  if (context.errorTimer !== null) clearTimeout(context.errorTimer);
+  context.connectionTimer = context.reconnectTimer = context.heartbeatTimer = context.errorTimer = null;
+}
+
+function retireConnection(context: ConnectionContext) {
+  // Invalidate before close: browsers may dispatch onclose later, mocks may dispatch synchronously.
+  context.closed = true;
+  context.abort.abort();
+  clearTimers(context);
+  context.socket.onopen = context.socket.onmessage = context.socket.onclose = context.socket.onerror = null;
+  try { context.socket.close(); } catch { /* Already closed or unavailable. */ }
+}
+
+function setConnectionError(error: string | null) {
+  connectionError = error;
+  useUIStore.getState().setConnectionError(error);
+}
+
+function showTransientError(context: ConnectionContext, error: string) {
+  if (!isOpen(context)) return;
+  if (context.errorTimer !== null) clearTimeout(context.errorTimer);
+  setConnectionError(error);
+  context.errorTimer = setTimeout(() => {
+    if (!isOpen(context)) return;
+    context.errorTimer = null;
+    // Do not erase a different HTTP/connection error from another source.
+    if (useUIStore.getState().connectionError === error) setConnectionError(null);
+  }, 5000);
 }
 
 function getReconnectDelay(attempt: number): number {
-  const delay = BASE_RECONNECT_DELAY * Math.pow(1.5, attempt - 1);
-  const jitter = Math.random() * 1000;
-  return Math.min(delay + jitter, MAX_RECONNECT_DELAY);
+  return Math.min(BASE_RECONNECT_DELAY * Math.pow(1.5, attempt - 1) + Math.random() * 1000, MAX_RECONNECT_DELAY);
 }
 
-// 获取重连进度信息，供UI展示
 export function getReconnectProgress(): { current: number; max: number } {
   return { current: reconnectAttempts, max: MAX_RECONNECT_ATTEMPTS };
 }
 
-function startHeartbeat(wsInstance: WebSocket) {
-  stopHeartbeat();
-  // 被动心跳：不再主动发送ping，只监听后端ping并回复pong
-  // 后端每30s发送ping，如果45s内没有收到任何消息（ping/pong/其他），则认为连接断开
-  heartbeatTimer = setInterval(() => {
-    if (wsInstance.readyState === WebSocket.OPEN) {
-      const timeSinceLastMessage = Date.now() - lastMessageReceivedTime;
-      if (timeSinceLastMessage > HEARTBEAT_TIMEOUT) {
-        if (import.meta.env.DEV) console.warn('[WS] 被动心跳超时，准备重连');
-        if (wsInstance.readyState === WebSocket.OPEN) {
-          wsInstance.close(4002, 'Heartbeat timeout');
-        }
-      }
-    } else {
-      stopHeartbeat();
-    }
-  }, HEARTBEAT_INTERVAL);
+function getTimestampsKey(candidate: ConnectionOwner): string {
+  return `ws_last_msg_ts_${candidate.userId}`;
 }
 
-function resetHeartbeatTimeout() {
-  if (heartbeatTimeoutTimer) {
-    clearTimeout(heartbeatTimeoutTimer);
-    heartbeatTimeoutTimer = null;
-  }
-}
-
-function stopHeartbeat() {
-  if (heartbeatTimer) {
-    clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
-  }
-  if (heartbeatTimeoutTimer) {
-    clearTimeout(heartbeatTimeoutTimer);
-    heartbeatTimeoutTimer = null;
-  }
-}
-
-function clearConnectionTimer() {
-  if (connectionTimer) {
-    clearTimeout(connectionTimer);
-    connectionTimer = null;
-  }
-}
-
-function getTimestampsKey(): string {
-  const userId = getCacheUserId();
-  return userId ? `ws_last_msg_ts_${userId}` : 'ws_last_msg_ts';
-}
-
-function recordMessageTimestamp(groupId: string, timestamp: string) {
+function recordMessageTimestamp(context: ConnectionContext, groupId: string, timestamp: string) {
+  if (!isOpen(context)) return;
   lastMessageTimestamp[groupId] = timestamp;
   try {
-    const stored = JSON.parse(localStorage.getItem(getTimestampsKey()) || '{}');
-    stored[groupId] = timestamp;
-    localStorage.setItem(getTimestampsKey(), JSON.stringify(stored));
-  } catch { }
+    localStorage.setItem(getTimestampsKey(context.owner), JSON.stringify(lastMessageTimestamp));
+  } catch { /* Recovery still works with the in-memory cursor. */ }
 }
 
-function loadPersistedTimestamps() {
+function loadPersistedTimestamps(candidate: ConnectionOwner) {
+  lastMessageTimestamp = {};
   try {
-    const stored = JSON.parse(localStorage.getItem(getTimestampsKey()) || '{}');
+    const stored = JSON.parse(localStorage.getItem(getTimestampsKey(candidate)) || '{}');
     for (const [groupId, ts] of Object.entries(stored)) {
-      if (typeof ts === 'string') {
-        lastMessageTimestamp[groupId] = ts;
+      if (typeof ts === 'string' && Number.isFinite(Date.parse(ts))) lastMessageTimestamp[groupId] = ts;
+    }
+  } catch { /* Malformed/unavailable cache is not an authentication failure. */ }
+}
+
+function readForConnection<T>(context: ConnectionContext, path: string, params?: Record<string, unknown>) {
+  // Stamp ownership before Axios's asynchronous request interceptor can yield to
+  // logout/login. Cancellation also stops retries and stale auth errors at source.
+  const config = { signal: context.abort.signal, authGeneration: context.owner.authGeneration,
+    headers: { 'X-Expected-User-Id': context.owner.userId }, params };
+  return axiosInstance.get<T>(path, config).then(response => response.data);
+}
+
+function fetchMissedMessages(context: ConnectionContext, groupId: string): Promise<void> {
+  if (!isOpen(context)) return Promise.resolve();
+  const existing = context.gapFills.get(groupId);
+  if (existing) return existing;
+  const liveChanges: GapFillChanges = { touched: new Set(), deleted: new Set(), pendingEvents: [], confirmedClientIds: new Set(), cleared: false };
+  context.gapFillChanges.set(groupId, liveChanges);
+  const hasVisibleMessages = (useMessagesStore.getState().messages[groupId] || []).length > 0;
+  // A persisted cursor is not loaded history. A cold tab must fetch the first page.
+  const lastTimestamp = hasVisibleMessages ? lastMessageTimestamp[groupId] : undefined;
+  const pending = Promise.resolve().then(async () => {
+    try {
+      if (!isOpen(context)) return;
+      if (!hasVisibleMessages) {
+        const cached = (await loadMessagesFromIndexedDB(groupId)).map(recoverCachedMessage);
+        if (!isOpen(context) || liveChanges.cleared) return;
+        const current = useMessagesStore.getState().messages[groupId] || [];
+        const knownIds = new Set(current.map(item => item.id));
+        const restored = cached.filter(item => !knownIds.has(item.id) && !liveChanges.deleted.has(item.id)
+          && !(item.tempId && liveChanges.confirmedClientIds.has(item.tempId)));
+        for (const item of cached) {
+          if (item.tempId && liveChanges.confirmedClientIds.has(item.tempId)) useMessagesStore.getState().confirmClientMessage(groupId, item.tempId);
+        }
+        if (restored.length) {
+          useMessagesStore.setState(state => ({ messages: { ...state.messages, [groupId]: [...current, ...restored]
+            .sort((a, b) => a.created_at.localeCompare(b.created_at)) } }));
+          const restoredIds = new Set(restored.map(item => item.id));
+          for (const event of liveChanges.pendingEvents) {
+            if (event.message_id && restoredIds.has(event.message_id)) handleWebSocketMessage(event, context, false);
+          }
+        }
+      }
+      if (!isOpen(context)) return;
+      const beforeRead = new Map((useMessagesStore.getState().messages[groupId] || []).map(item => [item.id, item]));
+      const paginationBefore = useMessagesStore.getState().pagination[groupId];
+      const collected: Message[] = [];
+      let cursorBefore: string | undefined;
+      let hasMore = false;
+      for (let page = 0; page < (lastTimestamp ? MAX_GAP_FILL_PAGES : 1); page++) {
+        if (!isOpen(context)) return;
+        const response = await readForConnection<{ messages?: Message[]; hasMore?: boolean }>(context, `/groups/${groupId}/messages`, {
+          limit: lastTimestamp ? 100 : 50, ...(cursorBefore ? { before: cursorBefore } : {}), ...(lastTimestamp ? { after: lastTimestamp } : {})
+        });
+        if (!isOpen(context)) return;
+        const pageMessages = response.messages || [];
+        hasMore = response.hasMore || false;
+        if (pageMessages.length === 0) break;
+        collected.unshift(...pageMessages);
+        if (!hasMore) break;
+        const oldestFetched = pageMessages[0]?.created_at;
+        if (!oldestFetched || oldestFetched === cursorBefore) break;
+        cursorBefore = oldestFetched;
+      }
+      if (!isOpen(context) || liveChanges.cleared) return;
+      const messagesStore = useMessagesStore.getState();
+      if (!lastTimestamp) {
+        const confirmedIds = new Set(collected.map(item => item.id));
+        const oldestConfirmed = collected[0]?.created_at;
+        const removed = (messagesStore.messages[groupId] || []).filter(item => !confirmedIds.has(item.id)
+          && (!hasMore || (oldestConfirmed && item.created_at >= oldestConfirmed))
+          && item.status !== 'failed' && item.status !== 'sending' && !item.is_streaming
+          && !liveChanges.touched.has(item.id) && beforeRead.get(item.id) === item).map(item => item.id);
+        // A first page only proves absence inside its fetched time range.
+        // Older cached history is not a source deletion when more pages exist.
+        // Keep unsent drafts/live changes while reconciling covered cached bodies.
+        if (removed.length) messagesStore.removeMessages(groupId, removed);
+      }
+      const insertedIds = new Set<string>();
+      for (const msg of collected) {
+        if (!isOpen(context)) return;
+        if (liveChanges.deleted.has(msg.id)) continue;
+        const currentMessages = useMessagesStore.getState().messages[groupId] || [];
+        const existingMessage = currentMessages.find(item => item.id === msg.id);
+        const local = findMatchingLocalMessage(currentMessages, (msg as Message & { client_message_id?: string }).client_message_id);
+        if (local && existingMessage) {
+          if (local.id !== existingMessage.id) messagesStore.confirmClientMessage(groupId, local.tempId!);
+          else messagesStore.addMessage(groupId, { ...existingMessage, status: 'sent' });
+          if (local.id === existingMessage.id && local.tempId) messagesStore.confirmClientMessage(groupId, local.tempId);
+        }
+        if (existingMessage && (liveChanges.touched.has(msg.id) || existingMessage !== beforeRead.get(msg.id))) continue;
+        if (existingMessage?.is_streaming && !msg.is_streaming) {
+          messagesStore.finalizeStreamMessage(groupId, msg.id, msg.content || '', msg.reply_to, msg.reply_to_ids);
+        } else if (!existingMessage) {
+          insertedIds.add(msg.id);
+          messagesStore.addMessage(groupId, { ...msg, ...(local?.tempId ? { tempId: local.tempId, status: 'sent' as const } : {}) });
+        } else if (!lastTimestamp) {
+          // Cold-tab cached confirmed messages may have been edited while offline.
+          messagesStore.addMessage(groupId, msg);
+        }
+      }
+      if (!isOpen(context)) return;
+      // An edit/reaction can arrive for a message missing until this history read.
+      // Replay only for newly inserted IDs, never double-apply already visible events.
+      for (const event of liveChanges.pendingEvents) {
+        if (event.message_id && insertedIds.has(event.message_id)) handleWebSocketMessage(event, context, false);
+      }
+      if (!isOpen(context)) return;
+      useMessagesStore.setState(state => ({
+        messages: { ...state.messages, [groupId]: [...(state.messages[groupId] || [])].sort((a, b) => a.created_at.localeCompare(b.created_at)) },
+        // Only a first-page fetch knows whether older history exists.
+        ...(!lastTimestamp && state.pagination[groupId] === paginationBefore ? { pagination: { ...state.pagination, [groupId]: {
+          hasMore, loadingMore: false, oldestMessageId: collected[0]?.id || null, oldestMessageCreatedAt: collected[0]?.created_at || null
+        } } } : {})
+      }));
+    } catch {
+      if (isOpen(context)) showTransientError(context, '消息同步失败，保留已显示内容；可重新打开群聊重试');
+    } finally {
+      if (context.gapFills.get(groupId) === pending) {
+        context.gapFills.delete(groupId);
+        context.gapFillChanges.delete(groupId);
       }
     }
-  } catch { }
+  });
+  context.gapFills.set(groupId, pending);
+  return pending;
 }
 
-async function fetchMissedMessages(groupId: string) {
-  const lastTimestamp = lastMessageTimestamp[groupId];
-  if (!lastTimestamp) {
-    void useMessagesStore.getState().fetchMessages(groupId).catch(error => {
-      if (import.meta.env.DEV) console.warn('[WS] Initial messages fetch failed:', error);
+function mergeLiveFields<T extends object>(remote: T, current?: T, before?: T): T {
+  if (!current || current === before) return remote;
+  if (!before) return { ...remote, ...current };
+  const merged = { ...remote } as Record<string, unknown>;
+  const live = current as Record<string, unknown>;
+  const initial = before as Record<string, unknown>;
+  for (const key of new Set([...Object.keys(initial), ...Object.keys(live)])) {
+    if (!Object.is(live[key], initial[key])) {
+      if (key in live) merged[key] = live[key]; else delete merged[key];
+    }
+  }
+  return merged as T;
+}
+
+async function syncDataAfterReconnect(context: ConnectionContext) {
+  if (!isOpen(context)) return;
+  // Store-owned fetch actions commit internally. Fetch here so ownership is checked
+  // before every store/cache mutation, including same-user connection replacement.
+  const groupsBefore = new Map(useGroupsStore.getState().groups.map(group => [group.id, group]));
+  const personasBefore = usePersonasStore.getState().personas;
+  const [groupsResult, personasResult] = await Promise.allSettled([
+    readForConnection<Group[]>(context, '/groups'),
+    readForConnection<{ personas: Record<string, PersonaConfig> }>(context, '/personas')
+  ]);
+  if (!isOpen(context)) return;
+  const validGroups = groupsResult.status === 'fulfilled' && Array.isArray(groupsResult.value)
+    && groupsResult.value.every(group => group && typeof group.id === 'string');
+  const validPersonas = personasResult.status === 'fulfilled' && personasResult.value?.personas
+    && typeof personasResult.value.personas === 'object' && !Array.isArray(personasResult.value.personas)
+    && Object.values(personasResult.value.personas).every(persona => persona && typeof persona === 'object');
+  if (groupsResult.status === 'fulfilled' && validGroups) {
+    const current = new Map(useGroupsStore.getState().groups.map(group => [group.id, group]));
+    const groups = groupsResult.value.filter(group => !groupsBefore.has(group.id) || current.has(group.id)).map(group => {
+      const existing = current.get(group.id);
+      const hydrated = existing ? { ...group, avatar_url: existing.avatar_url || group.avatar_url,
+        background_url: existing.background_url || group.background_url,
+        announcement: existing.announcement || group.announcement,
+        last_message_preview: group.last_message_preview || existing.last_message_preview } : group;
+      return mergeLiveFields(hydrated, existing, groupsBefore.get(group.id));
     });
+    const returnedIds = new Set(groups.map(group => group.id));
+    for (const group of current.values()) if (!groupsBefore.has(group.id) && !returnedIds.has(group.id)) groups.push(group);
+    const selected = useGroupsStore.getState().currentGroup?.id;
+    useGroupsStore.setState({ groups, currentGroup: groups.find(group => group.id === selected) || null, loading: false, initialized: true });
+    if (!isOpen(context)) return;
+    saveGroupsCache(groups);
+    subscribeAllGroups();
+    for (const group of groups) if (!groupsBefore.has(group.id)) void fetchMissedMessages(context, group.id);
+  }
+  if (!isOpen(context)) return;
+  if (personasResult.status === 'fulfilled' && validPersonas) {
+    const current = usePersonasStore.getState().personas;
+    const personas: Record<string, PersonaConfig> = {};
+    for (const [id, persona] of Object.entries(personasResult.value.personas)) {
+      if (personasBefore[id] && !current[id]) continue;
+      personas[id] = mergeLiveFields({ ...persona, avatar_url: persona.avatar_url || current[id]?.avatar_url || null,
+        color: persona.color || current[id]?.color }, current[id], personasBefore[id]);
+    }
+    for (const [id, persona] of Object.entries(current)) if (!personasBefore[id] && !personas[id]) personas[id] = persona;
+    usePersonasStore.setState({ personas, loading: false, error: null });
+    if (!isOpen(context)) return;
+    savePersonasCache(personas);
+  }
+  if (!validGroups || !validPersonas) {
+    showTransientError(context, '部分群聊资料同步失败，已保留当前内容');
+  }
+}
+
+function finishConnection(context: ConnectionContext, code: number) {
+  if (!isCurrent(context)) return;
+  context.closed = true;
+  context.abort.abort();
+  clearTimers(context);
+  subscribedGroupIds.clear();
+  useUIStore.getState().setConnectionStatus('disconnected');
+  // Opening a TCP/WebSocket connection is not evidence that the server is healthy.
+  // At least one valid frame after the stable window is needed to reset backoff.
+  if (context.openedAt !== null && context.lastMessageAt - context.openedAt >= CONNECTION_STABLE_THRESHOLD_MS) reconnectAttempts = 0;
+  if (code === 4001) {
+    // Authentication failure must not accept arbitrary server reason text or retry.
+    disconnectWebSocket();
+    setConnectionError('认证失败，请重新登录');
+    notifyAuthExpired();
     return;
   }
-
-  try {
-    const collected: Message[] = [];
-    let cursorBefore: string | undefined = undefined;
-
-    for (let page = 0; page < MAX_GAP_FILL_PAGES; page++) {
-      const response = await api.getMessages(groupId, 100, cursorBefore, lastTimestamp);
-      const pageMessages = response.messages || [];
-
-      if (pageMessages.length === 0) {
-        break;
-      }
-
-      collected.unshift(...pageMessages);
-
-      if (!response.hasMore) {
-        break;
-      }
-
-      const oldestFetched = pageMessages[0]?.created_at;
-      if (!oldestFetched || oldestFetched === cursorBefore) {
-        break;
-      }
-      cursorBefore = oldestFetched;
-    }
-
-    if (collected.length === 0) {
-      return;
-    }
-
-    const messagesStore = useMessagesStore.getState();
-    const currentMsgs = messagesStore.messages[groupId] || [];
-    const streamingIds = new Set(currentMsgs.filter(m => m.is_streaming).map(m => m.id));
-    const existingIds = new Set(currentMsgs.map(m => m.id));
-    let addedCount = 0;
-    let finalizedCount = 0;
-
-    collected.forEach((msg: Message) => {
-      if (streamingIds.has(msg.id)) {
-        messagesStore.finalizeStreamMessage(
-          groupId,
-          msg.id,
-          msg.content || '',
-          msg.reply_to,
-          msg.reply_to_ids
-        );
-        streamingIds.delete(msg.id);
-        finalizedCount++;
-      } else if (!existingIds.has(msg.id)) {
-        messagesStore.addMessage(groupId, {
-          ...msg,
-          sender_type: msg.sender_type,
-          content_type: msg.content_type,
-          is_streaming: false
-        });
-        addedCount++;
-      }
-    });
-
-    if (import.meta.env.DEV) console.log(`[WS] Fetched ${collected.length} missed messages in pages, ${addedCount} new, ${finalizedCount} finalized for group ${groupId}`);
-  } catch (error) {
-    if (import.meta.env.DEV) console.error('[WS] Failed to fetch missed messages:', error);
+  if (code === 1000 || code === 1001) return;
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    setConnectionError('连接已断开，重连失败，请刷新页面重试');
+    return;
   }
+  reconnectAttempts++;
+  useUIStore.getState().setConnectionStatus('connecting');
+  setConnectionError(null);
+  context.reconnectTimer = setTimeout(() => {
+    // Checking the closed context itself prevents an old queued timer stealing
+    // ownership from a new socket even if both belong to the same account.
+    if (connection !== context || !isOwnerCurrent(context.owner)) return;
+    context.reconnectTimer = null;
+    openConnection(context.owner);
+  }, getReconnectDelay(reconnectAttempts));
 }
 
-async function syncDataAfterReconnect() {
+function failConnection(context: ConnectionContext, reason: string) {
+  if (!isCurrent(context)) return;
+  finishConnection(context, 4002);
+  try { context.socket.close(4002, reason); } catch { /* Retry already scheduled. */ }
+}
+
+function openConnection(candidate: ConnectionOwner) {
+  if (!isOwnerCurrent(candidate)) return;
+  if (connection) retireConnection(connection);
+  connection = null;
+  useUIStore.getState().setConnectionStatus('connecting');
+  let socket: WebSocket;
   try {
-    const { fetchGroups } = useGroupsStore.getState();
-    const { fetchPersonas } = usePersonasStore.getState();
-    await Promise.all([
-      fetchGroups(),
-      fetchPersonas()
-    ]);
-    if (import.meta.env.DEV) console.log('[WS] Reconnect data sync completed');
-  } catch (error) {
-    if (import.meta.env.DEV) console.error('[WS] Reconnect data sync failed:', error);
+    const endpoint = new URL(getWebSocketUrl());
+    if (import.meta.env.DEV && import.meta.env.VITE_AUTH_MODE === 'dev') endpoint.searchParams.set('userId', getDevUserId());
+    socket = new WebSocket(endpoint.toString());
+  } catch {
+    // Invalid URL/security/constructor failures need intervention, not a hot loop.
+    useUIStore.getState().setConnectionStatus('disconnected');
+    setConnectionError('无法建立实时连接，请检查服务地址后刷新页面');
+    return;
   }
+  const context: ConnectionContext = { owner: candidate, socket, closed: false, openedAt: null,
+    lastMessageAt: Date.now(), connectionTimer: null, reconnectTimer: null, heartbeatTimer: null,
+    errorTimer: null, gapFills: new Map(), gapFillChanges: new Map(), abort: new AbortController() };
+  connection = context;
+  context.connectionTimer = setTimeout(() => {
+    if (isCurrent(context) && socket.readyState === WebSocket.CONNECTING) failConnection(context, 'Connection timeout');
+  }, CONNECTION_TIMEOUT);
+
+  socket.onopen = () => {
+    if (!isCurrent(context) || socket.readyState !== WebSocket.OPEN || context.openedAt !== null) return;
+    if (context.connectionTimer !== null) clearTimeout(context.connectionTimer);
+    context.connectionTimer = null;
+    context.lastMessageAt = Date.now();
+    context.openedAt = Date.now();
+    useUIStore.getState().setConnectionStatus('connected');
+    setConnectionError(null);
+    context.heartbeatTimer = setInterval(() => {
+      if (!isCurrent(context)) return;
+      if (socket.readyState !== WebSocket.OPEN || Date.now() - context.lastMessageAt > HEARTBEAT_TIMEOUT) {
+        failConnection(context, 'Heartbeat timeout');
+      }
+    }, HEARTBEAT_INTERVAL);
+    currentGroupId = pendingGroupId || currentGroupId;
+    pendingGroupId = null;
+    subscribedGroupIds.clear();
+    subscribeAllGroups();
+    if (currentGroupId) joinGroup(currentGroupId);
+    for (const group of useGroupsStore.getState().groups) void fetchMissedMessages(context, group.id);
+    void syncDataAfterReconnect(context);
+    void recoverInterruptedStreams(context);
+  };
+  socket.onmessage = event => {
+    if (!isOpen(context)) return;
+    try {
+      const message = JSON.parse(event.data);
+      if (!message || typeof message !== 'object' || typeof message.type !== 'string') return;
+      context.lastMessageAt = Date.now();
+      if (message.type === 'ping') { send(context, { type: 'pong' }); return; }
+      if (message.type === 'pong') return;
+      handleWebSocketMessage(message, context);
+    } catch {
+      // JSON parser errors may embed message bodies. Never log their raw text.
+      if (import.meta.env.DEV) console.warn('[WS] Invalid incoming event');
+    }
+  };
+  socket.onclose = event => finishConnection(context, event.code);
+  socket.onerror = () => {
+    if (!isCurrent(context)) return;
+    setConnectionError('WebSocket 连接出错，正在尝试重连...');
+    // The browser emits close after error; connecting/open timeouts cover silent failures.
+  };
 }
 
 export function connectWebSocket(groupId?: string) {
-  const uiStore = useUIStore.getState();
-  isCleanDisconnect = false;
-
-  // 重连锁：如果正在建立连接（CONNECTING状态），直接跳过，避免并发竞争
-  if (ws && ws.readyState === WebSocket.CONNECTING) {
-    if (import.meta.env.DEV) console.log('[WS] Connection in progress, skipping...');
-    return;
+  if (owner && !isOwnerCurrent(owner)) disconnectWebSocket();
+  if (!owner) {
+    const userId = currentUserId();
+    if (!userId) return;
+    owner = { userId, authGeneration: getAuthGeneration() };
+    loadPersistedTimestamps(owner);
   }
-  isReconnecting = false; // 重置标志，允许新连接
-
-  loadPersistedTimestamps();
   setupMobileEventListeners();
-
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    if (currentGroupId === groupId) return;
-    if (currentGroupId && currentGroupId !== groupId) {
-      leaveGroup(currentGroupId);
-    }
-    if (groupId) {
-      joinGroup(groupId);
-    }
-    return;
-  }
-
-  if (ws && ws.readyState !== WebSocket.OPEN) {
-    if (import.meta.env.DEV) console.log('[WS] Closing stale connection, readyState:', ws.readyState);
-    try { ws.close(); } catch { }
-    ws = null;
-  }
-
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-
-  uiStore.setConnectionStatus('connecting');
-  clearConnectionTimer();
-
-  const endpoint = new URL(getWebSocketUrl());
-  if (import.meta.env.DEV && import.meta.env.VITE_AUTH_MODE === 'dev') endpoint.searchParams.set('userId', getDevUserId());
-  const wsUrl = endpoint.toString();
-
-  if (import.meta.env.DEV) console.log('[WS] Connecting to:', wsUrl);
-
-  const wsInstance = new WebSocket(wsUrl);
-  ws = wsInstance;
-
-  connectionTimer = setTimeout(() => {
-    if (wsInstance.readyState === WebSocket.CONNECTING) {
-      if (import.meta.env.DEV) console.error('[WS] Connection timeout after', CONNECTION_TIMEOUT, 'ms');
-      isCleanDisconnect = false;
-      wsInstance.close(4002, 'Connection timeout');
-    }
-  }, CONNECTION_TIMEOUT);
-
-  wsInstance.onopen = () => {
-    clearConnectionTimer();
-    lastMessageReceivedTime = Date.now();
-    if (import.meta.env.DEV) console.log('[WS] WebSocket connected');
-    markConnected();
-    reconnectAttempts = 0;
-    connectionError = null;
-    uiStore.setConnectionStatus('connected');
-    uiStore.setConnectionError(null);
-
-    startHeartbeat(wsInstance);
-    startHealthCheck();
-
-    const groupIdToJoin = pendingGroupId || currentGroupId || groupId;
-    if (import.meta.env.DEV) console.log('[WS] onopen - groupIdToJoin:', groupIdToJoin);
-    if (groupIdToJoin) {
-      currentGroupId = groupIdToJoin;
-      pendingGroupId = null;
-    }
-
-    // 重连时必须清空已订阅组集合，确保subscribeAllGroups重新发送所有join_group
-    subscribedGroupIds.clear();
-    subscribeAllGroups();
-
-    // 重连后获取所有群组的丢失消息，避免其他群组消息永久丢失
-    if (currentGroupId) {
-      if (import.meta.env.DEV) console.log('[WS] 获取丢失的消息并同步全局数据, isReconnecting:', isReconnecting);
-      fetchMissedMessages(currentGroupId).then(() => {
-        syncDataAfterReconnect();
-      });
-    }
-    // 对其他已订阅群组也获取丢失消息
-    const allGroups = useGroupsStore.getState().groups || [];
-    for (const group of allGroups) {
-      if (group.id !== currentGroupId) {
-        fetchMissedMessages(group.id).catch(err => {
-          if (import.meta.env.DEV) console.warn('[WS] Failed to fetch missed messages for group', group.id, err);
-        });
-      }
-    }
-    // 重连后恢复中断的流式消息：检查所有is_streaming消息是否已在后端finalize
-    recoverInterruptedStreams();
-    isReconnecting = false;
-  };
-
-  wsInstance.onmessage = (event) => {
-    lastMessageReceivedTime = Date.now();
-    try {
-      const message = JSON.parse(event.data);
-
-      if (message.type === 'ping') {
-        if (wsInstance.readyState === WebSocket.OPEN) {
-          wsInstance.send(JSON.stringify({ type: 'pong' }));
-        }
-        resetHeartbeatTimeout();
-        return;
-      }
-
-      if (message.type === 'pong') {
-        resetHeartbeatTimeout();
-        return;
-      }
-
-      handleWebSocketMessage(message);
-    } catch (error) {
-      if (import.meta.env.DEV) console.error('WebSocket message parse error:', error);
-    }
-  };
-
-  wsInstance.onclose = (event) => {
-    clearConnectionTimer();
-    stopHeartbeat();
-
-    const uiStore = useUIStore.getState();
-
-    if (import.meta.env.DEV) console.log('[WS] WebSocket disconnected, code:', event.code, 'reason:', event.reason || 'N/A', 'wasClean:', event.wasClean);
-
-    uiStore.setConnectionStatus('disconnected');
-
-    if (isCleanDisconnect) {
-      if (import.meta.env.DEV) console.log('[WS] Clean disconnect, not reconnecting');
-      isReconnecting = false;
-      isCleanDisconnect = false;
+  if (groupId) { currentGroupId = groupId; pendingGroupId = groupId; }
+  if (connection && isCurrent(connection)) {
+    if (connection.socket.readyState === WebSocket.OPEN) {
+      if (groupId) joinGroup(groupId);
       return;
     }
-
-    if (event.code === 1000 || event.code === 1001) {
-      if (import.meta.env.DEV) console.log('[WS] Normal close, not reconnecting');
-      isReconnecting = false;
-      return;
-    }
-
-    if (event.code === 4001) {
-      if (import.meta.env.DEV) console.log('[WS] Auth error from server, triggering logout');
-      isReconnecting = false;
-      connectionError = event.reason || '认证失败，请重新登录';
-      uiStore.setConnectionError(connectionError);
-      notifyAuthExpired();
-      return;
-    }
-
-    if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-      reconnectAttempts++;
-      // 统一使用指数退避+jitter，避免1006异常关闭时引发重连风暴
-      const delay = getReconnectDelay(reconnectAttempts);
-      if (import.meta.env.DEV) console.log(`[WS] Reconnecting... attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}, delay ${delay}ms`);
-      uiStore.setConnectionStatus('connecting');
-      uiStore.setConnectionError(null);
-
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        isReconnecting = true;
-        connectWebSocket(currentGroupId || undefined);
-      }, delay);
-    } else {
-      if (import.meta.env.DEV) console.error('[WS] Max reconnection attempts reached, will retry in 60s');
-      isReconnecting = false;
-      connectionError = '连接已断开，重连失败，请刷新页面重试';
-      uiStore.setConnectionError(connectionError);
-      // 使用reconnectTimer存储60秒兜底重试定时器，确保可被disconnectWebSocket清除
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        reconnectAttempts = 0;
-        if (currentGroupId) {
-          connectWebSocket(currentGroupId);
-        }
-      }, 60000);
-    }
-  };
-
-  wsInstance.onerror = (error) => {
-    if (import.meta.env.DEV) {
-      console.error('[WS] WebSocket error:', error);
-      console.error('[WS] Error details - readyState:', wsInstance.readyState, 'URL:', wsUrl);
-    }
-    connectionError = 'WebSocket 连接出错，正在尝试重连...';
-    useUIStore.getState().setConnectionError(connectionError);
-  };
+    if (connection.socket.readyState === WebSocket.CONNECTING) return;
+  }
+  // An explicit connect (e.g. a user retry) may start a fresh bounded attempt cycle.
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) reconnectAttempts = 0;
+  openConnection(owner);
 }
 
-function handleWebSocketMessage(message: WSIncomingMessage) {
+function handleWebSocketMessage(message: WSIncomingMessage, context: ConnectionContext, trackGapChanges = true) {
+  if (!isOpen(context)) return;
+  const liveChanges = trackGapChanges ? context.gapFillChanges.get(message.group_id) : undefined;
+  if (liveChanges) {
+    const existingMessages = useMessagesStore.getState().messages[message.group_id] || [];
+    if (message.id) liveChanges.touched.add(message.id);
+    if (message.type === 'new_message' && message.sender_type === 'user' && message.client_message_id) {
+      liveChanges.confirmedClientIds.add(message.client_message_id);
+    }
+    if (message.message_id) {
+      liveChanges.touched.add(message.message_id);
+      if (!existingMessages.some(item => item.id === message.message_id)) liveChanges.pendingEvents.push(message);
+    }
+    if (message.type === 'message_deleted' && message.message_id) liveChanges.deleted.add(message.message_id);
+    if (message.type === 'messages_batch_deleted') {
+      for (const id of message.message_ids || []) liveChanges.deleted.add(id);
+    }
+    if (message.type === 'messages_all_deleted') liveChanges.cleared = true;
+    if (message.type === 'generation_stopped') {
+      for (const item of existingMessages) if (item.is_streaming) liveChanges.touched.add(item.id);
+    }
+  }
   const messagesStore = useMessagesStore.getState();
   const uiStore = useUIStore.getState();
   const groupsStore = useGroupsStore.getState();
-
-  if (import.meta.env.DEV) console.log('[WS] Received message type:', message.type, message);
 
   try {
     switch (message.type) {
@@ -529,7 +589,6 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
                 tempId: localMsg.tempId,
                 status: 'sent'
               });
-              if (localMsg.tempId) void deleteMessageFromIndexedDB(localMsg.tempId);
             } else {
               messagesStore.addMessage(message.group_id, {
                 id: msgId,
@@ -558,7 +617,7 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
             });
           }
 
-          recordMessageTimestamp(message.group_id, messageTimestamp);
+          recordMessageTimestamp(context, message.group_id, messageTimestamp);
 
           useGroupsStore.setState(state => ({
             groups: state.groups.map(g =>
@@ -658,7 +717,6 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
         break;
 
       case 'joined_group':
-        if (import.meta.env.DEV) console.log('Joined group:', message.group_id);
         break;
 
       case 'generation_stopped':
@@ -682,7 +740,6 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
 
       case 'message_stream':
         if (message.group_id && message.message_id) {
-          if (import.meta.env.DEV) console.log('[WS] Received message_stream:', message.message_id, 'is_done:', message.is_done, 'chunk_len:', message.chunk?.length, 'sender:', message.sender_id);
           const incremental = (message as any).incremental_chunk;
           const fullChunk = message.chunk;
           let contentToUse: string | undefined;
@@ -698,7 +755,6 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
             const messagesStore = useMessagesStore.getState();
             const streamMsgs = messagesStore.messages[message.group_id] || [];
             const existingMsg = streamMsgs.find(m => m.id === message.message_id);
-            if (import.meta.env.DEV) console.log('[WS] message_stream - existing:', !!existingMsg, 'content_len:', contentToUse.length);
 
             if (existingMsg) {
               messagesStore.updateStreamMessage(message.group_id, message.message_id, contentToUse, message.is_done ?? false);
@@ -732,11 +788,9 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
 
       case 'message_stream_end':
         if (message.group_id && message.message_id && message.content !== undefined) {
-          if (import.meta.env.DEV) console.log('[WS] Received message_stream_end:', message.message_id, 'content_len:', message.content.length);
           const messagesStore = useMessagesStore.getState();
           const streamMsgs = messagesStore.messages[message.group_id] || [];
           const existingMsg = streamMsgs.find(m => m.id === message.message_id);
-          if (import.meta.env.DEV) console.log('[WS] message_stream_end - existing:', !!existingMsg);
 
           if (existingMsg) {
             messagesStore.finalizeStreamMessage(
@@ -748,7 +802,6 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
               );
               if (message.sender_type === 'system') messagesStore.updateMessage(message.message_id, message.group_id, { sender_type: 'system', metadata: message.metadata });
             } else {
-            if (import.meta.env.DEV) console.log('[WS] message_stream_end - creating new message directly');
             const finalMessage: Message = {
               id: message.message_id,
               group_id: message.group_id,
@@ -897,8 +950,7 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
           groupsStore.setTypingAI(message.group_id, null);
           uiStore.clearAllTypingForGroup(message.group_id);
           if (message.error) {
-            useUIStore.getState().setConnectionError(`自动聊天出错: ${message.error}`);
-            setTimeout(() => useUIStore.getState().setConnectionError(null), 5000);
+            showTransientError(context, '自动聊天出错，请检查连接后重试');
           }
         }
         break;
@@ -907,9 +959,6 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
         if (message.aiId && message.persona) {
           const personasStore = usePersonasStore.getState();
           personasStore.handlePersonaUpdate(message.aiId, message.persona as PersonaConfig);
-          if (import.meta.env.DEV) {
-            console.log('[WS] Persona updated:', message.aiId, message.persona.name);
-          }
         }
         break;
 
@@ -920,9 +969,6 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
             dedupedPersonas[aiId] = persona as PersonaConfig;
           }
           usePersonasStore.setState({ personas: dedupedPersonas });
-          if (import.meta.env.DEV) {
-            console.log('[WS] Personas synced:', Object.keys(dedupedPersonas).length, 'personas');
-          }
         }
         break;
 
@@ -930,7 +976,7 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
         if (message.messages && Array.isArray(message.messages)) {
           for (const subMessage of message.messages) {
             if (subMessage && subMessage.type) {
-              handleWebSocketMessage(subMessage);
+              handleWebSocketMessage(subMessage, context);
             }
           }
         }
@@ -938,335 +984,142 @@ function handleWebSocketMessage(message: WSIncomingMessage) {
 
       case 'error':
         {
-          const errorMsg = typeof message.message === 'string' ? message.message : message.error || '未知错误';
-          useUIStore.getState().setConnectionError(errorMsg);
-          setTimeout(() => useUIStore.getState().setConnectionError(null), 5000);
+          showTransientError(context, '实时消息处理失败，请稍后重试');
         }
         break;
     }
-  } catch (err) {
-    if (import.meta.env.DEV) {
-      console.error('[WS] Error handling message type:', message.type, err);
-    }
-    // 记录错误但不中断后续消息处理
+  } catch {
+    showTransientError(context, '实时消息处理失败，请稍后重试');
   }
+}
+
+function send(context: ConnectionContext, message: Record<string, unknown>): boolean {
+  if (!isOpen(context)) return false;
+  try { context.socket.send(JSON.stringify(message)); return true; }
+  catch { failConnection(context, 'Send failed'); return false; }
 }
 
 export function joinGroup(groupId: string) {
-  if (import.meta.env.DEV) console.log('[WS] joinGroup called:', groupId, 'ws state:', ws?.readyState, 'currentGroupId:', currentGroupId);
-
+  if (!owner || !isOwnerCurrent(owner) || !groupId) return;
   currentGroupId = groupId;
+  pendingGroupId = groupId;
+  const context = connection;
+  if (!context || !isOpen(context)) return;
   pendingGroupId = null;
-
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    if (!subscribedGroupIds.has(groupId)) {
-      ws.send(JSON.stringify({
-        type: 'join_group',
-        group_id: groupId
-      }));
-      subscribedGroupIds.add(groupId);
-      if (import.meta.env.DEV) console.log('[WS] Sent join_group for:', groupId, 'total subscribed:', subscribedGroupIds.size);
-    }
-  } else {
-    if (import.meta.env.DEV) console.log('[WS] WebSocket not open, will join when connected');
-    if (ws && ws.readyState === WebSocket.CONNECTING) {
-      pendingGroupId = groupId;
-    }
+  if (!subscribedGroupIds.has(groupId) && send(context, { type: 'join_group', group_id: groupId })) {
+    subscribedGroupIds.add(groupId);
   }
-
-  useMessagesStore.getState().fetchMessages(groupId);
+  void fetchMissedMessages(context, groupId);
 }
 
 export function leaveGroup(groupId: string) {
-  if (subscribedGroupIds.has(groupId)) {
-    subscribedGroupIds.delete(groupId);
-  }
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      type: 'leave_group',
-      group_id: groupId
-    }));
-    if (currentGroupId === groupId) {
-      currentGroupId = null;
-    }
-  }
+  if (!owner || !isOwnerCurrent(owner)) return;
+  subscribedGroupIds.delete(groupId);
+  if (currentGroupId === groupId) currentGroupId = null;
+  if (pendingGroupId === groupId) pendingGroupId = null;
+  if (connection) send(connection, { type: 'leave_group', group_id: groupId });
 }
 
 export function sendTypingStatus(groupId: string, aiId: string, status: boolean) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      type: 'typing',
-      group_id: groupId,
-      ai: aiId,
-      status
-    }));
-  }
+  if (connection) send(connection, { type: 'typing', group_id: groupId, ai: aiId, status });
 }
 
 export function stopGeneration(groupId: string) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      type: 'stop_generation',
-      group_id: groupId
-    }));
-  }
+  if (connection) send(connection, { type: 'stop_generation', group_id: groupId });
 }
 
 export function subscribeAllGroups() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-
-  const groupsStore = useGroupsStore.getState();
-  const allGroups = groupsStore.groups || [];
-
-  for (const group of allGroups) {
-    if (!subscribedGroupIds.has(group.id)) {
-      ws.send(JSON.stringify({
-        type: 'join_group',
-        group_id: group.id
-      }));
+  const context = connection;
+  if (!context || !isOpen(context)) return;
+  for (const group of useGroupsStore.getState().groups) {
+    if (!subscribedGroupIds.has(group.id) && send(context, { type: 'join_group', group_id: group.id })) {
       subscribedGroupIds.add(group.id);
     }
   }
-
-  if (import.meta.env.DEV) console.log('[WS] subscribeAllGroups: subscribed to', subscribedGroupIds.size, 'groups');
 }
 
 export function disconnectWebSocket() {
-  isCleanDisconnect = true;
-  clearConnectionTimer();
-  stopHeartbeat();
-  stopHealthCheck();
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  const uiStore = useUIStore.getState();
-  uiStore.setConnectionStatus('disconnected');
-  if (ws) {
-    ws.close();
-    ws = null;
-    currentGroupId = null;
-    subscribedGroupIds.clear();
-  }
-  isReconnecting = false;
+  // Clear intent first. Online/visibility events can never revive a logged-out session.
+  owner = null;
+  const previous = connection;
+  connection = null;
+  if (previous) retireConnection(previous);
   reconnectAttempts = 0;
-  clearConnectedMarker();
+  currentGroupId = null;
+  pendingGroupId = null;
+  subscribedGroupIds.clear();
+  lastMessageTimestamp = {};
+  wasHidden = false;
+  hiddenAt = 0;
+  cleanupMobileEventListeners();
+  setConnectionError(null);
+  useUIStore.getState().setConnectionStatus('disconnected');
 }
 
-export function getConnectionError(): string | null {
-  return connectionError;
-}
+export function getConnectionError(): string | null { return connectionError; }
 
-let mobileListenersSetup = false;
-
-function cleanupStaleStreamMessages() {
-  const messagesStore = useMessagesStore.getState();
-  const uiStore = useUIStore.getState();
-  const now = Date.now();
-  let cleanedCount = 0;
-  // 与streamTimeouts的120秒保持一致，避免误杀正常流式传输
-  const STALE_STREAM_THRESHOLD = 120000;
-
-  for (const [groupId, msgs] of Object.entries(messagesStore.messages)) {
-    const streamingMsgs = msgs.filter(m => m.is_streaming);
-    for (const msg of streamingMsgs) {
-      const msgAge = now - new Date(msg.created_at).getTime();
-      if (msgAge > STALE_STREAM_THRESHOLD) {
-        if (import.meta.env.DEV) console.log(`[WS] Cleaning up stale stream message: ${msg.id}, age: ${msgAge}ms`);
-        // 保留已接收内容，追加超时提示
-        const existingContent = msg.content || '';
-        const finalContent = existingContent.trim()
-          ? existingContent + '\n\n[流式传输超时，部分内容可能不完整]'
-          : '[流式传输超时，请重新发送]';
-        messagesStore.finalizeStreamMessage(groupId, msg.id, finalContent, undefined, undefined);
-        const senderId = msg.sender_id;
-        if (senderId) {
-          uiStore.setTyping(groupId, senderId, false);
+async function recoverInterruptedStreams(context: ConnectionContext) {
+  if (!isOpen(context)) return;
+  const snapshot = useMessagesStore.getState().messages;
+  for (const [groupId, messages] of Object.entries(snapshot)) {
+    for (const message of messages) {
+      if (!isOpen(context)) return;
+      if (!message.is_streaming || Date.now() - Date.parse(message.created_at) <= 10000) continue;
+      try {
+        const serverMessage = await readForConnection<{ is_streaming?: boolean; content?: string } | null>(context, `/messages/${message.id}`);
+        if (!isOpen(context)) return;
+        // A deletion/edit/new stream event supersedes this individual recovery read.
+        const current = useMessagesStore.getState().messages[groupId]?.find(item => item.id === message.id);
+        if (current !== message || !current.is_streaming) continue;
+        if (serverMessage && !serverMessage.is_streaming) {
+          useMessagesStore.getState().finalizeStreamMessage(groupId, message.id, serverMessage.content || message.content || '[消息内容不可用]');
         }
-        cleanedCount++;
-      }
-    }
-  }
-
-  if (cleanedCount > 0 && import.meta.env.DEV) {
-    console.log(`[WS] Cleaned up ${cleanedCount} stale stream messages`);
-  }
-}
-
-/**
- * 重连后恢复中断的流式消息
- * 检查所有is_streaming消息，若已超过10秒无更新则向后端查询是否已finalize
- */
-async function recoverInterruptedStreams() {
-  const messagesStore = useMessagesStore.getState();
-  const now = Date.now();
-  const RECOVERY_THRESHOLD = 10000; // 10秒无更新视为可能中断
-
-  for (const [groupId, msgs] of Object.entries(messagesStore.messages)) {
-    const streamingMsgs = msgs.filter(m => m.is_streaming);
-    for (const msg of streamingMsgs) {
-      const msgAge = now - new Date(msg.created_at).getTime();
-      if (msgAge > RECOVERY_THRESHOLD) {
-        if (import.meta.env.DEV) console.log(`[WS] Recovering interrupted stream: ${msg.id}, age: ${msgAge}ms`);
-        try {
-          // 向后端查询该消息的最新状态（axiosInstance 自动携带 cookie 与 CSRF 头）
-          const response = await axiosInstance.get(`/messages/${msg.id}`);
-          const serverMsg = response.data as { is_streaming?: boolean; content?: string } | null;
-          if (serverMsg && !serverMsg.is_streaming) {
-            // 后端已finalize，用完整内容替换前端部分内容
-            const finalContent = serverMsg.content || msg.content || '[消息内容不可用]';
-            messagesStore.finalizeStreamMessage(groupId, msg.id, finalContent, undefined, undefined);
-            if (import.meta.env.DEV) console.log(`[WS] Recovered stream message ${msg.id} from server`);
-          }
-        } catch (err) {
-          if (import.meta.env.DEV) console.warn(`[WS] Failed to recover stream message ${msg.id}:`, err);
-        }
+      } catch {
+        if (isOpen(context)) showTransientError(context, '中断消息暂时无法核验，已保留收到的内容');
       }
     }
   }
 }
 
-let wasHidden = false;
-let hiddenAt = 0;
-let healthCheckTimer: ReturnType<typeof setInterval> | null = null;
-
-function startHealthCheck() {
-  stopHealthCheck();
-  healthCheckTimer = setInterval(() => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      if (import.meta.env.DEV) console.log('[WS] Health check: connection lost, reconnecting...');
-      if (ws) {
-        try { ws.close(); } catch { }
-        ws = null;
-      }
-      isReconnecting = false;
-      consumeStableConnectionReset();
-      connectWebSocket(currentGroupId || undefined);
-    }
-  }, 120000);
-}
-
-function stopHealthCheck() {
-  if (healthCheckTimer) {
-    clearInterval(healthCheckTimer);
-    healthCheckTimer = null;
+function resumeConnection() {
+  if (!owner || !isOwnerCurrent(owner)) return;
+  const context = connection;
+  if (context && isOpen(context)) {
+    if (currentGroupId) void fetchMissedMessages(context, currentGroupId);
+    send(context, { type: 'ping' });
+    return;
   }
+  // Preserve backoff and its cap; browser events are not permission to reconnect forever.
+  if (context && context.reconnectTimer !== null) return;
+  if (context && isCurrent(context) && context.socket.readyState === WebSocket.CONNECTING) return;
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) return;
+  if (context && !context.closed) { failConnection(context, 'Connection unavailable'); return; }
+  openConnection(owner);
 }
 
 function handleVisibilityChange() {
-  if (document.visibilityState === 'hidden') {
-    wasHidden = true;
-    hiddenAt = Date.now();
-    return;
-  }
-
+  if (!owner || !isOwnerCurrent(owner)) return;
+  if (document.visibilityState === 'hidden') { wasHidden = true; hiddenAt = Date.now(); return; }
   if (document.visibilityState === 'visible' && wasHidden) {
     wasHidden = false;
-    const hiddenDuration = Date.now() - hiddenAt;
-
-    if (import.meta.env.DEV) console.log('[WS] Page became visible, checking connection... (hidden for', hiddenDuration, 'ms)');
-
-    cleanupStaleStreamMessages();
-
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      // 连接已断开，仅当隐藏时间超过5秒才重连，避免短暂切换标签页触发重连
-      if (hiddenDuration < 5000) {
-        if (import.meta.env.DEV) console.log('[WS] Page hidden for less than 5s, skipping reconnect');
-        return;
-      }
-      if (import.meta.env.DEV) console.log('[WS] Connection lost while hidden, reconnecting...');
-      if (ws) {
-        try { ws.close(); } catch { }
-        ws = null;
-      }
-      isReconnecting = false;
-      consumeStableConnectionReset();
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      connectWebSocket(currentGroupId || undefined);
-    } else {
-      // 连接仍然 OPEN，只发送 ping 和获取丢失消息，不强制关闭重连
-      if (currentGroupId) {
-        if (import.meta.env.DEV) console.log('[WS] Connection still alive, fetching missed messages...');
-        fetchMissedMessages(currentGroupId);
-      }
-      try {
-        ws.send(JSON.stringify({ type: 'ping' }));
-      } catch {
-        if (import.meta.env.DEV) console.log('[WS] Ping failed, reconnecting...');
-        try { ws.close(); } catch { }
-        ws = null;
-        isReconnecting = false;
-        consumeStableConnectionReset();
-        connectWebSocket(currentGroupId || undefined);
-      }
-    }
+    if (Date.now() - hiddenAt >= 5000) resumeConnection();
   }
 }
 
-function handleOnline() {
-  if (import.meta.env.DEV) console.log('[WS] Network came back online');
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    if (ws) {
-      try { ws.close(); } catch { }
-      ws = null;
-    }
-    isReconnecting = false;
-    consumeStableConnectionReset();
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-    connectWebSocket(currentGroupId || undefined);
-  } else if (currentGroupId) {
-    fetchMissedMessages(currentGroupId);
-  }
-}
-
-function handleOffline() {
-  // 连接断开时不需要特殊处理，重连机制会处理
-}
+function handleOnline() { resumeConnection(); }
 
 function setupMobileEventListeners() {
   if (mobileListenersSetup) return;
   mobileListenersSetup = true;
-
   document.addEventListener('visibilitychange', handleVisibilityChange);
   window.addEventListener('online', handleOnline);
-  window.addEventListener('offline', handleOffline);
 }
 
 function cleanupMobileEventListeners() {
   if (!mobileListenersSetup) return;
   document.removeEventListener('visibilitychange', handleVisibilityChange);
   window.removeEventListener('online', handleOnline);
-  window.removeEventListener('offline', handleOffline);
   mobileListenersSetup = false;
 }
 
-export function destroyWebSocket() {
-  isCleanDisconnect = true;
-  clearConnectionTimer();
-  stopHeartbeat();
-  stopHealthCheck();
-  if (ws) {
-    ws.close();
-    ws = null;
-  }
-  reconnectAttempts = 0;
-  currentGroupId = null;
-  pendingGroupId = null;
-  subscribedGroupIds.clear();
-  isReconnecting = false;
-  clearConnectedMarker();
-
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-
-  cleanupMobileEventListeners();
-  useUIStore.getState().setConnectionStatus('disconnected');
-}
+export function destroyWebSocket() { disconnectWebSocket(); }

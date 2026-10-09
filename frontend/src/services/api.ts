@@ -1,4 +1,7 @@
-import axios from 'axios';
+import { probeReceipt } from './modelProbeReceipt';
+import { getCacheUserId } from '../utils/cacheUtils';
+import { recordDiagnostic, getDiagnosticSurface } from '../observability/runtimeDiagnostics';
+import axios, { type AxiosRequestConfig } from 'axios';
 import type { Group, GroupFile, Message } from '../types';
 import type { FileUploadResponse, MessageCreateInput } from '../types';
 import type { GroupInsights, MemoryDigest } from '../types';
@@ -6,8 +9,19 @@ import type { GroupCreateInput, GroupSettingsInput, PaginatedMessagesResponse } 
 import { getApiBaseUrl, getApiBaseUrlCandidates, rememberBackendOrigin } from './runtimeConfig';
 
 const DEFAULT_AUTH_MODE = 'session';
+// A successful explicit login identifies the new account before bootstrap hydrates stores.
+let pendingAuthenticatedUserId: string | null = null;
+let authGeneration = 0;
+const activeRequestAccount = () => pendingAuthenticatedUserId || getCacheUserId();
+export const getAuthGeneration = () => authGeneration;
+export function confirmAuthIdentity(userId: string | null) {
+  // Identity equality is insufficient after logout/login A → B → A.
+  authGeneration++;
+  authExpiredHandledAt = 0;
+  if (userId === null || userId === pendingAuthenticatedUserId) pendingAuthenticatedUserId = null;
+}
 
-type AuthEventListener = () => void;
+type AuthEventListener = (reason?: 'expired' | 'account_changed') => void;
 const authEventListeners: Set<AuthEventListener> = new Set();
 
 export const __CLEAR__ = '__CLEAR__';
@@ -20,24 +34,62 @@ export function onAuthExpired(listener: AuthEventListener): () => void {
   return () => authEventListeners.delete(listener);
 }
 
-export function notifyAuthExpired() {
+export function notifyAuthExpired(reason: 'expired' | 'account_changed' = 'expired') {
   const now = Date.now();
   if (authExpiredHandledAt !== 0 && now - authExpiredHandledAt < AUTH_EXPIRED_COOLDOWN_MS) {
     return;
   }
   authExpiredHandledAt = now;
   authEventListeners.forEach(listener => {
-    try { listener(); } catch { }
+    try { listener(reason); } catch { }
   });
 }
 
-export const axiosInstance = axios.create({
+const transport = axios.create({
   baseURL: getApiBaseUrl(),
   timeout: 30000,
   headers: {
     'Content-Type': 'application/json'
   },
   withCredentials: true
+});
+
+
+// Axios's asynchronous interceptors start in a later microtask. Capture the
+// initiating session at the public call boundary, before that scheduling gap.
+type ScopedRequestConfig = AxiosRequestConfig & { authGeneration?: number };
+function freezeRequestContext(config: ScopedRequestConfig = {}, url?: string): ScopedRequestConfig {
+  const headers = new axios.AxiosHeaders(config.headers as Parameters<typeof axios.AxiosHeaders.from>[0]);
+  const expected = activeRequestAccount();
+  if (expected && !/^\/?auth\/(?:login|register|token)/.test(url || config.url || '')) {
+    headers.set('X-Expected-User-Id', expected, false);
+  }
+  return { ...config, headers, authGeneration: config.authGeneration ?? authGeneration };
+}
+function scopedArguments(method: string, input: unknown[]) {
+  const args = [...input];
+  if (method === 'request') {
+    if (typeof args[0] === 'string') args[1] = freezeRequestContext(args[1] as ScopedRequestConfig, args[0]);
+    else args[0] = freezeRequestContext(args[0] as ScopedRequestConfig);
+  } else {
+    const index = ['post', 'put', 'patch', 'postForm', 'putForm', 'patchForm'].includes(method) ? 2 : 1;
+    args[index] = freezeRequestContext(args[index] as ScopedRequestConfig, args[0] as string);
+  }
+  return args;
+}
+const requestMethods = new Set(['request', 'get', 'delete', 'head', 'options', 'post', 'put', 'patch', 'postForm', 'putForm', 'patchForm']);
+const methodWrappers = new Map<PropertyKey, { source: unknown; wrapped: (...args: unknown[]) => unknown }>();
+export const axiosInstance = new Proxy(transport, {
+  apply(target, thisArg, args) { return Reflect.apply(target, thisArg, scopedArguments('request', args)); },
+  get(target, key) {
+    const value = Reflect.get(target, key, target);
+    if (typeof key !== 'string' || !requestMethods.has(key) || typeof value !== 'function') return value;
+    const existing = methodWrappers.get(key);
+    if (existing && existing.source === value) return existing.wrapped;
+    const wrapped = (...args: unknown[]) => Reflect.apply(value, target, scopedArguments(key, args));
+    methodWrappers.set(key, { source: value, wrapped });
+    return wrapped;
+  },
 });
 
 const MAX_RETRIES = 3;
@@ -147,14 +199,19 @@ export const getDevUserId = () => {
 
 axiosInstance.interceptors.request.use(
   async (config) => {
+    (config as typeof config & { diagnosticStarted?: number }).diagnosticStarted = performance.now();
     const runtimeBaseUrl = getApiBaseUrl();
     const requestConfig = config as typeof config & {
       baseUrlCandidates?: string[];
       activeBaseUrlIndex?: number;
+      authGeneration?: number;
     };
 
+    requestConfig.authGeneration ??= authGeneration;
+    if (requestConfig.authGeneration !== authGeneration) throw staleSessionError();
     requestConfig.baseUrlCandidates = requestConfig.baseUrlCandidates || getBaseUrlCandidates();
-    requestConfig.activeBaseUrlIndex = requestConfig.baseUrlCandidates.indexOf(runtimeBaseUrl);
+    // Keep an explicitly selected fallback on retry instead of resetting to the failed origin.
+    requestConfig.activeBaseUrlIndex ??= requestConfig.baseUrlCandidates.indexOf(runtimeBaseUrl);
     if (requestConfig.activeBaseUrlIndex < 0) {
       requestConfig.activeBaseUrlIndex = 0;
     }
@@ -162,24 +219,31 @@ axiosInstance.interceptors.request.use(
 
     const authMode = getAuthMode();
     config.headers = config.headers || {};
+    // Freeze the initiating identity before any async CSRF work or retry.
+    const expectedUser = activeRequestAccount();
+    if (expectedUser && !/^\/?auth\/(?:login|register|token)/.test(config.url || '')) {
+      config.headers.set('X-Expected-User-Id', expectedUser, false);
+    }
     if (authMode === 'dev') {
       const userId = getDevUserId();
       config.headers['x-user-id'] = userId;
       if (import.meta.env.DEV) {
-        console.log(`[API Request] ${config.method?.toUpperCase()} ${config.baseURL}${config.url} | userId: ${userId} | data:`, config.data);
+        console.log('[API Request] started');
       }
     } else {
       config.withCredentials = true;
       if (isMutatingMethod(config.method)) {
         const csrfToken = await ensureCsrfToken();
         if (csrfToken) {
-          config.headers['x-csrf-token'] = csrfToken;
+          config.headers.set('x-csrf-token', csrfToken);
         }
       }
       if (import.meta.env.DEV) {
-        console.log(`[API Request] ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`);
+        console.log('[API Request] started');
       }
     }
+    // A session transition during CSRF acquisition must cancel, not send old input.
+    if (requestConfig.authGeneration !== authGeneration) throw staleSessionError();
     return config;
   },
   (error) => {
@@ -187,11 +251,25 @@ axiosInstance.interceptors.request.use(
   }
 );
 
+function staleSessionError() {
+  return Object.assign(new Error('登录会话已变化，已丢弃旧会话的请求或响应'), { status: 409, code: 'STALE_ACCOUNT_RESPONSE' });
+}
+function obsoleteSession(config: { authGeneration?: number }) {
+  return config.authGeneration !== undefined && config.authGeneration !== authGeneration;
+}
+
 axiosInstance.interceptors.response.use(
   (response) => {
+    if (obsoleteSession(response.config as typeof response.config & { authGeneration?: number })) return Promise.reject(staleSessionError());
+    const expected = response.config.headers?.get('X-Expected-User-Id');
+    if (expected && expected !== activeRequestAccount()) {
+      return Promise.reject(Object.assign(new Error('账号已切换，已丢弃旧账号的迟到响应'), { status: 409, code: 'STALE_ACCOUNT_RESPONSE' }));
+    }
+    const start = (response.config as typeof response.config & { diagnosticStarted?: number }).diagnosticStarted;
+    recordDiagnostic('request', getDiagnosticSurface(), 'succeeded', start === undefined ? undefined : performance.now() - start);
     rememberBackendOriginFromUrl(response.request?.responseURL || response.config.baseURL);
     if (import.meta.env.DEV) {
-      console.log(`[API Response] ${response.config.method?.toUpperCase()} ${response.config.url} -> ${response.status}`);
+      console.log('[API Response] received');
     }
     if (response.status !== 204 && (typeof response.data !== 'object' || response.data === null)) {
       const error = new Error('服务器返回了非预期的响应格式，请稍后重试');
@@ -202,12 +280,22 @@ axiosInstance.interceptors.response.use(
   async (error) => {
     const config = error.config as (typeof error.config & {
       retryCount?: number;
+      authGeneration?: number;
       baseUrlCandidates?: string[];
       activeBaseUrlIndex?: number;
     }) | undefined;
 
     if (!config) {
       return Promise.reject(error);
+    }
+
+    if (obsoleteSession(config)) return Promise.reject(staleSessionError());
+    recordDiagnostic('request', getDiagnosticSurface(), error.response ? 'failed' : 'unknown');
+
+    if (error.response?.status === 409 && error.response?.data?.code === 'ACCOUNT_CHANGED') {
+      const expected = config.headers?.get('X-Expected-User-Id');
+      if (!expected || expected === activeRequestAccount()) { pendingAuthenticatedUserId = null; notifyAuthExpired('account_changed'); }
+      return Promise.reject(Object.assign(new Error('登录账号已改变，请重新进入当前账号'), { status: 409, code: 'ACCOUNT_CHANGED' }));
     }
 
     if (typeof config.retryCount !== 'number') {
@@ -231,7 +319,7 @@ axiosInstance.interceptors.response.use(
       document.cookie = 'XSRF-TOKEN=; Path=/; Max-Age=0';
       const newToken = await ensureCsrfToken();
       if (newToken) {
-        config.headers['x-csrf-token'] = newToken;
+        config.headers.set('x-csrf-token', newToken);
         if (import.meta.env.DEV) {
           console.warn('[API] CSRF token验证失败，已重新获取token并重试');
         }
@@ -247,7 +335,7 @@ axiosInstance.interceptors.response.use(
         config.baseURL = config.baseUrlCandidates[nextBaseUrlIndex];
         config.retryCount = 0;
         if (import.meta.env.DEV) {
-          console.warn(`[API Fallback] 切换后端地址到 ${config.baseURL}`);
+          console.warn('[API Fallback] switching backend candidate');
         }
         return axiosInstance(config);
       }
@@ -258,7 +346,7 @@ axiosInstance.interceptors.response.use(
 
       const delayMs = RETRY_DELAY * Math.pow(2, config.retryCount - 1);
       if (import.meta.env.DEV) {
-        console.log(`[API Retry] 第${config.retryCount}次重试，${config.method?.toUpperCase()} ${config.url}，等待 ${delayMs}ms`);
+        console.log('[API Retry] retrying a read request');
       }
 
       await delay(delayMs);
@@ -278,7 +366,7 @@ axiosInstance.interceptors.response.use(
     if (import.meta.env.DEV) {
       const isExpected401 = error.response?.status === 401 && error.config?.url?.includes('/auth/token');
       if (!isExpected401) {
-        console.error('[API Error]', error.message, error.code);
+        console.error('[API Error] request failed');
       }
     }
 
@@ -290,13 +378,25 @@ axiosInstance.interceptors.response.use(
     if (error.response?.status === 401) {
       const isAuthRequest = error.config?.url?.includes('/auth/token');
       if (!isAuthRequest) {
-        notifyAuthExpired();
+        const expected = config.headers?.get('X-Expected-User-Id');
+        if (!expected || expected === activeRequestAccount()) notifyAuthExpired();
       }
       return Promise.reject(error);
     }
 
+    // Keep typed model-test outcomes through the friendly-error boundary, but
+    // only on the exact probe routes and after identity/401 handling above.
+    const probeRoute = (config.method?.toUpperCase() === 'POST' && /^\/?user\/model-catalog\/test$/.test(config.url || '')) ||
+      (config.method?.toUpperCase() === 'GET' && /^\/?user\/model-catalog\/tests\/[0-9a-f-]{36}$/i.test(config.url || ''));
+    const receipt = probeRoute ? probeReceipt(error.response.data) : null;
+    if (receipt) {
+      return Promise.reject(Object.assign(new Error(receipt.error || '测试结果需要核验，请查询原请求'), {
+        status: error.response.status, code: receipt.code, probeReceipt: receipt,
+      }));
+    }
+
     if (typeof error.response.data === 'object' && error.response.data !== null && error.response.data.error) {
-      const detailedError = Object.assign(new Error(error.response.data.error), { status: error.response.status });
+      const detailedError = Object.assign(new Error(error.response.data.error), { status: error.response.status, code: error.response.data.code });
       return Promise.reject(detailedError);
     }
 
@@ -308,7 +408,7 @@ axiosInstance.interceptors.response.use(
       } else if (status === 503) {
         message = '服务暂时不可用，请稍后重试';
       }
-      const friendlyError = new Error(message);
+      const friendlyError = Object.assign(new Error(message), { status });
       return Promise.reject(friendlyError);
     }
 
@@ -868,16 +968,22 @@ export const api = {
 
   loginPhone: async (phone: string, password: string) => {
     const response = await axiosInstance.post('/auth/login-phone', { phone, password });
+    pendingAuthenticatedUserId = typeof response.data?.user?.id === 'string' ? response.data.user.id : null;
+    authGeneration++; authExpiredHandledAt = 0;
     return response.data;
   },
 
   registerSms: async (phone: string, password: string, code: string, nickname?: string) => {
     const response = await axiosInstance.post('/auth/register-sms', { phone, password, code, nickname });
+    pendingAuthenticatedUserId = typeof response.data?.user?.id === 'string' ? response.data.user.id : null;
+    authGeneration++; authExpiredHandledAt = 0;
     return response.data;
   },
 
-  logout: async () => {
-    const response = await axiosInstance.post('/auth/logout');
+  logout: async (expectedUserId = activeRequestAccount()) => {
+    const response = await axiosInstance.post('/auth/logout', undefined, {
+      headers: expectedUserId ? { 'X-Expected-User-Id': expectedUserId } : {},
+    });
     return response.data;
   },
 
@@ -936,9 +1042,7 @@ export const api = {
   },
 
   generateAgentQuestions: async (data: { name: string; description: string; openingMessage: string }) => {
-    if (import.meta.env.DEV) console.log('[api.generateAgentQuestions] 准备发送请求:', data);
     const response = await axiosInstance.post('/agents/generate-questions', data);
-    if (import.meta.env.DEV) console.log('[api.generateAgentQuestions] 收到响应:', response.data);
     return response.data;
   },
 

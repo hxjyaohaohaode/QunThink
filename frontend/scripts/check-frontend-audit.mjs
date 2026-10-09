@@ -52,4 +52,6 @@ if (counts.critical > 0 || counts.moderate > 0 || counts.low > 0 || counts.info 
   process.exit(1);
 }
 
-console.log('Frontend audit gate passed: only the documented React Router RSC-only advisory remains.');
+console.log(counts.total === 0
+  ? 'Frontend audit gate passed: no production dependency vulnerabilities reported.'
+  : 'Frontend audit gate passed: only the documented React Router RSC-only advisory remains.');

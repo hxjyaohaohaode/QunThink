@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { defaultModelId, readCatalog, resolveModel } from '../ai/catalog.js';
 import { requestCompletion } from '../ai/transport.js';
-import { getUploadsDir, getUserDb, withWriteLock } from '../../models/db.js';
+import { getUploadsDir, getUserDb, withWriteLock, beginUserDbWriteBarrier, readCommittedUserDb } from '../../models/db.js';
 import { callAI, callAIStream, normalizeResponse } from '../ai/index.js';
 import { parseFile } from '../fileParser/index.js';
 import { annotateAndDescribe, generateMediaDescription } from '../fileAnnotation/index.js';
@@ -169,11 +169,35 @@ function trimAgentMessages(db, agentId, max = 200) {
   db.data.agent_messages = messages.filter((_, i) => !removeSet.has(i));
 }
 
+// Keep readers behind each chat write and discard an unacknowledged in-memory
+// mutation. The write may have committed before failing, so invalidate the
+// local cache and let the next read establish durable truth; never retry it.
+async function appendAgentMessage(userId, db, message) {
+  await withWriteLock(userId, async () => {
+    await db.read({ force: true });
+    const before = db.data.agent_messages;
+    const releaseReaders = beginUserDbWriteBarrier(db);
+    try {
+      db.data.agent_messages = [...(before || []), message];
+      trimAgentMessages(db, message.agent_id);
+      await db.write();
+    } catch (error) {
+      db.data.agent_messages = before;
+      db.invalidateReadCache?.();
+      throw Object.assign(new Error('消息保存结果未确认，请刷新核对会话后再决定是否重新发送'), { cause: error });
+    } finally { releaseReaders(); }
+  });
+}
+
 export async function chatWithAgent(userId, agentId, userMessage, onChunk, attachments = []) {
   const db = await getUserDb(userId);
-  await db.read();
+  const releaseLease = db.holdCurrentLease();
+  try { return await chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, attachments); }
+  finally { releaseLease(); }
+}
 
-  const agent = db.data.agents.find(a => a.id === agentId);
+async function chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, attachments) {
+  const agent = await readCommittedUserDb(db, data => data.agents.find(a => a.id === agentId));
   if (!agent) {
     throw new Error('智能体不存在');
   }
@@ -264,18 +288,10 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
     created_at: new Date().toISOString()
   };
 
-  await withWriteLock(userId, async () => {
-    await db.read();
-    db.data.agent_messages.push(userMsg);
-    trimAgentMessages(db, agentId);
-    await db.write();
-  });
+  await appendAgentMessage(userId, db, userMsg);
 
-  await db.read();
-
-  const recentAgentMessages = db.data.agent_messages
-    .filter(m => m.agent_id === agentId)
-    .slice(-30);
+  const recentAgentMessages = await readCommittedUserDb(db, data =>
+    data.agent_messages.filter(m => m.agent_id === agentId).slice(-30));
 
   const modelRoles = agent.model_roles || [];
   const intentModel = modelRoles.find(r => r.role === '意图理解') || modelRoles[0];
@@ -325,6 +341,12 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
 
   const finalMessage = intentContext ? `${messageContent}${intentContext}` : messageContent;
 
+  let emittedContent = '';
+  const emitChunk = chunk => {
+    if (typeof chunk !== 'string') return;
+    emittedContent += chunk;
+    onChunk?.(chunk);
+  };
   const response = await callAIStream(
     replyModelId,
     replyPersona,
@@ -333,7 +355,7 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
     'free_chat',
     null, [], null, null, false, [],
     enhancedSystemPrompt,
-    [], onChunk, null, userId
+    [], emitChunk, null, userId
   );
 
   const agentMsg = {
@@ -344,13 +366,14 @@ export async function chatWithAgent(userId, agentId, userMessage, onChunk, attac
     created_at: new Date().toISOString()
   };
 
-  await withWriteLock(userId, async () => {
-    await db.read();
-    db.data.agent_messages.push(agentMsg);
-    trimAgentMessages(db, agentId);
-    await db.write();
-  });
+  await appendAgentMessage(userId, db, agentMsg);
 
+  // callAIStream can append a truthful interruption notice to its returned text.
+  // Emit only the actual saved suffix, never repeat chunks or invent a result.
+  if (typeof response === 'string' && response.startsWith(emittedContent)) {
+    const savedTail = response.slice(emittedContent.length);
+    if (savedTail) emitChunk(savedTail);
+  }
   return { content: response };
 }
 
