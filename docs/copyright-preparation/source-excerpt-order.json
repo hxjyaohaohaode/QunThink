@@ -1,10 +1,14 @@
 {
   "project": "qunthink",
+  "identity_scope": "本轮所列生产文件的原始字节快照，未把未指定的外部manifest匹配结果预填为true。适用后续HEAD前必须逐项重新核对；整库tree和同步提交由外部最终回执绑定。",
+  "production_file_set_sha256": "c738f0563e723aa37bdf656d3b6fc753020838b7fb0d5331bbd8212c4e664525",
   "not_ready_for_submission": true,
   "notes": [
     "文件顺序是为功能连续性制定的审阅建议，不是页数凑数，也不是原创/权属证明。",
     "权属确认后固定全程序目录及连续页选取规则，再按适用官方规则排版；不要临时抽跳代码制造连续。",
-    "排除测试、测试夹具、锁文件、编译副本、依赖源码、许可原文和来源未核对的视觉借鉴组件。"
+    "排除测试、测试夹具、锁文件、编译副本、依赖源码、许可原文和来源未核对的视觉借鉴组件。",
+    "本文件45项为功能审阅选取，不是全部208项生产文件集合；完整生产文件SHA映射在source-identity.json。",
+    "bytes和lines直接由原始字节及物理行复算，不使用旧manifest_sha256或matches_manifest作为当前证明。"
   ],
   "suggested_core_review_order": [
     {
@@ -13,9 +17,7 @@
       "category": "application_source_candidate",
       "bytes": 20722,
       "lines": 578,
-      "sha256": "4652f2840545cd644819db74052d06e67a1c40a4757827bf93639d0277f46722",
-      "manifest_sha256": "4652f2840545cd644819db74052d06e67a1c40a4757827bf93639d0277f46722",
-      "matches_manifest": true
+      "sha256": "4652f2840545cd644819db74052d06e67a1c40a4757827bf93639d0277f46722"
     },
     {
       "order": 2,
@@ -23,9 +25,7 @@
       "category": "application_source_candidate",
       "bytes": 5928,
       "lines": 197,
-      "sha256": "761c05c0cd5a9b5719b3abd2fe40da6ac9a0364edb3159f8d1c11cd2b33d02d9",
-      "manifest_sha256": "761c05c0cd5a9b5719b3abd2fe40da6ac9a0364edb3159f8d1c11cd2b33d02d9",
-      "matches_manifest": true
+      "sha256": "761c05c0cd5a9b5719b3abd2fe40da6ac9a0364edb3159f8d1c11cd2b33d02d9"
     },
     {
       "order": 3,
@@ -33,9 +33,7 @@
       "category": "application_source_candidate",
       "bytes": 2568,
       "lines": 82,
-      "sha256": "5f29267674df4ed2f133737368dde8e004d119186b897f9d98d99d3610c4752f",
-      "manifest_sha256": "5f29267674df4ed2f133737368dde8e004d119186b897f9d98d99d3610c4752f",
-      "matches_manifest": true
+      "sha256": "5f29267674df4ed2f133737368dde8e004d119186b897f9d98d99d3610c4752f"
     },
     {
       "order": 4,
@@ -43,9 +41,7 @@
       "category": "application_source_candidate",
       "bytes": 21729,
       "lines": 699,
-      "sha256": "6309091322d57bc49f8fde43f54e690c28ef6bcda76c91157c452df6872c667d",
-      "manifest_sha256": "6309091322d57bc49f8fde43f54e690c28ef6bcda76c91157c452df6872c667d",
-      "matches_manifest": true
+      "sha256": "6309091322d57bc49f8fde43f54e690c28ef6bcda76c91157c452df6872c667d"
     },
     {
       "order": 5,
@@ -53,9 +49,7 @@
       "category": "application_source_candidate",
       "bytes": 2700,
       "lines": 50,
-      "sha256": "46a1999ae3654d05083d7f34cfc152cec443ecd6ba3f64184035ef88d99f76da",
-      "manifest_sha256": "46a1999ae3654d05083d7f34cfc152cec443ecd6ba3f64184035ef88d99f76da",
-      "matches_manifest": true
+      "sha256": "46a1999ae3654d05083d7f34cfc152cec443ecd6ba3f64184035ef88d99f76da"
     },
     {
       "order": 6,
@@ -63,9 +57,7 @@
       "category": "application_source_candidate",
       "bytes": 16107,
       "lines": 278,
-      "sha256": "f6f8a1e1b24be7cb1d80774c7018a558536f86afa51b86aa9db81881a0dc246c",
-      "manifest_sha256": "f6f8a1e1b24be7cb1d80774c7018a558536f86afa51b86aa9db81881a0dc246c",
-      "matches_manifest": true
+      "sha256": "f6f8a1e1b24be7cb1d80774c7018a558536f86afa51b86aa9db81881a0dc246c"
     },
     {
       "order": 7,
@@ -73,9 +65,7 @@
       "category": "application_source_candidate",
       "bytes": 19989,
       "lines": 344,
-      "sha256": "ca445cb46511f1fadbb6d138b3fed42734d0bcef7b50d8b1bb0af03f48f18f81",
-      "manifest_sha256": "ca445cb46511f1fadbb6d138b3fed42734d0bcef7b50d8b1bb0af03f48f18f81",
-      "matches_manifest": true
+      "sha256": "ca445cb46511f1fadbb6d138b3fed42734d0bcef7b50d8b1bb0af03f48f18f81"
     },
     {
       "order": 8,
@@ -83,9 +73,7 @@
       "category": "application_source_candidate",
       "bytes": 46689,
       "lines": 1292,
-      "sha256": "33a9172958ef021aa2c97dfd247e73f72b4f556794f5992cade7b22444e4f673",
-      "manifest_sha256": "33a9172958ef021aa2c97dfd247e73f72b4f556794f5992cade7b22444e4f673",
-      "matches_manifest": true
+      "sha256": "33a9172958ef021aa2c97dfd247e73f72b4f556794f5992cade7b22444e4f673"
     },
     {
       "order": 9,
@@ -93,9 +81,7 @@
       "category": "application_source_candidate",
       "bytes": 59632,
       "lines": 1415,
-      "sha256": "f359799f2b6b1af2d6393cf2934b91df8d26cf4096aacc5e192c8cd443254edd",
-      "manifest_sha256": "f359799f2b6b1af2d6393cf2934b91df8d26cf4096aacc5e192c8cd443254edd",
-      "matches_manifest": true
+      "sha256": "f359799f2b6b1af2d6393cf2934b91df8d26cf4096aacc5e192c8cd443254edd"
     },
     {
       "order": 10,
@@ -103,9 +89,7 @@
       "category": "application_source_candidate",
       "bytes": 7692,
       "lines": 146,
-      "sha256": "19cf695afb6a36a54f3636612ec4b8f2b84221310175bb5d02849ba50b85b84c",
-      "manifest_sha256": "19cf695afb6a36a54f3636612ec4b8f2b84221310175bb5d02849ba50b85b84c",
-      "matches_manifest": true
+      "sha256": "19cf695afb6a36a54f3636612ec4b8f2b84221310175bb5d02849ba50b85b84c"
     },
     {
       "order": 11,
@@ -113,9 +97,7 @@
       "category": "application_source_candidate",
       "bytes": 44886,
       "lines": 937,
-      "sha256": "10033172e4b7c540995c3a4bce04154ff6086ed8cde4b9b931ff0c7997d9c194",
-      "manifest_sha256": "10033172e4b7c540995c3a4bce04154ff6086ed8cde4b9b931ff0c7997d9c194",
-      "matches_manifest": true
+      "sha256": "10033172e4b7c540995c3a4bce04154ff6086ed8cde4b9b931ff0c7997d9c194"
     },
     {
       "order": 12,
@@ -123,9 +105,7 @@
       "category": "application_source_candidate",
       "bytes": 25356,
       "lines": 807,
-      "sha256": "440c333db176e6fcd4cb2c5d27f42d48c8406b5b5c7a6368f52d3bd108d3101b",
-      "manifest_sha256": "440c333db176e6fcd4cb2c5d27f42d48c8406b5b5c7a6368f52d3bd108d3101b",
-      "matches_manifest": true
+      "sha256": "440c333db176e6fcd4cb2c5d27f42d48c8406b5b5c7a6368f52d3bd108d3101b"
     },
     {
       "order": 13,
@@ -133,9 +113,7 @@
       "category": "application_source_candidate",
       "bytes": 4352,
       "lines": 80,
-      "sha256": "e97a8453bf85f6563039f6f95cc1e49354f8c0443d35089cc5df5ecb352529a5",
-      "manifest_sha256": "e97a8453bf85f6563039f6f95cc1e49354f8c0443d35089cc5df5ecb352529a5",
-      "matches_manifest": true
+      "sha256": "e97a8453bf85f6563039f6f95cc1e49354f8c0443d35089cc5df5ecb352529a5"
     },
     {
       "order": 14,
@@ -143,9 +121,7 @@
       "category": "application_source_candidate",
       "bytes": 38876,
       "lines": 622,
-      "sha256": "96f6f653264af9e9d4ee1694c34b38d6a6832170bf8c7de4373e5e8ef3794899",
-      "manifest_sha256": "96f6f653264af9e9d4ee1694c34b38d6a6832170bf8c7de4373e5e8ef3794899",
-      "matches_manifest": true
+      "sha256": "96f6f653264af9e9d4ee1694c34b38d6a6832170bf8c7de4373e5e8ef3794899"
     },
     {
       "order": 15,
@@ -153,9 +129,7 @@
       "category": "application_source_candidate",
       "bytes": 3133,
       "lines": 63,
-      "sha256": "d770d787582f991e5bb7d9bf2672b90b0faed67a0db37f4d35cde2482032a535",
-      "manifest_sha256": "d770d787582f991e5bb7d9bf2672b90b0faed67a0db37f4d35cde2482032a535",
-      "matches_manifest": true
+      "sha256": "d770d787582f991e5bb7d9bf2672b90b0faed67a0db37f4d35cde2482032a535"
     },
     {
       "order": 16,
@@ -163,9 +137,7 @@
       "category": "application_source_candidate",
       "bytes": 21552,
       "lines": 279,
-      "sha256": "24ccf21f1d12de2ae3037438cf70412229bf0cd62a7ff9bd31caf79f0efb6ae0",
-      "manifest_sha256": "24ccf21f1d12de2ae3037438cf70412229bf0cd62a7ff9bd31caf79f0efb6ae0",
-      "matches_manifest": true
+      "sha256": "24ccf21f1d12de2ae3037438cf70412229bf0cd62a7ff9bd31caf79f0efb6ae0"
     },
     {
       "order": 17,
@@ -173,9 +145,7 @@
       "category": "application_source_candidate",
       "bytes": 7003,
       "lines": 150,
-      "sha256": "2f3fbd5216cbc0c689647d2ccf4f00545f2672e2720c2025ef4150fe770ee79d",
-      "manifest_sha256": "2f3fbd5216cbc0c689647d2ccf4f00545f2672e2720c2025ef4150fe770ee79d",
-      "matches_manifest": true
+      "sha256": "2f3fbd5216cbc0c689647d2ccf4f00545f2672e2720c2025ef4150fe770ee79d"
     },
     {
       "order": 18,
@@ -183,9 +153,7 @@
       "category": "application_source_candidate",
       "bytes": 26745,
       "lines": 569,
-      "sha256": "6d0bb2489b00ef1daa18473b510254a9700087e0e5511510420e0e5bec0b0ed3",
-      "manifest_sha256": "6d0bb2489b00ef1daa18473b510254a9700087e0e5511510420e0e5bec0b0ed3",
-      "matches_manifest": true
+      "sha256": "6d0bb2489b00ef1daa18473b510254a9700087e0e5511510420e0e5bec0b0ed3"
     },
     {
       "order": 19,
@@ -193,9 +161,7 @@
       "category": "application_source_candidate",
       "bytes": 9420,
       "lines": 226,
-      "sha256": "a983d2845b55158c6f1bfa454399f80a0e7b361b25368ff69796fd6c496a51d5",
-      "manifest_sha256": "a983d2845b55158c6f1bfa454399f80a0e7b361b25368ff69796fd6c496a51d5",
-      "matches_manifest": true
+      "sha256": "a983d2845b55158c6f1bfa454399f80a0e7b361b25368ff69796fd6c496a51d5"
     },
     {
       "order": 20,
@@ -203,9 +169,7 @@
       "category": "application_source_candidate",
       "bytes": 13638,
       "lines": 363,
-      "sha256": "60f03aba72f4e020d754fefa74b56a8c9b60ac63a863ee9486fbfa2c026530c1",
-      "manifest_sha256": "60f03aba72f4e020d754fefa74b56a8c9b60ac63a863ee9486fbfa2c026530c1",
-      "matches_manifest": true
+      "sha256": "60f03aba72f4e020d754fefa74b56a8c9b60ac63a863ee9486fbfa2c026530c1"
     },
     {
       "order": 21,
@@ -213,9 +177,7 @@
       "category": "application_source_candidate",
       "bytes": 26758,
       "lines": 635,
-      "sha256": "88cc213ce37481c8b31b440a3e0c95b8a3d807cb705823701b5a2da9af206a48",
-      "manifest_sha256": "88cc213ce37481c8b31b440a3e0c95b8a3d807cb705823701b5a2da9af206a48",
-      "matches_manifest": true
+      "sha256": "88cc213ce37481c8b31b440a3e0c95b8a3d807cb705823701b5a2da9af206a48"
     },
     {
       "order": 22,
@@ -223,190 +185,193 @@
       "category": "application_source_candidate",
       "bytes": 10962,
       "lines": 228,
-      "sha256": "b77c83cadf81819ae9eea2c7b7ad539411728fe4253c93e796b2c1890ae6f7d4",
-      "manifest_sha256": "b77c83cadf81819ae9eea2c7b7ad539411728fe4253c93e796b2c1890ae6f7d4",
-      "matches_manifest": true
+      "sha256": "b77c83cadf81819ae9eea2c7b7ad539411728fe4253c93e796b2c1890ae6f7d4"
     },
     {
       "order": 23,
       "path": "backend/src/foundations/agentStore.js",
       "category": "application_source_candidate",
-      "bytes": 60371,
-      "lines": 1132,
-      "sha256": "37f5ab5293dc7cc54facd9ac6e24030fea34dfc977815190e75179a2726c36bb",
-      "manifest_sha256": "37f5ab5293dc7cc54facd9ac6e24030fea34dfc977815190e75179a2726c36bb",
-      "matches_manifest": true
+      "bytes": 61047,
+      "lines": 1144,
+      "sha256": "aefb6c96f2e59f0afb2de962a126582ad457369808c547110766d8398412884d"
     },
     {
       "order": 24,
       "path": "backend/src/foundations/internalGoalWorker.js",
       "category": "application_source_candidate",
-      "bytes": 4021,
+      "bytes": 4053,
       "lines": 80,
-      "sha256": "1925e8ce1cfd621bbf8ad506a2be3ae3bdf95cac6f2822cbabeca35cd0a9d48c",
-      "manifest_sha256": "1925e8ce1cfd621bbf8ad506a2be3ae3bdf95cac6f2822cbabeca35cd0a9d48c",
-      "matches_manifest": true
+      "sha256": "782b869555074bab83f8541dcf8d14f4f5c6ecf5075961f4fe02c23be4f21d45"
     },
     {
       "order": 25,
+      "path": "backend/src/services/fileParser/index.js",
+      "category": "application_source_candidate",
+      "bytes": 11197,
+      "lines": 256,
+      "sha256": "d72662c1db113a20d2b015cf10dbc537e55ae1dce49477bdadd1bfa24324a1ac"
+    },
+    {
+      "order": 26,
+      "path": "backend/src/services/fileParser/archiveProcess.js",
+      "category": "application_source_candidate",
+      "bytes": 4371,
+      "lines": 86,
+      "sha256": "12fd33caf0dd769b1127198598b7cb615ec1f42fdf3056a3ba9ca9062ad46203"
+    },
+    {
+      "order": 27,
+      "path": "backend/src/services/fileParser/archiveWorker.js",
+      "category": "application_source_candidate",
+      "bytes": 1865,
+      "lines": 34,
+      "sha256": "b00016a661143691363e6c438378b2d701425577f92fd302da245c0a8865300b"
+    },
+    {
+      "order": 28,
+      "path": "backend/src/services/fileParser/archiveBudget.js",
+      "category": "application_source_candidate",
+      "bytes": 5683,
+      "lines": 101,
+      "sha256": "7a5579a1cfa125dddfec21190d73153014f603b45c970044ed1bffec54eef8c6"
+    },
+    {
+      "order": 29,
+      "path": "backend/src/services/fileParser/zipText.js",
+      "category": "application_source_candidate",
+      "bytes": 3476,
+      "lines": 75,
+      "sha256": "74245e6405b1309036cc0b3ec9181ce871f2af846d7c28876468b9b54e4147d0"
+    },
+    {
+      "order": 30,
       "path": "shared/tasks.ts",
       "category": "application_source_candidate",
       "bytes": 6040,
       "lines": 166,
-      "sha256": "d80e548cf4641d0d37f7d09e2e8dca579c813647897cfa22d7ec7052615a5ea5",
-      "manifest_sha256": "d80e548cf4641d0d37f7d09e2e8dca579c813647897cfa22d7ec7052615a5ea5",
-      "matches_manifest": true
+      "sha256": "d80e548cf4641d0d37f7d09e2e8dca579c813647897cfa22d7ec7052615a5ea5"
     },
     {
-      "order": 26,
+      "order": 31,
       "path": "frontend/src/App.tsx",
       "category": "application_source_candidate",
       "bytes": 46508,
       "lines": 1144,
-      "sha256": "b9d52ec6be76c969a0bd18fb9676cf6d1fdbd9771a551b7ded20e345349f4bc1",
-      "manifest_sha256": "b9d52ec6be76c969a0bd18fb9676cf6d1fdbd9771a551b7ded20e345349f4bc1",
-      "matches_manifest": true
+      "sha256": "b9d52ec6be76c969a0bd18fb9676cf6d1fdbd9771a551b7ded20e345349f4bc1"
     },
     {
-      "order": 27,
+      "order": 32,
       "path": "frontend/src/components/Layout/ModelCenter.tsx",
       "category": "application_source_candidate",
       "bytes": 24753,
       "lines": 175,
-      "sha256": "c651b6abed861b3c9da6ef270d73dc23de62c3734e10a4c4fc17c51740cd5e76",
-      "manifest_sha256": "c651b6abed861b3c9da6ef270d73dc23de62c3734e10a4c4fc17c51740cd5e76",
-      "matches_manifest": true
+      "sha256": "c651b6abed861b3c9da6ef270d73dc23de62c3734e10a4c4fc17c51740cd5e76"
     },
     {
-      "order": 28,
+      "order": 33,
       "path": "frontend/src/components/Layout/NewChatModal.tsx",
       "category": "application_source_candidate",
       "bytes": 25134,
       "lines": 606,
-      "sha256": "bb2fbeedaf3ebea33e78f649d5211970e52c1f3c61b6ae0df941633346fa16f3",
-      "manifest_sha256": "bb2fbeedaf3ebea33e78f649d5211970e52c1f3c61b6ae0df941633346fa16f3",
-      "matches_manifest": true
+      "sha256": "bb2fbeedaf3ebea33e78f649d5211970e52c1f3c61b6ae0df941633346fa16f3"
     },
     {
-      "order": 29,
+      "order": 34,
       "path": "frontend/src/components/Chat/MessageList.tsx",
       "category": "application_source_candidate",
       "bytes": 30876,
       "lines": 764,
-      "sha256": "f535d00cc964a5a8375e36476bbf9bd86c46f3e1013f4e6d548246fa8a617b0c",
-      "manifest_sha256": "f535d00cc964a5a8375e36476bbf9bd86c46f3e1013f4e6d548246fa8a617b0c",
-      "matches_manifest": true
+      "sha256": "f535d00cc964a5a8375e36476bbf9bd86c46f3e1013f4e6d548246fa8a617b0c"
     },
     {
-      "order": 30,
+      "order": 35,
       "path": "frontend/src/components/Chat/MessageInput.tsx",
       "category": "application_source_candidate",
       "bytes": 44170,
       "lines": 1001,
-      "sha256": "318f12e2d483c0d38fac8852d2e2c77a6ec1de9be2e3ba0de31c7655ee9d315f",
-      "manifest_sha256": "318f12e2d483c0d38fac8852d2e2c77a6ec1de9be2e3ba0de31c7655ee9d315f",
-      "matches_manifest": true
+      "sha256": "318f12e2d483c0d38fac8852d2e2c77a6ec1de9be2e3ba0de31c7655ee9d315f"
     },
     {
-      "order": 31,
+      "order": 36,
       "path": "frontend/src/components/Writing/ConversationWriting.tsx",
       "category": "application_source_candidate",
       "bytes": 10036,
       "lines": 83,
-      "sha256": "7c7f1a360d2218bf9c2fba3dfe46eb3ce213df4772a6237a0a57827eef78a67d",
-      "manifest_sha256": "7c7f1a360d2218bf9c2fba3dfe46eb3ce213df4772a6237a0a57827eef78a67d",
-      "matches_manifest": true
+      "sha256": "7c7f1a360d2218bf9c2fba3dfe46eb3ce213df4772a6237a0a57827eef78a67d"
     },
     {
-      "order": 32,
+      "order": 37,
       "path": "frontend/src/components/Layout/WorkspacePage.tsx",
       "category": "application_source_candidate",
       "bytes": 35818,
       "lines": 259,
-      "sha256": "ed4628ec7403015c566f0fd34997c549a09a7adef1d6bbea982edbab6480c045",
-      "manifest_sha256": "ed4628ec7403015c566f0fd34997c549a09a7adef1d6bbea982edbab6480c045",
-      "matches_manifest": true
+      "sha256": "ed4628ec7403015c566f0fd34997c549a09a7adef1d6bbea982edbab6480c045"
     },
     {
-      "order": 33,
+      "order": 38,
       "path": "frontend/src/components/Writing/TaskResultEditor.tsx",
       "category": "application_source_candidate",
       "bytes": 23707,
       "lines": 141,
-      "sha256": "1ce1c66b1edecc0b3f0554936c935f2cda347b5f2b432e5f57fd2e348a2e6828",
-      "manifest_sha256": "1ce1c66b1edecc0b3f0554936c935f2cda347b5f2b432e5f57fd2e348a2e6828",
-      "matches_manifest": true
+      "sha256": "1ce1c66b1edecc0b3f0554936c935f2cda347b5f2b432e5f57fd2e348a2e6828"
     },
     {
-      "order": 34,
+      "order": 39,
       "path": "frontend/src/components/Layout/MemoryCenter.tsx",
       "category": "application_source_candidate",
       "bytes": 13324,
       "lines": 110,
-      "sha256": "11f66551d0d7751d8a85e9724158d11f3421fe66672c29072be04a2e6e8faf75",
-      "manifest_sha256": "11f66551d0d7751d8a85e9724158d11f3421fe66672c29072be04a2e6e8faf75",
-      "matches_manifest": true
+      "sha256": "11f66551d0d7751d8a85e9724158d11f3421fe66672c29072be04a2e6e8faf75"
     },
     {
-      "order": 35,
+      "order": 40,
       "path": "frontend/src/components/Layout/PersonalGoalsPanel.tsx",
       "category": "application_source_candidate",
       "bytes": 23590,
       "lines": 304,
-      "sha256": "33a5820ee33baae80b452d043e477bcf23d2d29cc0cecb648ec3a7af4f1e9dcc",
-      "manifest_sha256": "33a5820ee33baae80b452d043e477bcf23d2d29cc0cecb648ec3a7af4f1e9dcc",
-      "matches_manifest": true
+      "sha256": "33a5820ee33baae80b452d043e477bcf23d2d29cc0cecb648ec3a7af4f1e9dcc"
     },
     {
-      "order": 36,
+      "order": 41,
       "path": "frontend/src/stores/tasksStore.ts",
       "category": "application_source_candidate",
       "bytes": 17814,
       "lines": 256,
-      "sha256": "fed6972c7b799447d7bee166b5ff79065a7e9464197196830a7a426bc41349de",
-      "manifest_sha256": "fed6972c7b799447d7bee166b5ff79065a7e9464197196830a7a426bc41349de",
-      "matches_manifest": true
+      "sha256": "fed6972c7b799447d7bee166b5ff79065a7e9464197196830a7a426bc41349de"
     },
     {
-      "order": 37,
+      "order": 42,
       "path": "frontend/src/stores/taskResultsStore.ts",
       "category": "application_source_candidate",
       "bytes": 29529,
       "lines": 333,
-      "sha256": "06deb69cdcec351c61987578f0648528f2695af718fd778f1527fc18533f8d62",
-      "manifest_sha256": "06deb69cdcec351c61987578f0648528f2695af718fd778f1527fc18533f8d62",
-      "matches_manifest": true
+      "sha256": "06deb69cdcec351c61987578f0648528f2695af718fd778f1527fc18533f8d62"
     },
     {
-      "order": 38,
+      "order": 43,
       "path": "frontend/src/stores/memoryStore.ts",
       "category": "application_source_candidate",
       "bytes": 23284,
       "lines": 365,
-      "sha256": "87db0632214e90e1f0e7373cbc4179ee99fa97e46dd8ff4ae6fe467f91a7abb9",
-      "manifest_sha256": "87db0632214e90e1f0e7373cbc4179ee99fa97e46dd8ff4ae6fe467f91a7abb9",
-      "matches_manifest": true
+      "sha256": "87db0632214e90e1f0e7373cbc4179ee99fa97e46dd8ff4ae6fe467f91a7abb9"
     },
     {
-      "order": 39,
+      "order": 44,
       "path": "frontend/src/stores/navigationStore.ts",
       "category": "application_source_candidate",
       "bytes": 3328,
       "lines": 88,
-      "sha256": "d216a6e35a3656a8d56cd32542886e0c6f658fc7dff0cfb05299c303344fb6b2",
-      "manifest_sha256": "d216a6e35a3656a8d56cd32542886e0c6f658fc7dff0cfb05299c303344fb6b2",
-      "matches_manifest": true
+      "sha256": "d216a6e35a3656a8d56cd32542886e0c6f658fc7dff0cfb05299c303344fb6b2"
     },
     {
-      "order": 40,
+      "order": 45,
       "path": "frontend/src/utils/mobileNavigation.ts",
       "category": "application_source_candidate",
       "bytes": 1187,
       "lines": 22,
-      "sha256": "42640f1981e3a70d59eadfd254e340741773ab0e3e37d7aecba1b02bfb36dd06",
-      "manifest_sha256": "42640f1981e3a70d59eadfd254e340741773ab0e3e37d7aecba1b02bfb36dd06",
-      "matches_manifest": true
+      "sha256": "42640f1981e3a70d59eadfd254e340741773ab0e3e37d7aecba1b02bfb36dd06"
     }
   ],
-  "listed_raw_lines": 17069
+  "listed_files": 45,
+  "listed_raw_lines": 17633
 }

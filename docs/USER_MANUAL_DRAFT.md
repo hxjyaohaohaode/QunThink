@@ -1,13 +1,13 @@
 # 群想操作手册草稿
 
 
-版本边界：本文引用的430文件、提交和内容树只标识本次文档补充前的工程基线。本次仅文档同步新增5文件、修改6文件，整库为435文件；不改变业务代码、Logo或顶层LICENSE。修改后的整库树和同步提交须从外部校验收据或Git读取，不能复用430文件基线哈希。下列CI与Render记录也仅证明所列旧提交，不代表本次文档同步后的新提交已经通过。
+版本边界：430文件工程基线与随后435文件首次文档同步，是2026-10-09材料整理时的历史记录，不是当前HEAD文件数；当时“仅文档、业务未改”的结论不适用于后续运行逻辑修复。本轮生产文件身份与45项审阅顺序见[copyright-preparation/source-identity.json](copyright-preparation/source-identity.json)和[source-excerpt-order.json](copyright-preparation/source-excerpt-order.json)，原始字节、摘要和物理行已重算。清单排除自身，整库tree、同步提交及新CI须从外部最终回执或精确Git记录读取；历史CI和Render只证明各自所列提交。
 
-本修订依据2026年10月9日文档同步前的430文件工程基线整理；该基线相对于历史427文件仅增加3个第三方来源与许可告知文件，原427文件逐字节不变，供逐步核对和定稿；尚未装配最终版本截图，不能直接当作正式提交版。产品简称为“群想”，英文标识为QunThink。拟申请人为用户个人；法定姓名、权属依据、正式软件全称、登记版本、开发完成日期和首次发表日期均待用户依据事实确认。前后端package.json中的1.0.0仅作为当前组件版本记录。
+初稿依据2026年10月9日文档同步前的430文件工程基线整理；该基线相对于历史427文件仅增加3个第三方来源与许可告知文件，原427文件逐字节不变，供逐步核对和定稿；尚未装配最终版本截图，不能直接当作正式提交版。产品简称为“群想”，英文标识为QunThink。拟申请人为用户个人；法定姓名、权属依据、正式软件全称、登记版本、开发完成日期和首次发表日期均待用户依据事实确认。前后端package.json中的1.0.0仅作为当前组件版本记录。
 
 文档同步前工程基线核对完成：430文件源码已于2026-10-09 11:24:47 UTC合并主线；PR与合并后精确main CI均首次通过，Render实际命中跳过部署保护。本稿仍为软著准备草稿，不是已定稿申报材料。
 
-文档同步前工程基线：main提交6646d89f03c0b29e39df3a466b2d81b4f2d8e28b；内容树6300935871b0650a759d79816d7a5cbc27279e36。PR #3于2026-10-09 11:24:47 UTC合并，原PR审查提交为6a2cf2b919e877d1cef94bf4ebdee74d9cc017bf。历史业务基线树364d29dd9e358ff04f9d36d473527dd5346df3ee及main提交f6eb4567fd7a7cafa96fa882da1809cadbf24ada保留作为原427文件和旧CI的身份，不将其写为430文件工程基线的main。430文件基线清单见独立准备包“源码版本与校验/QunThink-交付源码SHA256清单.txt”。
+文档同步前工程基线：main提交6646d89f03c0b29e39df3a466b2d81b4f2d8e28b；内容树6300935871b0650a759d79816d7a5cbc27279e36。PR #3于2026-10-09 11:24:47 UTC合并，原PR审查提交为6a2cf2b919e877d1cef94bf4ebdee74d9cc017bf。历史业务基线树364d29dd9e358ff04f9d36d473527dd5346df3ee及main提交f6eb4567fd7a7cafa96fa882da1809cadbf24ada保留作为原427文件和旧CI的身份，不将其写为430文件工程基线的main。430文件基线清单只对应当时的历史准备包；新版同名SHA256清单标识新版源码，不能反向证明旧基线。
 
 ## 1 适用范围与开始前准备
 
@@ -69,7 +69,9 @@
 5. 需要语音时，从相应消息的语音合成操作配置并提交；供应商请求可能收费。出现unknown或“需要核验”时先核对原请求，不能当作未调用成功而反复新建。
 6. 辩论和观察者控制依赖会话实际可用的模型与配置。本稿不将其描述为独立专家认证或多个模型得出了可靠共识。
 
-来源：frontend/src/components/Chat/MessageInput.tsx、MessageList.tsx、MessageActions.tsx、SearchPanel.tsx、GroupInfoPage.tsx、TTSSynthesizeModal.tsx、DebateControlPanel.tsx、ObserverControlPanel.tsx；backend/src/routes/files.js、messages.js、tts.js；backend/src/services/fileParser/index.js:101起；backend/src/services/debate/index.js。
+来源：frontend/src/components/Chat/MessageInput.tsx、MessageList.tsx、MessageActions.tsx、SearchPanel.tsx、GroupInfoPage.tsx、TTSSynthesizeModal.tsx、DebateControlPanel.tsx、ObserverControlPanel.tsx；backend/src/routes/files.js、messages.js、tts.js；backend/src/services/fileParser/index.js；backend/src/services/debate/index.js。
+
+本轮ZIP类文档限制：DOCX、XLSX、PPTX、EPUB及ODT/ODS/ODP文本提取有压缩输入、实际展开量、文本输出、时间及并发上限，超限会明确失败，不把截断内容当作完整成功。请拆分超大文档后重试；ZIP列目录不展开正文。具体预算和未覆盖格式见[资源预算说明](document-parser-resource-budgets.md)；128MiB是V8旧堆限制，不是操作系统RSS硬上限，也不代表所有文件格式均已隔离。
 
 ## 6 将自己的材料整理成文稿
 

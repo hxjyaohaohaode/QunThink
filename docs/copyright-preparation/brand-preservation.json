@@ -1,5 +1,5 @@
 {
-  "scope": "Byte-preservation evidence only; not authorship or asset permission proof.",
+  "scope": "仅记录所列品牌完整文件或内联片段与原始品牌基线的字节保留；baseline_commit不是当前HEAD。本轮生产修改未触及这些品牌文件，但此记录不是全仓验证、作者身份或素材许可证明。",
   "records": [
     {
       "project": "qunthink",

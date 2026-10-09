@@ -3,7 +3,7 @@ import path from 'path';
 import { safeLog } from '../../utils/logger.js';
 import { fileURLToPath } from 'url';
 import pdf from 'pdf-parse';
-import mammoth from 'mammoth';
+import { parseBoundedArchive } from './archiveProcess.js';
 import { parse } from 'csv-parse/sync';
 import { getUploadsDir } from '../../models/db.js';
 
@@ -125,43 +125,9 @@ async function parseVideo(filePath, ext, mimeType) {
 }
 
 async function parsePresentation(filePath, ext) {
+  if (ext !== '.pptx') return `[PPT文件: ${path.basename(filePath)}, 格式: ${ext.toUpperCase()}]`;
   try {
-    if (ext === '.pptx') {
-      try {
-        const AdmZip = (await import('adm-zip')).default;
-        const zip = new AdmZip(filePath);
-        const slideEntries = zip.getEntries()
-          .filter(e => e.entryName.match(/^ppt\/slides\/slide\d+\.xml$/i))
-          .sort((a, b) => {
-            const na = parseInt(a.entryName.match(/slide(\d+)/i)?.[1] || '0');
-            const nb = parseInt(b.entryName.match(/slide(\d+)/i)?.[1] || '0');
-            return na - nb;
-          });
-
-        if (slideEntries.length > 0) {
-          let result = '';
-          for (const entry of slideEntries) {
-            const xmlContent = entry.getData().toString('utf-8');
-            const texts = [];
-            const textRegex = /<a:t[^>]*>([^<]*)<\/a:t>/g;
-            let match;
-            while ((match = textRegex.exec(xmlContent)) !== null) {
-              if (match[1].trim()) texts.push(match[1].trim());
-            }
-            const slideNum = entry.entryName.match(/slide(\d+)/i)?.[1] || '?';
-            if (texts.length > 0) {
-              result += `--- 幻灯片 ${slideNum} ---\n${texts.join('\n')}\n\n`;
-            }
-          }
-          if (result.trim()) return result.trim();
-        }
-      } catch {
-        // .pptx XML解析失败，降级到占位文本
-      }
-    }
-
-    // .ppt 和 .pptx 统一降级占位文本
-    return `[PPT文件: ${path.basename(filePath)}, 格式: ${ext.toUpperCase()}]`;
+    return await parseBoundedArchive(filePath, { format: 'pptx' });
   } catch (error) {
     safeLog('error', 'Presentation parse error', { error: error?.message || error });
     return `[PPT解析失败: ${error.message}]`;
@@ -180,13 +146,12 @@ async function parsePDF(filePath) {
   }
 }
 
-async function parseWord(filePath) {
+async function parseWord(filePath, options) {
   try {
-    const result = await mammoth.extractRawText({ path: filePath });
-    return result.value || '';
+    return await parseBoundedArchive(filePath, options);
   } catch (error) {
     safeLog('error', 'Word parse error', { error: error?.message || error });
-    return '[Word文档解析失败]';
+    return /budget|busy|timed out|cancelled/.test(error.message) ? `[Word文档解析失败: ${error.message}]` : '[Word文档解析失败]';
   }
 }
 
@@ -205,9 +170,8 @@ async function parseSpreadsheet(filePath, ext) {
       return '[暂不支持旧式 XLS 文件，请另存为 XLSX 后重新上传]';
     }
 
-    const buffer = await fs.readFile(filePath);
-
     if (ext === '.csv') {
+      const buffer = await fs.readFile(filePath);
       const rows = parse(buffer.toString('utf8'), {
         bom: true,
         skip_empty_lines: true,
@@ -220,40 +184,10 @@ async function parseSpreadsheet(filePath, ext) {
       return `--- CSV ---\n${lines.join('\n')}${truncated}`;
     }
 
-    const { default: ExcelJS } = await import('exceljs');
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(buffer);
-
-    let result = '';
-    let totalRows = 0;
-
-    for (const worksheet of workbook.worksheets.slice(0, MAX_SHEETS)) {
-      if (totalRows >= MAX_ROWS) break;
-      const sheetLines = [];
-      const rowLimit = Math.min(Number(worksheet.rowCount) || 0, MAX_ROWS - totalRows);
-      for (let rowNumber = 1; rowNumber <= rowLimit; rowNumber += 1) {
-        const row = worksheet.getRow(rowNumber);
-        const values = row.values.slice(1, MAX_COLUMNS + 1).map(cell => {
-          if (cell === null || cell === undefined) return '';
-          if (typeof cell === 'object') {
-            if (typeof cell.text === 'string') return cell.text;
-            if (Object.prototype.hasOwnProperty.call(cell, 'result')) return String(cell.result ?? '');
-            return '';
-          }
-          return String(cell);
-        });
-        sheetLines.push(values.join('\t'));
-        totalRows += 1;
-      }
-      result += `--- Sheet: ${worksheet.name} ---\n${sheetLines.join('\n')}\n\n`;
-    }
-
-    return totalRows >= MAX_ROWS
-      ? `解析表格（仅显示前${MAX_ROWS}行）：\n${result}`
-      : result;
+    return await parseBoundedArchive(filePath, { format: 'xlsx' });
   } catch (error) {
     safeLog('error', 'Spreadsheet parse error', { error: error?.message || error });
-    return '[表格解析失败]';
+    return /budget|busy|timed out|cancelled/.test(error.message) ? `[表格解析失败: ${error.message}]` : '[表格解析失败]';
   }
 }
 
@@ -291,16 +225,7 @@ async function parseArchive(filePath, ext) {
 
     let fileList = '';
     if (ext === '.zip' || ext === '.odt' || ext === '.ods' || ext === '.odp') {
-      try {
-        const AdmZip = (await import('adm-zip')).default;
-        const zip = new AdmZip(filePath);
-        const entries = zip.getEntries();
-        const names = entries.slice(0, 50).map(e => e.entryName);
-        fileList = `\n包含文件:\n${names.join('\n')}`;
-        if (entries.length > 50) {
-          fileList += `\n... 共 ${entries.length} 个文件`;
-        }
-      } catch { }
+      fileList = await parseBoundedArchive(filePath, { format: 'archive' });
     }
 
     return `[压缩文件] 名称=${path.basename(filePath)} · 格式=${ext.toUpperCase()} · 大小=${fileSize}${fileList}`;
@@ -312,28 +237,7 @@ async function parseArchive(filePath, ext) {
 
 async function parseEpub(filePath, ext) {
   try {
-    const AdmZip = (await import('adm-zip')).default;
-    const zip = new AdmZip(filePath);
-
-    let textContent = '';
-    const htmlEntries = zip.getEntries().filter(e =>
-      e.entryName.endsWith('.html') || e.entryName.endsWith('.xhtml') || e.entryName.endsWith('.htm')
-    );
-
-    for (const entry of htmlEntries.slice(0, 20)) {
-      const html = entry.getData().toString('utf-8');
-      const stripped = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-      if (stripped.length > 0) {
-        textContent += stripped + '\n\n';
-      }
-      if (textContent.length > 5000) break;
-    }
-
-    if (textContent.trim()) {
-      return textContent.trim();
-    }
-
-    return `[电子书文件] 名称=${path.basename(filePath)} · 格式=${ext.toUpperCase()}`;
+    return await parseBoundedArchive(filePath, { format: ext.slice(1) });
   } catch (error) {
     safeLog('error', 'EPUB parse error', { error: error?.message || error });
     return `[电子书解析失败: ${error.message}]`;
@@ -342,26 +246,7 @@ async function parseEpub(filePath, ext) {
 
 async function parseOpenDocument(filePath, ext) {
   try {
-    const AdmZip = (await import('adm-zip')).default;
-    const zip = new AdmZip(filePath);
-    const contentEntry = zip.getEntries().find(e => e.entryName === 'content.xml');
-
-    if (contentEntry) {
-      const xmlContent = contentEntry.getData().toString('utf-8');
-      const texts = [];
-      const textRegex = /<text:p[^>]*>([^<]*(?:<[^>]+>[^<]*)*)<\/text:p>/g;
-      let match;
-      while ((match = textRegex.exec(xmlContent)) !== null) {
-        const stripped = match[1].replace(/<[^>]+>/g, '').trim();
-        if (stripped) texts.push(stripped);
-      }
-      if (texts.length > 0) {
-        return texts.join('\n');
-      }
-    }
-
-    const typeLabel = ext === '.odt' ? 'ODT文档' : ext === '.ods' ? 'ODS表格' : 'ODP演示';
-    return `[${typeLabel}] 名称=${path.basename(filePath)} · 格式=${ext.toUpperCase()}`;
+    return await parseBoundedArchive(filePath, { format: ext.slice(1) });
   } catch (error) {
     safeLog('error', 'OpenDocument parse error', { error: error?.message || error });
     return `[OpenDocument解析失败: ${error.message}]`;

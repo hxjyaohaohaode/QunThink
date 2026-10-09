@@ -1,7 +1,7 @@
-# 群想当前技术材料补充稿
+# 群想技术材料草稿与源码边界
 
 
-版本边界：本文引用的430文件、提交和内容树只标识本次文档补充前的工程基线。本次仅文档同步新增5文件、修改6文件，整库为435文件；不改变业务代码、Logo或顶层LICENSE。修改后的整库树和同步提交须从外部校验收据或Git读取，不能复用430文件基线哈希。下列CI与Render记录也仅证明所列旧提交，不代表本次文档同步后的新提交已经通过。
+版本边界：430文件工程基线与随后435文件首次文档同步，是2026-10-09材料整理时的历史记录，不是当前HEAD文件数；当时“仅文档、业务未改”的结论不适用于后续运行逻辑修复。本轮生产文件身份与45项审阅顺序见[copyright-preparation/source-identity.json](copyright-preparation/source-identity.json)和[source-excerpt-order.json](copyright-preparation/source-excerpt-order.json)，原始字节、摘要和物理行已重算。清单排除自身，整库tree、同步提交及新CI须从外部最终回执或精确Git记录读取；历史CI和Render只证明各自所列提交。
 
 本稿用于整理软件著作权准备资料，不是申请表、权属证明、正式鉴别材料或登记通过意见。仅反映已盘点的冻结源码、既有执行证据和未确认事项。
 
@@ -12,7 +12,7 @@
 - 页面简称：群想；README英文标识：QunThink。
 - 拟申请人为用户个人；法定姓名、权属依据、正式中文全称、登记版本、完成日期和首次发表日期：待事实核对。
 - 后端组件ai-chat-group-backend及前端组件ai-chat-group-frontend均声明1.0.0；它们不能自行替代登记版本。旧“功能升级交付报告.md”的v2.0及“系统功能分析报告.md”的2.0.0属于旧文档标识。
-- 文档同步前工程基线：430文件；main合并提交6646d89f03c0b29e39df3a466b2d81b4f2d8e28b；内容树6300935871b0650a759d79816d7a5cbc27279e36。PR #3于2026-10-09 11:24:47 UTC合并，其审查头为6a2cf2b919e877d1cef94bf4ebdee74d9cc017bf。该430文件基线已逐项复核SHA-256，准备包的QunThink-交付源码SHA256清单.txt须使用本修订对应清单。
+- 文档同步前工程基线：430文件；main合并提交6646d89f03c0b29e39df3a466b2d81b4f2d8e28b；内容树6300935871b0650a759d79816d7a5cbc27279e36。PR #3于2026-10-09 11:24:47 UTC合并，其审查头为6a2cf2b919e877d1cef94bf4ebdee74d9cc017bf。该430文件基线已逐项复核SHA-256，这项430文件身份只对应当时的历史准备包；新版同名SHA256清单标识新版源码，不可反向替代旧基线。
 - 430文件工程基线的来源：其中原427文件与历史main提交f6eb4567fd7a7cafa96fa882da1809cadbf24ada、内容树364d29dd9e358ff04f9d36d473527dd5346df3ee逐字节相同。该430文件基线相对于427文件业务基线仅新增THIRD_PARTY_NOTICES.md、frontend/public/THIRD_PARTY_NOTICES.html、frontend/public/third-party-licenses/react-bits.txt；未改业务代码、Logo或顶层LICENSE。
 
 ## 技术环境
@@ -24,7 +24,7 @@ Node.js最低22.12；后端为JavaScript、Express、WebSocket，前端为TypeSc
 1. 模型连接、目录发现、能力声明与显式测试：frontend/src/components/Layout/ModelCenter.tsx；backend/src/routes/modelCatalog.js；backend/src/services/ai/catalog.js、modelProbes.js。保存不等于验证，测试可能收费。
 2. 普通会话、用户与单AI私聊、2至5个AI间私聊、消息与流式反馈：frontend/src/components/Layout/NewChatModal.tsx；frontend/src/components/Chat/；backend/src/routes/groups.js、messages.js、ai.js；backend/src/websocket/index.js。普通会话允许零AI，数据仍属当前账号边界。
 3. AI角色、智能体配置与会话、辩论：frontend/src/components/Layout/AIPersonaEditor.tsx、AgentCreateModal.tsx、AgentsPage.tsx、AgentChatView.tsx；backend/src/routes/agents.js、personas.js；backend/src/services/agent/index.js、debate/index.js。
-4. 自有文档上传、文本提取、视觉模型图片理解及语音合成：backend/src/routes/files.js、tts.js；backend/src/services/fileParser/index.js；frontend/src/components/Chat/TTSSynthesizeModal.tsx。音视频附件仅元数据，语音合成不是语音识别。
+4. 自有文档上传、文本提取、视觉模型图片理解及语音合成：backend/src/routes/files.js、tts.js；backend/src/services/fileParser/index.js；frontend/src/components/Chat/TTSSynthesizeModal.tsx。ZIP类文档提取新增有界子进程、输入/展开/输出及并发预算，超限明确失败；范围和限制见[资源预算说明](document-parser-resource-budgets.md)，不宣称PDF、CSV、文本或媒体已隔离。音视频附件仅元数据，语音合成不是语音识别。
 5. 会话材料起草、人工正文版本、AI候选稿、采用/验收/文本下载：frontend/src/components/Writing/ConversationWriting.tsx、TaskResultEditor.tsx；backend/src/services/taskSources.js、taskResults.js。材料来源、当前正文和被验收版本分开记录。
 6. 工作台任务、显式定时生成、未知结果核验：frontend/src/components/Layout/WorkspacePage.tsx；backend/src/routes/tasks.js；backend/src/services/tasks.js。只产生文字草稿与材料整理，不操作外部办公软件。
 7. 个人笔记、消息摘录、更正/遗忘及删除核验：frontend/src/components/Layout/MemoryCenter.tsx；backend/src/routes/memory.js；backend/src/services/memory/persistentMemory.js、deletionBarrier.js。旧性能/自动记忆接口返回501；MongoDB/PostgreSQL记忆账本尚不支持。
@@ -36,6 +36,10 @@ Node.js最低22.12；后端为JavaScript、Express、WebSocket，前端为TypeSc
 没有真人共享群/组织成员完整权限；没有任意浏览器、文件系统或第三方软件自动操作；没有音视频内容理解或音频真实转写；没有通用外部搜索连接器；没有对模型解释的事实认证；没有完整费用结算；没有所有云存储/备份回滚情形的彻底删除保证；没有软件已上线、零漏洞、版权独有或登记通过结论。
 
 ## 验证记录与截图版本定位
+
+截至2026-10-10（北京时间）的本轮材料更新：上一已核主线`99dcf7fb7a5a16f9a1c762cf881d18a4e58701ff`的[CI 37967228676](https://github.com/hxjyaohaohaode/QunThink/actions/runs/37967228676)首次8项作业通过，修复了目标运行领取竞态；其[Render 37968246342](https://github.com/hxjyaohaohaode/QunThink/actions/runs/37968246342)已观察同提交部署跳过。本轮新增ZIP文档资源限额属于之后的代码变更，不把这份旧主线结果转写为新候选CI通过；包含该变更的精确提交和实测范围须另行绑定。以下427/430记录继续作为历史。
+
+本轮资源限额修复的文档更新前代码候选`952c5bff14968d02eaf3ca89e0172a7c32a18547`（443文件）已完成Node22与真实PostgreSQL后端407/407、57/57测试文件、0跳过；前端556、打包9项及品牌、OpenAPI、构建检查通过。这是该代码候选的本地验证，不代表本次文档合入后的精确提交已跑过托管CI。
 
 历史427文件业务基线验收摘要：main提交f6eb4567fd7a7cafa96fa882da1809cadbf24ada，Actions运行37900387062，首次运行8项作业成功；后端389、前端556、浏览器56、打包9项通过，两个Docker镜像构建通过但未推送镜像。Render工作流37901291816实际命中提交消息跳过保护，不是生产部署成功。
 
@@ -67,4 +71,4 @@ Lightfall、Radar、Strands共7段shader已与React Bits官方较早历史版本
 
 scripts/brand-baseline.json记录基线ac69f6d6aa92b2b6f42166af26112bbdf3e9fd4c。本次独立SHA计算确认15个受保护完整文件及3组内联Logo摘要全部匹配。纯logo.txt摘要09e6eacb4e9cc715e9c948073620d0cef4af2b5d98eb5bf8b9cf3314bc7c4240；有字logo.txt摘要faec2e780810f5218f1b4406f119b758dbdff2269deaf483558164090d356b4b。字节一致不证明素材权利授权。
 
-另备40个当前业务文件的审阅顺序建议，供权属确认后建立完整连续源程序目录；全量文件摘要见准备包QunThink-交付源码SHA256清单.txt。不是最终页码或60页鉴别材料；测试、夹具、依赖、锁文件及编译副本不用于凑页数。
+本轮按208项生产文件集合重算身份，另备45个业务候选文件、17,633物理行的审阅顺序建议，供权属确认后建立完整连续源程序目录；全量文件摘要见准备包QunThink-交付源码SHA256清单.txt。不是最终页码或60页鉴别材料；测试、夹具、依赖、锁文件及编译副本不用于凑页数。
