@@ -99,10 +99,12 @@ export class PgLow {
   async read() {
     try {
       const p = this._poolOverride || await getPool();
+      this.assertCurrentLease?.();
       if (!p) throw new Error('PostgreSQL连接不可用');
-      await readWithWriteBarrier(this, () => p.query(
-        'SELECT data, revision FROM kv_store WHERE key = $1', [this.key]
-      ), result => {
+      await readWithWriteBarrier(this, () => {
+        this.assertCurrentLease?.();
+        return p.query('SELECT data, revision FROM kv_store WHERE key = $1', [this.key]);
+      }, result => {
         if (result.rows.length > 0 && result.rows[0].data) {
           this.data = result.rows[0].data;
           this._revision = Number(result.rows[0].revision);
@@ -120,6 +122,7 @@ export class PgLow {
   async write() {
     try {
       const p = this._poolOverride || await getPool();
+      this.assertCurrentLease?.();
       if (!p) throw new Error('PostgreSQL连接不可用，拒绝丢弃写入');
       const data = JSON.parse(JSON.stringify(this.data));
       const updated = await p.query(
@@ -132,6 +135,7 @@ export class PgLow {
         return;
       }
       if (this._revision === 0) {
+        this.assertCurrentLease?.();
         const inserted = await p.query(
           `INSERT INTO kv_store(key,data,revision,updated_at)
            VALUES($1,$2,1,NOW()) ON CONFLICT (key) DO NOTHING RETURNING revision`,

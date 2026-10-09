@@ -66,7 +66,10 @@ export class MongoLow {
 
   async read() {
     try {
-      await readWithWriteBarrier(this, () => this.collection.findOne(this.filter), doc => {
+      await readWithWriteBarrier(this, () => {
+        this.assertCurrentLease?.();
+        return this.collection.findOne(this.filter);
+      }, doc => {
         this._revision = Number(doc?.revision || 0);
         this.data = doc?.data || JSON.parse(JSON.stringify(this.defaultData));
       });
@@ -81,6 +84,7 @@ export class MongoLow {
       const versionFilter = this._revision === 0
         ? { $or: [{ revision: 0 }, { revision: { $exists: false } }] }
         : { revision: this._revision };
+      this.assertCurrentLease?.();
       const updated = await this.collection.updateOne(
         { ...this.filter, ...versionFilter },
         { $set: { data: this.data, updatedAt: new Date() }, $inc: { revision: 1 } }
@@ -91,6 +95,7 @@ export class MongoLow {
       }
       if (this._revision === 0) {
         try {
+          this.assertCurrentLease?.();
           await this.collection.insertOne({ ...this.filter, data: this.data, revision: 1, updatedAt: new Date() });
           this._revision = 1;
           return;

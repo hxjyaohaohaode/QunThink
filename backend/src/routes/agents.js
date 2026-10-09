@@ -1,6 +1,6 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { withWriteLock } from '../models/db.js';
+import { withWriteLock, readCommittedUserDb } from '../models/db.js';
 import { createAgent, buildBaseAgentPrompt, generateAgentQuestions, chatWithAgent, invokeAgentInGroup, generateSuggestions } from '../services/agent/index.js';
 import { resolveModel } from '../services/ai/catalog.js';
 import multer from 'multer';
@@ -218,15 +218,14 @@ router.get('/agents/:agentId/messages', asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   const before = req.query.before;
   const db = await req.getUserDb();
-  await db.read();
-  let messages = (db.data.agent_messages || []).filter(m => m.agent_id === agentId);
-  if (before) {
-    const beforeIndex = messages.findIndex(m => m.id === before);
-    if (beforeIndex > -1) {
-      messages = messages.slice(0, beforeIndex);
+  const messages = await readCommittedUserDb(db, data => {
+    let entries = (data.agent_messages || []).filter(m => m.agent_id === agentId);
+    if (before) {
+      const beforeIndex = entries.findIndex(m => m.id === before);
+      if (beforeIndex > -1) entries = entries.slice(0, beforeIndex);
     }
-  }
-  messages = messages.slice(-limit);
+    return entries.slice(-limit);
+  });
   res.json(messages);
 }));
 
@@ -322,8 +321,11 @@ router.get('/agents/:agentId/suggestions', asyncHandler(async (req, res) => {
   const { context } = req.query;
 
   const db = await req.getUserDb();
-  await db.read();
-  const agent = (db.data.agents || []).find(a => a.id === agentId);
+  const { agent, chatHistory, userProfile } = await readCommittedUserDb(db, data => ({
+    agent: (data.agents || []).find(a => a.id === agentId),
+    chatHistory: (data.agent_messages || []).filter(m => m.agent_id === agentId).slice(-10),
+    userProfile: data.userProfile || null
+  }));
   if (!agent) {
     throw notFoundError('智能体不存在');
   }
@@ -331,11 +333,6 @@ router.get('/agents/:agentId/suggestions', asyncHandler(async (req, res) => {
   if (!agent.enable_suggestions) {
     return res.json({ suggestions: [] });
   }
-
-  const chatHistory = (db.data.agent_messages || [])
-    .filter(m => m.agent_id === agentId)
-    .slice(-10);
-  const userProfile = db.data.userProfile || null;
 
   const lastAgentMsg = [...chatHistory].reverse().find(m => m.sender_type === 'agent');
   const lastUserMsg = [...chatHistory].reverse().find(m => m.sender_type === 'user');
