@@ -191,6 +191,12 @@ async function appendAgentMessage(userId, db, message) {
 
 export async function chatWithAgent(userId, agentId, userMessage, onChunk, attachments = []) {
   const db = await getUserDb(userId);
+  const releaseLease = db.holdCurrentLease();
+  try { return await chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, attachments); }
+  finally { releaseLease(); }
+}
+
+async function chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, attachments) {
   const agent = await readCommittedUserDb(db, data => data.agents.find(a => a.id === agentId));
   if (!agent) {
     throw new Error('智能体不存在');

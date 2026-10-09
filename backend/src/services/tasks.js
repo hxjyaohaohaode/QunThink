@@ -293,10 +293,42 @@ export async function deleteTask(userId, taskId) {
   });
 }
 
+// A hard source replacement still invalidates the old handle, including one
+// held by an active operation. Close only its exact durable checkpoint from a
+// canonical force-read under the account lock, without copying old data/content.
+async function recoverTaskStorageFailure(userId, taskId, runId, dispatched = false, observedUsage = null) {
+  return withWriteLock(userId, async () => {
+    const db = await getUserDb(userId);
+    await db.read({ force: true });
+    return stableTaskSnapshot(db, async () => {
+      const latest = db.data.tasks?.find(item => item.id === taskId);
+      if (!latest || latest.run_id !== runId) return null;
+      if (latest.status !== 'running') return viewTask(userId, latest, db);
+      const now = new Date().toISOString();
+      const unknown = dispatched || latest.dispatch_status !== 'not_sent';
+      const status = unknown ? 'outcome_unknown' : 'failed';
+      const message = unknown
+        ? '模型调用已发出，但成果保存或来源核验未完成；请先核验再决定是否重试'
+        : '存储状态在模型请求发出前改变，未发送请求；请刷新核对后再继续';
+      if (!latest.history?.some(run => run.id === runId)) {
+        latest.history = [...(latest.history || []), { ...runEvidence(latest),
+          finished_at: now, status, result: '', error: message,
+          usage: observedUsage, usage_status: observedUsage ? 'provider_reported' : 'unknown', cost: null }];
+        latest.run_count = (latest.run_count || 0) + 1;
+      }
+      Object.assign(latest, { status, auto_run: false, result_pending_review: false, error: message, updated_at: now });
+      await db.write();
+      return viewTask(userId, latest, db);
+    });
+  });
+}
+
 export async function runTask(userId, taskId, { scheduled = false, client_request_id } = {}) {
   const requestId = client_request_id === undefined ? null : requestIdInput.parse(client_request_id);
   return runAsUser(userId, async () => {
     const db = await getUserDb(userId);
+    const releaseLease = db.holdCurrentLease();
+    try {
     const controller = new AbortController(), key = executionKey(userId, taskId), runId = randomUUID();
     const prepared = await withStableTaskLock(userId, db, async () => {
       const task = db.data.tasks?.find(t => t.id === taskId);
@@ -334,6 +366,11 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
       try { await writeOrRestore(db, before); } catch (error) { activeRuns.delete(key); throw error; }
       return { task: publicTask(task), messages: structuredClone(messages),
         contextDb: { data: { files: structuredClone(db.data.files || []) } } };
+    }).catch(async error => {
+      // Admission can commit before its acknowledgement is invalidated. Close
+      // that exact not-sent checkpoint too, rather than stranding it as running.
+      try { await recoverTaskStorageFailure(userId, taskId, runId); } catch {}
+      throw error;
     });
     if (!prepared) return null;
     if (prepared.replay) return prepared.replay;
@@ -401,7 +438,7 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
         : controller.signal.aborted ? '任务已停止'
         : error?.code === 'TASK_SOURCE_CHANGED' ? error.message : describeProviderError(error);
     }
-    return withStableTaskLock(userId, db, async () => {
+    return await withStableTaskLock(userId, db, async () => {
       const latest = db.data.tasks?.find(t => t.id === taskId);
       if (!latest || latest.run_id !== runId || latest.status !== 'running')
         return latest ? viewTask(userId, latest, db) : null;
@@ -441,32 +478,13 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
       catch (error) { error.taskFinalizationWriteFailed = true; throw error; }
       return viewTask(userId, latest, db);
     }).catch(async error => {
-      if (dispatched) {
-        // A storage/source-read outage after sending must not strand an idle
-        // task as running or allow an unacknowledged effect to be sent again.
-        try {
-          const recovered = await withStableTaskLock(userId, db, async () => {
-            const latest = db.data.tasks?.find(item => item.id === taskId);
-            if (!latest || latest.run_id !== runId) return null;
-            if (latest.status !== 'running') return viewTask(userId, latest, db);
-            const now = new Date().toISOString();
-            const message = '模型调用已发出，但成果保存或来源核验未完成；请先核验再决定是否重试';
-            if (!latest.history?.some(run => run.id === runId)) {
-              latest.history = [...(latest.history || []), { ...runEvidence(latest),
-                finished_at: now, status: 'outcome_unknown', result: '', error: message,
-                usage: observedUsage, usage_status: observedUsage ? 'provider_reported' : 'unknown', cost: null }];
-              latest.run_count = (latest.run_count || 0) + 1;
-            }
-            Object.assign(latest, { status: 'outcome_unknown', auto_run: false,
-              result_pending_review: false, error: message, updated_at: now });
-            await db.write();
-            return viewTask(userId, latest, db);
-          });
-          if (recovered && error.taskFinalizationWriteFailed) return recovered;
-        } catch { /* The durable running checkpoint still blocks new dispatch. */ }
-      }
+      try {
+        const recovered = await recoverTaskStorageFailure(userId, taskId, runId, dispatched, observedUsage);
+        if (recovered && error.taskFinalizationWriteFailed) return recovered;
+      } catch { /* Durable checkpoints still block redispatch if storage is unavailable. */ }
       throw error;
     }).finally(() => { activeRuns.delete(key); });
+    } finally { releaseLease(); }
   });
 }
 

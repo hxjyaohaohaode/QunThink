@@ -434,7 +434,7 @@ test('agent route streaming matches saved replies without duplicate interruption
   });
 
   for (const replacement of ['explicit clear', 'natural LRU', 'restored source']) {
-    await t.test(`${replacement}: late old chat fails visibly and never overwrites the active account instance`, async () => {
+    await t.test(`${replacement}: active chat survives benign eviction but fails closed on source replacement`, async () => {
       mode = 'success';
       const active = await getUserDb(userId);
       await active.read({ force: true });
@@ -458,19 +458,25 @@ test('agent route streaming matches saved replies without duplicate interruption
           if (replacement === 'restored source') await fs.writeFile(diskPath, JSON.stringify(baseline));
         }
         current = await getUserDb(userId);
-        assert.notEqual(current, active);
+        if (replacement === 'natural LRU') assert.equal(current, active, 'active chat holds canonical handle through provider wait');
+        else assert.notEqual(current, active);
         const groupId = current.data.groups[0].id;
         assert.equal((await request.put(`/api/groups/${groupId}/pin`).set('Cookie', cookies).send({ pinned: true })).status, 200);
         await current.read({ force: true });
         release();
         const response = await late;
-        assert.match(response.text, /"error"/);
+        if (replacement === 'natural LRU') assert.ok(!response.text.includes('"error"'));
+        else assert.match(response.text, /"error"/);
         assert.ok(response.text.includes(complete), 'already received response text remains available despite uncertain storage');
         const savedBefore = JSON.parse(await fs.readFile(diskPath, 'utf8'));
-        assert.equal(savedBefore.agent_messages.length, baseline.agent_messages.length + (replacement === 'restored source' ? 0 : 1));
+        assert.equal(savedBefore.agent_messages.length, baseline.agent_messages.length + (replacement === 'restored source' ? 0 : replacement === 'natural LRU' ? 2 : 1));
         assert.equal((await request.put(`/api/groups/${groupId}/pin`).set('Cookie', cookies).send({ pinned: false })).status, 200);
         const savedAfter = JSON.parse(await fs.readFile(diskPath, 'utf8'));
         assert.deepEqual(savedAfter.agent_messages, savedBefore.agent_messages);
+        if (replacement === 'natural LRU') {
+          // The chat's finally releases its hold; later pressure can evict it.
+          for (let index = 0; index < 51; index++) await initUserDatabase(randomUUID());
+        }
         await assert.rejects(active.write(), error => error.code === 'USER_DB_REPLACED');
         await assert.rejects(active.read(), error => error.code === 'USER_DB_REPLACED');
         assert.equal(savedAfter.groups.find(group => group.id === groupId).pinned, false);

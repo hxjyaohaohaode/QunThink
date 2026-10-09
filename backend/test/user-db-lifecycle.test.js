@@ -146,3 +146,49 @@ for (const backend of ['PgLow', 'MongoLow']) {
     });
   }
 }
+
+test('scoped holds nest, release idempotently, and prune active overflow after release', async () => {
+  const registry = createUserDbRegistry({ maxSize: 2 });
+  const a = await registry.get('a', loader({ value: { rows: [] } }));
+  const releaseA = a.holdCurrentLease(), releaseNested = a.holdCurrentLease();
+  const b = await registry.get('b', loader({ value: { rows: [] } }));
+  const releaseB = b.holdCurrentLease();
+  const c = await registry.get('c', loader({ value: { rows: [] } }));
+  const releaseC = c.holdCurrentLease();
+  assert.equal(registry.cache.size, 3, 'all active operations may temporarily exceed soft LRU bound');
+  releaseA(); releaseA();
+  assert.equal(registry.cache.get('a'), a, 'one nested hold remains after duplicate release');
+  releaseNested();
+  assert.equal(registry.cache.size, 2);
+  assert.ok(!registry.cache.has('a'));
+  await replaced(a.write());
+  releaseB(); releaseC();
+});
+
+for (const global of [false, true]) test(`explicit clear retires held handles even during overflow, global=${global}`, async () => {
+  const registry = createUserDbRegistry({ maxSize: 1 }), disk = { value: { rows: [] } };
+  const old = await registry.get('a', loader(disk)); const release = old.holdCurrentLease();
+  await registry.get('b', loader({ value: {} }));
+  registry.clear(global ? undefined : 'a');
+  const current = await registry.get('a', loader(disk)); const releaseCurrent = current.holdCurrentLease();
+  old.data.rows.push('stale'); await replaced(old.write()); await replaced(old.read());
+  assert.throws(() => old.holdCurrentLease(), error => error.code === 'USER_DB_REPLACED');
+  release(); release();
+  assert.equal(await registry.get('a', loader(disk)), current, 'old finally cannot retire new active hold');
+  assert.deepEqual(disk.value.rows, []); releaseCurrent();
+});
+
+test('more than fifty simultaneously held accounts return to the cache bound as operations settle', async () => {
+  const registry = createUserDbRegistry({ maxSize: 50 }), held = [];
+  try {
+    for (let i = 0; i < 55; i++) {
+      const db = await registry.get(`active-${i}`, loader({ value: { rows: [i] } }));
+      held.push({ db, release: db.holdCurrentLease() });
+    }
+    assert.equal(registry.cache.size, 55);
+    for (const item of held) await item.db.read();
+  } finally { for (const item of held) item.release(); }
+  assert.equal(registry.cache.size, 50);
+  for (const item of held.slice(0, 5)) await replaced(item.db.read());
+  for (const item of held.slice(5)) await item.db.read();
+});

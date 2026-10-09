@@ -24,6 +24,17 @@ jobs:
             echo "CI 对应提交已不是 main 最新提交，跳过部署"
             exit 0
           fi
+          if ! commit_message=$(git show -s --format=%B "$TESTED_SHA"); then
+            echo "::error::Unable to read tested commit message; refusing Render deployment"
+            exit 1
+          fi
+          # Match Render's documented skip phrases in the full commit message.
+          case "${commit_message,,}" in
+            *"[skip render]"*|*"[render skip]"*|*"[skip deploy]"*|*"[deploy skip]"*|*"[skip cd]"*|*"[cd skip]"*)
+              echo "Tested commit requests a deployment skip; skipping Render deployment"
+              exit 0
+              ;;
+          esac
           if [ -z "$RENDER_API_KEY" ]; then
             echo "::warning::RENDER_API_KEY secret 未配置，跳过 Render 部署（Render 自动部署不受影响）"
             exit 0

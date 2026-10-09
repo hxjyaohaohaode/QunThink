@@ -19,7 +19,7 @@ process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-task-lifecycle-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 process.env.ENCRYPTION_KEY = crypto.randomBytes(32).toString('base64');
-const { initDatabase, initUserDatabase, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
+const { initDatabase, initUserDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb, generateSessionToken } = await import('../src/models/authDb.js');
 const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
@@ -99,6 +99,36 @@ test('real PgLow retains dispatch checkpoint across catalog re-reads and bound c
   assert.equal(cancelled.history.at(-1).dispatch_status, 'sent_or_unknown');
   assert.equal(during.dispatch_status,'sent_or_unknown');
   assert.equal(cancelled.status,'outcome_unknown');
+});
+
+
+test('real PgLow active task survives ordinary 50-account scheduler eviction pressure', async () => {
+  const s = await session(true), task = await create(s), before = calls.length;
+  for (let i = 0; i < 51; i++) await initUserDatabase(crypto.randomUUID());
+  // Refresh canonical storage before admission; earlier setup may have evicted it.
+  const active = await getUserDb(s.userId);
+  behavior = 'hold'; const heldBefore = held.length;
+  const running = runTask(s.userId, task.id, { client_request_id: crypto.randomUUID() });
+  try {
+    await eventually(() => held.length > heldBefore);
+    await tickTasks();
+    assert.equal(await getUserDb(s.userId), active);
+    reply(held[heldBefore], 'PgLow response survives scheduler cache pressure');
+    const result = await running;
+    assert.equal(result.status, 'needs_review');
+    assert.equal(result.result, 'PgLow response survives scheduler cache pressure');
+    assert.equal(result.history.length, 1); assert.equal(result.run_count, 1);
+    assert.equal(result.history[0].dispatch_status, 'sent_or_unknown');
+    assert.equal(calls.length, before + 1);
+    behavior = 'ok';
+    const next = await create(s);
+    assert.equal((await runTask(s.userId, next.id)).status, 'needs_review');
+    assert.equal(calls.length, before + 2);
+  } finally {
+    behavior = 'ok';
+    if (held[heldBefore] && !held[heldBefore].writableEnded) reply(held[heldBefore]);
+    await running.catch(() => {});
+  }
 });
 
 }

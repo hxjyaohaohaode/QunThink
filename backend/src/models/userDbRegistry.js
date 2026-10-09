@@ -32,7 +32,7 @@ export function createUserDbRegistry({ maxSize = 50, isLocked = () => false, onE
     for (const [userId, db] of oldest) {
       if (cache.size <= maxSize) break;
       const token = leases.get(db);
-      if (isLocked(userId) || loading.has(userId) || token?.writes.size) continue;
+      if (isLocked(userId) || loading.has(userId) || token?.writes.size || token?.holds) continue;
       retire(token); cache.delete(userId); removed++;
     }
     if (removed) onEvict(removed);
@@ -41,6 +41,20 @@ export function createUserDbRegistry({ maxSize = 50, isLocked = () => false, onE
     assertCurrent(token);
     leases.set(db, token);
     db.assertCurrentLease = () => assertCurrent(token);
+    // Active operations already retain this handle. A scoped counter keeps
+    // benign LRU eviction from discarding their pending results; explicit clear
+    // still retires the handle immediately. Never keep a separate pin map.
+    db.holdCurrentLease = () => {
+      assertCurrent(token);
+      token.holds++;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        token.holds--;
+        evict();
+      };
+    };
     const read = db.read.bind(db), write = db.write.bind(db);
     db.read = async (...args) => {
       assertCurrent(token);
@@ -78,7 +92,7 @@ export function createUserDbRegistry({ maxSize = 50, isLocked = () => false, onE
       const existing = cache.get(userId);
       if (existing) { existing._lastAccess = Date.now(); return existing; }
       if (loading.has(userId)) return loading.get(userId).promise;
-      const token = { userId, retired: false, writes: new Set() };
+      const token = { userId, retired: false, writes: new Set(), holds: 0 };
       const entry = { token, promise: null };
       loading.set(userId, entry);
       entry.promise = (async () => {
