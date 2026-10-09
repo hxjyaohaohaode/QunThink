@@ -1,0 +1,69 @@
+{
+  "identity_scope": "The engineering_baseline object identifies only the source before this documentation patch. It is not the current repository tree or a filing-ready identity.",
+  "engineering_baseline": {
+    "scope": "Pre-documentation engineering baseline only. The 430-file baseline comprised unchanged 427-file business baseline plus 3 notices. Its commit, tree, CI and archive identities do not identify the 435-file repository after this documentation update.",
+    "source_file_count": 430,
+    "candidate_tree": "6300935871b0650a759d79816d7a5cbc27279e36",
+    "candidate_commit": "6a2cf2b919e877d1cef94bf4ebdee74d9cc017bf",
+    "candidate_pr": "https://github.com/hxjyaohaohaode/QunThink/pull/3",
+    "candidate_ci_run": "https://github.com/hxjyaohaohaode/QunThink/actions/runs/37922452782",
+    "candidate_ci_conclusion": "success",
+    "final_main_commit": "6646d89f03c0b29e39df3a466b2d81b4f2d8e28b",
+    "sealed": true,
+    "candidate_manifest_sha256": "e02bbe841a47df058426e34b8297165b3ad68516805405984bab8a84155497c8",
+    "business_baseline": {
+      "source_file_count": 427,
+      "commit": "f6eb4567fd7a7cafa96fa882da1809cadbf24ada",
+      "tree": "364d29dd9e358ff04f9d36d473527dd5346df3ee",
+      "ci_run": "https://github.com/hxjyaohaohaode/QunThink/actions/runs/37900387062",
+      "original_files_unchanged": 427
+    },
+    "added_notices": [
+      "THIRD_PARTY_NOTICES.md",
+      "frontend/public/THIRD_PARTY_NOTICES.html",
+      "frontend/public/third-party-licenses/react-bits.txt"
+    ],
+    "applicant_intent": "用户个人；法定身份与权属依据待核实",
+    "formal_name": "待确认",
+    "registration_version": "待确认",
+    "completion_date": "待事实确认",
+    "first_publication_date": "待事实确认",
+    "merged_at_utc": "2026-10-09T11:24:47Z",
+    "candidate_ci_first_attempt": true,
+    "candidate_ci_counts": {
+      "backend": 389,
+      "frontend": 556,
+      "browser": 56,
+      "packaging": 9,
+      "docker_builds": 2,
+      "jobs": 8
+    },
+    "main_ci_conclusion": "success",
+    "main_ci_run": "https://github.com/hxjyaohaohaode/QunThink/actions/runs/37923561149",
+    "render_skip_verified": true,
+    "main_ci_first_attempt": true,
+    "main_ci_counts": {
+      "backend": 389,
+      "frontend": 556,
+      "browser": 56,
+      "packaging": 9,
+      "docker_builds": 2,
+      "jobs": 8
+    },
+    "render_run": "https://github.com/hxjyaohaohaode/QunThink/actions/runs/37924683298",
+    "render_job": 113800674449,
+    "render_skip_time_utc": "2026-10-09T11:35:40.6364504Z",
+    "render_actual_api_deploy": false,
+    "source_archive_filename": "三个项目-已验证云端源码-20261009.zip",
+    "source_archive_sha256": "10c2e4b1508947ae4508c84676d860bf3c1779ad287a62b2da4747d2ba831aad",
+    "source_archive_members": 1398,
+    "source_archive_source_files": 1396
+  },
+  "documentation_update": {
+    "added_files": 5,
+    "modified_files": 6,
+    "repository_files_after_update": 435,
+    "business_code_logo_and_top_level_license_unchanged": true,
+    "result_tree_and_sync_commit": "Read from the external review receipt or Git; omitted here to avoid self-referential tree identity."
+  }
+}
