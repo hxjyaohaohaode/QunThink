@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID, createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import pg from 'pg';
 import { createPostgresDeletionLedger, deferPostgresMemoryJson, onPostgresMemoryFailure } from '../src/services/memory/postgresDeletionLedger.js';
@@ -138,17 +138,26 @@ test('independent PostgreSQL ledger: rollback, registry loss, cross-process lock
     });
     await t.test('least-privilege runtime requires explicit control identity grant and forces synchronous durability', async () => {
       const role = `ledger_role_${randomUUID().replaceAll('-', '')}`;
-      await businessPool.query(`CREATE ROLE ${role} LOGIN`);
-      const businessRoleUrl = new URL(businessUrl); businessRoleUrl.username = role;
-      const ledgerRoleUrl = new URL(ledgerUrl); ledgerRoleUrl.username = role;
+      // Synthetic one-run credential: CI uses SCRAM, unlike local trust fixtures.
+      // Hex encoding makes this generated SQL literal safe; never log it.
+      const rolePassword = randomBytes(32).toString('hex');
+      await businessPool.query(`CREATE ROLE ${role} LOGIN PASSWORD '${rolePassword}'`);
+      const businessRoleUrl = new URL(businessUrl); businessRoleUrl.username = role; businessRoleUrl.password = rolePassword;
+      const ledgerRoleUrl = new URL(ledgerUrl); ledgerRoleUrl.username = role; ledgerRoleUrl.password = rolePassword;
       const bp = new pg.Pool({ connectionString: businessRoleUrl.toString() });
       const lp = new pg.Pool({ connectionString: ledgerRoleUrl.toString(), options: '-c synchronous_commit=off' });
       const limited = createPostgresDeletionLedger({ businessPool: bp, ledgerPool: lp, installationId });
       try {
+        // Prove both pools actually authenticated as the restricted role before
+        // testing fail-closed behavior; an auth failure is not a privilege test.
+        assert.equal((await bp.query('SELECT current_user')).rows[0].current_user, role);
+        assert.equal((await lp.query('SELECT current_user')).rows[0].current_user, role);
         await businessPool.query(`GRANT SELECT ON kv_store TO ${role}`);
         await ledgerPool.query(`GRANT SELECT ON memory_deletion_installation,memory_deletion_accounts,memory_deletion_tombstones TO ${role}; GRANT INSERT ON memory_deletion_accounts,memory_deletion_tombstones TO ${role}`);
         await businessPool.query('REVOKE EXECUTE ON FUNCTION pg_control_system() FROM PUBLIC');
         await ledgerPool.query('REVOKE EXECUTE ON FUNCTION pg_control_system() FROM PUBLIC');
+        await assert.rejects(bp.query('SELECT * FROM pg_control_system()'), { code: '42501' });
+        await assert.rejects(lp.query('SELECT * FROM pg_control_system()'), { code: '42501' });
         await assert.rejects(limited.deletedIds('alice', []), { code: 'MEMORY_BARRIER_UNAVAILABLE' });
         await businessPool.query(`GRANT EXECUTE ON FUNCTION pg_control_system() TO ${role}`);
         await ledgerPool.query(`GRANT EXECUTE ON FUNCTION pg_control_system() TO ${role}`);
