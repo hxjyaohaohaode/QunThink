@@ -107,6 +107,10 @@ jobs:
         if: matrix.suite == 'core'
         run: npm run test:e2e -- --project=${{ matrix.project }}
         working-directory: ./frontend
+      - name: Site AI isolated desktop/mobile consent and failure flows
+        if: ${{ !cancelled() && matrix.suite == 'core' }}
+        run: npx playwright test --config=playwright.site-basic.config.ts --project=${{ matrix.project }}
+        working-directory: ./frontend
       - name: Q1 same-draft result chain and bounded failure recovery
         if: ${{ !cancelled() && matrix.suite == 'core' }}
         run: npx playwright test --config=playwright.q1.config.ts --project=${{ matrix.project }}

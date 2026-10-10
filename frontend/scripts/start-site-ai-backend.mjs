@@ -1,0 +1,12 @@
+import { buildSiteAiFixtureEnvironment } from './site-ai-fixture.mjs';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+const data = await mkdtemp(join(tmpdir(), 'qunthink-site-ai-e2e-'));
+const emptyEnv = join(data, 'empty.env');
+await writeFile(emptyEnv, '');
+const isolated = buildSiteAiFixtureEnvironment(process.env, data, emptyEnv, randomBytes(32).toString('base64'));
+for (const key of Object.keys(process.env)) delete process.env[key];
+Object.assign(process.env, isolated);
+await import('../../backend/src/index.js');
