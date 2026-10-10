@@ -1,6 +1,6 @@
 import { expect, type Page, type TestInfo, type Locator } from '@playwright/test';
 import { createSessionTokenRecovery } from '../scripts/session-token-retry.mjs';
-import { createScopedSessionNavigator, observeSessionTokenAttempt } from '../scripts/session-navigation.mjs';
+import { createScopedSessionNavigator, observeSessionTokenAttempt, readVisibleSessionState } from '../scripts/session-navigation.mjs';
 
 type Recovery = { deadline: number; navigate: ReturnType<typeof createScopedSessionNavigator> };
 const recoveries = new WeakMap<Page, Recovery>();
@@ -42,7 +42,7 @@ export async function navigateWithSessionTokenRecovery(page: Page, action: (time
     waitForState: async (observation: { classify: (visible: { destination: boolean; recovery: boolean }) => string }) => {
       let state = 'waiting';
       await expect.poll(async () => {
-        state = observation.classify({ destination: await destination.isVisible(), recovery: await retry.isVisible() });
+        state = observation.classify(await readVisibleSessionState(destination, retry));
         return state;
       }, { timeout: Math.min(5000, budget()) }).not.toBe('waiting');
       return state;

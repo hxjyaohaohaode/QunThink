@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
-import { createScopedSessionNavigator, createSettledSessionObserver, observeSessionTokenAttempt } from '../scripts/session-navigation.mjs';
+import { createScopedSessionNavigator, createSettledSessionObserver, observeSessionTokenAttempt, readVisibleSessionState } from '../scripts/session-navigation.mjs';
 const origin = 'http://127.0.0.1:3210';
 const events = ['request', 'response', 'requestfinished', 'requestfailed'];
 function request(url = `${origin}/api/auth/token`, method = 'GET') { return { url: () => url, method: () => method }; }
@@ -64,11 +64,45 @@ test('a transient visible destination cannot pass while the current token reques
   assert.equal(observe({ latest, destination: true, recovery: false }), 'waiting');
   assert.equal(observe({ latest, destination: false, recovery: true }), 'recovery');
 });
-test('a successful destination requires two stable observations for the same current request', () => {
+test('the completed current 200 and actual destination pass on their first observation', () => {
   const observe = createSettledSessionObserver(); const latest = { sequence: 1, response: response(200), finished: true, failed: false };
-  assert.equal(observe({ latest, destination: true, recovery: false }), 'waiting');
-  assert.equal(observe({ latest: { ...latest, sequence: 2 }, destination: true, recovery: false }), 'waiting');
-  assert.equal(observe({ latest: { ...latest, sequence: 2 }, destination: true, recovery: false }), 'destination');
+  assert.equal(observe({ latest, destination: false, recovery: false }), 'waiting');
+  assert.equal(observe({ latest, destination: true, recovery: false }), 'destination');
+  assert.equal(observe({ latest: { ...latest, sequence: 2, finished: false }, destination: true, recovery: false }), 'waiting');
+});
+
+test('a visible destination avoids the recovery RPC completely within the original polling budget', async () => {
+  let elapsed = 138, destinationCalls = 0, retryCalls = 0;
+  const visible = await readVisibleSessionState(
+    { isVisible: async () => { destinationCalls++; elapsed += 138; return true; } },
+    { isVisible: async () => { retryCalls++; throw new Error('absent recovery RPC must not run'); } },
+  );
+  assert.deepEqual(visible, { destination: true, recovery: false });
+  assert.equal(destinationCalls, 1); assert.equal(retryCalls, 0); assert.ok(elapsed < 5000);
+  const observe = createSettledSessionObserver();
+  assert.equal(observe({ latest: { response: response(200), finished: true }, ...visible }), 'destination');
+  assert.equal(observe({ latest: { response: response(200), finished: false }, ...visible }), 'waiting');
+  assert.equal(observe({ latest: { response: response(429), finished: true }, ...visible }), 'waiting');
+});
+test('an absent destination queries the real recovery button exactly once and propagates its visibility', async () => {
+  for (const recovery of [false, true]) {
+    const calls = [];
+    const visible = await readVisibleSessionState(
+      { isVisible: async () => { calls.push('destination'); return false; } },
+      { isVisible: async () => { calls.push('retry'); return recovery; } },
+    );
+    assert.deepEqual(calls, ['destination', 'retry']);
+    assert.deepEqual(visible, { destination: false, recovery });
+  }
+});
+test('visibility RPC failures propagate without inventing a successful page or recovery evidence', async () => {
+  await assert.rejects(readVisibleSessionState(
+    { isVisible: async () => { throw new Error('destination RPC failed'); } },
+    { isVisible: async () => { assert.fail('retry must not run'); } },
+  ), /destination RPC failed/);
+  await assert.rejects(readVisibleSessionState(
+    { isVisible: async () => false }, { isVisible: async () => { throw new Error('retry RPC failed'); } },
+  ), /retry RPC failed/);
 });
 test('non-429 failures and a current 503 after an old 429 cannot authorize retry', async () => {
   for (const statuses of [[500], [401], [200], [429, 503]]) {
@@ -139,7 +173,8 @@ test('native integration keeps original budget, stable real UI and four-listener
   assert.match(native, /const deadline = Date\.now\(\) \+ info\.timeout/);
   assert.match(native, /remaining = recovery\.deadline - Date\.now\(\) - 5000/);
   assert.match(native, /recovery\.navigate\(\{/); assert.match(native, /observation\.classify/);
-  assert.match(native, /destination\.isVisible\(\)/); assert.match(native, /retry\.isVisible\(\)/);
+  assert.match(native, /observation\.classify\(await readVisibleSessionState\(destination, retry\)\)/);
+  assert.match(scope, /destination\.isVisible\(\)/); assert.match(scope, /visible \? false : await retry\.isVisible\(\)/);
   assert.match(native, /waitForDestination:.*expect\(destination\)\.toBeVisible/);
   assert.doesNotMatch(native, /setTimeout|setDefaultTimeout|waitForAuthenticatedDestination|waitForResponse/);
   for (const event of events) assert.ok(scope.includes(`page.off('${event}'`));

@@ -3,21 +3,24 @@ import { isSessionTokenResponse } from './session-token-retry.mjs';
 // App.tsx cancels the older StrictMode effect before its success/error guards.
 // Its request can finish late, so choose the newest request by start order,
 // never by response-arrival order. An active request must settle before the
-// destination can pass, then its actual UI must be stable on two observations.
+// destination can pass together with its actual visible UI.
 export function createSettledSessionObserver() {
-  let priorDestinationSequence = null;
   return ({ latest, destination, recovery }) => {
-    const prior = priorDestinationSequence; priorDestinationSequence = null;
     if (latest?.failed) return 'failed';
     if (!latest) return recovery ? 'recovery' : 'waiting';
     if (!latest.finished || !latest.response) return 'waiting';
-    if (destination && latest.response.status() === 200) {
-      priorDestinationSequence = latest.sequence;
-      return prior === latest.sequence ? 'destination' : 'waiting';
-    }
+    if (destination && latest.response.status() === 200) return 'destination';
     if (recovery && latest.response.status() !== 200) return 'recovery';
     return 'waiting';
   };
+}
+
+// Avoid an unnecessary browser RPC for an absent recovery button once the
+// actual destination is visible. Classification still requires its current
+// token request to have finished successfully.
+export async function readVisibleSessionState(destination, retry) {
+  const visible = await destination.isVisible();
+  return { destination: visible, recovery: visible ? false : await retry.isVisible() };
 }
 
 export function createScopedSessionNavigator({ page, origin, recover }) {
