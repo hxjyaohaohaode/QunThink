@@ -1,4 +1,4 @@
-﻿import { Low } from 'lowdb';
+import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -10,6 +10,7 @@ import { isSupabaseEnabled, PgLow, listAllKeys, getPool } from './supabaseAdapte
 import { encryptText, decryptText } from '../utils/encryption.js';
 import { readWithWriteBarrier } from './readBarrier.js';
 import { createUserDbRegistry } from './userDbRegistry.js';
+import { retireImplicitPresetMembers } from '../config/legacyModels.js';
 export { beginUserDbWriteBarrier, readCommittedUserDb } from './readBarrier.js';
 
 const _writeTimestamps = new WeakMap();
@@ -302,7 +303,7 @@ function createDefaultGroups() {
       debate_mode: false,
       debate_level: 1,
       debate_config: null,
-      ai_members: ['deepseek', 'deepseek_reasoner', 'glm_air', 'qwen_flash'],
+      ai_members: [],
       created_at: now,
       last_message_at: now,
       last_message_preview: null
@@ -319,7 +320,7 @@ function createDefaultGroups() {
       debate_mode: true,
       debate_level: 2,
       debate_config: null,
-      ai_members: ['deepseek', 'glm_flash', 'mimo_omni', 'qwen_turbo'],
+      ai_members: [],
       created_at: now,
       last_message_at: now,
       last_message_preview: null
@@ -336,7 +337,7 @@ function createDefaultGroups() {
       debate_mode: false,
       debate_level: 0,
       debate_config: null,
-      ai_members: ['glm_air', 'mimo_flash', 'qwen_flash', 'glm_flashx'],
+      ai_members: [],
       created_at: now,
       last_message_at: now,
       last_message_preview: null
@@ -410,6 +411,8 @@ async function loadUserDb(userId, protect) {
     }
 
 
+    if (retireImplicitPresetMembers(db.data)) needsWrite = true;
+
     for (const group of db.data.groups) {
       if (group.last_message_at === undefined || group.last_message_preview === undefined) {
         resetGroupActivity(db, group.id);
@@ -454,6 +457,8 @@ async function loadUserDb(userId, protect) {
       needsWrite = true;
     }
 
+
+    if (retireImplicitPresetMembers(db.data)) needsWrite = true;
 
     for (const group of db.data.groups) {
       if (group.last_message_at === undefined || group.last_message_preview === undefined) {
@@ -532,6 +537,8 @@ async function loadUserDb(userId, protect) {
     needsWrite = true;
   }
 
+
+  if (retireImplicitPresetMembers(db.data)) needsWrite = true;
 
   for (const group of db.data.groups) {
     if (group.last_message_at === undefined || group.last_message_preview === undefined) {

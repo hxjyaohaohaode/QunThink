@@ -1,15 +1,11 @@
-﻿import axios from 'axios';
 import { AI_NAMES, AI_MENTION_ALIASES, calculateSimilarity } from '../../config/constants.js';
 import { safeLog } from '../../utils/logger.js';
 import { getEffectiveRelationship } from '../../config/personas.js';
-import { getSafeExternalRequestOptions } from '../../utils/safeExternalUrl.js';
 
-import { LEGACY_AI_CONFIGS } from '../../config/legacyModels.js';
 import { resolveModel, defaultModelId } from './catalog.js';
 import { normalizeEndpoint, normalizeBaseUrl } from './endpoints.js';
 import { requestCompletion, requestCompletionStream, describeProviderError } from './transport.js';
 export { normalizeEndpoint, normalizeBaseUrl };
-const aiConfigs = LEGACY_AI_CONFIGS;
 
 // 自定义 systemPrompt 中的危险指令关键词，命中即拒绝加载该自定义人设
 const SUSPICIOUS_SYSTEM_PROMPT_KEYWORDS = ['忽略之前的指令', '覆盖所有规则', '重新定义你的角色', '忘记你的设定', '你是一个全新的AI'];
@@ -63,9 +59,6 @@ export async function selectVisionModel(modelId, userId) {
   return config.capabilities.includes('vision') ? modelId : defaultModelId(userId, 'vision');
 }
 
-// Kept for startup compatibility. User catalogs are resolved at request time.
-export async function loadAIConfigsFromDB() {}
-
 export async function getUserCustomPersona(userId, aiId) {
   try {
     const { getUserDb } = await import('../../models/db.js');
@@ -89,11 +82,6 @@ export async function getUserCustomPersona(userId, aiId) {
     return null;
   }
 }
-
-export function getAIConfigs() { return aiConfigs; }
-export function getAIConfig(id) { return aiConfigs[id]; }
-
-const aiHealthStatus = new Map();
 
 /**
  * 判断AI是否应该回复 - 拟人化随机回复决策
@@ -260,81 +248,6 @@ export async function callAI(aiId, persona, userMessage, recentMessages, respons
   } catch (error) {
     throw Object.assign(new Error(describeProviderError(error)), { status: error.status || 502, cause: error });
   }
-}
-
-async function checkAIHealth(aiId) {
-  const config = aiConfigs[aiId];
-  if (!config || !config.enabled) {
-    aiHealthStatus.set(aiId, { status: 'unhealthy', lastCheck: Date.now(), error: '模型未启用或配置不存在', responseTime: 0 });
-    return false;
-  }
-
-  if (config.skipHealthCheck) {
-    aiHealthStatus.set(aiId, { status: 'healthy', lastCheck: Date.now(), error: null, responseTime: 0 });
-    return true;
-  }
-
-  aiHealthStatus.set(aiId, { status: 'checking', lastCheck: Date.now(), error: null, responseTime: 0 });
-
-  const startTime = Date.now();
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 20000);
-
-  try {
-    const requestBody = config.isTTS
-      ? {
-        model: config.model,
-        modalities: ['text', 'audio'],
-        audio: {
-          voice: 'mimo_default',
-          format: 'wav'
-        },
-        messages: [
-          { role: 'user', content: '请将下一条 assistant 消息转成语音。' },
-          { role: 'assistant', content: '你好' }
-        ],
-        stream: false
-      }
-      : {
-        model: config.model,
-        messages: [{ role: 'user', content: '你好' }],
-        max_tokens: 5,
-        temperature: 0
-      };
-
-    const safeRequestOptions = await getSafeExternalRequestOptions(config.endpoint);
-    await axios.post(config.endpoint, requestBody, {
-      headers: {
-        'Authorization': `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      signal: controller.signal,
-      timeout: 20000,
-      ...safeRequestOptions
-    });
-
-    clearTimeout(timeoutId);
-    const responseTime = Date.now() - startTime;
-    aiHealthStatus.set(aiId, { status: 'healthy', lastCheck: Date.now(), error: null, responseTime });
-    return true;
-  } catch (error) {
-    clearTimeout(timeoutId);
-    const responseTime = Date.now() - startTime;
-    aiHealthStatus.set(aiId, { status: 'unhealthy', lastCheck: Date.now(), error: error.message, responseTime });
-    safeLog('warn', `AI ${aiId} 健康检查失败`, { error: error.message });
-    return false;
-  }
-}
-
-async function checkAllAIHealth() {
-  const results = {};
-  const promises = Object.keys(aiConfigs).map(async (aiId) => {
-    results[aiId] = await checkAIHealth(aiId);
-    safeLog('info', `AI ${aiId} 健康状态: ${results[aiId] ? '正常' : '异常'}`);
-  });
-
-  await Promise.allSettled(promises);
-  return results;
 }
 
 function checkResponseRelevance(userMessage, aiResponse) {
@@ -796,7 +709,7 @@ export async function callAIStream(aiId, persona, userMessage, recentMessages, r
   }
 }
 
-export { aiHealthStatus, checkAIHealth, checkAllAIHealth, checkResponseRelevance, normalizeResponse, applyMessageLengthLimit };
+export { checkResponseRelevance, normalizeResponse, applyMessageLengthLimit };
 
 export function buildDebateSystemPrompt(persona, debateRound, totalRounds, debateLevel, recentMessages = [], groupMembers = null, userMessage = '') {
   // 自定义 systemPrompt 优先级最高

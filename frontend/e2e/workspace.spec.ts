@@ -22,6 +22,30 @@ test('brand login entry remains visible before authentication', async ({ page },
   await page.screenshot({ path: info.outputPath('brand-login.png'), fullPage: true, animations: 'disabled' });
 });
 
+test('fresh accounts have no platform AI and model setup remains an explicit choice', async ({ page, context }, info) => {
+  const workspace = await openWorkspace(page, context);
+  const probes: string[] = [];
+  page.on('request', request => { if (request.url().includes('/model-catalog/test')) probes.push(request.url()); });
+  const catalog = await (await context.request.get('/api/user/model-catalog')).json();
+  expect(catalog.providers).toEqual([]);
+  expect(catalog.models).toEqual([]);
+  expect(catalog.defaults).toEqual({ chat: null, vision: null, tts: null });
+  const personas = await (await context.request.get('/api/personas')).json();
+  expect(personas.personas).toEqual({});
+  const groups = await (await context.request.get('/api/groups')).json();
+  expect(groups.every((group: { ai_members: string[] }) => group.ai_members.length === 0)).toBe(true);
+  await workspace.getByRole('button', { name: '模型中心', exact: true }).click();
+  const models = page.getByRole('region', { name: '模型中心', exact: true });
+  await expect(models.getByRole('button', { name: '＋ 服务商', exact: true })).toBeVisible();
+  await expect(models.getByLabel('服务商名称', { exact: true })).toHaveCount(0);
+  await expect(models.getByRole('button', { name: '保存并应用', exact: true })).toBeDisabled();
+  await page.reload();
+  await expect(page.getByTestId('workspace')).toBeVisible();
+  expect((await (await context.request.get('/api/user/model-catalog')).json()).models).toEqual([]);
+  expect(probes).toEqual([]);
+  await page.screenshot({ path: info.outputPath('byok-empty-model-center.png'), fullPage: true, animations: 'disabled' });
+});
+
 test('real API saves once, preserves draft across views, and restores saved task after reload', async ({ page, context }, info) => {
   const workspace = await openWorkspace(page, context);
   await expect(workspace.getByText('先写作，再选择 AI 助手')).toBeVisible();

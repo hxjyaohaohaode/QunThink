@@ -1,4 +1,4 @@
-﻿import express from 'express';
+import express from 'express';
 import { withWriteLock, resetGroupActivity, updateGroupActivity } from '../models/db.js';
 import { invalidateInsightsCache } from '../services/insightsCache.js';
 import { v4 as uuidv4 } from 'uuid';
@@ -7,6 +7,8 @@ import { z } from 'zod';
 import { queueAIMessages, handleUserReaction, handleUserComment, startAutonomousChat, stopAutonomousChat, getAutonomousChatStatus } from '../services/scheduler/index.js';
 import socialService from '../services/social/index.js';
 import { AI_PERSONAS } from '../config/personas.js';
+import { buildMergedPersonas } from './personas.js';
+import { getCatalogData } from '../services/ai/catalog.js';
 import encryptionUtils from '../utils/encryption.js';
 import { broadcastToGroup } from '../websocket/index.js';
 import { validateBody, sendMessageSchema, editMessageSchema, batchDeleteSchema, commentSchema } from '../validators/index.js';
@@ -868,6 +870,7 @@ router.get('/search', asyncHandler(async (req, res) => {
     (!file.uploader_id || file.uploader_id === req.userId));
   const readableGroupIds = new Set(readableGroups.map(group => group.id));
 
+  const accountPersonas = buildMergedPersonas(db.data.customPersonas || {}, getCatalogData(db.data));
   const searchQuery = q.toLowerCase().trim();
   const searchTypes = type ? type.split(',') : ['groups', 'messages', 'files', 'agents', 'personas', 'comments', 'members', 'media'];
 
@@ -1159,7 +1162,7 @@ router.get('/search', asyncHandler(async (req, res) => {
   }
 
   if (searchTypes.includes('personas')) {
-    for (const [aiId, persona] of Object.entries(AI_PERSONAS)) {
+    for (const [aiId, persona] of Object.entries(accountPersonas)) {
       if (results.personas.length >= maxLimit) break;
       const nameMatch = persona.name?.toLowerCase().includes(searchQuery);
       const styleMatch = persona.style?.toLowerCase().includes(searchQuery);
@@ -1221,7 +1224,7 @@ router.get('/search', asyncHandler(async (req, res) => {
         if (results.members.length >= maxLimit) break;
         const memberKey = `ai_${aiId}`;
         if (seenMemberIds.has(memberKey)) continue;
-        const persona = AI_PERSONAS[aiId];
+        const persona = accountPersonas[aiId] || AI_PERSONAS[aiId];
         const aiName = persona?.name || aiId;
         const nameMatch = aiName.toLowerCase().includes(searchQuery);
         const personalityMatch = persona?.personality?.toLowerCase().includes(searchQuery);

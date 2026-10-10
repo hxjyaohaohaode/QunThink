@@ -1,6 +1,6 @@
 import express from 'express';
 import { withWriteLock } from '../models/db.js';
-import { AI_PERSONAS, AI_LIST } from '../config/personas.js';
+import { AI_PERSONAS } from '../config/personas.js';
 import { loadCustomPersonas } from '../services/scheduler/index.js';
 import { validateBody, updatePersonaSchema } from '../validators/index.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
@@ -8,8 +8,6 @@ import { broadcastPersonaUpdate, broadcastPersonasSync } from '../websocket/inde
 import { getCatalogData, modelPersona } from '../services/ai/catalog.js';
 
 const router = express.Router();
-
-const VALID_AI_IDS = new Set(AI_LIST);
 
 const PERSONA_ALLOWED_FIELDS = [
   'name', 'systemPrompt', 'avatar', 'avatar_url', 'color', 'styleTag', 'style', 'replyStyle', 'personality',
@@ -21,10 +19,6 @@ const PERSONA_ALLOWED_FIELDS = [
 ];
 
 const PERSONA_NESTED_FIELDS = ['responseConfig', 'socialConfig', 'modelConfig', 'debateConfig', 'relationships'];
-
-function isKnownAiId(aiId) {
-  return VALID_AI_IDS.has(aiId);
-}
 
 async function resolveAiId(req, res) {
   const { aiId } = req.params;
@@ -119,7 +113,7 @@ function mergePersona(defaultPersona, customPersona = {}) {
 
 export function buildMergedPersonas(customPersonas = {}, catalog = null) {
   const merged = {};
-  const defaults = catalog ? Object.fromEntries(catalog.models.map(m => [m.id, { ...AI_PERSONAS[m.id], ...modelPersona(m) }])) : AI_PERSONAS;
+  const defaults = catalog ? Object.fromEntries(catalog.models.map(m => [m.id, { ...AI_PERSONAS[m.id], ...modelPersona(m) }])) : {};
   for (const [aiId, defaultPersona] of Object.entries(defaults)) {
     const custom = customPersonas[aiId] || {};
     merged[aiId] = mergePersona(defaultPersona, custom);

@@ -1,7 +1,7 @@
 {
   "project": "qunthink",
   "identity_scope": "本轮所列生产文件的原始字节快照，未把未指定的外部manifest匹配结果预填为true。适用后续HEAD前必须逐项重新核对；整库tree和同步提交由外部最终回执绑定。",
-  "production_file_set_sha256": "cba96e3f2c09b901cdf00939f1a1062963fbb8e282d4ee0a728637f30f7f3077",
+  "production_file_set_sha256": "90ff36ce34600c809d05508d542bd7d64acce1a16e7af0b74c71db9fba5708ac",
   "not_ready_for_submission": true,
   "notes": [
     "文件顺序是为功能连续性制定的审阅建议，不是页数凑数，也不是原创/权属证明。",
@@ -15,9 +15,9 @@
       "order": 1,
       "path": "backend/src/index.js",
       "category": "application_source_candidate",
-      "bytes": 20722,
-      "lines": 578,
-      "sha256": "4652f2840545cd644819db74052d06e67a1c40a4757827bf93639d0277f46722"
+      "bytes": 20467,
+      "lines": 573,
+      "sha256": "ed3181aa94ec08f465b5671453e77bab3eb67bdc9070cde989dcff4892a8fb1c"
     },
     {
       "order": 2,
@@ -39,9 +39,9 @@
       "order": 4,
       "path": "backend/src/models/db.js",
       "category": "application_source_candidate",
-      "bytes": 21729,
-      "lines": 699,
-      "sha256": "6309091322d57bc49f8fde43f54e690c28ef6bcda76c91157c452df6872c667d"
+      "bytes": 21838,
+      "lines": 706,
+      "sha256": "06b1a0ccaea5c33a5fd5d2b088a77962216820720547a19e499571024aac2732"
     },
     {
       "order": 5,
@@ -55,9 +55,9 @@
       "order": 6,
       "path": "backend/src/services/ai/catalog.js",
       "category": "application_source_candidate",
-      "bytes": 16107,
-      "lines": 278,
-      "sha256": "f6f8a1e1b24be7cb1d80774c7018a558536f86afa51b86aa9db81881a0dc246c"
+      "bytes": 15961,
+      "lines": 282,
+      "sha256": "9636d00ac737ecc8f33c51269b4dd5ffcfd1bafaca6d927cd3b5495efe9e94b8"
     },
     {
       "order": 7,
@@ -79,9 +79,9 @@
       "order": 9,
       "path": "backend/src/routes/messages.js",
       "category": "application_source_candidate",
-      "bytes": 59632,
-      "lines": 1415,
-      "sha256": "f359799f2b6b1af2d6393cf2934b91df8d26cf4096aacc5e192c8cd443254edd"
+      "bytes": 59873,
+      "lines": 1418,
+      "sha256": "0d14a31e8875e0d8a949c1aab9baa1630d982ff9bfdc8608c180458f028b66c0"
     },
     {
       "order": 10,
@@ -95,17 +95,17 @@
       "order": 11,
       "path": "backend/src/services/ai/index.js",
       "category": "application_source_candidate",
-      "bytes": 45104,
-      "lines": 943,
-      "sha256": "e8c2afc215bc0cc61362604665c6db7be3304776809a185990d5dea12f4608b4"
+      "bytes": 42142,
+      "lines": 856,
+      "sha256": "da8e69c038eec842a6ebcfcea65a642a09c98c29ed999adc8b8613f7482a7c96"
     },
     {
       "order": 12,
       "path": "backend/src/websocket/index.js",
       "category": "application_source_candidate",
-      "bytes": 25356,
-      "lines": 807,
-      "sha256": "440c333db176e6fcd4cb2c5d27f42d48c8406b5b5c7a6368f52d3bd108d3101b"
+      "bytes": 25332,
+      "lines": 806,
+      "sha256": "7505a3fc010bf25d4fa15917dc2076c776e5d701237b95a9072d58773acf2e25"
     },
     {
       "order": 13,
@@ -263,17 +263,17 @@
       "order": 32,
       "path": "frontend/src/components/Layout/ModelCenter.tsx",
       "category": "application_source_candidate",
-      "bytes": 24753,
+      "bytes": 24891,
       "lines": 175,
-      "sha256": "c651b6abed861b3c9da6ef270d73dc23de62c3734e10a4c4fc17c51740cd5e76"
+      "sha256": "65961cea51047c701f0389bb0055032ebedac39b7ac975b593c98fc12ae0559c"
     },
     {
       "order": 33,
       "path": "frontend/src/components/Layout/NewChatModal.tsx",
       "category": "application_source_candidate",
-      "bytes": 25134,
-      "lines": 606,
-      "sha256": "bb2fbeedaf3ebea33e78f649d5211970e52c1f3c61b6ae0df941633346fa16f3"
+      "bytes": 25501,
+      "lines": 612,
+      "sha256": "d50e6c2c36d6aba4cdc69ebc935e2b0c66bb937abbccb98bb3de4eab81340f96"
     },
     {
       "order": 34,
@@ -373,5 +373,5 @@
     }
   ],
   "listed_files": 45,
-  "listed_raw_lines": 17687
+  "listed_raw_lines": 17614
 }

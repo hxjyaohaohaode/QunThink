@@ -1,6 +1,5 @@
 import { getCatalogData } from '../services/ai/catalog.js';
 import { buildMergedPersonas } from '../routes/personas.js';
-import { AI_LIST } from '../config/personas.js';
 import { cancelGroupGeneration } from '../services/scheduler/index.js';
 import { getAuthDb } from '../models/authDb.js';
 import { getUserDb } from '../models/db.js';
@@ -790,7 +789,7 @@ export async function broadcastPersonasSync(userId) {
     const db = await getUserDb(userId);
     await db.read();
     const customPersonas = db.data.customPersonas || {};
-    const merged = buildMergedPersonas(customPersonas);
+    const merged = buildMergedPersonas(customPersonas, getCatalogData(db.data));
 
     clients.forEach((client, clientId) => {
       if (client.userId === userId && client.ws.readyState === 1) {

@@ -751,7 +751,8 @@ export const AI_PERSONAS = {
   }
 };
 
-export const AI_LIST = ['deepseek', 'deepseek_reasoner', 'mimo_flash', 'mimo_omni', 'mimo_tts', 'glm_air', 'glm_flash', 'glm_flashx', 'qwen_flash', 'qwen_turbo', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'];
+// Legacy persona metadata above is retained for user-saved models and history.
+// Selectable models come exclusively from the current account catalog.
 
 // 可参与群聊对话的文本类 AI(排除 TTS / 视觉 / 全模态等专用模型)
 export const TEXT_CHAT_AIS = ['deepseek', 'deepseek_reasoner', 'mimo_flash', 'mimo_omni', 'glm_air', 'glm_flash', 'glm_flashx', 'qwen_flash', 'qwen_turbo'];

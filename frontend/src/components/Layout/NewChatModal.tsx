@@ -382,6 +382,12 @@ export function NewChatModal({ isOpen, onClose, onSelectGroup }: NewChatModalPro
           </button>
         </div>
 
+        {CHATTABLE_AI_LIST.length === 0 && (
+          <p role="status" className="mb-4 rounded-xl border border-dashed border-border p-3 text-sm text-text-secondary">
+            暂无可用的对话模型。请到设置中的“模型中心”添加自己的服务商和模型，保存后完成对话测试。平台不提供预置 AI。
+          </p>
+        )}
+
         {activeTab === 'private' && (
           <div className="space-y-3">
             <p className="text-sm text-text-muted mb-3">选择一个AI开始一对一私聊</p>

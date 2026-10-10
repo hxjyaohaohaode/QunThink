@@ -3040,28 +3040,16 @@ paths:
     post:
       tags: [ ApiConfig ]
       operationId: testUserApiConfig
-      summary: 测试用户自定义 API 配置可用性
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                vendor:
-                  type: string
-                  enum: [ deepseek, zhipu, mimo, qwen ]
-                apiKey: { type: string }
-                baseUrl: { type: string }
+      summary: 已退役；请明确选择自己的模型并在模型中心测试
+      deprecated: true
       responses:
-        '200':
-          description: 健康检查结果（healthy/vendor/endpoint/model/responseTime 等）
+        '410':
+          description: 不发起任何服务商请求；replacement 指向 /api/user/model-catalog/test
           content:
             application/json:
               schema:
                 type: object
                 additionalProperties: true
-        '400':
-          $ref: '#/components/responses/BadRequest'
 
   # ---------------------------------------------------------------------- Ai
   /api/ai/models:
@@ -5472,7 +5460,6 @@ components:
         keySource:
           enum:
             - user
-            - environment
             - none
         ready: *a1
       required:

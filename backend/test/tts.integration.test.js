@@ -1,3 +1,4 @@
+import { syntheticModel, syntheticProvider } from './helpers/syntheticCatalog.js';
 import { mockProviderDns } from './helpers/mockProviderDns.js';
 mockProviderDns(['api.xiaomimimo.com']);
 import test from 'node:test';
@@ -42,7 +43,17 @@ async function registerAndGetSession() {
     });
 
   assert.equal(response.status, 201);
-  return response.headers['set-cookie'];
+  const cookies = response.headers['set-cookie'];
+  const initial = await request.get('/api/user/model-catalog').set('Cookie', cookies);
+  assert.deepEqual(initial.body.models, []);
+  const configured = await request.put('/api/user/model-catalog').set('Cookie', cookies).send({
+    ...initial.body,
+    providers: [syntheticProvider({ id: 'mimo', baseUrl: 'https://api.xiaomimimo.com/v1' })],
+    models: [syntheticModel({ id: 'mimo_tts', providerId: 'mimo', model: 'mimo-v2.5-tts',
+      capabilities: ['tts'], ttsMode: 'chat-audio', ttsVoice: 'mimo_default' })]
+  });
+  assert.equal(configured.status, 200);
+  return cookies;
 }
 
 function testWav() {

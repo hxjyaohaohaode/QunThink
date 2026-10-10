@@ -9,7 +9,7 @@ export interface ModelProvider {
   apiKey?: string;
   clearApiKey?: boolean;
   apiKeyConfigured?: boolean;
-  keySource?: 'user' | 'environment' | 'none';
+  keySource?: 'user' | 'none';
   ready?: boolean;
 }
 export interface CatalogModel {

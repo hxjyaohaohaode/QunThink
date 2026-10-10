@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { LEGACY_AI_CONFIGS } from '../../config/legacyModels.js';
+import { LEGACY_MODEL_METADATA } from '../../config/legacyModels.js';
 import { AI_PERSONAS } from '../../config/personas.js';
 import { getUserDb, withWriteLock, readCommittedUserDb } from '../../models/db.js';
 import { decryptStoredApiKey, encryptApiKeyForStorage } from '../../utils/apiConfigSecurity.js';
@@ -8,10 +8,10 @@ import { getSafeAiRequestOptions } from '../../utils/safeExternalUrl.js';
 import { normalizeBaseUrl, normalizeEndpoint } from './endpoints.js';
 
 const providers = {
-  deepseek: { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', env: 'DEEPSEEK_API_KEY' },
-  zhipu: { name: '智谱', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', env: 'GLM_API_KEY' },
-  mimo: { name: 'MiMo', baseUrl: 'https://api.xiaomimimo.com/v1', env: 'MIMO_API_KEY' },
-  qwen: { name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', env: 'QWEN_API_KEY' }
+  deepseek: { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com' },
+  zhipu: { name: '智谱', baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
+  mimo: { name: 'MiMo', baseUrl: 'https://api.xiaomimimo.com/v1' },
+  qwen: { name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1' }
 };
 const idSchema = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/).refine(v => !['constructor', 'prototype', '__proto__'].includes(v));
 const providerSchema = z.object({
@@ -47,39 +47,43 @@ function legacyVendor(id) {
 }
 
 export function getCatalogData(data = {}) {
+  // A saved catalog is owned by this account. Preserve all explicit models,
+  // credentials and defaults, including models whose IDs match older presets.
   if (data.modelCatalog) return data.modelCatalog;
-  return {
-    revision: 0,
-    providers: Object.entries(providers).map(([id, p]) => ({
-      id, name: p.name, protocol: 'openai', enabled: true, keyRequired: true,
-      baseUrl: normalizeBaseUrl(data.aiApiConfigs?.[id]?.baseUrl || (id === 'mimo' && process.env.MIMO_BASE_URL) || p.baseUrl)
-    })),
-    models: Object.entries(LEGACY_AI_CONFIGS).map(([id, m]) => ({
-      id, providerId: legacyVendor(id), name: m.name, model: data.aiModels?.[id]?.model || m.model,
-      enabled: true, capabilities: m.isTTS ? ['tts'] : ['chat', ...(m.capabilities || [])],
+  const models = Object.entries(data.aiModels || {}).flatMap(([id, saved]) => {
+    const m = LEGACY_MODEL_METADATA[id];
+    if (!m || typeof saved?.model !== 'string' || !saved.model.trim()) return [];
+    return [{
+      id, providerId: legacyVendor(id), name: saved.name || m.name, model: saved.model,
+      enabled: saved.enabled !== false, capabilities: m.isTTS ? ['tts'] : ['chat', ...(m.capabilities || [])],
       contextWindow: 32000, maxTokens: Math.max(512, m.params.max_tokens),
       temperature: null, tokenParameter: 'max_tokens', ttsMode: m.isTTS ? 'chat-audio' : 'speech',
       ttsVoice: m.isTTS ? 'mimo_default' : null, color: AI_PERSONAS[id]?.color || '#6366f1'
+    }];
+  });
+  return {
+    revision: 0,
+    // Retain user-saved legacy connections without inventing models for them.
+    // Empty slots created by the old API config form are not connections.
+    providers: Object.entries(providers).filter(([id]) => {
+      const saved = data.aiApiConfigs?.[id];
+      return Boolean(saved?.apiKey || saved?.baseUrl || models.some(m => m.providerId === id));
+    }).map(([id, p]) => ({
+      id, name: p.name, protocol: 'openai', enabled: true, keyRequired: true,
+      baseUrl: normalizeBaseUrl(data.aiApiConfigs?.[id]?.baseUrl || p.baseUrl)
     })),
+    models,
     defaults: { chat: null, vision: null, tts: null }
   };
 }
 
 function resolveProvider(provider, data) {
   const stored = Object.hasOwn(provider, 'apiKey') ? provider : data.aiApiConfigs?.[provider.id];
-  let apiKey = decryptStoredApiKey(stored);
-  const preset = providers[provider.id];
-  const trustedBase = preset && normalizeBaseUrl((provider.id === 'mimo' && process.env.MIMO_BASE_URL) || preset.baseUrl);
-  // An arbitrary user endpoint must NEVER receive a server-owned credential.
-  // A server key may fund many accounts. It is unavailable to ordinary user
-  // catalogs unless the operator deliberately enables shared credentials.
-  const allowEnvironment = process.env.QUNTHINK_SHARED_PROVIDER_KEYS === '1' &&
-    preset && !provider.keyCleared && normalizeBaseUrl(provider.baseUrl) === trustedBase;
-  const rawEnvironmentKey = allowEnvironment ? (process.env[preset.env] || '').trim() : '';
-  const environmentKey = /^your_|_here/.test(rawEnvironmentKey) ? '' : rawEnvironmentKey;
-  const source = apiKey ? 'user' : environmentKey ? 'environment' : 'none';
-  apiKey ||= environmentKey;
-  return { apiKey, source, ready: provider.enabled && (!provider.keyRequired || Boolean(apiKey)) };
+  const apiKey = decryptStoredApiKey(stored);
+  // BYOK only: server environment keys are never consulted, even when an old
+  // deployment still has the retired shared-provider-key switch enabled.
+  return { apiKey, source: apiKey ? 'user' : 'none',
+    ready: provider.enabled && (!provider.keyRequired || Boolean(apiKey)) };
 }
 
 export function capabilityFingerprint(model, provider, data = {}) {

@@ -16,13 +16,9 @@ services:
       # 生成方式（任选其一）：
       #   openssl rand -base64 32
       #   powershell -Command "$b=New-Object byte[] 32;[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b);[Convert]::ToBase64String($b)"
-      # 建议通过根目录 .env 提供（setup-api-keys.bat 可自动写入）。
+      # 建议通过根目录 .env 提供；模型密钥由用户在模型中心保存。
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY must be a base64 encoded 32-byte secret}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://localhost:3010}
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
-      - GLM_API_KEY=${GLM_API_KEY:-}
-      - MIMO_API_KEY=${MIMO_API_KEY:-}
-      - QWEN_API_KEY=${QWEN_API_KEY:-}
     volumes:
       - backend-data:/app/data
     networks:

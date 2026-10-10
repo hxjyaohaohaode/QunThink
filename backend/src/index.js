@@ -41,7 +41,6 @@ import { closeSupabaseConnection } from './models/supabaseAdapter.js';
 import fs from 'fs/promises';
 import crypto from 'crypto';
 import { setupWebSocket } from './websocket/index.js';
-import { checkAllAIHealth, loadAIConfigsFromDB } from './services/ai/index.js';
 import { safeLog } from './utils/logger.js';
 import { initializeKeyManager } from './utils/keyManager.js';
 import { startTTSCleanupScheduler } from './services/scheduler/ttsCleanup.js';
@@ -415,7 +414,6 @@ initDatabase().then(async () => {
 
   setupWebSocket(wss);
 
-  await loadAIConfigsFromDB();
 
   const { listUserDatabases, getUserDb } = await import('./models/db.js');
   const userIds = await listUserDatabases();
@@ -517,9 +515,6 @@ initDatabase().then(async () => {
     console.log(`Server running on http://localhost:${PORT}`);
     console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
 
-    if (process.env.AI_HEALTH_PROBES === '1') checkAllAIHealth().then(results => {
-      console.log('AI健康检查完成:', results);
-    });
   });
 }).catch((error) => {
   safeLog('error', '服务启动失败，已安全终止', { error: error?.message });

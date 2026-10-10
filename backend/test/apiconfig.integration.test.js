@@ -6,6 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
+import axios from 'axios';
 
 process.env.NODE_ENV = 'test';
 process.env.AUTH_MODE = 'session';
@@ -61,14 +62,14 @@ test('API config endpoint encrypts secrets and returns only configured state', a
   assert.equal(loaded.body.config.deepseek.apiKeyConfigured, true);
 });
 
-test('API config test rejects loopback targets before any network request', async () => {
+test('retired API config test rejects every target before any network request', async () => {
   const { token } = await createSession();
   const response = await supertest(createTestApp())
     .post('/api/user/apiconfig/test')
     .set('Cookie', `session_token=${token}`)
     .send({ vendor: 'deepseek', apiKey: 'sk-test', baseUrl: 'http://127.0.0.1:3000/v1' });
 
-  assert.equal(response.status, 400);
+  assert.equal(response.status, 410);
   assert.equal(response.body.healthy, false);
 });
 
@@ -102,20 +103,20 @@ test('legacy test never sends a stored or environment key to a changed public en
   assert.equal(stored.status, 200);
   const changed = await request.post('/api/user/apiconfig/test').set('Cookie', cookie)
     .send({ vendor: 'deepseek', baseUrl: 'https://example.org/v1' });
-  assert.equal(changed.status, 502);
+  assert.equal(changed.status, 410);
   assert.equal(changed.body.healthy, false);
-  assert.match(changed.body.error, /未配置API Key/);
+  assert.match(changed.body.error, /旧版连接测试已停用/);
   assert.equal((await request.post('/api/user/apiconfig/test').set('Cookie', cookie)
-    .send({ vendor: 'deepseek', baseUrl: 'not a URL' })).status, 400);
+    .send({ vendor: 'deepseek', baseUrl: 'not a URL' })).status, 410);
   const previousEnvironmentKey = process.env.DEEPSEEK_API_KEY;
   process.env.DEEPSEEK_API_KEY = 'sk-server-secret';
   try {
     const noSaved = await createSession();
     const envChanged = await request.post('/api/user/apiconfig/test').set('Cookie', `session_token=${noSaved.token}`)
       .send({ vendor: 'deepseek', baseUrl: 'https://example.org/v1' });
-    assert.equal(envChanged.status, 502);
+    assert.equal(envChanged.status, 410);
     assert.equal(envChanged.body.healthy, false);
-    assert.match(envChanged.body.error, /未配置API Key/);
+    assert.match(envChanged.body.error, /旧版连接测试已停用/);
   } finally {
     if (previousEnvironmentKey === undefined) delete process.env.DEEPSEEK_API_KEY;
     else process.env.DEEPSEEK_API_KEY = previousEnvironmentKey;
@@ -144,4 +145,28 @@ test('startup migration encrypts legacy plaintext API keys under the user write 
 
   const secondRun = await migrateApiConfigSecrets();
   assert.equal(secondRun.migratedKeys, 0, 'migration is idempotent');
+});
+
+
+test('retired legacy probes never spend a saved or supplied user key or choose a preset model', async () => {
+  const { token } = await createSession();
+  const request = supertest(createTestApp());
+  const cookie = `session_token=${token}`;
+  const original = axios.defaults.adapter;
+  let calls = 0;
+  axios.defaults.adapter = async () => { calls++; throw new Error('Unexpected provider dispatch'); };
+  try {
+    assert.equal((await request.put('/api/user/apiconfig').set('Cookie', cookie)
+      .send({ deepseek: { apiKey: 'synthetic-saved-user-key' } })).status, 200);
+    for (const body of [
+      { vendor: 'deepseek' },
+      { vendor: 'deepseek', apiKey: 'synthetic-supplied-key' },
+      { vendor: 'deepseek', model: 'explicit-model', apiKey: 'synthetic-supplied-key' }
+    ]) {
+      const response = await request.post('/api/user/apiconfig/test').set('Cookie', cookie).send(body);
+      assert.equal(response.status, 410);
+      assert.equal(response.body.replacement, '/api/user/model-catalog/test');
+    }
+    assert.equal(calls, 0);
+  } finally { axios.defaults.adapter = original; }
 });

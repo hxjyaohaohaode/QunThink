@@ -90,3 +90,19 @@ test('404 recovery discloses charge risk and requires an explicit same-request b
   globalThis.__modelUi.get=async path=>{if(path.includes('/tests/'))throw Object.assign(new Error('404'),{response:{status:404,data:{error:'not found'}}});return{data:catalog()}};await click('查询原请求状态');assert.equal(writes.length,1);assert.match(container.textContent,/尚未收到原请求，将开始测试，可能产生费用/);assert.ok(button('重新提交原测试请求'));
   await click('重新提交原测试请求');assert.equal(writes.length,2);assert.deepEqual(writes[0][1],writes[1][1]);assert.equal(writes[0][2].headers['Idempotency-Key'],writes[1][2].headers['Idempotency-Key']);
 });
+
+test('empty account catalog stays empty until the user explicitly adds a connection',async()=>{
+  const empty={revision:0,providers:[],models:[],defaults:{chat:null,vision:null,tts:null}};
+  const writes=[];globalThis.__modelUi.get=async()=>({data:empty});globalThis.__modelUi.post=async(...args)=>{writes.push(args);return {data:{}}};globalThis.__modelUi.put=async(...args)=>{writes.push(args);return {data:{}}};
+  await act(async()=>{store.getState().cleanup();await settle()});
+  assert.deepEqual(store.getState().catalog,empty);assert.equal(store.getState().selected,'');
+  assert.match(container.textContent,/平台不预置 AI，也不提供共享密钥/);
+  assert.match(container.textContent,/当前没有服务商/);assert.match(container.textContent,/查看历史会话和进行人工写作/);
+  assert.equal(container.querySelector('input[type="password"]'),null);assert.equal(button('保存并应用').disabled,true);
+  for(const select of container.querySelectorAll('select')) assert.equal(select.options.length,1);
+  assert.deepEqual(writes,[]);
+  await click('＋ 服务商');
+  const draft=store.getState().draft;assert.equal(draft.providers.length,1);assert.equal(draft.providers[0].baseUrl,'');assert.equal(draft.providers[0].apiKey,undefined);assert.deepEqual(draft.models,[]);assert.deepEqual(draft.defaults,empty.defaults);
+  assert.equal(inputFor('服务地址').value,'');assert.equal(container.querySelector('input[type="password"]').value,'');assert.equal(button('拉取模型列表').disabled,true);assert.deepEqual(writes,[]);
+  await click('放弃修改');assert.deepEqual(store.getState().draft,empty);assert.match(container.textContent,/当前没有服务商/);assert.deepEqual(writes,[]);
+});

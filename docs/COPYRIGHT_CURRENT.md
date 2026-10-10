@@ -21,7 +21,7 @@ Node.js最低22.12；后端为JavaScript、Express、WebSocket，前端为TypeSc
 
 ## 当前功能与实现对应
 
-1. 模型连接、目录发现、能力声明与显式测试：frontend/src/components/Layout/ModelCenter.tsx；backend/src/routes/modelCatalog.js；backend/src/services/ai/catalog.js、modelProbes.js。保存不等于验证，测试可能收费。
+1. 用户自配模型连接、目录发现、能力声明与显式测试：frontend/src/components/Layout/ModelCenter.tsx；backend/src/routes/modelCatalog.js；backend/src/services/ai/catalog.js、modelProbes.js。新账号没有平台预设AI或默认密钥，不使用平台模型隐式回退；已有用户创建AI与历史保留。保存不等于验证，测试可能收费。
 2. 普通会话、用户与单AI私聊、2至5个AI间私聊、消息与流式反馈：frontend/src/components/Layout/NewChatModal.tsx；frontend/src/components/Chat/；backend/src/routes/groups.js、messages.js、ai.js；backend/src/websocket/index.js。普通会话允许零AI，数据仍属当前账号边界。
 3. AI角色、智能体配置与会话、辩论：frontend/src/components/Layout/AIPersonaEditor.tsx、AgentCreateModal.tsx、AgentsPage.tsx、AgentChatView.tsx；backend/src/routes/agents.js、personas.js；backend/src/services/agent/index.js、debate/index.js。现有Agent会话新增“停止生成”：中止当前回复接收，已收到正文保留并标明未完成，不自动重发；实际已保存内容须刷新会话核对。JSON与multipart连接中断将取消信号传给主回复、意图分析及附件标注/描述；删除Agent后取消本进程同账号对应活动调用，消息写锁内再次确认Agent存在，防止迟到结果复活已删历史。首token前停止不保存空的成功助手消息，部分输出停止保留incomplete状态。不能保证供应商停止推理或计费；本地文件解析仍按既有资源预算运行，取消登记不是跨worker总线。这是既有聊天闭环的限定修复，不是通用Agent执行能力完成。
 4. 自有文档上传、文本提取、视觉模型图片理解及语音合成：backend/src/routes/files.js、tts.js；backend/src/services/fileParser/index.js；frontend/src/components/Chat/TTSSynthesizeModal.tsx。ZIP类文档提取新增有界子进程、输入/展开/输出及并发预算，超限明确失败；范围和限制见[资源预算说明](document-parser-resource-budgets.md)，不宣称PDF、CSV、文本或媒体已隔离。音视频附件仅元数据，语音合成不是语音识别。
@@ -36,6 +36,10 @@ Node.js最低22.12；后端为JavaScript、Express、WebSocket，前端为TypeSc
 没有真人共享群/组织成员完整权限；没有任意浏览器、文件系统或第三方软件自动操作；没有音视频内容理解或音频真实转写；没有通用外部搜索连接器；没有对模型解释的事实认证；没有完整费用结算；没有所有云存储/备份回滚情形的彻底删除保证；没有软件已上线、零漏洞、版权独有或登记通过结论。
 
 ## 验证记录与截图版本定位
+
+2026-10-10用户自配AI增量：新账号不再提供平台预设AI、平台默认密钥或隐式模型回退，模型连接和目录须由用户配置；移除旧loadBalancer生产文件，旧平台测试入口返回HTTP410，避免隐式付费模型调用。现有用户创建AI、显式模型目录、自定义群组/智能体及消息历史保留；仅对可判定为自动创建且没有用户所有模型的预设群成员做退役，保留退役成员ID以供恢复。历史内容显示所需的旧元数据仍保留，不能把源码中的旧名称视为仍可使用的平台预设。当前生产集合208文件、63,485物理行；45项原审阅顺序不变，原始行数重算为17,614。作者最终前端582项与构建通过；root随后独立fresh npm ci并完成真实PG全后端498/498、64/64文件、0失败0跳过0取消、exit0，PG夹具已停止并删除临时数据。root前端fresh npm ci后582/582、构建、品牌15文件、OpenAPI178及打包9项均exit0；旧476项只属前一安全候选。新增原生浏览器用例本地仍受阻，不表述为本地原生通过。含本次元数据的新精确托管CI待验，空AI界面手册截图须从新精确CI另核。BYOK不代表模型调用免费，免费优先不消除平台临时存储与缺失Supabase CA限制；本轮没有实际部署或改变平台证书信任。
+
+2026-10-10 PostgreSQL TLS与上传依赖安全增量：新增backend/src/models/postgresTls.js，并更新supabaseAdapter.js，生产集合现为209文件、64,428物理行。默认验证证书链与实际连接DNS/IP身份，限定兼容的旧TLS参数仍转为严格验证，拒绝不安全或歧义参数并对配置错误脱敏；可选自定义CA须为单个CA证书，不增加生产loopback或NODE_ENV绕过。已实际验证本地CA握手、DNS/IP身份及常见参数别名；尚未验证或改变真实部署平台的证书信任链与连通性。另将已存在的pg-connection-string 2.12.0显式声明为直接依赖^2.12.0，Multer从1.4.5-lts.2升级到2.4.0，真实畸形multipart上传回归由失败变为通过。锁文件移除buffer-from、concat-stream、typedarray；独立比对其余已解析包版本不变，但backend/package.json和package-lock.json身份均已变化，不能沿用“五个锁文件均未变”的旧材料结论。第三方清单应在最终精确提交后重新生成。新组合经fresh npm ci及真实PostgreSQL16完成后端476/476、62/62文件、0失败0跳过、exit0，PG已停止并清理。前端生产未改，577项及构建仅保留上一精确版本的证据；本次含元数据的新精确托管CI仍待验，未部署生产。原45项优先审阅顺序及17,687物理行保持不变，新完整连续源码审阅本须在新提交冻结后另生成，旧已交付材料保留其原版本身份。详见[PostgreSQL TLS说明](../backend/docs/postgres-tls.md)及[上传依赖说明](../backend/docs/multipart-dependency-security.md)。
 
 2026-10-10部署配置增量：此前精确main 1e04efc05a53a32821753899bcf137a5ffe17c95的CI38018597939已8/8通过，真实原生58/58与Docker镜像构建2项通过；Render38019165333在正确checkout上于03:02:47 UTC实际执行提交标记检查后跳过部署，不是生产发布。其后本次仅6文件修正Render当前schema及Compose前端构建上下文，补离线部署诊断、契约测试和说明；生产208文件、64,370行和45项审阅顺序不变。新的Node22/真实PG16全量后端435/435、59/59文件、0失败0跳过通过，PG已停止并清理；无前端改动，577项及构建仍保留原精确来源。本次配置增量的新精确托管CI待验，当前环境未实际运行Docker/Compose，也未向供应商应用配置或触发部署。离线Vercel诊断仍明确拒绝未核后端占位，不把手工预检称为已接入发布门禁。详见[部署配置核查](deployment-config-audit-2026-10-10.md)。
 
@@ -77,4 +81,4 @@ Lightfall、Radar、Strands共7段shader已与React Bits官方较早历史版本
 
 scripts/brand-baseline.json记录基线ac69f6d6aa92b2b6f42166af26112bbdf3e9fd4c。本次独立SHA计算确认15个受保护完整文件及3组内联Logo摘要全部匹配。纯logo.txt摘要09e6eacb4e9cc715e9c948073620d0cef4af2b5d98eb5bf8b9cf3314bc7c4240；有字logo.txt摘要faec2e780810f5218f1b4406f119b758dbdff2269deaf483558164090d356b4b。字节一致不证明素材权利授权。
 
-本轮按208项生产文件集合重算身份，另备45个业务候选文件、17,687物理行的审阅顺序建议，供权属确认后建立完整连续源程序目录；全量文件摘要见准备包QunThink-交付源码SHA256清单.txt。不是最终页码或60页鉴别材料；测试、夹具、依赖、锁文件及编译副本不用于凑页数。
+本轮按208项生产文件集合重算身份，另备45个业务候选文件、17,614物理行的审阅顺序建议，供权属确认后建立完整连续源程序目录；全量文件摘要见准备包QunThink-交付源码SHA256清单.txt。不是最终页码或60页鉴别材料；测试、夹具、依赖、锁文件及编译副本不用于凑页数。

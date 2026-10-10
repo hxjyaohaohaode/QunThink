@@ -1,10 +1,19 @@
 /**
  * API 全矩阵冒烟探针
- * 用法: node scripts/api-smoke.mjs [baseUrl] [devUserId]
+ * 仅限一次性本地测试账号。用法: QUNTHINK_SMOKE_FIXTURE=1 node scripts/api-smoke.mjs <baseUrl> <smoke_userId> <model1,model2,model3>
+ * 先在隔离测试账号明确添加 3 个无密钥、未就绪的模型。本脚本不创建/覆盖模型配置。
  * 覆盖：全部只读端点 + 群组/消息/文件完整生命周期写操作 + 错误路径
  */
 const BASE = process.argv[2] || 'http://localhost:3102';
-const UID = process.argv[3] || 'dev_user_default';
+const UID = process.argv[3] || '';
+const MODEL_IDS = (process.argv[4] || '').split(',').filter(Boolean);
+let localOrigin = false;
+try { const url = new URL(BASE); localOrigin = ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) && !url.username && !url.password; } catch {}
+if (process.env.QUNTHINK_SMOKE_FIXTURE !== '1' || !localOrigin || !/^smoke_[A-Za-z0-9_-]+$/.test(UID) ||
+    MODEL_IDS.length !== 3 || new Set(MODEL_IDS).size !== 3 || MODEL_IDS.some(id => !/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(id))) {
+  console.error('Precondition: use a disposable local smoke_ account with QUNTHINK_SMOKE_FIXTURE=1 and three explicitly configured unready model IDs. No requests were sent. Prefer the isolated npm test / Playwright fixtures; never target a real account.');
+  process.exit(2);
+}
 const H = { 'x-user-id': UID, 'Content-Type': 'application/json', Origin: 'http://localhost:3010' };
 
 const results = [];
@@ -34,6 +43,15 @@ async function req(method, path, body, extraHeaders = {}, expectStatus = null) {
 
 function check(name, cond, detail = '') {
   results.push({ name, ok: !!cond, detail });
+}
+
+// Verify the explicitly prepared fixture before any state-changing request.
+const fixtureCatalog = await req('GET', '/api/user/model-catalog');
+if (fixtureCatalog.status !== 200 || !Array.isArray(fixtureCatalog.json?.models) ||
+    fixtureCatalog.json.models.some(model => model.ready) ||
+    MODEL_IDS.some(id => !fixtureCatalog.json.models.some(model => model.id === id && model.enabled && model.capabilities?.includes('chat')))) {
+  console.error('Precondition: the isolated account must already contain the three explicit chat model IDs and no callable models. No catalog was changed and no lifecycle writes were started.');
+  process.exit(2);
 }
 
 // ---------- 只读端点全扫描 ----------
@@ -75,7 +93,7 @@ await req('GET', '/api/auth/me');
     name: `smoke_${Date.now()}`,
     description: 'API smoke test group',
     is_private: false,
-    ai_members: ['deepseek', 'qwen_flash']
+    ai_members: MODEL_IDS.slice(0, 2)
   }, {}, 201);
   if (json && json.id) {
     createdGroupId = json.id;
@@ -87,7 +105,7 @@ await req('GET', '/api/auth/me');
 
   if (createdGroupId) {
     // 无效成员校验
-    await req('POST', '/api/groups', { name: 'bad', is_private: false, ai_members: ['not_an_ai', 'deepseek'] }, {}, 400);
+    await req('POST', '/api/groups', { name: 'bad', is_private: false, ai_members: ['not_an_ai', MODEL_IDS[0]] }, {}, 400);
 
     // 发送消息
     const sent = await req('POST', `/api/groups/${createdGroupId}/messages`, {
@@ -123,7 +141,7 @@ await req('GET', '/api/auth/me');
 
     // 成员管理（无效 aiId 应 400）
     await req('POST', `/api/groups/${createdGroupId}/members`, { aiId: 'hacker_ai' }, {}, 400);
-    await req('POST', `/api/groups/${createdGroupId}/members`, { aiId: 'glm_flash' });
+    await req('POST', `/api/groups/${createdGroupId}/members`, { aiId: MODEL_IDS[2] });
 
     // settings 校验（background_url 注入应被拒）
     await req('PUT', `/api/groups/${createdGroupId}/settings`, { background_url: 'javascript:alert(1)' }, {}, 400);
@@ -174,21 +192,18 @@ await req('GET', '/api/auth/me');
 
 // ---------- 私聊获取或创建（幂等）----------
 {
-  const r1 = await req('POST', '/api/private-chat/deepseek');
-  const r2 = await req('POST', '/api/private-chat/deepseek');
+  const r1 = await req('POST', `/api/private-chat/${MODEL_IDS[0]}`);
+  const r2 = await req('POST', `/api/private-chat/${MODEL_IDS[0]}`);
   check('private_chat_idempotent', r1.json?.id && r2.json?.id === r1.json.id, `${r1.status}/${r2.status}`);
   // 无效 aiId 拒绝
   await req('POST', '/api/private-chat/not_an_ai', undefined, {}, 400);
 }
 
-// ---------- apiconfig 写语义 ----------
+// Legacy connection reads remain available for migration. Never change keys,
+// endpoints or catalogs as a side effect of a smoke run.
 {
-  const save = await req('PUT', '/api/user/apiconfig', {
-    deepseek: { apiKey: '' },
-    zhipu: { baseUrl: '' }
-  });
-  check('apiconfig.save_empty_keeps', save.status === 200 && save.json?.success === true, `status=${save.status}`);
-  check('apiconfig.no_plaintext_key', !JSON.stringify(save.json).match(/sk-[A-Za-z0-9]{10,}/), '');
+  const saved = await req('GET', '/api/user/apiconfig');
+  check('apiconfig.no_plaintext_key', !Object.values(saved.json?.config || {}).some(provider => provider.apiKey), '');
 }
 
 // ---------- profile 校验 ----------
@@ -202,7 +217,7 @@ await req('GET', '/api/auth/me');
 
 // ---------- personas 校验（补充：非法值应被拒或忽略）----------
 {
-  await req('PATCH', '/api/personas/deepseek', { temperature: 'hot' });
+  await req('PATCH', `/api/personas/${MODEL_IDS[0]}`, { temperature: 'hot' });
 }
 
 // ---------- interaction 自定义事件 ----------
@@ -217,7 +232,7 @@ await req('GET', '/api/auth/me');
 // ---------- personas 校验 ----------
 {
   await req('PATCH', '/api/personas/not_an_ai', { temperature: 99 }, {}, 404);
-  await req('PATCH', '/api/personas/deepseek', { temperature: 0.5 });
+  await req('PATCH', `/api/personas/${MODEL_IDS[0]}`, { temperature: 0.5 });
 }
 
 // ---------- 监控上报分桶 ----------
@@ -249,7 +264,7 @@ await req('GET', '/api/tts/messages?limit=5').catch(() => {});
               if (!sawExpected) {
                 sawExpected = true;
                 // typing 越权探测：不应导致连接崩溃
-                ws.send(JSON.stringify({ type: 'typing', group_id: 'someone-elses-group', ai: 'deepseek', status: 'start' }));
+                ws.send(JSON.stringify({ type: 'typing', group_id: 'someone-elses-group', ai: MODEL_IDS[0], status: 'start' }));
                 setTimeout(() => { try { ws.close(); } catch {} clearTimeout(timer); resolve(true); }, 500);
               }
             }
@@ -267,7 +282,7 @@ await req('GET', '/api/tts/messages?limit=5').catch(() => {});
   const g = await req('POST', '/api/groups', {
     name: `insight_probe_${Date.now()}`,
     is_private: false,
-    ai_members: ['deepseek', 'qwen_flash']
+    ai_members: MODEL_IDS.slice(0, 2)
   }, {}, 201);
   if (g.json?.id) {
     await req('POST', `/api/groups/${g.json.id}/messages`, { content: '洞察探针消息' }, {}, 201);

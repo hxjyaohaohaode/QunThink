@@ -1,7 +1,13 @@
 import pg from 'pg';
+import { buildPostgresTlsConfig } from './postgresTls.js';
 import { readWithWriteBarrier } from './readBarrier.js';
 
 const { Pool } = pg;
+
+function safePostgresErrorCode(error) {
+  return typeof error?.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(error.code)
+    ? error.code : 'POSTGRES_CONNECTION_FAILED';
+}
 
 let pool = null;
 let initialized = false;
@@ -43,18 +49,18 @@ export async function getPool() {
     throw Object.assign(new Error('PostgreSQL 暂不可用，请稍后重试'), { status: 503 });
   }
 
+  const tlsConfig = buildPostgresTlsConfig(connectionString, process.env.SUPABASE_DB_CA_FILE);
   initializing = (async () => {
     try {
       pool = new Pool({
-        connectionString,
+        ...tlsConfig,
         max: 5,
         idleTimeoutMillis: 60000,
-        connectionTimeoutMillis: 15000,
-        ssl: { rejectUnauthorized: true }
+        connectionTimeoutMillis: 15000
       });
 
       pool.on('error', (err) => {
-        console.error('PostgreSQL pool error:', err.message);
+        console.error('PostgreSQL pool error:', safePostgresErrorCode(err));
       });
 
       const client = await pool.connect();
@@ -70,7 +76,7 @@ export async function getPool() {
       initializing = null;
       return pool;
     } catch (err) {
-      console.error('❌ Supabase/PostgreSQL 连接失败:', err.message);
+      console.error('❌ Supabase/PostgreSQL 连接失败:', safePostgresErrorCode(err));
       console.error('⚠️ 将在 60 秒后自动重试；期间新请求按无云库处理。数据不会静默切换到本地存储。');
       _lastConnectionFailureAt = Date.now();
       if (pool) {
@@ -79,7 +85,7 @@ export async function getPool() {
       pool = null;
       initialized = false;
       initializing = null;
-      throw err;
+      throw Object.assign(new Error('PostgreSQL connection failed'), { code: safePostgresErrorCode(err) });
     }
   })();
 

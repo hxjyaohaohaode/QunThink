@@ -96,7 +96,7 @@ function customModel(overrides = {}) {
 async function configure(userId, overrides = {}) {
   const catalog = await readCatalog(userId);
   catalog.providers.push({ id: 'custom_provider', name: '本地测试', baseUrl: `${origin}/v1`, protocol: 'openai', enabled: true, keyRequired: true, apiKey: 'user-owned-test-secret' });
-  catalog.models.push(customModel(overrides)); catalog.defaults.chat = 'custom';
+  catalog.models.push(customModel(overrides), customModel({ id: 'deepseek', name: 'User-selected legacy-ID model', model: 'future/second-model' })); catalog.defaults.chat = 'custom';
   return saveCatalog(userId, catalog);
 }
 async function probeChat(s) {
@@ -675,8 +675,10 @@ test('a failed refusal request does not create a fabricated refusal message', as
 
 test('server keys never follow a custom endpoint; clearing a key cannot revive environment fallback', async () => {
   const s = await session(), catalog = await readCatalog(s.userId);
-  const p = catalog.providers.find(p => p.id === 'deepseek'); assert.equal(p.keySource, 'environment');
-  p.baseUrl = `${origin}/v1`;
+  assert.deepEqual(catalog.providers, []);
+  assert.deepEqual(catalog.models, []);
+  catalog.providers.push({ id: 'deepseek', name: 'User connection', protocol: 'openai', baseUrl: `${origin}/v1`, enabled: true, keyRequired: true });
+  catalog.models.push(customModel({ id: 'deepseek', providerId: 'deepseek' }));
   const changed = await saveCatalog(s.userId, catalog);
   assert.equal(changed.providers.find(p => p.id === 'deepseek').ready, false);
   await assert.rejects(resolveModel(s.userId, 'deepseek'), e => e.status === 409);

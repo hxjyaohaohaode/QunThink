@@ -70,7 +70,7 @@ export function ModelCenter() {
     <div>
       <p className="text-[10px] tracking-[0.2em] text-accent font-semibold mb-2">MODELS & CONNECTIONS</p>
       <h2 className="text-xl font-semibold text-text-primary">模型中心</h2>
-      <p className="text-sm text-text-secondary mt-2 leading-relaxed">连接服务商，自由添加模型。名称由你决定，实际模型 ID 与服务商一致。保存不会发起付费测试；更改连接、模型参数或音色后，需手动重新测试。</p>
+      <p className="text-sm text-text-secondary mt-2 leading-relaxed">平台不预置 AI，也不提供共享密钥。请连接你自己的服务商并添加模型；名称由你决定，实际模型 ID 与服务商一致。保存不会发起付费测试；更改连接、模型参数或音色后，需手动重新测试。</p>
     </div>
     <ol className="grid sm:grid-cols-3 gap-2 text-xs text-text-secondary" aria-label="连接步骤">
       <li className="rounded-xl border border-border p-3">1. 填写服务地址和密钥</li>
@@ -102,7 +102,7 @@ export function ModelCenter() {
         <label className="text-xs text-text-secondary space-y-1.5">API 协议<select className={field} value={provider.protocol} onChange={e => updateProvider(provider.id, { protocol: e.target.value as ModelProvider['protocol'] })}><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic Messages</option></select></label>
       </div>
       <label className="block text-xs text-text-secondary space-y-1.5">服务地址（Base URL）<input className={field} value={provider.baseUrl} placeholder={provider.protocol === 'anthropic' ? 'https://api.anthropic.com/v1' : 'https://your-provider.example/v1'} onChange={e => updateProvider(provider.id, { baseUrl: e.target.value })} /></label>
-      <label className="block text-xs text-text-secondary space-y-1.5">API Key · {provider.clearApiKey ? '保存后清除' : provider.apiKeyConfigured ? `已配置${provider.keySource === 'environment' ? '（服务器）' : ''}，留空保留` : '尚未配置'}<input className={field} type="password" autoComplete="new-password" value={provider.apiKey || ''} placeholder="密钥仅用于服务连接，保存后不再显示" onChange={e => updateProvider(provider.id, { apiKey: e.target.value, clearApiKey: false })} /></label>
+      <label className="block text-xs text-text-secondary space-y-1.5">API Key · {provider.clearApiKey ? '保存后清除' : provider.apiKeyConfigured ? '已配置，留空保留' : '尚未配置'}<input className={field} type="password" autoComplete="new-password" value={provider.apiKey || ''} placeholder="密钥仅用于服务连接，保存后不再显示" onChange={e => updateProvider(provider.id, { apiKey: e.target.value, clearApiKey: false })} /></label>
       <div className="flex flex-wrap gap-3 justify-between text-xs text-text-secondary">
         <label className="flex items-center gap-2"><input type="checkbox" checked={!provider.keyRequired} onChange={e => updateProvider(provider.id, { keyRequired: !e.target.checked })} />无需密钥（如本地模型服务）</label>
         <button className="hover:text-red-500" onClick={() => updateProvider(provider.id, { clearApiKey: true, apiKey: '' })}>清除已存密钥</button>
@@ -114,7 +114,7 @@ export function ModelCenter() {
       {discovery.error && <p role="alert" className="text-sm text-red-500">{discovery.error} 可检查连接后重新拉取，或手动添加服务商提供的模型 ID。</p>}
       {discovery.complete && <p role="status" className="text-xs text-text-secondary">{discovered.length ? `找到 ${discovered.length} 个模型。添加后仍需保存并测试能力。` : '没有返回可用模型 ID，请手动添加，或检查服务商是否支持模型列表。'}</p>}
       {discovered.length > 0 && <div className="space-y-2"><input aria-label="搜索服务商模型" className={field} value={search} onChange={e => setSearch(e.target.value)} placeholder="搜索模型 ID" /><div className="max-h-44 overflow-y-auto flex flex-wrap gap-2">{discovered.filter(m => m.toLowerCase().includes(search.toLowerCase())).map(m => <button className={secondary} key={m} disabled={models.some(existing => existing.model === m)} onClick={() => addModel(m)}>{m}</button>)}</div>{search && !discovered.some(m => m.toLowerCase().includes(search.toLowerCase())) && <p className="text-xs text-text-secondary">没有匹配的模型 <button className={secondary} onClick={() => setSearch('')}>清除搜索</button></p>}</div>}
-    </div> : <div className="rounded-xl border border-dashed border-border p-6 text-sm text-text-secondary">添加第一个服务商，开始连接你的 AI。</div>}
+    </div> : <div className="rounded-xl border border-dashed border-border p-6 text-sm text-text-secondary">当前没有服务商。点击“＋ 服务商”，填写你自己的服务地址和密钥，再添加模型并测试能力。未连接模型时，可以查看历史会话和进行人工写作。</div>}
     <div className="space-y-3">
       {provider && models.length === 0 && <p className="rounded-xl border border-dashed border-border p-4 text-sm text-text-secondary">此服务商还没有模型。拉取列表或点击“手动添加模型”，填入实际模型 ID。</p>}
       {models.map(m => <details key={m.id} ref={node => { modelRefs.current[m.id] = node; }} className="rounded-2xl border border-border bg-bg-primary/40" open={expanded === m.id || !m.model || undefined}>

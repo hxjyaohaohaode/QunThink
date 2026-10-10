@@ -55,6 +55,7 @@ export interface AI {
   style: string;
 }
 
+// Historical display metadata only. Available AI members come from the user model catalog.
 export const AI_COLORS: Record<string, string> = {
   user: '#171717',
   deepseek: '#f97316',
@@ -109,7 +110,6 @@ export const AI_AVATAR_LETTERS: Record<string, string> = {
   system: 'S'
 };
 
-export const AI_LIST = ['deepseek', 'deepseek_reasoner', 'mimo_flash', 'mimo_omni', 'mimo_tts', 'glm_air', 'glm_flash', 'glm_flashx', 'qwen_flash', 'qwen_turbo', 'glm_4v_flash', 'qwen_vl_plus', 'qwen_omni'] as const;
 
 export type DebateStyle = 'moderate' | 'standard' | 'intense';
 

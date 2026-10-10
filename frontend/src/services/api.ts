@@ -1119,14 +1119,4 @@ export const api = {
     return response.data;
   },
 
-  /**
-   * 测试用户自定义API配置是否可用
-   * @param vendor 厂商名（deepseek/zhipu/mimo/qwen）
-   * @param apiKey 可选，未提供则使用已保存或系统默认
-   * @param baseUrl 可选，未提供则使用已保存或系统默认
-   */
-  testUserApiConfig: async (vendor: string, apiKey?: string, baseUrl?: string) => {
-    const response = await axiosInstance.post('/user/apiconfig/test', { vendor, apiKey, baseUrl });
-    return response.data;
-  }
 };

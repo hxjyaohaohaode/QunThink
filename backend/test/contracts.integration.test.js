@@ -1,3 +1,6 @@
+import { mockProviderDns } from './helpers/mockProviderDns.js';
+mockProviderDns(['api.deepseek.com']);
+import { syntheticModel, syntheticProvider } from './helpers/syntheticCatalog.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
@@ -34,7 +37,15 @@ async function registerAndGetSession() {
     });
 
   assert.equal(response.status, 201);
-  return response.headers['set-cookie'];
+  const cookies = response.headers['set-cookie'];
+  const catalog = (await request.get('/api/user/model-catalog').set('Cookie', cookies)).body;
+  assert.deepEqual(catalog.models, []);
+  const saved = await request.put('/api/user/model-catalog').set('Cookie', cookies).send({
+    ...catalog, providers: [syntheticProvider()],
+    models: [syntheticModel({ id: 'deepseek' }), syntheticModel({ id: 'glm_air' })]
+  });
+  assert.equal(saved.status, 200);
+  return cookies;
 }
 
 test('group creation accepts canonical ai_members payload and persists avatar_color', async () => {

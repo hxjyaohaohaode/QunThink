@@ -11,9 +11,8 @@ import crypto from 'node:crypto';
 if (!process.env.QUNTHINK_TEST_PG_URL) {
   test('real PgLow task lifecycle (requires isolated QUNTHINK_TEST_PG_URL)', { skip: true }, () => {});
 } else {
-  const pgUrl = new URL(process.env.QUNTHINK_TEST_PG_URL);
-  pgUrl.searchParams.set('sslmode', 'disable');
-  process.env.SUPABASE_DB_URL = pgUrl.toString();
+  const { configureLoopbackPgFixture } = await import('./helpers/loopbackPgFixture.js');
+  configureLoopbackPgFixture();
   process.env.NODE_ENV = 'test';
 process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-task-lifecycle-'));

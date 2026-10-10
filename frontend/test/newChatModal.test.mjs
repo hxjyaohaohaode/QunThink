@@ -183,3 +183,18 @@ test('switching tabs keeps group and AI-to-AI membership requirements independen
   assert.deepEqual(state.groups, [['合成单模型群聊', '新的对话', ['model-c'], undefined]]);
   assert.deepEqual(state.aiPrivate, []);
 });
+
+test('empty model catalog explains BYOK onboarding in every chat tab without preset private targets', async () => {
+  state.models=[];mounted=await render(container);
+  const onboarding=/暂无可用的对话模型。请到设置中的“模型中心”添加自己的服务商和模型，保存后完成对话测试。平台不提供预置 AI。/;
+  assert.match(container.querySelector('[role="status"]').textContent,onboarding);
+  assert.equal(container.querySelector('.grid.grid-cols-3').children.length,0);
+  assert.deepEqual(state.private,[]);
+  await click(button('AI 与 AI 私聊'));
+  assert.match(container.querySelector('[role="status"]').textContent,onboarding);
+  assert.equal(button('创建 AI 私聊').disabled,true);
+  await click(button('创建群聊'));
+  assert.match(container.querySelector('[role="status"]').textContent,onboarding);
+  assert.ok(container.textContent.includes(groupHint));
+  assert.deepEqual(state.groups,[]);assert.deepEqual(state.aiPrivate,[]);assert.deepEqual(state.private,[]);
+});
