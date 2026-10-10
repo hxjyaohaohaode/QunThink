@@ -24,6 +24,12 @@ export function buildAgentFixtureEnvironment(env, data, emptyEnv, encryptionKey)
   };
 }
 
+// AgentChatView renders正文 as direct text and status as a separate child.
+// Serialize this self-contained function into the real browser via evaluate.
+export function readDirectAgentMessageText(element) {
+  return Array.from(element.childNodes).filter(node => node.nodeType === 3).map(node => node.textContent).join('');
+}
+
 export function inspectAgentRequest(body) {
   if (typeof body?.model !== 'string' || !/^agent-fixture-[a-f0-9-]+$/.test(body.model) || !Array.isArray(body.messages)) throw new Error('Only synthetic Agent models are accepted');
   const latest = [...body.messages].reverse().find(message => message.role === 'user');

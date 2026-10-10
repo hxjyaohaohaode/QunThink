@@ -1,6 +1,7 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 import { randomInt } from 'node:crypto';
 import { registerSyntheticAccount } from './authFixture';
+import { submitAuthWithSingleRateLimitRetry } from '../scripts/auth-submit-retry.mjs';
 
 async function register(context: BrowserContext, phone?: string) {
   return registerSyntheticAccount(context, { phone });
@@ -67,7 +68,8 @@ test('cross-origin preflight allows explicit task intent and account guard heade
   expect(response.headers()['access-control-allow-headers'].toLowerCase()).toContain('x-expected-user-id');
 });
 
-test('expired cached account can explicitly log into a different account without changing branding', async ({ page, context }) => {
+test('expired cached account can explicitly log into a different account without changing branding', async ({ page, context }, info) => {
+  const deadline = Date.now() + info.timeout;
   const alice = await register(context);
   const phone = `138${String(randomInt(10000000,99999999))}`;
   const bob = await register(context, phone);
@@ -79,7 +81,28 @@ test('expired cached account can explicitly log into a different account without
   await page.getByPlaceholder('请输入密码', {exact:true}).fill('Synthetic-Browser-Only-2026');
   const bootstraps: string[] = [];
   page.on('request', request => { if (request.url().endsWith('/api/bootstrap')) bootstraps.push(request.headers()['x-expected-user-id']); });
-  await page.locator('form').getByRole('button', {name:'登录',exact:true}).click();
+  const login = page.locator('form').getByRole('button', {name:'登录',exact:true});
+  const response = await submitAuthWithSingleRateLimitRetry(async () => {
+    const [response] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).origin === new URL(page.url()).origin &&
+        new URL(response.url()).pathname === '/api/auth/login-phone' && response.request().method() === 'POST'),
+      login.click(),
+    ]);
+    return response;
+  }, {
+    remainingBudgetMs: () => deadline - Date.now(),
+    onRateLimited: async response => {
+      // A known pre-admission rejection is recoverable through another visible
+      // login action. Never retry an uncertain network result or bypass limits.
+      await expect(page.getByText('请求过于频繁', { exact: true }).first()).toBeVisible();
+      await expect(login).toBeEnabled();
+      await expect(page.getByPlaceholder('请输入手机号')).toHaveValue(phone);
+      await expect(page.getByPlaceholder('请输入密码', {exact:true})).toHaveValue('Synthetic-Browser-Only-2026');
+      await info.attach('login-rate-limit.json', { body: JSON.stringify({ status: response.status(), retryAfter: response.headers()['retry-after'], remainingBudgetMs: deadline - Date.now() }), contentType: 'application/json' });
+      await page.screenshot({ path: info.outputPath('login-rate-limited-before-retry.png'), fullPage: true });
+    },
+  });
+  expect(response.status()).toBe(200);
   await expect(page.getByTestId('workspace')).toBeVisible();
   expect(bootstraps).toContain(bob.id);
 });

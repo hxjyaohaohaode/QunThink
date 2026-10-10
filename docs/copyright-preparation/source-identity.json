@@ -429,5 +429,38 @@
         "openapi.log": "8a15b017a0514c8bc37e2cd0a4214fa4aa97de24811faad13602313b6b76b3d6"
       }
     }
+  },
+  "test_acceptance_update": {
+    "recorded_at_utc": "2026-10-10T02:52:11.387232+00:00",
+    "scope": "仅测试层修订停止正文选择器与登录429恢复；生产208文件、64,370物理行、production_snapshot及源码审阅顺序完全不变。",
+    "prior_exact_commit": "21cf5805aa17b17d2631bb1093439f5d76a21267",
+    "prior_native_observations": {
+      "passed": 55,
+      "total": 58,
+      "conclusion": "failure",
+      "failed_scope": "停止正文exact全文选择器错误地包含同bubble新增状态文字；移动端旧登录场景遇真实HTTP429，Retry-After为10秒。",
+      "jobs_terminal": "接口实际返回7个job：4success、2core failure、1未展开Docker skipped；不写成8个已展开作业。",
+      "render_run_id": 38018060098,
+      "render_result": "job条件skipped；没有执行提交标记命中日志，不记作实际命中marker后跳过。"
+    },
+    "selector_correction": "只取正文直接TEXT_NODE并严格相等；保留缺字、多字逆向用例，不隐藏正文或状态。",
+    "login_rate_limit_correction": "仅在服务端明确返回429及有效等待指示时执行一次有界等待后真实登录重试；保留45秒总界限及账户bob身份断言，未改生产鉴权或10次/60秒匿名IP桶。",
+    "local_validation": {
+      "frontend_tests_passed": 577,
+      "frontend_tests_failed": 0,
+      "frontend_tests_skipped": 0,
+      "frontend_typecheck": "passed",
+      "frontend_vite_build": "passed",
+      "native_list_cases": 40,
+      "native_list_files": 7,
+      "native_execution": "未由本地列表发现证明通过；仍需新精确提交托管实跑。",
+      "logs_sha256": {
+        "frontend-acceptance-fix.log": "cc475b2e8f9b1ab4196057dcacfc6a4d9cb0b759e1d738321d651555123fb3b4",
+        "frontend-acceptance-fix-build.log": "3183555b6ed5810ebccc9ed0d6ed03fe67adc07fcfd176dd12139d3578076747",
+        "native-acceptance-fix-list.log": "b523f9fe2abbd1ac2b0254e38de2437d9e5f3d80268e913ba93e3d941c4ea9a7"
+      }
+    },
+    "new_exact_hosted_ci": "pending; 新精确提交与整树由外部冻结回执绑定，不自引用此文档。",
+    "production_deployment": "未执行生产部署；原失败与旧通过均保留各自精确身份。"
   }
 }

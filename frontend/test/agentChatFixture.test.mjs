@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildAgentFixtureEnvironment, inspectAgentRequest, AGENT_PARTIAL, AGENT_COMPLETE, startAgentChatFixture } from '../scripts/agent-chat-fixture.mjs';
+import { Window } from 'happy-dom';
+import { readDirectAgentMessageText, buildAgentFixtureEnvironment, inspectAgentRequest, AGENT_PARTIAL, AGENT_COMPLETE, startAgentChatFixture } from '../scripts/agent-chat-fixture.mjs';
 const model = 'agent-fixture-12345678-1234-4234-8234-123456789abc';
 test('Agent browser fixture rejects arbitrary models and malformed bodies', () => {
   for (const body of [null, {}, { model: 'real-model', messages: [] }, { model, messages: null }]) assert.throws(() => inspectAgentRequest(body), /Only synthetic/);
@@ -36,4 +37,22 @@ test('test launcher only preserves named runtime variables and replaces dotenv, 
   assert.equal(env.NODE_ENV, 'test'); assert.equal(env.AUTH_MODE, 'session'); assert.equal(env.QUNTHINK_SHARED_PROVIDER_KEYS, '0');
   for (const key of ['OPENAI_API_KEY', 'ALIYUN_SECRET_KEY', 'DATABASE_URL', 'DOTENV_CONFIG_OVERRIDE', 'NODE_OPTIONS', 'HTTP_PROXY']) assert.equal(env[key], undefined);
   assert.ok(!JSON.stringify(env).includes('must-not-inherit'));
+});
+
+test('stopped bubble body equality excludes only nested status, never missing or extra body text', () => {
+  const window = new Window();
+  try {
+    const bubble = window.document.createElement('div');
+    bubble.append(window.document.createTextNode(AGENT_PARTIAL));
+    const status = window.document.createElement('p'); status.setAttribute('role', 'status');
+    status.textContent = '回复未完成，已收到的内容仅供参考。已停止接收回复；已保存内容请刷新会话核对';
+    bubble.append(status);
+    assert.notEqual(bubble.textContent, AGENT_PARTIAL, 'old aggregate-text equality includes the real status notice');
+    assert.equal(readDirectAgentMessageText(bubble), AGENT_PARTIAL);
+    bubble.firstChild.textContent = AGENT_PARTIAL.slice(0, -1);
+    assert.notEqual(readDirectAgentMessageText(bubble), AGENT_PARTIAL, 'truncated body must still fail exact equality');
+    bubble.firstChild.textContent = AGENT_PARTIAL;
+    bubble.append(window.document.createTextNode('多余内容'));
+    assert.notEqual(readDirectAgentMessageText(bubble), AGENT_PARTIAL, 'extra body text must still fail exact equality');
+  } finally { window.close(); }
 });

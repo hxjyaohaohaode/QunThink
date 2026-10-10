@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { registerSyntheticAccount } from './authFixture';
-import { AGENT_FIXTURE_ORIGIN, AGENT_PARTIAL, AGENT_COMPLETE } from '../scripts/agent-chat-fixture.mjs';
+import { AGENT_FIXTURE_ORIGIN, AGENT_PARTIAL, AGENT_COMPLETE, readDirectAgentMessageText } from '../scripts/agent-chat-fixture.mjs';
 
 // Real Chromium click -> real authenticated API -> keyless local HTTP provider.
 // No route mocks, store mutation, forced clicks, fixed sleeps, or live API keys.
@@ -50,7 +50,11 @@ test('Agent stop preserves partial output and permits a new explicit message', a
   await stop.click();
   await expect(page.getByRole('status')).toContainText('回复未完成');
   await expect(page.getByRole('status')).toContainText('已停止接收回复');
-  await expect(page.getByText(AGENT_PARTIAL, { exact: true })).toBeVisible();
+  // The status is nested in the same bubble: matching its aggregate text
+  // exactly would incorrectly include the notice. Verify body bytes separately.
+  const stoppedBubble = page.getByRole('status').locator('..');
+  await expect(stoppedBubble).toBeVisible();
+  await expect.poll(() => stoppedBubble.evaluate(readDirectAgentMessageText)).toBe(AGENT_PARTIAL);
   await expect(input).toBeEnabled();
   await expect(input).toHaveValue('');
   await expect(stop).toHaveCount(0);
