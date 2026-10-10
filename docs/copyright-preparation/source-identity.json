@@ -626,5 +626,37 @@
     "hosted_ci": "Pending for final exact source-plus-metadata commit; no new SHA asserted.",
     "manual_screenshots": "Must capture or verify empty-AI state from new exact CI; old screenshots retain original identities.",
     "deployment_and_cost_scope": "No actual deployment. BYOK does not mean free model calls. Provider deployment, missing Supabase CA and ephemeral-storage constraints remain unverified/unresolved; no new credentials or trust exceptions configured."
+  },
+  "session_fixture_retry_acceptance_update": {
+    "recorded_at_utc": "2026-10-10T09:57:00Z",
+    "scope": "Four test/fixture files only, including three new files. Production208 files and63485 physical lines, production digests and excerpt ordering unchanged.",
+    "historical_exact_failure": {
+      "commit": "449472efbeef92b14d88b1adfa1db6084a4f1e5b",
+      "ci_run": 38042319353,
+      "native_passed": 58,
+      "native_total": 60,
+      "failed_scope": "Two mobile GET token requests received real HTTP429.",
+      "docker": "Skipped by condition; not a build success.",
+      "render": "Skipped by condition; no actual skip-marker execution evidence."
+    },
+    "changes": [
+      "Recover session acquisition only once according to valid server Retry-After; no production authentication or rate-limit changes.",
+      "Capture the original45-second deadline before registration and retain5seconds for assertions. The previous registration fixture may extend its own timeout and is unchanged, so no claim that every case completes within45seconds.",
+      "Capture screenshots in the real model-center UI before reload."
+    ],
+    "local_validation": {
+      "frontend_passed": 599,
+      "frontend_total": 599,
+      "new_tests": 17,
+      "focused_passed": 25,
+      "focused_total": 25,
+      "focused_includes_previous_tests": 8,
+      "backend": "Production unchanged; retains previous final combined498/498 tests,64/64files evidence, not rerun asserted here.",
+      "playwright_discovered": 42,
+      "native_scope": "--list enumeration only; no browser startup or pass inferred.",
+      "copy_receipt_sha256": "3f82d13f00965b003826b3da5b09ab8c3dfc5dc7d9bd91566993ecdc097068e3"
+    },
+    "new_exact_hosted_ci": "Not yet run; pending final new commit.",
+    "production_deployment": "Not performed or claimed."
   }
 }

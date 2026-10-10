@@ -2,12 +2,15 @@ import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 import { randomInt } from 'node:crypto';
 import { registerSyntheticAccount } from './authFixture';
 import { submitAuthWithSingleRateLimitRetry } from '../scripts/auth-submit-retry.mjs';
+import { beginSessionTokenRecovery, navigateWithSessionTokenRecovery } from './sessionTokenRecovery';
+
+test.beforeEach(async ({ page }, info) => { beginSessionTokenRecovery(page, info); });
 
 async function register(context: BrowserContext, phone?: string) {
   return registerSyntheticAccount(context, { phone });
 }
 async function openWorkspace(page: Page, context: BrowserContext) {
-  await register(context); await page.goto('/');
+  await register(context); await navigateWithSessionTokenRecovery(page, timeout => page.goto('/', { timeout }));
   const workspace = page.getByTestId('workspace');
   await expect(workspace).toBeVisible();
   // Only the active responsive tree may mount, avoiding duplicate polls/forms/IDs.
@@ -16,7 +19,7 @@ async function openWorkspace(page: Page, context: BrowserContext) {
 }
 
 test('brand login entry remains visible before authentication', async ({ page }, info) => {
-  await page.goto('/');
+  await navigateWithSessionTokenRecovery(page, timeout => page.goto('/', { timeout }));
   await expect(page.getByText('群想', { exact: true }).first()).toBeVisible();
   await expect(page.getByPlaceholder('请输入手机号')).toBeVisible();
   await page.screenshot({ path: info.outputPath('brand-login.png'), fullPage: true, animations: 'disabled' });
@@ -39,11 +42,12 @@ test('fresh accounts have no platform AI and model setup remains an explicit cho
   await expect(models.getByRole('button', { name: '＋ 服务商', exact: true })).toBeVisible();
   await expect(models.getByLabel('服务商名称', { exact: true })).toHaveCount(0);
   await expect(models.getByRole('button', { name: '保存并应用', exact: true })).toBeDisabled();
-  await page.reload();
+  await expect(models).toBeVisible();
+  await page.screenshot({ path: info.outputPath('byok-empty-model-center.png'), fullPage: true, animations: 'disabled' });
+  await navigateWithSessionTokenRecovery(page, timeout => page.reload({ timeout }));
   await expect(page.getByTestId('workspace')).toBeVisible();
   expect((await (await context.request.get('/api/user/model-catalog')).json()).models).toEqual([]);
   expect(probes).toEqual([]);
-  await page.screenshot({ path: info.outputPath('byok-empty-model-center.png'), fullPage: true, animations: 'disabled' });
 });
 
 test('real API saves once, preserves draft across views, and restores saved task after reload', async ({ page, context }, info) => {
@@ -61,7 +65,7 @@ test('real API saves once, preserves draft across views, and restores saved task
   await expect(workspace.getByRole('heading', { name: '中文跨页草稿测试', exact: true })).toBeVisible();
   const tasks = await (await context.request.get('/api/tasks')).json();
   expect(tasks.filter((task: { title: string }) => task.title === '中文跨页草稿测试')).toHaveLength(1);
-  await page.reload();
+  await navigateWithSessionTokenRecovery(page, timeout => page.reload({ timeout }));
   await expect(page.getByTestId('workspace').getByRole('heading', { name: '中文跨页草稿测试', exact: true })).toBeVisible();
   await page.screenshot({ path: info.outputPath('workspace-saved-task.png'), fullPage: true, animations: 'disabled' });
   await page.getByLabel('搜索任务').fill('没有任何匹配的内容');
@@ -99,7 +103,7 @@ test('expired cached account can explicitly log into a different account without
   const bob = await register(context, phone);
   await context.clearCookies();
   await page.addInitScript(userId => localStorage.setItem('app_current_user_id', userId), alice.id);
-  await page.goto('/');
+  await navigateWithSessionTokenRecovery(page, timeout => page.goto('/', { timeout }));
   await expect(page.getByPlaceholder('请输入手机号')).toBeVisible();
   await page.getByPlaceholder('请输入手机号').fill(phone);
   await page.getByPlaceholder('请输入密码', {exact:true}).fill('Synthetic-Browser-Only-2026');
