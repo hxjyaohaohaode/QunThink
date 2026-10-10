@@ -1,3 +1,4 @@
+import { onPostgresMemoryFailure } from '../services/memory/postgresDeletionLedger.js';
 import express from 'express';
 import path from 'path';
 import fs from 'fs/promises';
@@ -630,6 +631,7 @@ router.get('/audio/:filename', asyncHandler(async (req, res) => {
     // source revocation cannot make a new request open this file.
     try {
       const handle = await fs.open(audioPath, 'r');
+      onPostgresMemoryFailure(() => handle.close().catch(() => {}));
       try {
         const stat = await handle.stat();
         if (!stat.isFile()) {

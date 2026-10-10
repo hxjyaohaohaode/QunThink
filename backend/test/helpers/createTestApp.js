@@ -1,3 +1,4 @@
+import { deferPostgresMemoryJson } from '../../src/services/memory/postgresDeletionLedger.js';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import crypto from 'crypto';
@@ -22,8 +23,13 @@ import { injectUserDb } from '../../src/middleware/userDb.js';
 import { getAuthDb } from '../../src/models/authDb.js';
 import { getUserDb, listUserDatabases } from '../../src/models/db.js';
 
+// Route-only fixtures bypass index.js startup. Supply an ephemeral fixture key
+// before they write records; lazy key creation over existing data is forbidden.
+process.env.ENCRYPTION_KEY ||= crypto.randomBytes(32).toString('base64');
+
 export function createTestApp() {
   const app = express();
+  app.use(deferPostgresMemoryJson);
 
   app.use(cookieParser());
   app.use(express.json({ limit: '50mb' }));

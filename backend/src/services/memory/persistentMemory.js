@@ -1,3 +1,5 @@
+import { PgLow } from '../../models/supabaseAdapter.js';
+import { postgresMemoryRequired, getPostgresMemoryLedger } from './postgresDeletionLedger.js';
 import { randomUUID, createHash } from 'node:crypto';
 import path from 'node:path';
 import { getUserDb, getDataDir, withWriteLock, clearUserDbCache, CustomLow } from '../../models/db.js';
@@ -22,6 +24,7 @@ const sourceRevisionKey = (groupId, messageId, sourceHash) =>
   hash(['source_revision', groupId, messageId, sourceHash]);
 
 async function localBarrier(userId, db, { allowNew = false } = {}) {
+  if (db instanceof PgLow && await postgresMemoryRequired()) return getPostgresMemoryLedger();
   if (!(db instanceof CustomLow)) {
     throw memoryError('MEMORY_STORAGE_UNSUPPORTED', 503,
       '此存储尚无独立删除账本，记忆功能暂不可用');
@@ -70,12 +73,13 @@ async function localBarrier(userId, db, { allowNew = false } = {}) {
 
 /** Provision a ledger for a freshly generated account before its session is exposed. */
 export async function provisionNewLocalMemoryAccount(userId, db) {
-  if (!(db instanceof CustomLow)) return { supported: false };
+  if (!(db instanceof CustomLow) && !(db instanceof PgLow && await postgresMemoryRequired())) return { supported: false };
   if (records(db).length || db.data.messages?.length) {
     throw memoryError('MEMORY_BARRIER_UNAVAILABLE', 503,
       '已有数据的账号不能按新账号初始化删除账本');
   }
-  await localBarrier(userId, db, { allowNew: true });
+  if (db instanceof PgLow) await (await getPostgresMemoryLedger()).registerNewAccount(userId);
+  else await localBarrier(userId, db, { allowNew: true });
   return { supported: true };
 }
 
@@ -126,10 +130,9 @@ function attachmentFileId(attachment) {
 export async function readableSourceMessages(userId, db, messages = db.data.messages || []) {
   const candidates = Array.isArray(messages) ? messages : [];
   const live = candidates.filter(message => !message.deleted_at && !message.is_deleted);
-  // Cloud adapters do not have this local deletion ledger. Their ordinary
-  // reads follow the live database state; cloud backup rollback protection
-  // requires a storage-specific durable deletion mechanism.
-  if (!(db instanceof CustomLow)) return live;
+  // PostgreSQL can opt into the independent ledger. Unconfigured cloud
+  // adapters retain ordinary live reads without rollback protection.
+  if (!(db instanceof CustomLow) && !(db instanceof PgLow && await postgresMemoryRequired())) return live;
   const barrier = await localBarrier(userId, db);
   const linkedFiles = new Map((db.data.files || []).map(file => [file.id, file]));
   const keys = live.flatMap(message => [
@@ -169,7 +172,7 @@ export async function readableSourceMessages(userId, db, messages = db.data.mess
 
 export async function readableSourceGroups(userId, db, groups = db.data.groups || []) {
   const candidates = Array.isArray(groups) ? groups : [];
-  if (!(db instanceof CustomLow)) return candidates;
+  if (!(db instanceof CustomLow) && !(db instanceof PgLow && await postgresMemoryRequired())) return candidates;
   const barrier = await localBarrier(userId, db);
   const deleted = await barrierDeletedIds(barrier, userId,
     candidates.map(group => sourceGroupKey(group.id)));
@@ -183,7 +186,7 @@ export async function readableSourceFiles(userId, db, files = db.data.files || [
   const groups = await readableSourceGroups(userId, db);
   const liveGroupIds = new Set(groups.map(group => group.id));
   const live = candidates.filter(file => liveGroupIds.has(file.group_id));
-  if (!(db instanceof CustomLow)) return live;
+  if (!(db instanceof CustomLow) && !(db instanceof PgLow && await postgresMemoryRequired())) return live;
   const barrier = await localBarrier(userId, db);
   const deleted = await barrierDeletedIds(barrier, userId,
     live.map(file => sourceFileKey(file.group_id, file.id)));
@@ -191,7 +194,7 @@ export async function readableSourceFiles(userId, db, files = db.data.files || [
 }
 
 export async function isSourceIdentityRevoked(userId, db, message) {
-  if (!(db instanceof CustomLow)) return false;
+  if (!(db instanceof CustomLow) && !(db instanceof PgLow && await postgresMemoryRequired())) return false;
   const barrier = await localBarrier(userId, db);
   const deleted = await barrierDeletedIds(barrier, userId, [
     sourceGroupKey(message.group_id), sourceMessageKey(message.group_id, message.id)
@@ -266,14 +269,14 @@ async function reconcileBarrier(userId, db, barrier) {
 }
 
 export async function markMessageRevisionRevoked(userId, db, message) {
-  if (!(db instanceof CustomLow)) return;
+  if (!(db instanceof CustomLow) && !(db instanceof PgLow && await postgresMemoryRequired())) return;
   const barrier = await localBarrier(userId, db);
   await barrierMark(barrier, userId,
     sourceRevisionKey(message.group_id, message.id, messageSourceHash(message)));
 }
 
 export async function markMessageDeleted(userId, db, groupId, messageIds) {
-  if (!(db instanceof CustomLow)) return;
+  if (!(db instanceof CustomLow) && !(db instanceof PgLow && await postgresMemoryRequired())) return;
   const barrier = await localBarrier(userId, db);
   for (const id of new Set(messageIds)) {
     await barrierMark(barrier, userId, sourceMessageKey(groupId, id));
@@ -281,13 +284,13 @@ export async function markMessageDeleted(userId, db, groupId, messageIds) {
 }
 
 export async function markGroupDeleted(userId, db, groupId) {
-  if (!(db instanceof CustomLow)) return;
+  if (!(db instanceof CustomLow) && !(db instanceof PgLow && await postgresMemoryRequired())) return;
   const barrier = await localBarrier(userId, db);
   await barrierMark(barrier, userId, sourceGroupKey(groupId));
 }
 
 export async function markFileDeleted(userId, db, groupId, fileId) {
-  if (!(db instanceof CustomLow)) return;
+  if (!(db instanceof CustomLow) && !(db instanceof PgLow && await postgresMemoryRequired())) return;
   const barrier = await localBarrier(userId, db);
   await barrierMark(barrier, userId, sourceFileKey(groupId, fileId));
 }

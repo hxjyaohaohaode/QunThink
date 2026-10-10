@@ -1,3 +1,4 @@
+import { deferPostgresMemoryJson } from './services/memory/postgresDeletionLedger.js';
 import 'dotenv/config';
 import { getCatalogData } from './services/ai/catalog.js';
 import express from 'express';
@@ -64,6 +65,7 @@ const __dirname = path.dirname(__filename);
 const uploadsDir = getUploadsDir();
 
 const app = express();
+app.use(deferPostgresMemoryJson);
 const server = createServer(app);
 
 server.keepAliveTimeout = 65000;
@@ -397,10 +399,10 @@ app.use('/api/tts', ttsRouter);
 
 app.use(errorHandler);
 
-initDatabase().then(async () => {
+initializeKeyManager().then(async () => {
+  await initDatabase();
   await initAuthDb();
   initSmsClient();
-  await initializeKeyManager();
   await migrateApiConfigSecrets();
 
   try {

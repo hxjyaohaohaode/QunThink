@@ -4,6 +4,7 @@ import fsSync from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawnSync } from 'child_process';
+import { loadLocalEncryptionKey } from './localKeyGuard.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -147,24 +148,7 @@ async function loadOrGenerateEncryptionKey() {
   console.warn('⚠️  未设置 ENCRYPTION_KEY，使用文件存储的密钥');
   showMigrationWarning();
 
-  try {
-    await fs.access(KEY_FILE_PATH);
-    const keyData = await fs.readFile(KEY_FILE_PATH, 'utf8');
-    const keyBuffer = Buffer.from(keyData.trim(), 'base64');
-    if (keyBuffer.length === KEY_LENGTH) {
-      return keyBuffer;
-    }
-  } catch {
-  }
-
-  const newKey = generateKeyBuffer();
-  await ensureKeyDirectoryExists();
-  await fs.writeFile(KEY_FILE_PATH, newKey.toString('base64'), 'utf8');
-  setFilePermissions(KEY_FILE_PATH);
-
-  console.log('🔑 已生成新的加密密钥并保存到:', KEY_FILE_PATH);
-
-  return newKey;
+  return loadLocalEncryptionKey({ dataDir, keyPath: KEY_FILE_PATH, prepareNewFile: setFilePermissions });
 }
 
 async function generateNewKey() {
@@ -247,23 +231,7 @@ function loadOrGenerateEncryptionKeySync() {
     throw new Error('生产环境必须设置 ENCRYPTION_KEY 环境变量');
   }
 
-  if (fsSync.existsSync(KEY_FILE_PATH)) {
-    const keyData = fsSync.readFileSync(KEY_FILE_PATH, 'utf8').trim();
-    const keyBuffer = Buffer.from(keyData, 'base64');
-    if (keyBuffer.length === KEY_LENGTH) {
-      return keyBuffer;
-    }
-  }
-
-  const newKey = generateKeyBuffer();
-  const dir = getKeyDirectory();
-  if (!fsSync.existsSync(dir)) {
-    fsSync.mkdirSync(dir, { recursive: true });
-  }
-  fsSync.writeFileSync(KEY_FILE_PATH, newKey.toString('base64'), 'utf8');
-  setFilePermissions(KEY_FILE_PATH);
-  console.log('🔑 已生成新的加密密钥并保存到:', KEY_FILE_PATH);
-  return newKey;
+  return loadLocalEncryptionKey({ dataDir, keyPath: KEY_FILE_PATH, prepareNewFile: setFilePermissions });
 }
 
 async function getKeyMetadataAsync() {

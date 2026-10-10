@@ -71,6 +71,8 @@ powershell -Command "$b=New-Object byte[] 32;[Security.Cryptography.RandomNumber
 
 ⚠️ 密钥轮换会使先前加密的数据无法解密；切勿将密钥提交进版本库。
 
+本地非生产环境仅在全新空数据目录中自动生成文件密钥。密钥文件损坏、不可读，或已有数据时密钥缺失，启动会停止，避免新密钥使旧聊天和记忆无法解密。请从可信备份恢复原 `.encryption_key` 或原 `ENCRYPTION_KEY`，不要删除旧数据或生成替代密钥。配置远程数据库而缺少文件密钥时，也不会自动生成新密钥。外置认证文件或删除账本已存在时按已有安装处理。生产环境仍必须显式配置 `ENCRYPTION_KEY`。
+
 ### 步骤 4: 验证配置
 
 核对后端的 `ENCRYPTION_KEY`、`AUTH_MODE`、`CORS_ORIGINS` 与持久化存储配置，以及前端的 `VITE_BACKEND_URL` 和 `VITE_AUTH_MODE`。模型连接在系统启动后通过模型中心手动验证，不通过部署环境变量注入。注册/登录还需要正确的短信服务配置，详见 `backend/.env.example`。

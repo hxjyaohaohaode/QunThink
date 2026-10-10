@@ -1,3 +1,4 @@
+import { withPostgresMemoryLock } from '../services/memory/postgresDeletionLedger.js';
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import path from 'path';
@@ -190,7 +191,7 @@ export async function withWriteLock(userId, fn) {
   const mutex = getUserMutex(userId);
   const release = await mutex.acquire();
   try {
-    return await fn();
+    return await withPostgresMemoryLock(userId, fn);
   } finally {
     release();
   }

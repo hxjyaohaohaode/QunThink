@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
 
+process.env.ENCRYPTION_KEY = (await import('node:crypto')).randomBytes(32).toString('base64');
 process.env.NODE_ENV = 'test';
 process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-social-source-'));
