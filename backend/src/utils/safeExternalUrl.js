@@ -22,10 +22,12 @@ function isBlockedIpv4(address) {
 }
 
 export function isBlockedAddress(address) {
-  const normalized = String(address || '').toLowerCase().split('%')[0];
+  let normalized = String(address || '').toLowerCase().split('%')[0];
   const family = net.isIP(normalized);
   if (family === 4) return isBlockedIpv4(normalized);
   if (family !== 6) return true;
+  // DNS libraries may return expanded IPv6; canonicalize before classifying.
+  normalized = new URL(`http://[${normalized}]/`).hostname.slice(1, -1);
 
   if (normalized.startsWith('::ffff:')) {
     return isBlockedIpv4(normalized.slice('::ffff:'.length));
@@ -34,7 +36,8 @@ export function isBlockedAddress(address) {
     || normalized === '::1'
     || normalized.startsWith('fc')
     || normalized.startsWith('fd')
-    || /^fe[89ab]/.test(normalized)
+    || /^fe[89abcdef]/.test(normalized)
+    || normalized.startsWith('ff')
     || normalized.startsWith('2001:db8:');
 }
 

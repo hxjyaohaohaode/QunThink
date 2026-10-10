@@ -30,7 +30,7 @@ test('legacy plaintext keys remain readable for controlled migration', () => {
 });
 
 test('SSRF guard blocks local and reserved address ranges', async () => {
-  for (const address of ['127.0.0.1', '10.0.0.1', '169.254.169.254', '172.16.0.1', '192.168.1.1', '::1', 'fd00::1']) {
+  for (const address of ['127.0.0.1', '10.0.0.1', '169.254.169.254', '172.16.0.1', '192.168.1.1', '::1', 'ff02::1', 'fec0::1', '0:0:0:0:0:0:0:1', '0:0:0:0:0:0:0:0', 'fd00::1']) {
     assert.equal(isBlockedAddress(address), true, address);
   }
   await assert.rejects(() => assertSafeExternalUrl('http://127.0.0.1:3000/v1'), /不允许/);

@@ -26,6 +26,7 @@ import authRouter from './routes/auth.js';
 import smsRouter from './routes/sms.js';
 import apiConfigRouter from './routes/apiconfig.js';
 import modelCatalogRouter from './routes/modelCatalog.js';
+import siteBasicChatRouter from './routes/siteBasicChat.js';
 import tasksRouter from './routes/tasks.js';
 import personalGoalsRouter from './routes/personalGoals.js';
 import { closePersonalGoalRuntime, getPersonalGoalRuntime } from './foundations/personalWorkspace.js';
@@ -382,6 +383,7 @@ app.use('/api/interaction', queryRateLimiter);
 
 app.use('/api/user', apiConfigRouter);
 app.use('/api/user', modelCatalogRouter);
+app.use('/api/site-ai', siteBasicChatRouter);
 app.use('/api', tasksRouter);
 app.use('/api', personalGoalsRouter);
 app.use('/api', groupsRouter);

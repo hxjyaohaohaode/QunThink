@@ -36,6 +36,7 @@ const indexJsPath = path.join(rootDir, 'backend', 'src', 'index.js');
 const ROUTER_MOUNT_PREFIXES = {
   'apiconfig.js': '/api/user',
   'modelCatalog.js': '/api/user',
+  'siteBasicChat.js': '/api/site-ai',
   'tts.js': '/api/tts'
 };
 const DEFAULT_PREFIX = '/api';

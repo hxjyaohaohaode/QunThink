@@ -95,3 +95,11 @@ node scripts/verify-brand.mjs
 ## 许可说明
 
 仓库顶层 [LICENSE](LICENSE) 保持原有 MIT License 声明；第三方代码仍分别遵守其适用条款。Lightfall、Radar、Strands 的历史来源与 MIT + Commons Clause 许可见 [第三方告知](THIRD_PARTY_NOTICES.md)，不得将这些组件描述为纯 MIT 或全部自主原创。项目权属与其他依赖、素材授权仍须另行核对。
+
+### 可选站点基础 AI 与低成本部署
+
+站点基础 AI 默认关闭；配置完整后，用户可在模型中心明确选择单轮聊天。
+只支持已核验的国内厂商官方接口和相应自有模型系列，不改用户 BYOK，也不自动兜底。
+配置与限额见 [可选基础 AI](docs/site-basic-ai.md)。
+免费 Render 模板仅提供静态前端，需要已有持久后端；当前文件上传/TTS 不适合免费临时文件系统。
+本地或已有自托管持久卷通常更适合低成本演示，见 [免费前端部署边界](docs/render-free-deployment.md)。

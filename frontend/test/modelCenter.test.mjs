@@ -14,7 +14,7 @@ const bundled=await build({stdin:{contents:`import {createRoot} from 'react-dom/
   build.onResolve({filter:/(?:services\/api|^\.\/api)$/},()=>({path:'api',namespace:'mock'}));
   build.onResolve({filter:/utils\/cacheUtils$/},()=>({path:'cache',namespace:'mock'}));
   build.onResolve({filter:/^\.\/personasStore$/},()=>({path:'personas',namespace:'mock'}));
-  build.onLoad({filter:/.*/,namespace:'mock'},({path})=>({contents:path==='api'?`export const axiosInstance=Object.fromEntries(['get','post','put'].map(method=>[method,(...args)=>globalThis.__modelUi[method](...args)]));`:path==='cache'?'export const getCacheUserId=()=>globalThis.__modelUi.user;':'export const usePersonasStore={getState:()=>({fetchPersonas:async()=>{globalThis.__modelUi.personas++}})};',loader:'js'}));
+  build.onLoad({filter:/.*/,namespace:'mock'},({path})=>({contents:path==='api'?`export const getAuthGeneration=()=>0;export const axiosInstance=Object.fromEntries(['get','post','put'].map(method=>[method,(...args)=>globalThis.__modelUi[method](...args)]));`:path==='cache'?'export const getCacheUserId=()=>globalThis.__modelUi.user;':'export const usePersonasStore={getState:()=>({fetchPersonas:async()=>{globalThis.__modelUi.personas++}})};',loader:'js'}));
 }}]});
 const {mount,act,useModelsStore:store}=await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
 function catalog(){return{revision:1,providers:['a','b'].map(id=>({id,name:`服务${id}`,protocol:'openai',baseUrl:`https://${id}.example/v1`,enabled:true,keyRequired:true,apiKeyConfigured:true,ready:true})),models:[{id:'model-a',providerId:'a',name:'示例模型',model:'example',enabled:true,capabilities:['chat','vision','audio','video'],verifiedCapabilities:['chat'],ready:true,contextWindow:32000,maxTokens:4096,temperature:null,tokenParameter:'max_tokens',color:'#6366f1'}],defaults:{chat:'model-a',vision:null,tts:null}}}
@@ -57,12 +57,12 @@ test('paid test timeout survives remount, disables paid retry, and offers only o
 });
 test('known failed test removes verified label and refresh failure remains actionable',async()=>{
   globalThis.__modelUi.post=async(_,body)=>{throw Object.assign(new Error('failed'),{response:{status:502,data:{requestId:body.clientRequestId,modelId:'model-a',capability:'chat',status:'failed',healthy:false,stale:false,possibleCharge:true,replayed:false,error:'模型不支持'}}})};globalThis.__modelUi.get=async()=>{throw new Error('目录暂不可用')};
-  await click('测试对话');assert.doesNotMatch(container.querySelector('summary').textContent,/已验证：对话/);assert.match(container.textContent,/测试失败：服务商已返回/);assert.ok(button('重新读取目录'));assert.ok(button('测试对话'));assert.equal(button('测试对话').disabled,false);
+  await click('测试对话');assert.doesNotMatch(container.querySelector('fieldset summary').textContent,/已验证：对话/);assert.match(container.textContent,/测试失败：服务商已返回/);assert.ok(button('重新读取目录'));assert.ok(button('测试对话'));assert.equal(button('测试对话').disabled,false);
 });
 test('first-use manual setup, fail-closed defaults, unsupported audio/video, and keyboard repair are explicit',async()=>{
   assert.match(container.textContent,/音频理解和视频理解目前不能验证/);assert.match(container.textContent,/不会偷偷改用其他模型/);assert.equal(container.querySelector('ol[aria-label="连接步骤"]').children.length,3);
   const next=catalog();next.models[0].verifiedCapabilities=[];globalThis.__modelUi.get=async()=>({data:next});await act(async()=>store.getState().fetch());
-  assert.match(container.textContent,/保存后仍会阻止请求/);await click('查看并测试对话');assert.equal(container.querySelector('details').open,true);assert.equal(document.activeElement,container.querySelector('summary'));
+  assert.match(container.textContent,/保存后仍会阻止请求/);await click('查看并测试对话');assert.equal(container.querySelector('fieldset details').open,true);assert.equal(document.activeElement,container.querySelector('fieldset summary'));
   await click('服务b');assert.match(container.textContent,/此服务商还没有模型/);await click('＋ 手动添加模型');assert.equal(inputFor('模型 ID').value,'');assert.equal(button('保存并应用').disabled,false);assert.equal(store.getState().draft.models.at(-1).providerId,'b');
 });
 test('changing destination clears an unsaved key before any save or discovery',async()=>{
@@ -82,7 +82,7 @@ test('unknown test stays queryable even if another page removes its model',async
 
 test('repair button reopens and focuses a model after the user manually closed its disclosure',async()=>{
   const next=catalog();next.models[0].verifiedCapabilities=[];globalThis.__modelUi.get=async()=>({data:next});await act(async()=>store.getState().fetch());
-  await click('查看并测试对话');container.querySelector('details').open=false;await click('查看并测试对话');assert.equal(container.querySelector('details').open,true);assert.equal(document.activeElement,container.querySelector('summary'));
+  await click('查看并测试对话');container.querySelector('fieldset details').open=false;await click('查看并测试对话');assert.equal(container.querySelector('fieldset details').open,true);assert.equal(document.activeElement,container.querySelector('fieldset summary'));
 });
 
 test('404 recovery discloses charge risk and requires an explicit same-request button',async()=>{
@@ -96,7 +96,7 @@ test('empty account catalog stays empty until the user explicitly adds a connect
   const writes=[];globalThis.__modelUi.get=async()=>({data:empty});globalThis.__modelUi.post=async(...args)=>{writes.push(args);return {data:{}}};globalThis.__modelUi.put=async(...args)=>{writes.push(args);return {data:{}}};
   await act(async()=>{store.getState().cleanup();await settle()});
   assert.deepEqual(store.getState().catalog,empty);assert.equal(store.getState().selected,'');
-  assert.match(container.textContent,/平台不预置 AI，也不提供共享密钥/);
+  assert.match(container.textContent,/个人模型由你自行配置/);
   assert.match(container.textContent,/当前没有服务商/);assert.match(container.textContent,/查看历史会话和进行人工写作/);
   assert.equal(container.querySelector('input[type="password"]'),null);assert.equal(button('保存并应用').disabled,true);
   for(const select of container.querySelectorAll('select')) assert.equal(select.options.length,1);

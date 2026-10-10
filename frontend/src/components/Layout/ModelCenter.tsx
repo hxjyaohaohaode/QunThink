@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { SiteBasicChat } from './SiteBasicChat';
 import type { ModelProvider, CatalogModel, ModelCapability } from '../../../../shared/models';
 import { useModelsStore } from '../../stores/modelsStore';
 import { probeKey, probeUnresolved } from '../../services/modelProbes';
@@ -70,8 +71,9 @@ export function ModelCenter() {
     <div>
       <p className="text-[10px] tracking-[0.2em] text-accent font-semibold mb-2">MODELS & CONNECTIONS</p>
       <h2 className="text-xl font-semibold text-text-primary">模型中心</h2>
-      <p className="text-sm text-text-secondary mt-2 leading-relaxed">平台不预置 AI，也不提供共享密钥。请连接你自己的服务商并添加模型；名称由你决定，实际模型 ID 与服务商一致。保存不会发起付费测试；更改连接、模型参数或音色后，需手动重新测试。</p>
+      <p className="text-sm text-text-secondary mt-2 leading-relaxed">个人模型由你自行配置。站点如启用基础 AI，可在下方单独选择使用。请连接你自己的服务商并添加模型；名称由你决定，实际模型 ID 与服务商一致。保存不会发起付费测试；更改连接、模型参数或音色后，需手动重新测试。</p>
     </div>
+    <SiteBasicChat />
     <ol className="grid sm:grid-cols-3 gap-2 text-xs text-text-secondary" aria-label="连接步骤">
       <li className="rounded-xl border border-border p-3">1. 填写服务地址和密钥</li>
       <li className="rounded-xl border border-border p-3">2. 添加模型并保存配置</li>

@@ -73,6 +73,48 @@ security:
   - csrfHeader: []
 
 paths:
+  /api/site-ai/status:
+    get:
+      operationId: siteAiStatus
+      summary: Session-only optional site AI availability (no provider call)
+      description: Returns validated domestic vendor origin/model and consent token only when enabled. Never returns credentials; dev-header authentication is insufficient.
+      responses:
+        '200':
+          description: Availability and, when available, providerOrigin, model and consentToken
+        '401':
+          description: Session login required
+  /api/site-ai/chat:
+    post:
+      operationId: siteAiChat
+      summary: Explicitly consented single-turn site AI text generation
+      description: Session and CSRF protected; separate from BYOK catalogs, agents, tasks and tools. No automatic retries. Shared durable attempt limits apply.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [prompt, consent, consentToken]
+              properties:
+                prompt: {type: string, minLength: 1, maxLength: 4000}
+                consent: {type: boolean, const: true}
+                consentToken: {type: string}
+      responses:
+        '200':
+          description: content, generatedByAI=true, providerOrigin and model
+        '400':
+          description: Invalid single-turn input
+        '401':
+          description: Session login required
+        '409':
+          description: Consent target changed or request cancelled
+        '429':
+          description: Account, site or concurrency limit
+        '502':
+          description: Provider failed or returned invalid response; no automatic retry
+        '503':
+          description: Optional feature or durable quota unavailable
   # ------------------------------------------------------------------ System
   /api/health:
     get:
