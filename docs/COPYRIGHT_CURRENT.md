@@ -23,7 +23,7 @@ Node.js最低22.12；后端为JavaScript、Express、WebSocket，前端为TypeSc
 
 1. 模型连接、目录发现、能力声明与显式测试：frontend/src/components/Layout/ModelCenter.tsx；backend/src/routes/modelCatalog.js；backend/src/services/ai/catalog.js、modelProbes.js。保存不等于验证，测试可能收费。
 2. 普通会话、用户与单AI私聊、2至5个AI间私聊、消息与流式反馈：frontend/src/components/Layout/NewChatModal.tsx；frontend/src/components/Chat/；backend/src/routes/groups.js、messages.js、ai.js；backend/src/websocket/index.js。普通会话允许零AI，数据仍属当前账号边界。
-3. AI角色、智能体配置与会话、辩论：frontend/src/components/Layout/AIPersonaEditor.tsx、AgentCreateModal.tsx、AgentsPage.tsx、AgentChatView.tsx；backend/src/routes/agents.js、personas.js；backend/src/services/agent/index.js、debate/index.js。
+3. AI角色、智能体配置与会话、辩论：frontend/src/components/Layout/AIPersonaEditor.tsx、AgentCreateModal.tsx、AgentsPage.tsx、AgentChatView.tsx；backend/src/routes/agents.js、personas.js；backend/src/services/agent/index.js、debate/index.js。现有Agent会话新增“停止生成”：中止当前回复接收，已收到正文保留并标明未完成，不自动重发；实际已保存内容须刷新会话核对。JSON与multipart连接中断将取消信号传给主回复、意图分析及附件标注/描述；删除Agent后取消本进程同账号对应活动调用，消息写锁内再次确认Agent存在，防止迟到结果复活已删历史。首token前停止不保存空的成功助手消息，部分输出停止保留incomplete状态。不能保证供应商停止推理或计费；本地文件解析仍按既有资源预算运行，取消登记不是跨worker总线。这是既有聊天闭环的限定修复，不是通用Agent执行能力完成。
 4. 自有文档上传、文本提取、视觉模型图片理解及语音合成：backend/src/routes/files.js、tts.js；backend/src/services/fileParser/index.js；frontend/src/components/Chat/TTSSynthesizeModal.tsx。ZIP类文档提取新增有界子进程、输入/展开/输出及并发预算，超限明确失败；范围和限制见[资源预算说明](document-parser-resource-budgets.md)，不宣称PDF、CSV、文本或媒体已隔离。音视频附件仅元数据，语音合成不是语音识别。
 5. 会话材料起草、人工正文版本、AI候选稿、采用/验收/文本下载：frontend/src/components/Writing/ConversationWriting.tsx、TaskResultEditor.tsx；backend/src/services/taskSources.js、taskResults.js。材料来源、当前正文和被验收版本分开记录。
 6. 工作台任务、显式定时生成、未知结果核验：frontend/src/components/Layout/WorkspacePage.tsx；backend/src/routes/tasks.js；backend/src/services/tasks.js。只产生文字草稿与材料整理，不操作外部办公软件。
@@ -36,6 +36,8 @@ Node.js最低22.12；后端为JavaScript、Express、WebSocket，前端为TypeSc
 没有真人共享群/组织成员完整权限；没有任意浏览器、文件系统或第三方软件自动操作；没有音视频内容理解或音频真实转写；没有通用外部搜索连接器；没有对模型解释的事实认证；没有完整费用结算；没有所有云存储/备份回滚情形的彻底删除保证；没有软件已上线、零漏洞、版权独有或登记通过结论。
 
 ## 验证记录与截图版本定位
+
+2026-10-10本次组合候选：现有Agent聊天取消与删除边界修复、前端生产依赖审计门禁收紧已写入源码；各生产文件及原45项审阅顺序的字节、摘要、物理行数重新计算，详见本页链接的source-identity和source-excerpt-order。独立核心候选本地前端560项、定向后端80项通过，并完成前端构建、品牌与OpenAPI核对；使用隔离账号与keyless loopback模型，不代表真实供应商或当前浏览器视觉验收。组合候选随后在Node22与真实PostgreSQL16完成后端417项、58/58测试文件且0跳过，前端初轮564项，补充原生停止场景与夹具回归后最终568项、类型检查和Vite构建、打包9项、品牌15文件及内联Logo、OpenAPI178操作无漂移检查通过；测试PG已停止并清理临时数据。新增桌面/移动停止场景2项，保留原38项，原生用例发现共40项；这里只执行列表发现，尚不是浏览器通过结果，夹具为keyless loopback模型而非真实付费服务。上述是组合代码候选本地结果，当前原生浏览器验收及含本次文档的精确托管CI仍待另核，不沿用旧提交身份。生产依赖审计门禁不再放行旧advisory例外；全依赖审计5项high仍未修复，依据和边界见[依赖审计说明](dependency-audit-2026-10-10.md)。本轮未部署生产。
 
 截至2026-10-10（北京时间）的本轮材料更新：上一已核主线`99dcf7fb7a5a16f9a1c762cf881d18a4e58701ff`的[CI 37967228676](https://github.com/hxjyaohaohaode/QunThink/actions/runs/37967228676)首次8项作业通过，修复了目标运行领取竞态；其[Render 37968246342](https://github.com/hxjyaohaohaode/QunThink/actions/runs/37968246342)已观察同提交部署跳过。本轮新增ZIP文档资源限额属于之后的代码变更，不把这份旧主线结果转写为新候选CI通过；包含该变更的精确提交和实测范围须另行绑定。以下427/430记录继续作为历史。
 
@@ -71,4 +73,4 @@ Lightfall、Radar、Strands共7段shader已与React Bits官方较早历史版本
 
 scripts/brand-baseline.json记录基线ac69f6d6aa92b2b6f42166af26112bbdf3e9fd4c。本次独立SHA计算确认15个受保护完整文件及3组内联Logo摘要全部匹配。纯logo.txt摘要09e6eacb4e9cc715e9c948073620d0cef4af2b5d98eb5bf8b9cf3314bc7c4240；有字logo.txt摘要faec2e780810f5218f1b4406f119b758dbdff2269deaf483558164090d356b4b。字节一致不证明素材权利授权。
 
-本轮按208项生产文件集合重算身份，另备45个业务候选文件、17,633物理行的审阅顺序建议，供权属确认后建立完整连续源程序目录；全量文件摘要见准备包QunThink-交付源码SHA256清单.txt。不是最终页码或60页鉴别材料；测试、夹具、依赖、锁文件及编译副本不用于凑页数。
+本轮按208项生产文件集合重算身份，另备45个业务候选文件、17,687物理行的审阅顺序建议，供权属确认后建立完整连续源程序目录；全量文件摘要见准备包QunThink-交付源码SHA256清单.txt。不是最终页码或60页鉴别材料；测试、夹具、依赖、锁文件及编译副本不用于凑页数。

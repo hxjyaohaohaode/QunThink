@@ -1,7 +1,7 @@
 {
   "project": "qunthink",
   "identity_scope": "本轮所列生产文件的原始字节快照，未把未指定的外部manifest匹配结果预填为true。适用后续HEAD前必须逐项重新核对；整库tree和同步提交由外部最终回执绑定。",
-  "production_file_set_sha256": "c738f0563e723aa37bdf656d3b6fc753020838b7fb0d5331bbd8212c4e664525",
+  "production_file_set_sha256": "cba96e3f2c09b901cdf00939f1a1062963fbb8e282d4ee0a728637f30f7f3077",
   "not_ready_for_submission": true,
   "notes": [
     "文件顺序是为功能连续性制定的审阅建议，不是页数凑数，也不是原创/权属证明。",
@@ -95,9 +95,9 @@
       "order": 11,
       "path": "backend/src/services/ai/index.js",
       "category": "application_source_candidate",
-      "bytes": 44886,
-      "lines": 937,
-      "sha256": "10033172e4b7c540995c3a4bce04154ff6086ed8cde4b9b931ff0c7997d9c194"
+      "bytes": 45104,
+      "lines": 943,
+      "sha256": "e8c2afc215bc0cc61362604665c6db7be3304776809a185990d5dea12f4608b4"
     },
     {
       "order": 12,
@@ -167,17 +167,17 @@
       "order": 20,
       "path": "backend/src/routes/agents.js",
       "category": "application_source_candidate",
-      "bytes": 13638,
-      "lines": 363,
-      "sha256": "60f03aba72f4e020d754fefa74b56a8c9b60ac63a863ee9486fbfa2c026530c1"
+      "bytes": 14326,
+      "lines": 375,
+      "sha256": "71a37b172024fbf09e6fdd4151d26700339ad651819c79fa97c1bdf0ecad4150"
     },
     {
       "order": 21,
       "path": "backend/src/services/agent/index.js",
       "category": "application_source_candidate",
-      "bytes": 26758,
-      "lines": 635,
-      "sha256": "88cc213ce37481c8b31b440a3e0c95b8a3d807cb705823701b5a2da9af206a48"
+      "bytes": 28528,
+      "lines": 671,
+      "sha256": "c14038a76e4d2b63fc12ee43ff97bad34fe8e941c7aed56f4686a1d68cf5559e"
     },
     {
       "order": 22,
@@ -373,5 +373,5 @@
     }
   ],
   "listed_files": 45,
-  "listed_raw_lines": 17633
+  "listed_raw_lines": 17687
 }

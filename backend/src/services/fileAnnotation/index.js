@@ -161,18 +161,18 @@ async function compressImageForAnnotation(filePath, mimeType) {
   }
 }
 
-async function callFastAPI(messages, maxTokens = 120, timeout = 8000) {
+async function callFastAPI(messages, maxTokens = 120, timeout = 8000, signal = null) {
   const userId = currentUserId();
   if (!userId) return null;
   try {
     const id = await defaultModelId(userId);
     const config = await resolveModel(userId, id, 'chat');
-    return await requestCompletion(config, messages, { maxTokens, timeout });
+    return await requestCompletion(config, messages, { maxTokens, timeout, signal });
   } catch { return null; }
 }
 
-async function annotateWithVision(filePath, mimeType, fileName) {
-  const description = await generateImageDescription(filePath, mimeType, fileName);
+async function annotateWithVision(filePath, mimeType, fileName, signal) {
+  const description = await generateImageDescription(filePath, mimeType, fileName, signal);
   return description ? { description, tags: [getFileTypeLabel(path.extname(fileName))], source: 'vision' } : null;
 }
 
@@ -180,7 +180,7 @@ async function annotateWithMedia(fileName, fileSize, mediaType) {
   return { description: mediaType + '文件：' + fileName + '（' + formatFileSize(fileSize) + '）；尚未解析媒体内容', tags: [mediaType], source: 'metadata' };
 }
 
-async function annotateWithText(fileName, contentSnippet, ext) {
+async function annotateWithText(fileName, contentSnippet, ext, signal) {
   const snippet = contentSnippet.substring(0, 800);
   const fileType = getFileTypeLabel(ext);
   const prompt = TEXT_ANNOTATION_PROMPT
@@ -191,12 +191,12 @@ async function annotateWithText(fileName, contentSnippet, ext) {
   const content = await callFastAPI([
     { role: 'system', content: '你是一个文件搜索标注助手。你的任务是为文件生成简洁准确的搜索标注。只输出标注结果，不要多余解释。标签要具体、有区分度，便于用户搜索。' },
     { role: 'user', content: prompt }
-  ]);
+  ], 120, 8000, signal);
 
   return content ? parseAnnotationResponse(content) : null;
 }
 
-export async function annotateWithoutFile(fileName, mimeType, fileSize, parsedContent) {
+export async function annotateWithoutFile(fileName, mimeType, fileSize, parsedContent, signal = null) {
   const ext = path.extname(fileName).toLowerCase();
   const isAudio = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.amr', '.opus'].includes(ext);
   const isVideo = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.3gp'].includes(ext);
@@ -208,15 +208,15 @@ export async function annotateWithoutFile(fileName, mimeType, fileSize, parsedCo
   if (isAudio) {
     annotation = await annotateWithMedia(fileName, fileSize, '音频');
     if (!annotation && hasTextContent) {
-      annotation = await annotateWithText(fileName, textContent, ext);
+      annotation = await annotateWithText(fileName, textContent, ext, signal);
     }
   } else if (isVideo) {
     annotation = await annotateWithMedia(fileName, fileSize, '视频');
     if (!annotation && hasTextContent) {
-      annotation = await annotateWithText(fileName, textContent, ext);
+      annotation = await annotateWithText(fileName, textContent, ext, signal);
     }
   } else if (hasTextContent) {
-    annotation = await annotateWithText(fileName, textContent, ext);
+    annotation = await annotateWithText(fileName, textContent, ext, signal);
   }
 
   if (!annotation) {
@@ -249,7 +249,7 @@ const TEXT_DESCRIPTION_PROMPT = `请为以下文件内容生成详细描述，�
 
 请描述文件的核心内容、关键信息和主要观点，200字以内。`;
 
-async function generateImageDescription(filePath, mimeType, fileName) {
+async function generateImageDescription(filePath, mimeType, fileName, signal) {
   const userId = currentUserId();
   if (!userId) return null;
   try {
@@ -259,7 +259,7 @@ async function generateImageDescription(filePath, mimeType, fileName) {
     if (!dataUrl) return null;
     return await requestCompletion(config, [{ role: 'user', content: [
       { type: 'text', text: VISION_DESCRIPTION_PROMPT }, { type: 'image_url', image_url: { url: dataUrl } }
-    ] }], { maxTokens: 500, timeout: 30000 });
+    ] }], { maxTokens: 500, timeout: 30000, signal });
   } catch (error) { safeLog('warn', '图片理解不可用', { fileName, error: error.message }); return null; }
 }
 
@@ -271,7 +271,7 @@ async function generateVideoDescription(fileName, fileSize) {
   return '视频附件：' + fileName + '（' + formatFileSize(fileSize) + '）。当前未解析视频帧或音轨，无法确认其内容。';
 }
 
-async function generateTextDescription(fileName, contentSnippet, ext) {
+async function generateTextDescription(fileName, contentSnippet, ext, signal) {
   const snippet = contentSnippet.substring(0, 1500);
   const fileType = getFileTypeLabel(ext);
   const prompt = TEXT_DESCRIPTION_PROMPT
@@ -282,12 +282,12 @@ async function generateTextDescription(fileName, contentSnippet, ext) {
   const content = await callFastAPI([
     { role: 'system', content: '你是一个文件内容分析助手。你的任务是为文件生成详细的内容描述，让AI能够理解文件内容。' },
     { role: 'user', content: prompt }
-  ], 300, 10000);
+  ], 300, 10000, signal);
 
   return content && content.trim().length > 0 ? content.trim() : null;
 }
 
-export async function generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent, imageDescription = undefined) {
+export async function generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent, imageDescription = undefined, signal = null) {
   const ext = path.extname(fileName).toLowerCase();
   const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.tiff', '.tif', '.ico', '.avif', '.heic', '.heif'].includes(ext);
   const isAudio = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.amr', '.opus'].includes(ext);
@@ -300,19 +300,19 @@ export async function generateMediaDescription(filePath, mimeType, fileName, fil
 
   if (isImage) {
     description = imageDescription === undefined
-      ? await generateImageDescription(filePath, mimeType, fileName) : imageDescription;
+      ? await generateImageDescription(filePath, mimeType, fileName, signal) : imageDescription;
   } else if (isAudio) {
     description = await generateAudioDescription(fileName, fileSize);
     if (!description && hasTextContent) {
-      description = await generateTextDescription(fileName, textContent, ext);
+      description = await generateTextDescription(fileName, textContent, ext, signal);
     }
   } else if (isVideo) {
     description = await generateVideoDescription(fileName, fileSize);
     if (!description && hasTextContent) {
-      description = await generateTextDescription(fileName, textContent, ext);
+      description = await generateTextDescription(fileName, textContent, ext, signal);
     }
   } else if (hasTextContent) {
-    description = await generateTextDescription(fileName, textContent, ext);
+    description = await generateTextDescription(fileName, textContent, ext, signal);
   }
 
   if (!description) {
@@ -332,7 +332,7 @@ export async function generateMediaDescription(filePath, mimeType, fileName, fil
   return description;
 }
 
-export async function annotateFile(filePath, mimeType, fileName, fileSize, parsedContent, imageDescription = undefined) {
+export async function annotateFile(filePath, mimeType, fileName, fileSize, parsedContent, imageDescription = undefined, signal = null) {
   const ext = path.extname(fileName).toLowerCase();
   const isImage = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.tiff', '.tif', '.ico', '.avif', '.heic', '.heif'].includes(ext);
   const isAudio = ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.amr', '.opus'].includes(ext);
@@ -345,20 +345,20 @@ export async function annotateFile(filePath, mimeType, fileName, fileSize, parse
 
   if (isImage) {
     annotation = imageDescription === undefined
-      ? await annotateWithVision(filePath, mimeType, fileName)
+      ? await annotateWithVision(filePath, mimeType, fileName, signal)
       : imageDescription ? { description: imageDescription, tags: [getFileTypeLabel(ext)], source: 'vision' } : null;
   } else if (isAudio) {
     annotation = await annotateWithMedia(fileName, fileSize, '音频');
     if (!annotation && hasTextContent) {
-      annotation = await annotateWithText(fileName, textContent, ext);
+      annotation = await annotateWithText(fileName, textContent, ext, signal);
     }
   } else if (isVideo) {
     annotation = await annotateWithMedia(fileName, fileSize, '视频');
     if (!annotation && hasTextContent) {
-      annotation = await annotateWithText(fileName, textContent, ext);
+      annotation = await annotateWithText(fileName, textContent, ext, signal);
     }
   } else if (hasTextContent) {
-    annotation = await annotateWithText(fileName, textContent, ext);
+    annotation = await annotateWithText(fileName, textContent, ext, signal);
   }
 
   if (!annotation) {
@@ -380,19 +380,19 @@ export async function annotateFile(filePath, mimeType, fileName, fileSize, parse
   return annotation;
 }
 
-export async function annotateAndDescribe(filePath, mimeType, fileName, fileSize, parsedContent) {
+export async function annotateAndDescribe(filePath, mimeType, fileName, fileSize, parsedContent, signal = null) {
   const ext = path.extname(fileName).toLowerCase();
   if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.tiff', '.tif', '.ico', '.avif', '.heic', '.heif'].includes(ext)) {
-    const imageDescription = await generateImageDescription(filePath, mimeType, fileName);
+    const imageDescription = await generateImageDescription(filePath, mimeType, fileName, signal);
     const [annotation, description] = await Promise.all([
-      annotateFile(filePath, mimeType, fileName, fileSize, parsedContent, imageDescription),
-      generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent, imageDescription)
+      annotateFile(filePath, mimeType, fileName, fileSize, parsedContent, imageDescription, signal),
+      generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent, imageDescription, signal)
     ]);
     return { annotation, description };
   }
   const [annotation, description] = await Promise.all([
-    annotateFile(filePath, mimeType, fileName, fileSize, parsedContent),
-    generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent)
+    annotateFile(filePath, mimeType, fileName, fileSize, parsedContent, undefined, signal),
+    generateMediaDescription(filePath, mimeType, fileName, fileSize, parsedContent, undefined, signal)
   ]);
   return { annotation, description };
 }

@@ -1,14 +1,14 @@
 // Isolated synthetic-account server for browser tests. Never uses a real user data directory.
-import { mkdtemp } from 'node:fs/promises';
+import { buildAgentFixtureEnvironment, startAgentChatFixture } from './agent-chat-fixture.mjs';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const data = await mkdtemp(join(tmpdir(), 'qunthink-e2e-'));
-Object.assign(process.env, {
-  NODE_ENV: 'test', AUTH_MODE: 'session', PORT: '3202',
-  DATA_DIR: data, AUTH_DB_PATH: join(data, 'auth.json'),
-  MEMORY_DELETION_DIR: join(data, 'memory-deletions'),
-  CORS_ORIGINS: 'http://127.0.0.1:3210', QUNTHINK_SHARED_PROVIDER_KEYS: '0',
-  QUNTHINK_GOAL_BRIEF_SCHEDULER: '0', AI_HEALTH_PROBES: '0',
-  MONGODB_URI: '', SUPABASE_DB_URL: '', QUNTHINK_FOUNDATIONS_RUNTIME_URL: '',
-});
+const emptyEnv = join(data, 'empty.env');
+await writeFile(emptyEnv, '');
+const isolated = buildAgentFixtureEnvironment(process.env, data, emptyEnv, randomBytes(32).toString('base64'));
+for (const key of Object.keys(process.env)) delete process.env[key];
+Object.assign(process.env, isolated);
+await startAgentChatFixture();
 await import('../../backend/src/index.js');

@@ -1,7 +1,7 @@
 import express from 'express';
 import { v4 as uuidv4 } from 'uuid';
 import { withWriteLock, readCommittedUserDb } from '../models/db.js';
-import { createAgent, buildBaseAgentPrompt, generateAgentQuestions, chatWithAgent, invokeAgentInGroup, generateSuggestions } from '../services/agent/index.js';
+import { createAgent, buildBaseAgentPrompt, generateAgentQuestions, chatWithAgent, invokeAgentInGroup, generateSuggestions, cancelAgentChats } from '../services/agent/index.js';
 import { resolveModel } from '../services/ai/catalog.js';
 import multer from 'multer';
 import path from 'path';
@@ -78,6 +78,12 @@ const upload = multer({
 });
 
 const router = express.Router();
+
+async function cleanupAgentUploads(files = []) {
+  for (const file of files) {
+    if (file?.path) await fs.promises.unlink(file.path).catch(() => {});
+  }
+}
 
 function requireUserId(req) {
   if (!req.userId) {
@@ -210,6 +216,7 @@ router.delete('/agents/:agentId', asyncHandler(async (req, res) => {
     db.data.agent_messages = (db.data.agent_messages || []).filter(m => m.agent_id !== agentId);
     await db.write();
   });
+  cancelAgentChats(userId, agentId);
   res.json({ success: deleted });
 }));
 
@@ -240,20 +247,24 @@ router.post('/agents/:agentId/chat', asyncHandler(async (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
+  const controller = new AbortController();
+  const onClose = () => { if (!res.writableEnded) controller.abort(); };
+  res.on('close', onClose);
+  if (res.destroyed) controller.abort();
   try {
     await chatWithAgent(userId, agentId, message, (chunk) => {
-      res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
-    }, attachments || []);
+      if (!res.destroyed) res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
+    }, attachments || [], controller.signal);
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (error) {
     console.error('[Agent对话路由] 错误:', error.message);
-    if (!res.writableEnded) {
+    if (!res.writableEnded && !res.destroyed) {
       res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
     }
-  }
+  } finally { res.off('close', onClose); }
 }));
 
 router.post('/agents/:agentId/chat-with-files', (req, res, next) => {
@@ -274,6 +285,7 @@ router.post('/agents/:agentId/chat-with-files', (req, res, next) => {
   const { agentId } = req.params;
   const message = typeof req.body.message === 'string' ? req.body.message : '';
   if (message.length > 8000) {
+    await cleanupAgentUploads(req.files);
     return res.status(400).json({ error: 'message 不能超过8000个字符' });
   }
 
@@ -290,28 +302,28 @@ router.post('/agents/:agentId/chat-with-files', (req, res, next) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
+  const controller = new AbortController();
+  const onClose = () => { if (!res.writableEnded) controller.abort(); };
+  res.on('close', onClose);
+  if (res.destroyed) controller.abort();
 
   try {
     await chatWithAgent(userId, agentId, message, (chunk) => {
-      res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
-    }, attachments);
+      if (!res.destroyed) res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
+    }, attachments, controller.signal);
 
     res.write('data: [DONE]\n\n');
     res.end();
   } catch (error) {
     console.error('[Agent对话-文件上传] 错误:', error.message);
-    if (!res.writableEnded) {
+    if (!res.writableEnded && !res.destroyed) {
       res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
     }
   } finally {
-    const files = req.files || [];
-    for (const file of files) {
-      if (file?.path) {
-        await fs.promises.unlink(file.path).catch(() => {});
-      }
-    }
+    res.off('close', onClose);
+    await cleanupAgentUploads(req.files);
   }
 }));
 

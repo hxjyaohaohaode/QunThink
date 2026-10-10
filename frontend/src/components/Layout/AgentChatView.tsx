@@ -116,6 +116,7 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
   const selectAgent = useAgentsStore((s) => s.selectAgent);
   const fetchAgentMessages = useAgentsStore((s) => s.fetchAgentMessages);
   const sendAgentMessage = useAgentsStore((s) => s.sendAgentMessage);
+  const stopAgentMessage = useAgentsStore((s) => s.stopAgentMessage);
   const fetchAgentSuggestions = useAgentsStore((s) => s.fetchAgentSuggestions);
   const agentMessages = useAgentsStore((s) =>
     s.agentMessages.get(agentId)
@@ -576,6 +577,11 @@ export function AgentChatView({ agentId, onBack }: AgentChatViewProps) {
             disabled={isSending || isAgentStreaming}
             className="flex-1 px-3.5 py-2.5 bg-bg-surface2 border border-border-subtle rounded-[10px] text-sm outline-none text-text-primary placeholder-text-muted focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:opacity-50 transition-all"
           />
+          {(isSending || isAgentStreaming) && <button
+            onClick={() => stopAgentMessage(agentId)}
+            className="px-3 py-2 rounded-lg bg-bg-surface2 text-sm text-text-secondary hover:bg-bg-surface3"
+            aria-label="停止生成"
+          >停止生成</button>}
           <button
             onClick={() => handleSend()}
             disabled={(!inputValue.trim() && attachedFiles.length === 0) || isSending || isAgentStreaming}

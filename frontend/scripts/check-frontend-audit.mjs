@@ -19,39 +19,34 @@ try {
   process.exit(2);
 }
 
-if (report.auditReportVersion !== 2 || !report.metadata?.vulnerabilities) {
-  console.error('The audit response is not a complete npm audit report; refusing to treat it as a pass.');
+const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const severities = ['info', 'low', 'moderate', 'high', 'critical'];
+const counts = report?.metadata?.vulnerabilities;
+const findings = report?.vulnerabilities;
+const invalidReport = () => {
+  console.error('The audit response is not a complete, consistent npm audit report; refusing to treat it as a pass.');
   process.exit(2);
+};
+
+if (!isRecord(report) || report.error || report.auditReportVersion !== 2 ||
+    !isRecord(counts) || !isRecord(findings)) invalidReport();
+
+for (const key of [...severities, 'total']) {
+  if (!Number.isSafeInteger(counts[key]) || counts[key] < 0) invalidReport();
 }
-
-// The app is a Vite SPA. React Router reports the RSC-only CSRF advisory on
-// the latest v7 line, but this app does not use RSC, SSR, framework mode,
-// loaders, or actions. Keep this exception exact and fail on anything else.
-const allowedPackage = new Set(['react-router', 'react-router-dom']);
-const allowedAdvisory = 'https://github.com/advisories/GHSA-qwww-vcr4-c8h2';
-const unexpected = [];
-
-for (const [name, vulnerability] of Object.entries(report.vulnerabilities)) {
-  if (!allowedPackage.has(name) || vulnerability.severity !== 'high') {
-    unexpected.push(`${name} (${vulnerability.severity})`);
-    continue;
-  }
-  for (const item of vulnerability.via ?? []) {
-    if (typeof item === 'string') {
-      if (item !== 'react-router') unexpected.push(`${name}: ${item}`);
-    } else if (item.url !== allowedAdvisory) {
-      unexpected.push(`${name}: ${item.url ?? item.title ?? 'unknown advisory'}`);
-    }
-  }
+const observed = Object.fromEntries(severities.map(severity => [severity, 0]));
+for (const [name, finding] of Object.entries(findings)) {
+  if (!isRecord(finding) || finding.name !== name || !severities.includes(finding.severity)) invalidReport();
+  observed[finding.severity]++;
 }
+if (severities.some(severity => counts[severity] !== observed[severity]) ||
+    counts.total !== Object.keys(findings).length) invalidReport();
 
-const counts = report.metadata.vulnerabilities;
-if (counts.critical > 0 || counts.moderate > 0 || counts.low > 0 || counts.info > 0 || unexpected.length > 0) {
-  console.error('Unexpected frontend dependency audit findings:');
-  console.error(JSON.stringify({ counts, unexpected }, null, 2));
+// Production dependencies currently have no reported advisories. Do not retain
+// historical package exceptions: a new finding must fail closed for review.
+if (counts.total > 0) {
+  console.error('Frontend production dependency vulnerabilities reported:');
+  console.error(JSON.stringify({ counts, packages: Object.keys(findings) }, null, 2));
   process.exit(1);
 }
-
-console.log(counts.total === 0
-  ? 'Frontend audit gate passed: no production dependency vulnerabilities reported.'
-  : 'Frontend audit gate passed: only the documented React Router RSC-only advisory remains.');
+console.log('Frontend audit gate passed: no production dependency vulnerabilities reported.');

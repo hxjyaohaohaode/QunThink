@@ -175,6 +175,9 @@ function trimAgentMessages(db, agentId, max = 200) {
 async function appendAgentMessage(userId, db, message) {
   await withWriteLock(userId, async () => {
     await db.read({ force: true });
+    if (!(db.data.agents || []).some(agent => agent.id === message.agent_id)) {
+      throw Object.assign(new Error('智能体已删除，回复未保存'), { status: 404 });
+    }
     const before = db.data.agent_messages;
     const releaseReaders = beginUserDbWriteBarrier(db);
     try {
@@ -189,14 +192,37 @@ async function appendAgentMessage(userId, db, message) {
   });
 }
 
-export async function chatWithAgent(userId, agentId, userMessage, onChunk, attachments = []) {
-  const db = await getUserDb(userId);
-  const releaseLease = db.holdCurrentLease();
-  try { return await chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, attachments); }
-  finally { releaseLease(); }
+// Cancellation is scoped by account AND agent, never by a client-provided stream ID.
+const activeChats = new Map();
+const chatKey = (userId, agentId) => JSON.stringify([userId, agentId]);
+export function cancelAgentChats(userId, agentId) {
+  for (const controller of activeChats.get(chatKey(userId, agentId)) || []) controller.abort();
 }
 
-async function chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, attachments) {
+export async function chatWithAgent(userId, agentId, userMessage, onChunk, attachments = [], signal = null) {
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  const key = chatKey(userId, agentId);
+  const controllers = activeChats.get(key) || new Set();
+  controllers.add(controller);
+  activeChats.set(key, controllers);
+  let releaseLease;
+  try {
+    controller.signal.throwIfAborted();
+    const db = await getUserDb(userId);
+    releaseLease = db.holdCurrentLease();
+    return await chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, attachments, controller.signal);
+  } finally {
+    releaseLease?.();
+    signal?.removeEventListener('abort', abort);
+    controllers.delete(controller);
+    if (!controllers.size && activeChats.get(key) === controllers) activeChats.delete(key);
+  }
+}
+
+async function chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, attachments, signal) {
   const agent = await readCommittedUserDb(db, data => data.agents.find(a => a.id === agentId));
   if (!agent) {
     throw new Error('智能体不存在');
@@ -209,6 +235,7 @@ async function chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, a
     messageContent += '\n\n【用户上传的附件】\n';
 
     for (const attachment of attachments) {
+      signal.throwIfAborted();
       try {
         const filePath = attachment.file_path || path.resolve(getUploadsDir(), attachment.filename || attachment.name);
         const mimeType = attachment.mime_type || attachment.type || 'application/octet-stream';
@@ -231,10 +258,11 @@ async function chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, a
         }
 
         const parsedContent = await parseFile(filePath, mimeType);
+        signal.throwIfAborted();
         const textContent = typeof parsedContent === 'string' ? parsedContent : '';
 
         const { annotation, description } = await annotateAndDescribe(
-          filePath, mimeType, fileName, fileSize, textContent
+          filePath, mimeType, fileName, fileSize, textContent, signal
         );
 
         const ext = path.extname(fileName).toLowerCase();
@@ -288,7 +316,9 @@ async function chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, a
     created_at: new Date().toISOString()
   };
 
+  signal.throwIfAborted();
   await appendAgentMessage(userId, db, userMsg);
+  signal.throwIfAborted();
 
   const recentAgentMessages = await readCommittedUserDb(db, data =>
     data.agent_messages.filter(m => m.agent_id === agentId).slice(-30));
@@ -328,7 +358,7 @@ async function chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, a
         'free_chat',
         null, [], null, null, false, [],
         intentSystemPrompt,
-        [], null, null, userId
+        [], null, null, userId, null, null, signal
       );
 
       if (intentResult && intentResult.trim()) {
@@ -339,6 +369,7 @@ async function chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, a
     }
   }
 
+  signal.throwIfAborted();
   const finalMessage = intentContext ? `${messageContent}${intentContext}` : messageContent;
 
   let emittedContent = '';
@@ -355,14 +386,19 @@ async function chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, a
     'free_chat',
     null, [], null, null, false, [],
     enhancedSystemPrompt,
-    [], emitChunk, null, userId
+    [], emitChunk, null, userId, null, async () => !signal.aborted &&
+      await readCommittedUserDb(db, data => (data.agents || []).some(entry => entry.id === agentId)), signal
   );
+
+  // A stop before the first token is not an empty successful assistant reply.
+  if (signal.aborted && !response) return { content: '', cancelled: true };
 
   const agentMsg = {
     id: uuidv4(),
     agent_id: agentId,
     sender_type: 'agent',
     content: response,
+    ...(signal.aborted ? { response_state: 'incomplete', response_error: '生成已停止' } : {}),
     created_at: new Date().toISOString()
   };
 
@@ -374,7 +410,7 @@ async function chatWithAgentOnLease(userId, db, agentId, userMessage, onChunk, a
     const savedTail = response.slice(emittedContent.length);
     if (savedTail) emitChunk(savedTail);
   }
-  return { content: response };
+  return { content: response, cancelled: signal.aborted };
 }
 
 function buildAgentSystemPrompt(agent) {

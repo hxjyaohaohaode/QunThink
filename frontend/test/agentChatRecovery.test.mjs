@@ -22,3 +22,46 @@ test('newer history read wins over an older response',async()=>{const reads=[];f
 test('cleared conversation state cannot be repopulated by an old response',async()=>{let finish;fixture.send=()=>new Promise(resolve=>{finish=resolve;});const send=store.getState().sendAgentMessage('agent-a','旧原文');store.setState({agentMessages:new Map(),currentAgent:null});finish(stream(['data: {"content":"Old private result"}\n\ndata: [DONE]\n\n']));await assert.rejects(send,/会话已改变/);assert.equal(store.getState().agentMessages.size,0);});
 test('network read interruption preserves received content without implicit resend',async()=>{let controller;fixture.send=async()=>new Response(new ReadableStream({start(c){controller=c;c.enqueue(new TextEncoder().encode('data: {"content":"保留部分"}\n\n'));}}),{status:200});const send=store.getState().sendAgentMessage('agent-a','原文');for(let i=0;i<10&&msgs()[1]?.content!=='保留部分';i++)await new Promise(setImmediate);assert.equal(msgs()[1].content,'保留部分');controller.error(new Error('synthetic read interruption'));await assert.rejects(send,/synthetic read interruption/);assert.equal(msgs()[1].response_state,'incomplete');assert.equal(msgs()[1].content,'保留部分');assert.equal(fixture.sends.length,1);});
 test('existing OGG attachment classification remains audio',async()=>{const file=new File(['synthetic audio bytes'],'fixture.ogg',{type:'audio/ogg'});await store.getState().sendAgentMessage('agent-a','附件说明',[file]);assert.equal(msgs()[0].attachments[0].type,'audio');assert.equal(fixture.sends[0][2][0],file);});
+
+test('explicit stop aborts only the selected agent and keeps partial output without automatic retry', async () => {
+  const signals = new Map();
+  fixture.send = async (id, message, signal) => {
+    signals.set(id, signal);
+    return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"content":"保留已生成片段"}\n\n'));
+      signal.addEventListener('abort', () => controller.error(new DOMException('Aborted', 'AbortError')), { once: true });
+    } }));
+  };
+  const first = store.getState().sendAgentMessage('agent-a', '原文');
+  const second = store.getState().sendAgentMessage('agent-b', '另一智能体');
+  for (let i = 0; i < 10 && msgs()[1]?.content !== '保留已生成片段'; i++) await new Promise(setImmediate);
+  store.getState().stopAgentMessage('agent-a');
+  store.getState().stopAgentMessage('agent-a');
+  await first;
+  assert.equal(signals.get('agent-a').aborted, true);
+  assert.equal(signals.get('agent-b').aborted, false);
+  assert.equal(msgs()[1].content, '保留已生成片段');
+  assert.equal(msgs()[1].response_state, 'incomplete');
+  assert.equal(msgs()[1].is_streaming, false);
+  assert.match(msgs()[1].response_error, /停止接收.*核对/);
+  assert.equal(fixture.sends.length, 2);
+  store.getState().stopAgentMessage('agent-b'); await second;
+  fixture.send = async () => stream(['data: {"content":"新回复"}\n\ndata: [DONE]\n\n']);
+  await store.getState().sendAgentMessage('agent-a', '新指令');
+  assert.equal(msgs().at(-1).content, '新回复'); assert.equal(fixture.sends.length, 3);
+});
+test('stop before headers settles without restoring or resending an already submitted input', async () => {
+  fixture.send = (id, message, signal) => new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true }));
+  const pending = store.getState().sendAgentMessage('agent-a', '已提交原文');
+  store.getState().stopAgentMessage('agent-a'); await pending;
+  assert.equal(msgs()[0].content, '已提交原文'); assert.equal(msgs()[1].is_streaming, false);
+  assert.equal(msgs()[1].response_state, 'incomplete'); assert.equal(fixture.sends.length, 1);
+});
+
+test('stop wins against an already buffered response before its promise continuation', async () => {
+  const pending = store.getState().sendAgentMessage('agent-a', '原文');
+  store.getState().stopAgentMessage('agent-a'); await pending;
+  assert.equal(msgs()[1].content, ''); assert.equal(msgs()[1].is_streaming, false);
+  assert.equal(msgs()[1].response_state, 'incomplete'); assert.equal(fixture.reads, 0);
+  assert.match(msgs()[1].response_error, /停止接收/); assert.equal(fixture.sends.length, 1);
+});

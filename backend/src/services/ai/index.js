@@ -765,8 +765,11 @@ export function buildSystemPrompt(persona, recentMessages = [], userProfile = nu
 const activeStreams = new Map();
 export function cancelStream(streamId) { activeStreams.get(streamId)?.abort(); }
 
-export async function callAIStream(aiId, persona, userMessage, recentMessages, responseType, userProfile = null, replyToMessages = [], feedbackInfo = null, groupMembers = null, isPrivateChat = false, privateChatHistory = [], customPrompt = null, groupOperations = [], onChunk = null, streamId = null, userId = null, userAgents = null, beforeDispatch = null) {
+export async function callAIStream(aiId, persona, userMessage, recentMessages, responseType, userProfile = null, replyToMessages = [], feedbackInfo = null, groupMembers = null, isPrivateChat = false, privateChatHistory = [], customPrompt = null, groupOperations = [], onChunk = null, streamId = null, userId = null, userAgents = null, beforeDispatch = null, signal = null) {
   const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) abort();
+  signal?.addEventListener('abort', abort, { once: true });
   if (streamId) activeStreams.set(streamId, controller);
   try {
     const custom = userId ? await getUserCustomPersona(userId, aiId) : null;
@@ -787,7 +790,10 @@ export async function callAIStream(aiId, persona, userMessage, recentMessages, r
     if (error.partialContent?.trim()) return error.partialContent + (controller.signal.aborted ? '\n\n[生成已停止]' : '\n\n[连接中断，回复未完成]');
     if (controller.signal.aborted) return '';
     throw Object.assign(new Error(describeProviderError(error)), { status: error.status || 502, cause: error });
-  } finally { if (streamId && activeStreams.get(streamId) === controller) activeStreams.delete(streamId); }
+  } finally {
+    signal?.removeEventListener('abort', abort);
+    if (streamId && activeStreams.get(streamId) === controller) activeStreams.delete(streamId);
+  }
 }
 
 export { aiHealthStatus, checkAIHealth, checkAllAIHealth, checkResponseRelevance, normalizeResponse, applyMessageLengthLimit };

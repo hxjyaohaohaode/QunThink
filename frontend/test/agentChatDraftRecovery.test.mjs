@@ -36,3 +36,14 @@ test('unmounted sender cannot restore a draft or notice',async()=>{let reject;st
 test('partial failed reply renders preserved body and explicit incomplete label',async()=>{state.store.agentMessages.set('a',[{id:'partial',agent_id:'a',sender_type:'agent',content:'已收到片段',response_state:'incomplete',response_error:'连接中断',created_at:'2026-10-08T00:00:01Z'}]);mounted=await render(container);assert.ok(container.textContent.includes('已收到片段'));assert.match(container.querySelector('[role="status"]').textContent,/回复未完成.*连接中断/);});
 test('changing to a missing agent renders a bounded empty state without hook-order failure',async()=>{mounted=await render(container);state.store.currentAgent=null;state.store.agents=[];mounted=await render(container,'missing',mounted);assert.ok(container.textContent.includes('该智能体不存在或已被删除'));});
 test('same-view newer composer revision is not overwritten by an old failure',async()=>{let reject;state.send=()=>new Promise((_,no)=>reject=no);mounted=await render(container);await type('原来的输入');await sendTwice();await type('较新的输入版本');await act(async()=>reject(new Error('old failure')));assert.equal(input().value,'较新的输入版本');assert.equal(container.querySelector('[role="alert"]'),null);assert.equal(state.sends.length,1);});
+
+test('active reply exposes a stop control and does not restore the sent composer on deliberate stop', async () => {
+  let finish; state.send = () => new Promise(resolve => { finish = resolve; });
+  const stops = []; state.store.stopAgentMessage = id => { stops.push(id); finish(); };
+  mounted = await render(container); await type('已提交指令'); await sendTwice();
+  const stop = container.querySelector('button[aria-label="停止生成"]'); assert.ok(stop);
+  await act(async () => stop.click());
+  assert.deepEqual(stops, ['a']); assert.equal(input().value, ''); assert.equal(input().disabled, false);
+  assert.equal(container.querySelector('[role="alert"]'), null); assert.equal(state.sends.length, 1);
+  assert.equal(container.querySelector('button[aria-label="停止生成"]'), null);
+});

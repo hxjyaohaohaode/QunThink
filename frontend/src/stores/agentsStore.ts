@@ -28,12 +28,13 @@ interface AgentsState {
   deleteAgent: (agentId: string) => Promise<void>;
   fetchAgentMessages: (agentId: string) => Promise<void>;
   sendAgentMessage: (agentId: string, message: string, files?: File[]) => Promise<void>;
+  stopAgentMessage: (agentId: string) => void;
   generateQuestions: (data: { name: string; description: string; openingMessage: string }) => Promise<AgentQuestion[]>;
   fetchAgentSuggestions: (agentId: string, context?: string) => Promise<string[]>;
 }
 
 // 按 agentId 存储活跃的 AbortController，确保新消息发送时中断旧流
-const activeStreamControllers = new Map<string, { controller: AbortController; messageId: string }>();
+const activeStreamControllers = new Map<string, { controller: AbortController; messageId: string; stopped?: boolean }>();
 const messageReadVersions = new Map<string, number>();
 
 export const useAgentsStore = create<AgentsState>((set, get) => ({
@@ -108,6 +109,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
   deleteAgent: async (agentId: string) => {
     try {
       await api.deleteAgent(agentId);
+      activeStreamControllers.get(agentId)?.controller.abort();
       set(state => {
         const newAgentMessages = new Map(state.agentMessages);
         newAgentMessages.delete(agentId);
@@ -186,12 +188,15 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       const response = files?.length
         ? await api.sendAgentMessageWithFiles(agentId, message, files, controller.signal)
         : await api.sendAgentMessage(agentId, message, controller.signal);
+      controller.signal.throwIfAborted();
       if (!current()) throw new Error('回复所属会话已改变');
       const content = await readAgentStream(response, value => {
+        controller.signal.throwIfAborted();
         if (!current()) throw new Error('回复所属会话已改变');
         partial = value;
         updateReply({ content: value });
       });
+      controller.signal.throwIfAborted();
       if (!current()) throw new Error('回复所属会话已改变');
       updateReply({ content, is_streaming: false });
       const snapshot = get().agentMessages.get(agentId);
@@ -205,13 +210,21 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
         }
       } catch { /* Keep the displayed reply if authoritative history is temporarily unavailable. */ }
     } catch (error) {
-      const reason = error instanceof Error ? error.message : '回复未完成';
-      updateReply({ content: partial, is_streaming: false, response_state: partial ? 'incomplete' : 'failed', response_error: reason }, reason);
-      throw error;
+      const stopped = activeStreamControllers.get(agentId)?.controller === controller && activeStreamControllers.get(agentId)?.stopped;
+      const reason = stopped ? '已停止接收回复；已保存内容请刷新会话核对' : error instanceof Error ? error.message : '回复未完成';
+      updateReply({ content: partial, is_streaming: false, response_state: stopped || partial ? 'incomplete' : 'failed', response_error: reason }, reason);
+      if (!stopped) throw error;
     } finally {
       controller.abort();
       if (activeStreamControllers.get(agentId)?.controller === controller) activeStreamControllers.delete(agentId);
     }
+  },
+
+  stopAgentMessage: (agentId: string) => {
+    const active = activeStreamControllers.get(agentId);
+    if (!active) return;
+    active.stopped = true;
+    active.controller.abort();
   },
 
   generateQuestions: async (data) => {
