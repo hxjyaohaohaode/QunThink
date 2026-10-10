@@ -19,7 +19,7 @@ async function openWorkspace(page: Page, context: BrowserContext) {
 }
 
 test('brand login entry remains visible before authentication', async ({ page }, info) => {
-  await navigateWithSessionTokenRecovery(page, timeout => page.goto('/', { timeout }));
+  await navigateWithSessionTokenRecovery(page, timeout => page.goto('/', { timeout }), page.getByPlaceholder('请输入手机号'));
   await expect(page.getByText('群想', { exact: true }).first()).toBeVisible();
   await expect(page.getByPlaceholder('请输入手机号')).toBeVisible();
   await page.screenshot({ path: info.outputPath('brand-login.png'), fullPage: true, animations: 'disabled' });
@@ -43,6 +43,24 @@ test('fresh accounts have no platform AI and model setup remains an explicit cho
   await expect(models.getByLabel('服务商名称', { exact: true })).toHaveCount(0);
   await expect(models.getByRole('button', { name: '保存并应用', exact: true })).toBeDisabled();
   await expect(models).toBeVisible();
+  const modelTab = workspace.getByRole('button', { name: '模型中心', exact: true });
+  await expect(modelTab).toHaveAttribute('aria-current', 'page');
+  let previousIndicator: { left: number; width: number; aligned: boolean } | undefined;
+  await expect.poll(async () => {
+    const observed = await modelTab.evaluate(tab => {
+      const indicator = tab.querySelector('.workspace-tab-indicator');
+      if (!indicator) return { left: 0, width: 0, aligned: false };
+      const outer = tab.getBoundingClientRect(), inner = indicator.getBoundingClientRect();
+      const aligned = tab.getAttribute('aria-current') === 'page' && inner.width > 0 && inner.height > 0 &&
+        inner.left >= outer.left && inner.right <= outer.right && inner.top >= outer.top && inner.bottom <= outer.bottom + 0.5 &&
+        Math.abs((inner.left + inner.right - outer.left - outer.right) / 2) <= 0.5;
+      return { left: inner.left, width: inner.width, aligned };
+    });
+    const settled = observed.aligned && previousIndicator?.aligned === true &&
+      Math.abs(observed.left - previousIndicator.left) <= 0.25 && Math.abs(observed.width - previousIndicator.width) <= 0.25;
+    previousIndicator = observed;
+    return settled;
+  }, { message: 'The real active Model Center underline must settle inside its own tab before the evidence screenshot' }).toBe(true);
   await page.screenshot({ path: info.outputPath('byok-empty-model-center.png'), fullPage: true, animations: 'disabled' });
   await navigateWithSessionTokenRecovery(page, timeout => page.reload({ timeout }));
   await expect(page.getByTestId('workspace')).toBeVisible();
@@ -103,7 +121,7 @@ test('expired cached account can explicitly log into a different account without
   const bob = await register(context, phone);
   await context.clearCookies();
   await page.addInitScript(userId => localStorage.setItem('app_current_user_id', userId), alice.id);
-  await navigateWithSessionTokenRecovery(page, timeout => page.goto('/', { timeout }));
+  await navigateWithSessionTokenRecovery(page, timeout => page.goto('/', { timeout }), page.getByPlaceholder('请输入手机号'));
   await expect(page.getByPlaceholder('请输入手机号')).toBeVisible();
   await page.getByPlaceholder('请输入手机号').fill(phone);
   await page.getByPlaceholder('请输入密码', {exact:true}).fill('Synthetic-Browser-Only-2026');

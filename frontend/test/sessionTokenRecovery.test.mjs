@@ -131,7 +131,7 @@ test('workspace integrates only bounded real token observation and real retry cl
   const workspace = await readFile(new URL('../e2e/workspace.spec.ts', import.meta.url), 'utf8');
   assert.match(native, /const deadline = Date\.now\(\) \+ info\.timeout/);
   assert.match(native, /remainingBudgetMs: \(\) => deadline - Date\.now\(\)/);
-  assert.match(native, /page\.waitForResponse\(response => isSessionTokenResponse\(response, page\.url\(\)\)/);
+  assert.match(native, /observeSessionTokenAttempt\(\{ page, origin: \(\) => page\.url\(\), action, timeout \}\)/);
   assert.match(native, /retry\.click\(\{ timeout \}\)/);
   assert.doesNotMatch(native, /setTimeout|setDefaultTimeout|page\.reload|page\.goto|waitForAuthenticatedDestination|route\(/);
   assert.match(workspace, /test\.beforeEach.*beginSessionTokenRecovery\(page, info\)/);
