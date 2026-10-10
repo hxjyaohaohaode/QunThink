@@ -2,7 +2,7 @@ services:
   - type: web
     name: ai-chat-group-backend
     autoDeployTrigger: checksPass
-    env: node
+    runtime: node
     region: singapore
     plan: starter
     buildCommand: cd backend && npm ci --omit=dev
@@ -36,10 +36,10 @@ services:
       mountPath: /var/data
       sizeGB: 1
 
-  - type: static
+  - type: web
+    runtime: static
     name: ai-chat-group-frontend
     autoDeployTrigger: checksPass
-    region: singapore
     buildCommand: cd frontend && npm ci && npm run build
     staticPublishPath: ./frontend/dist
     envVars:

@@ -1,0 +1,126 @@
+{
+  "$id": "https://render.com/schema/render.yaml.json",
+  "sourceSha256": "8a3fb8da6b4f55fe686fbefa790e011d3dd7895f013f355953c572a21ab6494a",
+  "retrievedAt": "2026-10-10",
+  "scope": "Selected official service-shape fields only; full-schema validation is separate",
+  "definitions": {
+    "staticService": {
+      "required": [
+        "type",
+        "name",
+        "runtime"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "web"
+        },
+        "name": {},
+        "runtime": {
+          "const": "static"
+        },
+        "buildCommand": {},
+        "staticPublishPath": {},
+        "previews": {},
+        "pullRequestPreviewsEnabled": {},
+        "buildFilter": {},
+        "headers": {},
+        "routes": {},
+        "envVars": {},
+        "rootDir": {},
+        "repo": {},
+        "branch": {},
+        "domain": {},
+        "domains": {},
+        "autoDeploy": {},
+        "autoDeployTrigger": {},
+        "preDeployCommand": {},
+        "ipAllowList": {},
+        "renderSubdomainPolicy": {}
+      }
+    },
+    "serverService": {
+      "required": [
+        "type",
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {},
+        "name": {},
+        "region": {},
+        "plan": {},
+        "runtime": {},
+        "buildSource": {},
+        "repo": {},
+        "branch": {},
+        "image": {},
+        "rootDir": {},
+        "dockerCommand": {},
+        "dockerContext": {},
+        "dockerfilePath": {},
+        "numInstances": {},
+        "healthCheckPath": {},
+        "scaling": {},
+        "buildCommand": {},
+        "startCommand": {},
+        "preDeployCommand": {},
+        "registryCredential": {},
+        "domain": {},
+        "domains": {},
+        "envVars": {},
+        "autoDeploy": {},
+        "autoDeployTrigger": {},
+        "initialDeployHook": {},
+        "disk": {},
+        "buildFilter": {},
+        "previews": {},
+        "pullRequestPreviewsEnabled": {},
+        "previewPlan": {},
+        "maintenanceMode": {},
+        "maxShutdownDelaySeconds": {},
+        "ipAllowList": {},
+        "renderSubdomainPolicy": {}
+      },
+      "allOf": [
+        {
+          "if": {
+            "not": {
+              "required": [
+                "buildSource"
+              ]
+            }
+          },
+          "then": {
+            "required": [
+              "runtime"
+            ]
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "buildSource"
+            ]
+          },
+          "then": {
+            "properties": {
+              "runtime": false,
+              "repo": false,
+              "branch": false,
+              "image": false,
+              "registryCredential": false,
+              "buildCommand": false,
+              "buildFilter": false,
+              "dockerContext": false,
+              "dockerfilePath": false,
+              "previews": false,
+              "pullRequestPreviewsEnabled": false,
+              "previewPlan": false
+            }
+          }
+        }
+      ]
+    }
+  }
+}

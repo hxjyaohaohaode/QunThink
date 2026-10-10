@@ -462,5 +462,51 @@
     },
     "new_exact_hosted_ci": "pending; 新精确提交与整树由外部冻结回执绑定，不自引用此文档。",
     "production_deployment": "未执行生产部署；原失败与旧通过均保留各自精确身份。"
+  },
+  "deployment_config_update": {
+    "recorded_at_utc": "2026-10-10T03:05:56.045392+00:00",
+    "scope": "仅6项部署配置、离线诊断、契约测试及说明增量；生产208文件、64,370行、production_snapshot与源码摘录顺序不变。完整工程451增至455文件。",
+    "changed_paths": [
+      "render.yaml",
+      "docker-compose.yml",
+      "backend/scripts/deployment-preflight.mjs",
+      "backend/test/deployment-config-contract.test.js",
+      "backend/test/fixtures/render.schema.json",
+      "docs/deployment-config-audit-2026-10-10.md"
+    ],
+    "render_blueprint": "后端改为runtime: node；静态前端采用type: web及runtime: static并去掉静态前端region。原计划、后端地域、磁盘及部署触发保持。",
+    "compose_build": "前端context改为仓库根目录，Dockerfile为frontend/Dockerfile，使其可访问frontend与shared路径。",
+    "offline_preflight": "新增仅本地读取配置的手工诊断，Render/Compose合同通过；Vercel未核后端占位明确拒绝，不访问供应商、不读取.env，也未冒称已经接入发布门禁。",
+    "local_validation": {
+      "node_major": 22,
+      "real_postgresql_major": 16,
+      "backend_tests_passed": 435,
+      "backend_test_files_passed": 59,
+      "backend_test_files_total": 59,
+      "backend_tests_failed": 0,
+      "backend_tests_skipped": 0,
+      "backend_log_sha256": "b7a4d44aaf6aee47eb99f9647143982fd95219b40eb065278d215d9931eb160f",
+      "postgres_fixture": "stopped; temporary data removed",
+      "frontend": "本次六项无前端改动；577项及构建结果属于下列1e04精确CI及此前本地记录，不冒称此轮重跑。",
+      "new_contract_tests": 18,
+      "docker_execution": "当前环境未运行Docker；配置合同与旧镜像构建不能代替本次Compose实际运行。"
+    },
+    "historical_verified_main_before_config_delta": {
+      "commit": "1e04efc05a53a32821753899bcf137a5ffe17c95",
+      "tree": "ed99f6f60d8e69e42dc7aa8cc45831cff5d2267d",
+      "ci_run_id": 38018597939,
+      "jobs_success": 8,
+      "jobs_total": 8,
+      "native_passed": 58,
+      "native_total": 58,
+      "docker_builds_passed": 2,
+      "render_run_id": 38019165333,
+      "render_job_id": 114116090108,
+      "render_marker_executed_at_utc": "2026-10-10T03:02:47Z",
+      "render_result": "实际执行提交标记检查后跳过部署，正确checkout已核；不是生产发布成功。"
+    },
+    "new_exact_hosted_ci": "待包含本次配置和文档增量的新精确提交运行；不把1e04通过继承为新候选通过。",
+    "production_deployment": "本次未向供应商应用配置、触发发布或重启。生产HTTPS、持久化、凭据及备份恢复仍须独立验收。",
+    "identity_rule": "新完整Git提交与内容树由外部冻结回执绑定，本文件不自引用新SHA。"
   }
 }

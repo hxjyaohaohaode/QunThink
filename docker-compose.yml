@@ -36,8 +36,8 @@ services:
 
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: frontend/Dockerfile
     container_name: ai-chat-frontend
     restart: unless-stopped
     ports:
