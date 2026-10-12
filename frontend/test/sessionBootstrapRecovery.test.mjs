@@ -154,3 +154,97 @@ test('all metadata pages in the same test retain its first deadline, including r
     assert.equal(called, 0); for (const page of [first, second]) for (const event of events) assert.equal(page.listenerCount(event), 0);
   } finally { Date.now = originalNow; }
 });
+
+async function bootstrapAdapter() {
+  const { build } = await import('esbuild');
+  const result = await build({ entryPoints: [new URL('../e2e/sessionBootstrapRecovery.ts', import.meta.url).pathname], bundle: true, write: false, format: 'esm', platform: 'node', plugins: [{ name: 'playwright-epoch-fixture', setup(b) {
+    b.onResolve({ filter: /^@playwright\/test$/ }, () => ({ path: 'playwright', namespace: 'epoch' }));
+    b.onLoad({ filter: /.*/, namespace: 'epoch' }, () => ({ contents: `
+      export function expect(locator) { return { toBeVisible: async () => { if (!await locator.isVisible()) throw new Error('UI not visible'); } }; }
+      expect.poll = read => ({ not: { toBe: async expected => { if (await read() === expected) throw new Error('bootstrap state still waiting'); } } });
+    `, loader: 'js' }));
+  } }] });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}#epochs`);
+}
+function epochPage() {
+  class Page extends EventEmitter {
+    destination = false; clicks = 0; navigations = []; retryStatus = 200;
+    url() { return origin + '/'; }
+    emitResponse(status, path = '/api/auth/token') {
+      const req = request(path), r = response(status, req, '0'); this.emit('request', req); this.emit('response', r); this.emit('requestfinished', req); return r;
+    }
+    getByRole() { return { isVisible: async () => !this.destination, click: async () => { this.clicks++; this.emitResponse(this.retryStatus); if (this.retryStatus === 200) { this.emitResponse(200, '/api/auth/me'); this.destination = true; } } }; }
+    getByTestId() { return { isVisible: async () => this.destination }; }
+    async screenshot() {}
+    async goto() { this.navigations.push('goto'); this.destination = false; this.emitResponse(200); this.emitResponse(429, '/api/auth/me'); }
+    async reload() { this.navigations.push('reload'); this.destination = false; this.emitResponse(429); }
+  }
+  const page = new Page(), attached = [];
+  const info = { timeout: 20000, attach: async (name, value) => attached.push(JSON.parse(value.body)), outputPath: name => name };
+  const clean = () => { for (const name of events) assert.equal(page.listenerCount(name), 0, name); };
+  return { page, info, attached, clean };
+}
+test('real adapter assigns a new recovery epoch only after completed goto then explicit reload', async () => {
+  const { beginSessionBootstrapRecovery: begin, navigateWithSessionBootstrapRecovery: navigate } = await bootstrapAdapter(); const s = epochPage(); begin(s.page, s.info);
+  await navigate(s.page, () => s.page.goto()); assert.equal(s.page.clicks, 1); assert.equal(s.page.destination, true);
+  // Repeated begin must not change the shared deadline or the current recovery identity.
+  begin(s.page, s.info); await navigate(s.page, () => s.page.reload());
+  assert.equal(s.page.clicks, 2); assert.deepEqual(s.page.navigations, ['goto', 'reload']);
+  assert.deepEqual(s.attached.map(a => a.path), ['/api/auth/me', '/api/auth/token']);
+  assert.ok(s.attached[1].remainingBudgetMs < s.attached[0].remainingBudgetMs); s.clean();
+});
+
+test('a second 429 within one epoch is terminal and re-navigation cannot mint another retry', async () => {
+  const { beginSessionBootstrapRecovery: begin, navigateWithSessionBootstrapRecovery: navigate } = await bootstrapAdapter(); const s = epochPage(); s.page.retryStatus = 429; begin(s.page, s.info);
+  await assert.rejects(navigate(s.page, () => s.page.goto()), /token failed; no further retry/);
+  begin(s.page, s.info); await assert.rejects(navigate(s.page, () => s.page.reload()), /prior bootstrap navigation failed/);
+  assert.equal(s.page.clicks, 1); assert.deepEqual(s.page.navigations, ['goto']); s.clean();
+});
+for (const failure of ['401', 'network-unknown']) test(`a current ${failure} cannot authorize clicks or reset a failed epoch`, async () => {
+  const { beginSessionBootstrapRecovery: begin, navigateWithSessionBootstrapRecovery: navigate } = await bootstrapAdapter(); const s = epochPage(); begin(s.page, s.info);
+  await assert.rejects(navigate(s.page, async () => {
+    s.page.emitResponse(200);
+    if (failure === '401') s.page.emitResponse(401, '/api/auth/me');
+    else { const r = request('/api/auth/me'); s.page.emit('request', r); s.page.emit('requestfailed', r); }
+  }), /lacks a current bootstrap 429|request failed; no blind retry/);
+  begin(s.page, s.info); await assert.rejects(navigate(s.page, () => s.page.reload()), /prior bootstrap navigation failed/);
+  assert.equal(s.page.clicks, 0); assert.deepEqual(s.page.navigations, []); s.clean();
+});
+test('late 429 from a completed previous epoch cannot authorize the new epoch recovery', async () => {
+  const { beginSessionBootstrapRecovery: begin, navigateWithSessionBootstrapRecovery: navigate } = await bootstrapAdapter(); const s = epochPage(); begin(s.page, s.info); const old = request('/api/auth/me');
+  await navigate(s.page, async () => { s.page.emitResponse(200); s.page.emit('request', old); s.page.emitResponse(200, '/api/auth/me'); s.page.destination = true; });
+  await assert.rejects(navigate(s.page, async () => { s.page.destination = false; s.page.emitResponse(200); s.page.emit('response', response(429, old)); s.page.emit('requestfinished', old); }), /bootstrap state still waiting/);
+  assert.equal(s.page.clicks, 0); s.clean();
+});
+test('a successful epoch never extends the original test deadline for reload or repeated begin', async () => {
+  const { beginSessionBootstrapRecovery: begin, navigateWithSessionBootstrapRecovery: navigate } = await bootstrapAdapter(); const s = epochPage(); const originalNow = Date.now; let clock = 1000, reloads = 0; Date.now = () => clock;
+  try {
+    begin(s.page, s.info);
+    await navigate(s.page, async () => { s.page.emitResponse(200); s.page.emitResponse(200, '/api/auth/me'); s.page.destination = true; });
+    clock = 17000; begin(s.page, s.info);
+    await assert.rejects(navigate(s.page, async () => { reloads++; await s.page.reload(); }), /original test budget/);
+    assert.equal(reloads, 0); assert.equal(s.page.clicks, 0); s.clean();
+  } finally { Date.now = originalNow; }
+});
+test('failed action, visible-state check or final UI check permanently closes its navigator epoch', async () => {
+  for (const at of ['action', 'state', 'destination']) {
+    const s = setup(); let factories = 0;
+    const navigate = createScopedBootstrapNavigator({ page: s.page, origin: () => origin, createRecovery: () => { factories++; return async () => { s.emit(200); s.emit(200, '/api/auth/me'); }; } });
+    let phase = 0;
+    const args = { action: async () => { if (at === 'action') throw new Error('action failed'); s.emit(429); }, waitForState: async o => { if (at === 'state') throw new Error('state failed'); return o.classify({ destination: phase++ > 0, recovery: phase === 1 }); }, waitForDestination: async () => { throw new Error('destination failed'); } };
+    await assert.rejects(navigate(args), /failed/); await assert.rejects(navigate(args), /prior bootstrap navigation failed/);
+    assert.equal(factories, 1); s.clean();
+  }
+});
+
+test('separate pages in one test preserve both epoch screenshots and JSON identities', async () => {
+  const { beginSessionBootstrapRecovery: begin, navigateWithSessionBootstrapRecovery: navigate } = await bootstrapAdapter();
+  const a = epochPage(), b = epochPage(), shots = [], names = [];
+  a.info.attach = async (name, value) => { names.push(name); a.attached.push(JSON.parse(value.body)); };
+  a.page.screenshot = b.page.screenshot = async ({ path }) => { shots.push(path); };
+  begin(a.page, a.info); begin(b.page, a.info);
+  await navigate(a.page, () => a.page.goto()); await navigate(b.page, () => b.page.goto());
+  assert.equal(new Set(shots).size, 2); assert.equal(new Set(names).size, 2);
+  assert.deepEqual(a.attached.map(value => value.navigationEpoch), [1, 2]);
+  assert.equal(a.page.clicks, 1); assert.equal(b.page.clicks, 1); a.clean(); b.clean();
+});

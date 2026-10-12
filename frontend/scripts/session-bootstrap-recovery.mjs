@@ -15,7 +15,7 @@ export function createSessionBootstrapRecovery({ origin, remainingBudgetMs, onRa
     if (!isSessionTokenResponse(response, origin()) && !isSessionUserResponse(response, origin())) throw new Error('Bootstrap recovery requires the real same-origin GET token or me response');
     if (response.status() !== 429) throw new Error('Only an observed bootstrap 429 authorizes recovery');
     if (recovered) throw new Error('A second bootstrap 429 requires triage; no further retry');
-    recovered = true; // Reserve before the first await, shared across this page's reloads.
+    recovered = true; // Reserve before the first await, once per explicit navigation epoch.
     let first = true;
     const result = await submitAuthWithSingleRateLimitRetry(async () => {
       assertCurrent();
@@ -30,11 +30,13 @@ export function createSessionBootstrapRecovery({ origin, remainingBudgetMs, onRa
   };
 }
 
-export function createScopedBootstrapNavigator({ page, origin, recover }) {
-  let active = false;
+export function createScopedBootstrapNavigator({ page, origin, recover, createRecovery }) {
+  let active = false, failed = false;
   return async ({ action, waitForState, waitForDestination }) => {
     if (active) throw new Error('Concurrent bootstrap navigation requires triage');
+    if (failed) throw new Error('A prior bootstrap navigation failed; no new recovery epoch');
     active = true;
+    let succeeded = false;
     const requests = new Map(); let token = null, user = null, sequence = 0;
     const onRequest = request => {
       const candidate = { url: () => request.url(), request: () => request };
@@ -66,10 +68,13 @@ export function createScopedBootstrapNavigator({ page, origin, recover }) {
       return state;
     };
     try {
+      // Only an explicit navigation after a completed successful epoch gets a
+      // fresh one-retry allowance. Failed/unknown epochs cannot reset by reload.
+      const recoverEpoch = createRecovery ? createRecovery() : recover;
       page.on('request', onRequest); page.on('response', onResponse); page.on('requestfinished', onFinished); page.on('requestfailed', onFailed);
       await action();
       const state = await knownState();
-      if (state === 'destination') return;
+      if (state === 'destination') { succeeded = true; return; }
       if (state !== 'recovery') throw new Error('Bootstrap navigation did not reach a known visible state');
       const response = token?.response?.status() === 200 ? currentUser()?.response : token?.response;
       if (!response || response.status() !== 429) throw new Error('Visible recovery lacks a current bootstrap 429');
@@ -79,12 +84,13 @@ export function createScopedBootstrapNavigator({ page, origin, recover }) {
         if (token !== observedToken || currentUser() !== observedUser || token?.failed || currentUser()?.failed || currentResponse !== response || currentResponse?.status() !== 429) throw new Error('Bootstrap changed during recovery; stale 429 cannot authorize a retry');
       };
       assertCurrent();
-      await recover(response, assertCurrent);
+      await recoverEpoch(response, assertCurrent);
       if (await knownState() !== 'destination') throw new Error('Bootstrap recovery did not reach current successful token and me reads');
       await waitForDestination();
+      succeeded = true;
     } finally {
       page.off('request', onRequest); page.off('response', onResponse); page.off('requestfinished', onFinished); page.off('requestfailed', onFailed);
-      requests.clear(); token = null; user = null; active = false;
+      requests.clear(); token = null; user = null; active = false; failed = !succeeded;
     }
   };
 }
