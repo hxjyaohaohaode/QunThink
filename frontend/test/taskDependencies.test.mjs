@@ -151,3 +151,11 @@ test('other tab durable pending dependency intent blocks both run and legacy acc
  localStorage.setItem(`qunthink_dependency_command_v1_alice:${id}:${intent.payload.client_request_id}`, JSON.stringify(intent)); assert.equal(store.getState().dependencyIntents[id], undefined); let calls = 0; globalThis.__deps.post = async () => { calls++; };
  await assert.rejects(store.getState().run(id), /前置任务/); await assert.rejects(store.getState().accept(id, 'run'), /前置任务/); assert.equal(calls, 0);
 });
+test('foreign successful dependency receipt preserves this tabs unsent choices and original revision', async () => {
+ await open(); await act(async () => check('前置甲').click());
+ const payload = { client_request_id: crypto.randomUUID(), expected_revision: 0, dependency_ids: [other] };
+ localStorage.setItem(`qunthink_dependency_command_v1_alice:${id}:${payload.client_request_id}`, JSON.stringify({ taskId: id, payload }));
+ tasks[0] = makeTask(id, '下游', { dependency_ids: [other], dependency_revision: 1 }); globalThis.__deps.get = async path => path === '/tasks' ? { data: tasks } : receipt(payload, tasks[0]);
+ await act(async () => store.getState().fetch()); await act(async () => { button('核验前置任务请求').click(); await tick(); });
+ assert.deepEqual(store.getState().dependencyDrafts[id].ids, [prior]); assert.equal(store.getState().dependencyDrafts[id].revision, 0); assert.equal(store.getState().dependencyConflicts[id], true); assert.equal(check('前置甲').checked, true); assert.equal(button('保存前置任务').disabled, true); await assert.rejects(store.getState().saveDependencies(id), /读取最新/);
+});

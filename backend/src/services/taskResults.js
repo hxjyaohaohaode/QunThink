@@ -5,6 +5,7 @@ import { encryptText, decryptData } from '../utils/encryption.js';
 import { readableSourceFiles } from './memory/persistentMemory.js';
 import { sourceHash, sourceSnapshot, isTaskInputSourceStale } from './taskSources.js';
 import { currentTaskDependencies, assertDependencyReady, dependencyIds, dependencyRevision, dependencyError } from './taskDependencies.js';
+import { advanceTaskMetadataRevisions } from './taskMetadata.js';
 
 export const TASK_RESULT_LIMITS = Object.freeze({ versions: 100, commands: 10000, content: 64000 });
 const uuid = z.string().uuid().transform(value => value.toLowerCase());
@@ -137,7 +138,7 @@ async function commandResponse(userId, receipt, db) {
 }
 async function persist(db, before) {
   const releaseReaders = beginUserDbWriteBarrier(db);
-  try { await db.write(); }
+  try { advanceTaskMetadataRevisions(db, before); await db.write(); }
   catch { db.data = before; db.invalidateReadCache?.(); throw storageError(); }
   finally { releaseReaders(); }
 }

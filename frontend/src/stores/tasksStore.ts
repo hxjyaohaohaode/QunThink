@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+import { clearMetadataWork } from '../utils/taskMetadataRecovery';
+import { createMetadataSlice, emptyMetadataState, type MetadataState } from './taskMetadataSlice';
 import { axiosInstance, getAuthGeneration } from '../services/api';
 import { persistTaskReceipt, readTaskReceipts, removeTaskReceipt, textHash, loadWritingContent, saveWritingContent, removeWritingDraft, type TaskCommandReceipt } from '../utils/taskRecovery';
 import { getCacheUserId } from '../utils/cacheUtils';
@@ -13,7 +15,7 @@ export interface TaskComposerDraft {
 }
 export const emptyTaskDraft = (): TaskComposerDraft => ({ title: '', prompt: '', category: 'work', dependencyIds: [], modelId: '', groupId: '', sourceMessageId: '', sourceMessageEditedAt: null, runAt: '', repeat: '', autoRun: false });
 interface CreateIntent { key: string; payload: TaskCreateInput; composerSequence?: number; }
-interface TaskState {
+export interface TaskState extends MetadataState {
   tasks: WorkspaceTask[]; loading: boolean; error: string | null; lastUpdated: string | null;
   pending: Record<string, string>; uncertainCreate: boolean; recoveredCreate: { taskId: string | null; deleted: boolean; cancelled?: boolean; preserveDraft?: boolean } | null;
   pendingCreates: TaskCommandReceipt[]; recoveryError: string | null;
@@ -25,7 +27,7 @@ interface TaskState {
   composerDraft: TaskComposerDraft;
   setDraft: (draft: { prompt: string; groupId: string | null; messageId?: string; editedAt?: string | null } | null) => void;
   setComposerDraft: (draft: TaskComposerDraft) => void;
-  dependencyDrafts: Record<string, { revision: number; ids: string[] }>;
+  dependencyDrafts: Record<string, { revision: number; ids: string[]; commandKey?: string }>;
   dependencyIntents: Record<string, DependencyIntent>;
   dependencyQueues: Record<string, DependencyIntent[]>;
   dependencyErrors: Record<string, string>;
@@ -196,9 +198,9 @@ export const useTasksStore = create<TaskState>((set, get) => {
     releaseDependency(intent);
     set(state => {
       const dependencyDrafts = { ...state.dependencyDrafts };
-      if (receipt.status === 'succeeded') delete dependencyDrafts[id];
-      else if (!dependencyDrafts[id]) dependencyDrafts[id] = { revision: intent.payload.expected_revision, ids: [...intent.payload.dependency_ids] };
-      return { dependencyDrafts, dependencyErrors: { ...state.dependencyErrors, [id]: '' }, dependencyConflicts: { ...state.dependencyConflicts, [id]: false }, dependencyNotices: { ...state.dependencyNotices, [id]: response.task_deleted ? '前置任务请求已确认；原任务已删除，没有重新创建' : receipt.status === 'cancelled' ? '原前置任务请求已结束，已保存的关系保持不变。处理完其余请求后可重新选择' : '前置任务关系已确认。已有正文保留，请核对是否需要保存新的复核版本' }, ...(snapshot === fetchSequence ? { tasks: response.task ? state.tasks.map(task => task.id === id ? response.task! : task) : state.tasks.filter(task => task.id !== id) } : {}) };
+      if (receipt.status === 'succeeded' && dependencyDrafts[id]?.commandKey === intent.payload.client_request_id) delete dependencyDrafts[id];
+      else if (receipt.status === 'cancelled' && !dependencyDrafts[id]) dependencyDrafts[id] = { revision: intent.payload.expected_revision, ids: [...intent.payload.dependency_ids] };
+      return { dependencyDrafts, dependencyErrors: { ...state.dependencyErrors, [id]: '' }, dependencyConflicts: { ...state.dependencyConflicts, [id]: receipt.status === 'succeeded' && !!dependencyDrafts[id] }, dependencyNotices: { ...state.dependencyNotices, [id]: response.task_deleted ? '前置任务请求已确认；原任务已删除，没有重新创建' : receipt.status === 'cancelled' ? '原前置任务请求已结束，已保存的关系保持不变。处理完其余请求后可重新选择' : '前置任务关系已确认。已有正文保留，请核对是否需要保存新的复核版本' }, ...(snapshot === fetchSequence ? { tasks: response.task ? state.tasks.map(task => task.id === id ? response.task! : task) : state.tasks.filter(task => task.id !== id) } : {}) };
     });
   }
   async function sendDependencies(intent: DependencyIntent, replay: boolean) {
@@ -229,6 +231,7 @@ export const useTasksStore = create<TaskState>((set, get) => {
     });
   }
   return {
+    ...createMetadataSlice(set, get, { context, current, sequence: () => fetchSequence, mutate }),
     dependencyDrafts: {}, dependencyIntents: {}, dependencyQueues: {}, dependencyErrors: {}, dependencyNotices: {}, dependencyConflicts: {}, dependencyRecoveryError: null,
     editDependencies: (id, ids) => {
       if (get().pending[id] || get().dependencyIntents[id] || get().dependencyConflicts[id]) return;
@@ -254,7 +257,9 @@ export const useTasksStore = create<TaskState>((set, get) => {
       if (get().dependencyConflicts[id] || draft.revision !== (task.dependency_revision ?? 0)) throw new Error('请读取最新关系后重新选择');
       if (['running', 'outcome_unknown'].includes(task.status)) throw new Error('正在生成或结果待核验时，不能修改前置任务');
       if (!validDependencyIds(draft.ids) || draft.ids.includes(id)) throw new Error('前置任务选择无效');
-      await sendDependencies({ taskId: id, payload: { client_request_id: crypto.randomUUID(), expected_revision: draft.revision, dependency_ids: [...draft.ids] } }, false);
+      const key = crypto.randomUUID();
+      set(state => ({ dependencyDrafts: { ...state.dependencyDrafts, [id]: { ...draft, commandKey: key } } }));
+      await sendDependencies({ taskId: id, payload: { client_request_id: key, expected_revision: draft.revision, dependency_ids: [...draft.ids] } }, false);
     },
     verifyDependencies: async (id, key) => {
       restoreDependencies();
@@ -298,6 +303,7 @@ export const useTasksStore = create<TaskState>((set, get) => {
     fetch: async () => {
       const origin = context(), request = ++fetchSequence;
       set({ loading: get().tasks.length === 0 });
+      try { get().restoreMetadata(); } catch { /* Preserve readable tasks while metadata writes fail closed. */ }
       try { restoreDependencies(); } catch { /* Relationship writes fail closed; task reading remains available. */ }
       try {
         const unknownCreates = refreshCreateReceipts();
@@ -305,6 +311,8 @@ export const useTasksStore = create<TaskState>((set, get) => {
         const { data } = await axiosInstance.get<WorkspaceTask[]>('/tasks', { headers: { 'X-Expected-User-Id': origin.user || '' } });
         if (!current(origin) || request !== fetchSequence) return;
         set({ tasks: data });
+        await get().hydrateMetadata();
+        if (!current(origin) || request !== fetchSequence) return;
         for (const receipt of unknownCreates) {
           try {
             const task = data.find(item => item.client_request_id === receipt.key);
@@ -354,6 +362,7 @@ export const useTasksStore = create<TaskState>((set, get) => {
     verifyCreate: key => queryCreate(key, false),
     closeCreate: key => queryCreate(key, true),
     run: async id => {
+      get().requireSettledMetadata(id);
       restoreDependencies();
       if (get().tasks.find(task => task.id === id)?.dependency_state?.blocked || get().dependencyIntents[id]) throw new Error('前置任务尚未就绪或关系待核验，暂时不能生成');
       const origin = context();
@@ -364,6 +373,7 @@ export const useTasksStore = create<TaskState>((set, get) => {
         try {
           const payloadHash = await textHash(JSON.stringify({ taskId: id, action: 'run' }));
           if (!current(origin)) throw new Error('账号已切换，请在当前账号重新打开工作台');
+          get().requireSettledMetadata(id);
           restoreDependencies();
           if (get().dependencyIntents[id]) throw new Error('前置任务关系待核验，暂时不能生成');
           persistTaskReceipt({ key, action: 'run', taskId: id, payloadHash, createdAt: new Date().toISOString() });
@@ -374,6 +384,7 @@ export const useTasksStore = create<TaskState>((set, get) => {
       });
     },
     accept: async (id, runId) => {
+      get().requireSettledMetadata(id);
       restoreDependencies();
       const dependency = get().tasks.find(task => task.id === id)?.dependency_state;
       if (dependency?.blocked || dependency?.result_stale || get().dependencyIntents[id]) throw new Error('请先处理前置任务并复核文稿，再验收');
@@ -392,6 +403,8 @@ export const useTasksStore = create<TaskState>((set, get) => {
       });
     },
     update: async (id, patch) => { const origin = context();
+      if (['title', 'auto_run', 'run_at'].some(key => key in patch)) throw new Error('请使用任务设置面板保存。当前草稿保留；如面板不可用，请刷新或升级应用');
+      if (patch.status !== 'cancelled') get().requireSettledMetadata(id);
       if (patch.status === 'cancelled') patch = { ...patch, ...(runIntents.get(id) ? { cancel_request_id: runIntents.get(id) } : {}) }; await mutate(patch.status === 'cancelled' ? `${id}:cancel` : id, patch.status === 'cancelled' ? '停止请求中' : '更新中', () => axiosInstance.patch(`/tasks/${id}`, patch, { headers: { 'X-Expected-User-Id': origin.user || '' } })); },
     remove: async id => {
       await mutate(id, '删除中', async () => {
@@ -401,8 +414,8 @@ export const useTasksStore = create<TaskState>((set, get) => {
       });
     },
     cleanup: () => {
-      epoch++; fetchSequence++; composerSequence++; createIntents.clear(); runIntents.clear(); inFlight.clear();
-      set({ dependencyDrafts: {}, dependencyIntents: {}, dependencyQueues: {}, dependencyErrors: {}, dependencyNotices: {}, dependencyConflicts: {}, dependencyRecoveryError: null, tasks: [], loading: false, error: null, lastUpdated: null, pending: {}, uncertainCreate: false, pendingCreates: [], recoveryError: null, recoveredCreate: null, draft: null, composerDraft: emptyTaskDraft() });
+      epoch++; fetchSequence++; composerSequence++; clearMetadataWork(); createIntents.clear(); runIntents.clear(); inFlight.clear();
+      set({ ...emptyMetadataState(), dependencyDrafts: {}, dependencyIntents: {}, dependencyQueues: {}, dependencyErrors: {}, dependencyNotices: {}, dependencyConflicts: {}, dependencyRecoveryError: null, tasks: [], loading: false, error: null, lastUpdated: null, pending: {}, uncertainCreate: false, pendingCreates: [], recoveryError: null, recoveredCreate: null, draft: null, composerDraft: emptyTaskDraft() });
     }
   };
 });

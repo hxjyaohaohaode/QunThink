@@ -364,7 +364,11 @@ test('a delayed request cannot create, run, change, accept, resolve or delete un
   assert.equal((await listTasks(b.userId)).length, 1);
   assert.equal((await listTasks(b.userId))[0].title, '可靠任务');
   assert.equal((await request.patch(`/api/tasks/${task.id}`).set('Cookie', b.cookie)
-    .set('X-Expected-User-Id', b.userId).send({ title: '当前账号修改' })).status, 200);
+    .set('X-Expected-User-Id', b.userId).send({ title: '当前账号修改' })).status, 428);
+  assert.equal((await request.put(`/api/tasks/${task.id}/metadata`).set('Cookie', b.cookie)
+    .set('X-Expected-User-Id', b.userId).send({ client_request_id: crypto.randomUUID(),
+      expected_revision: (await listTasks(b.userId)).find(item => item.id === task.id).metadata_revision,
+      changes: { title: '当前账号修改' } })).status, 200);
 });
 
 test('pre-versioning source hashes remain readable and acceptable until the source really changes', async () => {

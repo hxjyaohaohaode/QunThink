@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { axiosInstance, getAuthGeneration } from '../services/api';
+import { readMetadataJournal, metadataWorkPending } from '../utils/taskMetadataRecovery';
 import { readDependencyIntents } from '../utils/taskDependencyRecovery';
 import { getCacheUserId } from '../utils/cacheUtils';
 import { loadWritingContent, persistTaskReceipt, readTaskReceipts, removeTaskReceipt, removeWritingDraft, saveWritingContent, textHash, writingPreferences, type TaskCommandReceipt } from '../utils/taskRecovery';
@@ -277,6 +278,8 @@ export const useTaskResultsStore = create<ResultState>((set, get) => {
       await mutate(id, 'save_revision', { expected_revision: document.revision, base_version_id: editor.baseVersionId, content: editor.body, ...(editor.reviewedSourceHash ? { reviewed_source_hash: editor.reviewedSourceHash } : {}), ...(editor.reviewedDependencySignature !== undefined ? { reviewed_dependency_signature: editor.reviewedDependencySignature } : {}) }, '保存版本中');
     },
     accept: async (id, versionId, contentHash, sourceHash) => {
+      if (metadataWorkPending(id)) throw new Error('任务设置或运行请求正在处理，请先核验原请求');
+      if (readMetadataJournal().some(item => item.taskId === id)) throw new Error('任务设置待核验，请先核验或结束原请求');
       if (readDependencyIntents().some(intent => intent.taskId === id)) throw new Error('前置任务关系待核验，暂时不能验收');
       const document = get().documents[id], editor = get().editors[id];
       if (!document || editor?.dirty || document.source.status !== 'current' || document.dependency_state?.blocked || document.dependency_state?.result_stale) return;

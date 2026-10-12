@@ -3475,7 +3475,7 @@ paths:
           type: string
     patch:
       operationId: updateWorkspaceTask
-      summary: 修改任务状态、暂停或停止执行
+      summary: 按原运行或生成请求标识停止执行；元数据编辑改用metadata接口
       tags:
         - Tasks
       parameters: &a1
@@ -3505,6 +3505,8 @@ paths:
           description: 资源不属于当前用户或不存在
         "409":
           description: 配置版本冲突、任务运行中或模型被引用
+        "428":
+          description: TASK_METADATA_PRECONDITION_REQUIRED；旧title/auto_run/run_at PATCH未应用任何字段，请更新客户端并保留草稿
         "429":
           description: 达到执行次数或请求限制
     delete:
@@ -3613,6 +3615,104 @@ paths:
               schema: { $ref: "#/components/schemas/TaskDependencyCommandResponse" }
         "409": { description: 原编号已绑定另一任务，或并发CAS冲突；保留原号继续核验 }
         "429": { description: 回执达到限额，不遗忘旧命令 }
+        "503": { description: 封存结果未知；保留原号继续查询或封存，不换新编号 }
+  /api/tasks/{taskId}/metadata:
+    put:
+      operationId: updateWorkspaceTaskMetadata
+      summary: 同账号任务标题及排期CAS编辑；不触发模型
+      tags: [Tasks]
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: X-Expected-User-Id
+          in: header
+          required: false
+          schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateTaskMetadataInput" }
+      responses:
+        "200":
+          description: 同编号同内容重放不再次修改；新命令revision增加1
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskMetadataCommandResponse" }
+        "400": { description: 无效UUID、修订、标题或时间、空changes或未知字段；整体拒绝 }
+        "404": { description: 任务不存在或不属当前账号，不区分两者 }
+        "409": { description: TASK_METADATA_REVISION_CONFLICT、TASK_METADATA_STATE_CONFLICT、TASK_METADATA_RUN_PENDING或TASK_METADATA_IDEMPOTENCY_CONFLICT；本次拒绝不证明同号并发未提交，原请求须查询或封存 }
+        "410": { description: TASK_METADATA_COMMAND_CLOSED；原请求已耐久封存，迟到提交不生效 }
+        "422": { description: 开启主动执行但没有执行时间 }
+        "429": { description: 当前账号10000条任务设置回执限额，不遗忘旧命令 }
+        "500": { description: 读取等内部状态未知；保留原号，不以读失败证明未提交 }
+        "503": { description: TASK_METADATA_STORAGE_UNCERTAIN；可能已提交，按原编号核验 }
+  /api/tasks/{taskId}/metadata/commands/{requestId}:
+    get:
+      operationId: getWorkspaceTaskMetadataCommand
+      summary: 核对当前账号原任务设置回执及最新任务状态
+      tags: [Tasks]
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: X-Expected-User-Id
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: 已提交回执；任务删除后不重建，task为null
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskMetadataCommandResponse" }
+        "404": { description: 当前账号该任务没有此回执；不证明换新编号安全 }
+        "409": { description: ACCOUNT_CHANGED }
+        "500": { description: 读取等内部状态未知；保留原号，不以读失败证明未提交 }
+        "503": { description: 回执或存储状态暂不可核实 }
+  /api/tasks/{taskId}/metadata/commands/{requestId}/close:
+    post:
+      operationId: closeWorkspaceTaskMetadataCommand
+      summary: 核验或耐久封存原任务设置请求；已成功的设置不会撤销
+      tags: [Tasks]
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: X-Expected-User-Id
+          in: header
+          required: false
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        "200":
+          description: 返回已有成功回执或持久cancelled；只有该回执才证明迟到提交不能另行生效
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskMetadataCommandResponse" }
+        "409": { description: 原编号已绑定另一任务，或并发CAS冲突；保留原号继续核验 }
+        "429": { description: 回执达到限额，不遗忘旧命令 }
+        "500": { description: 读取等内部状态未知；保留原号，不以读失败证明未提交 }
         "503": { description: 封存结果未知；保留原号继续查询或封存，不换新编号 }
   /api/tasks/{taskId}/run:
     parameters:
@@ -5862,6 +5962,42 @@ components:
             - { $ref: "#/components/schemas/WorkspaceTask" }
             - { type: "null" }
         task_deleted: { type: boolean }
+    UpdateTaskMetadataInput:
+      type: object
+      additionalProperties: false
+      required: [client_request_id, expected_revision, changes]
+      properties:
+        client_request_id: { type: string, format: uuid }
+        expected_revision: { type: integer, minimum: 0, maximum: 9007199254740990 }
+        changes:
+          type: object
+          additionalProperties: false
+          minProperties: 1
+          properties:
+            title: { type: string, minLength: 1, maxLength: 150 }
+            auto_run: { type: boolean }
+            run_at: { type: [string, "null"], format: date-time }
+    TaskMetadataCommandResponse:
+      type: object
+      additionalProperties: false
+      required: [receipt, task]
+      properties:
+        receipt:
+          type: object
+          additionalProperties: false
+          required: [id, operation, task_id, committed_revision, status, committed_at]
+          properties:
+            id: { type: string, format: uuid }
+            operation: { const: metadata }
+            task_id: { type: string, format: uuid }
+            committed_revision: { type: [integer, "null"], minimum: 1, description: succeeded为提交修订号，cancelled为null }
+            status: { type: string, enum: [succeeded, cancelled] }
+            committed_at: { type: string, format: date-time }
+        task:
+          anyOf:
+            - { $ref: "#/components/schemas/WorkspaceTask" }
+            - { type: "null" }
+        task_deleted: { type: boolean }
     WorkspaceTaskInput:
       type: object
       properties:
@@ -5923,6 +6059,7 @@ components:
     WorkspaceTask:
       type: object
       properties:
+        metadata_revision: { type: integer, minimum: 0, description: 旧数据只读投影0；新命令和后台三字段变更共用修订 }
         dependency_ids: { $ref: "#/components/schemas/TaskDependencyIds" }
         dependency_revision: { type: integer, minimum: 0 }
         dependency_state: { $ref: "#/components/schemas/TaskDependencyState" }
@@ -6115,10 +6252,6 @@ components:
     WorkspaceTaskPatch:
       type: object
       properties:
-        title:
-          type: string
-          maxLength: 150
-          minLength: 1
         status:
           enum:
             - cancelled
@@ -6130,12 +6263,5 @@ components:
           type: string
           format: uuid
           description: 停止已接收运行时的标识；停止时必须提供此字段或 cancel_request_id
-        auto_run:
-          type: boolean
-        run_at:
-          type:
-            - string
-            - "null"
-          format: date-time
-      required: []
+      required: [status]
       additionalProperties: false

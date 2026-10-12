@@ -10,6 +10,7 @@ import { ModelCenter } from './ModelCenter';
 import { PersonalGoalsPanel } from './PersonalGoalsPanel';
 import { MemoryCenter } from './MemoryCenter';
 import { RuntimeDiagnostics } from './RuntimeDiagnostics';
+import { TaskMetadata } from '../Writing/TaskMetadata';
 import { TaskDependencies, DependencyPicker, DependencySummary } from '../Writing/TaskDependencies';
 import { TaskResultEditor } from '../Writing/TaskResultEditor';
 import { PendingCreateRecovery } from '../Writing/PendingCreateRecovery';
@@ -61,6 +62,8 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
   const draft = useTasksStore(state => state.composerDraft);
   const pending = useTasksStore(state => state.pending);
   const dependencyRecoveryError = useTasksStore(state => state.dependencyRecoveryError);
+  const metadataIntents = useTasksStore(state => state.metadataIntents);
+  const metadataRecoveryError = useTasksStore(state => state.metadataRecoveryError);
   const dependencyIntents = useTasksStore(state => state.dependencyIntents);
   const recoveredCreate = useTasksStore(state => state.recoveredCreate);
   const recoveryError = useTasksStore(state => state.recoveryError);
@@ -209,6 +212,8 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
       <motion.div key={view} initial={reduced ? false : { opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={transition}>
         {view === 'overview' && <PendingCreateRecovery />}
         {view === 'overview' && <PendingResultRecovery />}
+        {view === 'overview' && metadataRecoveryError && <p className="workspace-error mb-4" role="alert">{metadataRecoveryError}</p>}
+        {view === 'overview' && Object.keys(metadataIntents).filter(id => !tasks.some(task => task.id === id)).map(id => <div key={id} className="workspace-notice mb-4"><TaskMetadata taskId={id} /></div>)}
         {view === 'overview' && dependencyRecoveryError && <p className="workspace-error mb-4" role="alert">{dependencyRecoveryError}</p>}
         {view === 'overview' && Object.keys(dependencyIntents).filter(id => !tasks.some(task => task.id === id)).map(id => <div key={id} className="workspace-notice mb-4"><TaskDependencies taskId={id} /></div>)}
         {view === 'models' ? <section data-observe="models" className="max-w-3xl"><ModelCenter /></section> : view === 'goals' ? <section data-observe="goals"><PersonalGoalsPanel /></section> : view === 'memory' ? <section data-observe="memory"><MemoryCenter /></section> : view === 'diagnostics' ? <RuntimeDiagnostics /> : <>
@@ -239,20 +244,22 @@ export function WorkspacePage({ onOpenConversation }: { onOpenConversation: (id:
                 {!isOpen && <p className="text-sm text-text-secondary mt-3 line-clamp-2 break-words">{task.prompt}</p>}
                 {task.auto_run && task.run_at && <p className="text-xs text-text-muted mt-3">下次生成 {dateLabel(task.run_at)}{task.repeat_minutes ? ` · 每 ${task.repeat_minutes >= 1440 ? `${task.repeat_minutes / 1440} 天` : `${task.repeat_minutes} 分钟`}` : ''}</p>}
                 <DependencySummary state={task.dependency_state} />
+                {metadataIntents[task.id] && !isOpen && <p className="workspace-notice mt-3">任务设置待核验，请打开详情处理原请求。</p>}
                 {dependencyIntents[task.id] && !isOpen && <p className="workspace-notice mt-3">前置任务关系待核验，请打开详情处理原请求。</p>}
                 {task.source_input_stale && <p className="workspace-notice mt-3" role="status">再次生成所用的原始要求需要复核；这与已保存正文的来源状态分开。请打开文稿核对用途，再决定是否调用 AI。</p>}
                 {task.source_stale && <p className="workspace-notice mt-3" role="status">来源已变化，旧验收需要复核。打开原文稿核对并保存新版本，人工文字不会自动被替换。</p>}
                 {task.status === 'outcome_unknown' && <p className="workspace-notice mt-3" role="status">调用后的连接中断、取消或服务异常，无法证明模型未处理或未计费。请先核对服务商记录，再决定下一步。</p>}
                 {task.error && <p className="text-xs text-red-500 mt-3 break-words" role="status">{task.error}</p>}
                 <div className="flex flex-wrap items-center gap-2 mt-4">
-                  {task.status === 'running' || pending[task.id] === '生成中' ? <button className="workspace-button" disabled={!!pending[`${task.id}:cancel`]} onClick={() => void perform(() => useTasksStore.getState().update(task.id, { status: 'cancelled', ...(task.run_request_id ? { cancel_request_id: task.run_request_id } : task.run_id ? { run_id: task.run_id } : {}) }), '停止请求已提交；如模型已收到请求，仍需核验结果与费用。')}>{pending[`${task.id}:cancel`] ? '正在请求停止…' : '停止生成'}</button> : task.status === 'outcome_unknown' ? <><button className="workspace-button" disabled={taskBusy} onClick={() => void resolveUnknown(task, 'allow_retry')}>已核验，允许重试</button><button className="workspace-button" disabled={taskBusy} onClick={() => void resolveUnknown(task, 'abandon')}>停止此任务</button></> : <button className="workspace-button" disabled={taskBusy || !ready.length || task.source_input_stale || task.dependency_state?.blocked || !!dependencyIntents[task.id]} onClick={() => void run(task)}>{taskBusy ? pending[task.id] : task.run_count ? '重新生成' : '生成草稿'}</button>}
+                  {task.status === 'running' || pending[task.id] === '生成中' ? <button className="workspace-button" disabled={!!pending[`${task.id}:cancel`]} onClick={() => void perform(() => useTasksStore.getState().update(task.id, { status: 'cancelled', ...(task.run_request_id ? { cancel_request_id: task.run_request_id } : task.run_id ? { run_id: task.run_id } : {}) }), '停止请求已提交；如模型已收到请求，仍需核验结果与费用。')}>{pending[`${task.id}:cancel`] ? '正在请求停止…' : '停止生成'}</button> : task.status === 'outcome_unknown' ? <><button className="workspace-button" disabled={taskBusy} onClick={() => void resolveUnknown(task, 'allow_retry')}>已核验，允许重试</button><button className="workspace-button" disabled={taskBusy} onClick={() => void resolveUnknown(task, 'abandon')}>停止此任务</button></> : <button className="workspace-button" disabled={taskBusy || !ready.length || task.source_input_stale || task.dependency_state?.blocked || !!dependencyIntents[task.id] || !!metadataIntents[task.id] || !!metadataRecoveryError} onClick={() => void run(task)}>{taskBusy ? pending[task.id] : task.run_count ? '重新生成' : '生成草稿'}</button>}
                   <button className={needsReview(task) && !isOpen ? 'workspace-primary' : 'workspace-button'} onClick={() => setSelected(isOpen ? null : task.id)}>{isOpen ? '收起详情' : needsReview(task) ? '检查草稿' : '打开详情'}</button>
-                  {task.auto_run && task.status !== 'running' && task.status !== 'outcome_unknown' && <button className="workspace-button" disabled={taskBusy} onClick={() => void perform(() => useTasksStore.getState().update(task.id, { auto_run: false }), '已暂停定时生成')}>暂停定时</button>}
+                  {task.auto_run && task.status !== 'running' && task.status !== 'outcome_unknown' && <button className="workspace-button" disabled={taskBusy || !!metadataIntents[task.id]} onClick={() => { setSelected(task.id); void perform(async () => { const store = useTasksStore.getState(); if (store.metadataDrafts[task.id]) throw new Error('请先处理任务设置中的未保存修改，再暂停定时'); store.editMetadata(task.id, { auto_run: false }); await useTasksStore.getState().saveMetadata(task.id); }, '已暂停定时生成'); }}>暂停定时</button>}
                   {!ready.length && task.status !== 'outcome_unknown' && <button className="text-xs text-accent underline" onClick={() => setView('models')}>先连接模型</button>}
                 </div>
                 <AnimatePresence initial={false}>{isOpen && <motion.div id={`task-detail-${task.id}`} key="details" initial={{ height: reduced ? 'auto' : 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: reduced ? 'auto' : 0, opacity: 0 }} transition={transition} className="overflow-hidden"><div className="pt-5 mt-4 border-t border-border space-y-4">
                   <section><h4 className="text-xs font-semibold text-text-muted mb-2">任务要求</h4><p className="whitespace-pre-wrap text-sm text-text-secondary break-words">{task.prompt}</p></section>
                   {task.group_id && <button className="text-sm text-accent underline" disabled={!group} onClick={() => { useTaskResultsStore.getState().openPanel(task.group_id!, task.id); onOpenConversation(task.group_id!); }}>{group ? '打开来源会话 →' : '来源会话已不可用'}</button>}
+                  <TaskMetadata taskId={task.id} />
                   <TaskDependencies key={task.id} taskId={task.id} />
                   <TaskResultEditor taskId={task.id} onOpenConversation={onOpenConversation} />
                   {task.history.length > 0 && <details className="workspace-history"><summary>过程与用量 · 最近 {task.history.length} 次</summary><ol>{[...task.history].reverse().map(history => <li key={history.id} className="py-4 border-b border-border last:border-0"><p className="text-xs font-medium">{dateLabel(history.finished_at)} · {history.source_stale ? '来源已变化，历史内容不可据此验收' : history.status === 'outcome_unknown' ? '结果与费用待核验' : history.status === 'failed' ? '生成失败' : history.status === 'accepted' || history.id === task.accepted_run_id ? '已验收' : '已生成，未验收'}</p><p className="text-xs text-text-muted mt-2">{history.usage_status === 'provider_reported' && history.usage ? `服务商用量：输入 ${history.usage.inputTokens} / 输出 ${history.usage.outputTokens} / 总计 ${history.usage.totalTokens} tokens；费用未核算` : '用量与费用未核实，请以服务商账单为准'}</p>{history.error && <p className="text-xs text-red-500 mt-2">{history.error}</p>}{history.result && <p className="text-xs whitespace-pre-wrap break-words mt-3">{history.result}</p>}</li>)}</ol></details>}

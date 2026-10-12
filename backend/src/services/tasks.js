@@ -11,6 +11,7 @@ import { sourceMessages, linkedFile, sourceHash, sourceSnapshot, taskSourceMessa
 
 import { currentTaskResultHead, synchronizeTaskResults, taskResultState, TASK_RESULT_LIMITS } from './taskResults.js';
 import { dependencyIdsInput, editTaskDependenciesInput, dependencyIds, dependencyRevision, validateDependencyEdit, dependencyContext, currentTaskDependencies, assertDependencyReady, dependencyError, TASK_DEPENDENCY_LIMITS } from './taskDependencies.js';
+import { editTaskMetadataInput, metadataRevision, advanceTaskMetadataRevisions, metadataError, TASK_METADATA_LIMITS } from './taskMetadata.js';
 
 const requestIdInput = z.string().uuid().transform(value => value.toLowerCase());
 const CREATE_COMMAND_LIMIT = 10000;
@@ -53,7 +54,7 @@ function runEvidence(task) {
 // A failed local write must not leave a phantom success in the cached database.
 async function writeOrRestore(db, before) {
   const releaseReaders = beginUserDbWriteBarrier(db);
-  try { await db.write(); }
+  try { advanceTaskMetadataRevisions(db, before); await db.write(); }
   catch (error) { db.data = before; db.invalidateReadCache?.(); throw error; }
   finally { releaseReaders(); }
 }
@@ -113,7 +114,7 @@ export function publicTask(task, db = null, snapshot = null, dependencies = null
     !snapshot.messages.some(message => message.id === task.source_message_id && message.group_id === task.group_id));
   const sourceStale = originBlocked || (!hasEditorHead && inputStale) || (db ? isResultSourceStale(task, db, snapshot) : false);
   const { result_editor, ...visible } = task;
-  return { ...visible, dependency_ids: dependencyIds(task), dependency_revision: dependencyRevision(task), ...(dependencies ? { dependency_state: dependencies } : {}), ...(result_editor ? { result_editor_available: true, result_head_version_id: result_editor.head_version_id, result_accepted_version_id: result_editor.accepted_version_id } : {}), ...(db ? { source_stale: sourceStale, source_input_stale: inputStale } : {}),
+  return { ...visible, metadata_revision: metadataRevision(task), dependency_ids: dependencyIds(task), dependency_revision: dependencyRevision(task), ...(dependencies ? { dependency_state: dependencies } : {}), ...(result_editor ? { result_editor_available: true, result_head_version_id: result_editor.head_version_id, result_accepted_version_id: result_editor.accepted_version_id } : {}), ...(db ? { source_stale: sourceStale, source_input_stale: inputStale } : {}),
     prompt: inputStale ? '' : unpack(task.prompt), result: sourceStale ? '' : unpack(task.result),
     history: (task.history || []).map(h => {
       const stale = inputStale || (db ? isRunSourceStale(task, h, db, snapshot) : false);
@@ -306,12 +307,96 @@ export async function updateTaskDependencies(userId, taskId, raw) {
   });
 }
 
+function metadataCommands(db, userId) {
+  const list = db.data.taskMetadataCommands === undefined ? [] : db.data.taskMetadataCommands;
+  if (!Array.isArray(list) || list.length > TASK_METADATA_LIMITS.commands ||
+      new Set(list.map(item => item?.id)).size !== list.length ||
+      list.some(item => !requestIdInput.safeParse(item?.id).success || !requestIdInput.safeParse(item.task_id).success ||
+        item.actor_id !== userId || !z.iso.datetime().safeParse(item.committed_at).success ||
+        !['succeeded', 'cancelled'].includes(item.status) ||
+        (item.status === 'succeeded' ? !/^[a-f0-9]{64}$/.test(item.input_hash) || !Number.isSafeInteger(item.committed_revision) || item.committed_revision < 1 : item.committed_revision !== null))) {
+    throw metadataError('TASK_METADATA_STORAGE_UNCERTAIN', '任务设置回执无法核实，请保留原请求编号', 503);
+  }
+  return list;
+}
+async function metadataResponse(userId, receipt, db) {
+  if (receipt.actor_id !== userId) throw metadataError('TASK_METADATA_STORAGE_UNCERTAIN', '任务设置回执归属需要核验', 503);
+  const task = db.data.tasks?.find(item => item.id === receipt.task_id);
+  return { receipt: { id: receipt.id, operation: 'metadata', task_id: receipt.task_id,
+    committed_revision: receipt.committed_revision, status: receipt.status, committed_at: receipt.committed_at },
+    task: task ? await viewTask(userId, task, db) : null, ...(!task ? { task_deleted: true } : {}) };
+}
+function metadataWriteFailure(error) {
+  if (error?.code === 'REVISION_CONFLICT') return metadataError('TASK_METADATA_REVISION_CONFLICT', '任务已在另一进程变化，请核对原请求后重新编辑');
+  return metadataError('TASK_METADATA_STORAGE_UNCERTAIN', '保存结果暂时无法核实，请按原请求编号查询，不要换编号覆盖', 503);
+}
+export async function getTaskMetadataCommand(userId, taskId, requestId) {
+  taskId = requestIdInput.parse(taskId); requestId = requestIdInput.parse(requestId);
+  const db = await getUserDb(userId);
+  return withStableTaskLock(userId, db, async () => {
+    const receipt = metadataCommands(db, userId).find(item => item.id === requestId && item.task_id === taskId);
+    if (!receipt) throw metadataError('TASK_METADATA_COMMAND_NOT_FOUND', '尚未找到这次任务设置回执，请保留原编号核验', 404);
+    return metadataResponse(userId, receipt, db);
+  });
+}
+export async function closeTaskMetadataCommand(userId, taskId, requestId) {
+  taskId = requestIdInput.parse(taskId); requestId = requestIdInput.parse(requestId);
+  const db = await getUserDb(userId);
+  return withStableTaskLock(userId, db, async () => {
+    const list = metadataCommands(db, userId), prior = list.find(item => item.id === requestId);
+    if (prior) {
+      if (prior.task_id !== taskId) throw metadataError('TASK_METADATA_IDEMPOTENCY_CONFLICT', '原请求编号绑定了另一项任务设置');
+      return metadataResponse(userId, prior, db);
+    }
+    if (list.length >= TASK_METADATA_LIMITS.commands) throw metadataError('TASK_METADATA_COMMAND_LIMIT', '任务设置回执已达上限，需要归档核验', 429);
+    const before = structuredClone(db.data);
+    const receipt = { id: requestId, task_id: taskId, actor_id: userId, committed_revision: null,
+      status: 'cancelled', committed_at: new Date().toISOString() };
+    // Also allow closing a deleted/nonexistent task's own request. This cannot
+    // reveal whether another account owns the same ID, or recreate any task.
+    db.data.taskMetadataCommands = [...list, receipt];
+    try { await writeOrRestore(db, before); } catch (error) { throw metadataWriteFailure(error); }
+    return metadataResponse(userId, receipt, db);
+  });
+}
+export async function updateTaskMetadata(userId, taskId, raw) {
+  taskId = requestIdInput.parse(taskId);
+  const input = editTaskMetadataInput.parse(raw);
+  const inputHash = createHash('sha256').update(JSON.stringify({ userId, taskId, operation: 'metadata', input })).digest('hex');
+  const db = await getUserDb(userId);
+  return withStableTaskLock(userId, db, async () => {
+    const list = metadataCommands(db, userId), prior = list.find(item => item.id === input.client_request_id);
+    if (prior) {
+      if (prior.task_id !== taskId) throw metadataError('TASK_METADATA_IDEMPOTENCY_CONFLICT', '原请求编号绑定了另一项任务设置');
+      if (prior.status === 'cancelled') throw metadataError('TASK_METADATA_COMMAND_CLOSED', '原任务设置请求已封存，迟到提交不会生效；请核验后重新编辑', 410);
+      if (prior.input_hash !== inputHash) throw metadataError('TASK_METADATA_IDEMPOTENCY_CONFLICT', '原请求编号绑定了另一项任务设置');
+      return metadataResponse(userId, prior, db);
+    }
+    const task = db.data.tasks?.find(item => item.id === taskId);
+    if (!task) throw metadataError('TASK_METADATA_NOT_FOUND', '任务已删除或不属于当前账号', 404);
+    if (metadataRevision(task) !== input.expected_revision) throw metadataError('TASK_METADATA_REVISION_CONFLICT', '任务设置已变化，请核对原请求，再明确比较并重新编辑');
+    if (['running', 'outcome_unknown'].includes(task.status)) throw metadataError('TASK_METADATA_RUN_PENDING', '运行中或结果未知时不能修改任务设置，请先核验当前运行');
+    const updated = { ...task, ...input.changes };
+    if (updated.auto_run && !updated.run_at) throw metadataError('TASK_METADATA_INVALID', '主动执行需要设置执行时间', 422);
+    if (updated.auto_run && ['completed', 'cancelled'].includes(task.status)) throw metadataError('TASK_METADATA_STATE_CONFLICT', '已完成或已取消任务不能直接开启主动执行');
+    if (list.length >= TASK_METADATA_LIMITS.commands) throw metadataError('TASK_METADATA_COMMAND_LIMIT', '任务设置回执已达上限，需要归档核验', 429);
+    const before = structuredClone(db.data), now = new Date().toISOString();
+    Object.assign(task, input.changes, { metadata_revision: input.expected_revision + 1, updated_at: now });
+    const receipt = { id: input.client_request_id, task_id: taskId, actor_id: userId, input_hash: inputHash,
+      committed_revision: task.metadata_revision, status: 'succeeded', committed_at: now };
+    db.data.taskMetadataCommands = [...list, receipt];
+    try { await writeOrRestore(db, before); } catch (error) { throw metadataWriteFailure(error); }
+    return metadataResponse(userId, receipt, db);
+  });
+}
+
 export async function updateTask(userId, taskId, patch) {
+  if (patch && typeof patch === 'object' && ['title', 'auto_run', 'run_at'].some(key => Object.hasOwn(patch, key))) {
+    throw metadataError('TASK_METADATA_PRECONDITION_REQUIRED', '任务设置需要带修订和原请求编号的新接口，请更新或刷新页面；未应用任何字段', 428);
+  }
   const allowed = z.object({
-    title: z.string().trim().min(1).max(150).optional(),
-    status: z.enum(['cancelled']).optional(),
+    status: z.enum(['cancelled']),
     cancel_request_id: requestIdInput.optional(), run_id: requestIdInput.optional(),
-    auto_run: z.boolean().optional(), run_at: z.iso.datetime().nullable().optional()
   }).strict().parse(patch);
   if (allowed.status === 'cancelled' && !allowed.cancel_request_id && !allowed.run_id) throw taskError('RUN_ID_REQUIRED', '停止操作需要指定运行或生成请求，请刷新后重试', 400);
   if (allowed.status !== 'cancelled' && (allowed.cancel_request_id || allowed.run_id)) throw taskError('INVALID_CANCELLATION', '运行标识仅用于停止操作', 400);
@@ -390,6 +475,7 @@ async function recoverTaskStorageFailure(userId, taskId, runId, dispatched = fal
       const latest = db.data.tasks?.find(item => item.id === taskId);
       if (!latest || latest.run_id !== runId) return null;
       if (latest.status !== 'running') return viewTask(userId, latest, db);
+      const before = structuredClone(db.data);
       const now = new Date().toISOString();
       const unknown = dispatched || latest.dispatch_status !== 'not_sent';
       const status = unknown ? 'outcome_unknown' : 'failed';
@@ -403,7 +489,7 @@ async function recoverTaskStorageFailure(userId, taskId, runId, dispatched = fal
         latest.run_count = (latest.run_count || 0) + 1;
       }
       Object.assign(latest, { status, auto_run: false, result_pending_review: false, error: message, updated_at: now });
-      await db.write();
+      await writeOrRestore(db, before);
       return viewTask(userId, latest, db);
     });
   });
@@ -531,6 +617,7 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
     }
     return await withStableTaskLock(userId, db, async () => {
       const latest = db.data.tasks?.find(t => t.id === taskId);
+      const before = structuredClone(db.data);
       if (!latest || latest.run_id !== runId || latest.status !== 'running')
         return latest ? viewTask(userId, latest, db) : null;
       const currentMessages = await taskSourceMessages(userId, db, latest.group_id);
@@ -577,7 +664,7 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
         const manualHead = latest.result_editor.versions.find(version => version.id === latest.result_editor.head_version_id && version.kind === 'manual');
         if (manualHead) { latest.result = manualHead.content; latest.result_run_id = manualHead.run_id; latest.accepted_run_id = null; }
       }
-      try { await db.write(); }
+      try { await writeOrRestore(db, before); }
       catch (error) { error.taskFinalizationWriteFailed = true; throw error; }
       return viewTask(userId, latest, db);
     }).catch(async error => {
@@ -710,7 +797,7 @@ export async function startTaskScheduler() {
   for (const userId of await listUserDatabases()) {
     const db = await getUserDb(userId);
     await withWriteLock(userId, async () => {
-      await db.read(); let changed = false;
+      await db.read(); const before = structuredClone(db.data); let changed = false;
       for (const task of db.data.tasks || []) if (task.status === 'running' && !activeRuns.has(executionKey(userId, task.id))) {
         const now = new Date().toISOString();
         task.run_id ||= randomUUID();
@@ -725,7 +812,7 @@ export async function startTaskScheduler() {
           run_count: (task.run_count || 0) + 1, updated_at: now });
         changed = true;
       }
-      if (changed) await db.write();
+      if (changed) await writeOrRestore(db, before);
     });
   }
   timer = setInterval(() => void tickTasks().catch(e => safeLog('error', '任务调度失败', { error: e.message })), 30000);

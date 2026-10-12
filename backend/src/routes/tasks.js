@@ -4,6 +4,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { closeTaskDependencyCommand, updateTaskDependencies, getTaskDependencyCommand, acceptTaskResult, getTaskCreationReceipt, closeTaskCreationCommand, createTask, deleteTask, listTasks, runTask, updateTask, resolveUnknownTaskRun, taskRunInput } from '../services/tasks.js';
 
 import { getTaskResult, getTaskResultCommand, closeTaskResultCommand, saveTaskResultVersion, acceptTaskResultVersion, adoptTaskResultVersion, rebaseTaskBrief } from '../services/taskResults.js';
+import { updateTaskMetadata, getTaskMetadataCommand, closeTaskMetadataCommand } from '../services/tasks.js';
 
 const router = express.Router();
 function withRequestId(req) {
@@ -49,6 +50,16 @@ router.post('/tasks/:taskId/dependencies/commands/:requestId/close', asyncHandle
 }));
 router.patch('/tasks/:taskId', asyncHandler(async (req, res) => {
   res.json(await updateTask(req.userId, req.params.taskId, req.body));
+}));
+router.put('/tasks/:taskId/metadata', asyncHandler(async (req, res) => {
+  res.json(await updateTaskMetadata(req.userId, req.params.taskId, withRequestId(req)));
+}));
+router.get('/tasks/:taskId/metadata/commands/:requestId', asyncHandler(async (req, res) => {
+  res.json(await getTaskMetadataCommand(req.userId, req.params.taskId, req.params.requestId));
+}));
+router.post('/tasks/:taskId/metadata/commands/:requestId/close', asyncHandler(async (req, res) => {
+  z.object({}).strict().parse(req.body || {});
+  res.json(await closeTaskMetadataCommand(req.userId, req.params.taskId, req.params.requestId));
 }));
 router.delete('/tasks/:taskId', asyncHandler(async (req, res) => {
   await deleteTask(req.userId, req.params.taskId); res.status(204).end();

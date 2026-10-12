@@ -125,3 +125,16 @@ test('concurrent dependency edit requires a deliberate reselection and another a
     const foreignPage = await foreign.newPage(); await foreignPage.goto('/'); await expect(foreignPage.getByTestId('workspace')).toBeVisible(); await foreignPage.getByRole('button', { name: '＋ 新任务', exact: true }).click(); await expect(foreignPage.getByRole('group', { name: '选择前置任务', exact: true })).not.toContainText(first.title);
   } finally { await foreign.close(); }
 });
+
+test('another tab dependency success preserves this tabs unsubmitted choices until explicit reread', async ({ page, context }, info) => {
+  await registerSyntheticAccount(context); const a = await createTask(context, '依赖保留未提交甲'); const b = await createTask(context, '依赖保留已保存乙'); const task = await createTask(context, '依赖保留下游'); await workspace(page);
+  const card = await openTask(page, task), first = card.getByRole('region', { name: '编辑前置任务', exact: true }); await first.getByRole('checkbox', { name: a.title, exact: true }).check();
+  const secondPage = await context.newPage(); beginSessionTokenRecovery(secondPage, info); await workspace(secondPage); const secondCard = await openTask(secondPage, task), second = secondCard.getByRole('region', { name: '编辑前置任务', exact: true });
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; }); let committed = false;
+  await secondPage.route(`**/api/tasks/${task.id}/dependencies`, async route => { if (route.request().method() !== 'PUT') return route.continue(); const response = await route.fetch(); expect(response.status()).toBe(200); committed = true; await gate; await route.fulfill({ response }); });
+  await second.getByRole('checkbox', { name: b.title, exact: true }).check(); await second.getByRole('button', { name: '保存前置任务', exact: true }).click(); await expect.poll(() => committed).toBe(true);
+  await page.bringToFront(); await page.getByRole('button', { name: '刷新', exact: true }).click(); await expect(first.getByRole('button', { name: '核验前置任务请求', exact: true })).toBeEnabled(); await first.getByRole('button', { name: '核验前置任务请求', exact: true }).click();
+  await expect(first.getByRole('checkbox', { name: a.title, exact: true })).toBeChecked(); await expect(first.getByRole('checkbox', { name: b.title, exact: true })).not.toBeChecked(); await expect(first.getByRole('button', { name: '保存前置任务', exact: true })).toBeDisabled();
+  const saved: WorkspaceTask[] = await (await context.request.get('/api/tasks')).json(); expect(saved.find(value => value.id === task.id)?.dependency_ids).toEqual([b.id]); release(); await expect(second.getByRole('button', { name: '核验前置任务请求', exact: true })).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath('dependency-unsubmitted-cross-tab-draft-preserved.png'), fullPage: true, animations: 'disabled' }); await secondPage.close();
+});

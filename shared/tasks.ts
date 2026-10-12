@@ -16,7 +16,20 @@ export interface DependencyCommandResponse {
   task: WorkspaceTask | null;
   task_deleted?: boolean;
 }
+export type TaskMetadataChanges = Partial<Pick<WorkspaceTask, 'title' | 'auto_run' | 'run_at'>>;
+export interface UpdateTaskMetadataInput {
+  client_request_id: string;
+  expected_revision: number;
+  changes: TaskMetadataChanges;
+}
+export interface MetadataCommandResponse {
+  receipt: { id: string; operation: 'metadata'; task_id: string } & ({ status: 'succeeded'; committed_revision: number } | { status: 'cancelled'; committed_revision: null });
+  task: WorkspaceTask | null;
+  task_deleted?: boolean;
+}
 export interface WorkspaceTask {
+  /** Shared optimistic revision for title, auto_run and run_at. Legacy read projections start at zero. */
+  metadata_revision?: number;
   id: string;
   /** UUID identifying the original creation intent; reusable only with the same input. */
   client_request_id?: string;

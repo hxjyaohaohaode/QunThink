@@ -8,8 +8,10 @@ const deferred = () => { let resolve, reject; const promise = new Promise((a,b) 
 const tick = () => new Promise(resolve => setTimeout(resolve,0));
 globalThis.__result = {};
 const built = await build({ entryPoints:[resolve(root,'src/stores/taskResultsStore.ts')],bundle:true,write:false,format:'esm',platform:'browser',plugins:[{name:'result-protocol-boundaries',setup(build){
-  for (const [filter,path] of [[/services\/api$/,'api'],[/utils\/cacheUtils$/,'cache'],[/utils\/taskRecovery$/,'recovery'],[/utils\/taskDependencyRecovery$/,'dependencyRecovery']]) build.onResolve({filter},()=>({path,namespace:'fixture'}));
+  for (const [filter,path] of [[/services\/api$/,'api'],[/utils\/cacheUtils$/,'cache'],[/utils\/taskRecovery$/,'recovery'],[/utils\/taskDependencyRecovery$/,'dependencyRecovery'],[/utils\/taskMetadataRecovery$/,'metadataRecovery'],[/\.\/tasksStore$/,'tasks']]) build.onResolve({filter},()=>({path,namespace:'fixture'}));
   build.onLoad({filter:/.*/,namespace:'fixture'},({path})=>({loader:'js',contents:{
+    tasks:`export const useTasksStore={getState:()=>({pending:globalThis.__result.taskPending || {},metadataIntents:globalThis.__result.liveMetadataIntents || {}})};`,
+    metadataRecovery:`export const readMetadataJournal=()=>globalThis.__result.metadataIntents || [];export const metadataWorkPending=id=>!!globalThis.__result.taskPending?.[id];`,
     dependencyRecovery:`export const readDependencyIntents=()=>globalThis.__result.dependencyIntents || [];`,
     api:`export const getAuthGeneration=()=>globalThis.__result.auth; export const axiosInstance={get:(...args)=>globalThis.__result.get(...args),post:(...args)=>globalThis.__result.post(...args)};`,
     cache:`export const getCacheUserId=()=>globalThis.__result.user;`,
@@ -147,3 +149,7 @@ test('closing a deleted document command never promises retained text or continu
 test('other-tab dependency request blocks current-version acceptance before creating or sending a new command',async()=>{
  await store.getState().fetch('task-1');globalThis.__result.dependencyIntents=[{taskId:'task-1',payload:{client_request_id:'other-tab',expected_revision:0,dependency_ids:[]}}];let posts=0;globalThis.__result.post=async()=>{posts++;throw new Error('must not send')};await assert.rejects(store.getState().accept('task-1',version().id,version().content_hash,'source-20'),/前置任务关系待核验/);assert.equal(posts,0);assert.equal(globalThis.__result.receipts.size,0);
 });
+
+test('other-tab metadata intent blocks version acceptance without creating a new receipt',async()=>{await open();globalThis.__result.metadataIntents=[{taskId:'task-1'}];let calls=0;globalThis.__result.post=async()=>{calls++};await assert.rejects(store.getState().accept('task-1','11111111-1111-4111-8111-111111111111','hash','source-20'),/任务设置待核验/);assert.equal(calls,0);assert.equal(globalThis.__result.receipts.size,0)});
+
+test('metadata preparation before durable journal blocks acceptance',async()=>{await open();globalThis.__result.taskPending={'task-1':'保存任务设置中'};await assert.rejects(store.getState().accept('task-1','v','h','source-20'),/正在处理/);assert.equal(globalThis.__result.receipts.size,0)});
