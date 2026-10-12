@@ -43,7 +43,7 @@ test('double click is one write, freezes inputs, sends only IDs with exact accou
  await open(); await draft(); await act(async () => { button('保存前置任务').click(); button('保存前置任务')?.click(); });
  assert.equal(calls.length, 1); assert.equal(container.querySelector('fieldset').disabled, true); assert.equal(calls[0][2].headers['X-Expected-User-Id'], 'alice'); assert.deepEqual(Object.keys(calls[0][1]).sort(), ['client_request_id', 'dependency_ids', 'expected_revision']);
  assert.doesNotMatch(JSON.stringify(Object.values(localStorage)), /PRIVATE|前置甲|下游/);
- await act(async () => { tasks[0] = receipt(calls[0][1]).data.task; resolve(receipt(calls[0][1])); await tick(); }); assert.equal(store.getState().dependencyIntents[id], undefined); assert.equal(localStorage.length, 0);
+ await act(async () => { tasks[0] = receipt(calls[0][1]).data.task; resolve(receipt(calls[0][1])); await tick(); }); assert.equal(store.getState().dependencyIntents[id], undefined); assert.equal(localStorage.length, 0); assert.equal(store.getState().dependencyDrafts[id], undefined); assert.equal(store.getState().dependencyNotices[id], '前置任务关系已确认。已有正文保留，请核对是否需要保存新的复核版本'); assert.match(container.textContent, /前置任务关系已确认。/); assert.doesNotMatch(container.textContent, /当前草稿尚未保存/);
 });
 test('lost ACK survives reload; 404 cannot authorize replacement; retry preserves exact body and key', async () => {
  const writes = []; globalThis.__deps.put = async (...args) => { writes.push(args); throw new Error('offline'); };
@@ -53,7 +53,7 @@ test('lost ACK survives reload; 404 cannot authorize replacement; retry preserve
 });
 test('lookup success settles without another PUT; deleted task is never recreated', async () => {
  let payload, writes = 0; globalThis.__deps.put = async (_, body) => { payload = body; writes++; throw new Error('lost'); }; await draft(); await assert.rejects(store.getState().saveDependencies(id)); tasks = tasks.filter(task => task.id !== id);
- globalThis.__deps.get = async path => path === '/tasks' ? { data: tasks } : receipt(payload, null); await store.getState().verifyDependencies(id, payload.client_request_id); assert.equal(writes, 1); assert.equal(store.getState().dependencyIntents[id], undefined); assert.equal(store.getState().tasks.some(task => task.id === id), false);
+ globalThis.__deps.get = async path => path === '/tasks' ? { data: tasks } : receipt(payload, null); await store.getState().verifyDependencies(id, payload.client_request_id); assert.equal(writes, 1); assert.equal(store.getState().dependencyIntents[id], undefined); assert.equal(store.getState().tasks.some(task => task.id === id), false); assert.equal(store.getState().dependencyNotices[id], '前置任务请求已确认；原任务已删除，没有重新创建');
 });
 test('wrong request/task/operation/revision receipts remain uncertain', async () => {
  for (const patch of [{ id: 'wrong' }, { task_id: other }, { operation: 'save' }, { committed_revision: 0 }]) {
@@ -136,7 +136,7 @@ test('explicit close preserves choices, loses no key on disconnect, and settles 
   globalThis.__deps.post = async () => ({ data: { receipt: { ...receipt(intent.payload).data.receipt, status: 'cancelled', committed_revision: null, ...patch }, task: tasks[0] } }); await assert.rejects(store.getState().closeDependencies(id, intent.payload.client_request_id)); assert.ok(store.getState().dependencyIntents[id]);
  }
  let called; globalThis.__deps.post = async (...args) => { called = args; return { data: { receipt: { ...receipt(intent.payload).data.receipt, status: 'cancelled', committed_revision: null }, task: tasks[0] } }; };
- await store.getState().closeDependencies(id, intent.payload.client_request_id); assert.equal(called[0], `/tasks/${id}/dependencies/commands/${intent.payload.client_request_id}/close`); assert.deepEqual(called[1], {}); assert.equal(store.getState().dependencyIntents[id], undefined); assert.deepEqual(store.getState().dependencyDrafts[id].ids, [prior]); assert.deepEqual(tasks[0].dependency_ids, []);
+ await store.getState().closeDependencies(id, intent.payload.client_request_id); assert.equal(called[0], `/tasks/${id}/dependencies/commands/${intent.payload.client_request_id}/close`); assert.deepEqual(called[1], {}); assert.equal(store.getState().dependencyIntents[id], undefined); assert.deepEqual(store.getState().dependencyDrafts[id].ids, [prior]); assert.deepEqual(tasks[0].dependency_ids, []); assert.equal(store.getState().dependencyNotices[id], '原前置任务请求已结束，已保存的关系保持不变。处理完其余请求后可重新选择');
 });
 test('closing an already successful command preserves its committed relationship instead of undoing it', async () => {
  let sent; globalThis.__deps.put = async (_, payload) => { sent = payload; tasks[0] = receipt(payload).data.task; throw new Error('committed ACK lost'); }; await draft(); await assert.rejects(store.getState().saveDependencies(id));
@@ -158,4 +158,39 @@ test('foreign successful dependency receipt preserves this tabs unsent choices a
  tasks[0] = makeTask(id, '下游', { dependency_ids: [other], dependency_revision: 1 }); globalThis.__deps.get = async path => path === '/tasks' ? { data: tasks } : receipt(payload, tasks[0]);
  await act(async () => store.getState().fetch()); await act(async () => { button('核验前置任务请求').click(); await tick(); });
  assert.deepEqual(store.getState().dependencyDrafts[id].ids, [prior]); assert.equal(store.getState().dependencyDrafts[id].revision, 0); assert.equal(store.getState().dependencyConflicts[id], true); assert.equal(check('前置甲').checked, true); assert.equal(button('保存前置任务').disabled, true); await assert.rejects(store.getState().saveDependencies(id), /读取最新/);
+ assert.equal(store.getState().dependencyNotices[id], '原请求已确认保存，当前草稿尚未保存。已有正文保留，请核对是否需要保存新的复核版本'); assert.match(container.textContent, /原请求已确认保存，当前草稿尚未保存。/);
+});
+
+for (const [name, ids, savedIds, newerIds, unsaved] of [
+ ['no local draft', null, [other], null, false],
+ ['same saved IDs', [prior], [prior], null, false],
+ ['same IDs in another order', [prior, other], [other, prior], null, false],
+ ['empty selection matches saved', [], [], null, false],
+ ['empty selection differs from saved', [], [prior], null, true],
+ ['different selected IDs', [prior], [other], null, true],
+ ['newer saved projection matches draft', [prior], [other], [prior], false],
+ ['newer saved projection differs from draft', [prior], [prior], [other], true],
+]) test(`dependency receipt notice distinguishes ${name}`, async () => {
+ if (ids) await draft(ids);
+ const localDraft = store.getState().dependencyDrafts[id];
+ const payload = { client_request_id: crypto.randomUUID(), expected_revision: 0, dependency_ids: savedIds };
+ localStorage.setItem(`qunthink_dependency_command_v1_alice:${id}:${payload.client_request_id}`, JSON.stringify({ taskId: id, payload }));
+ const reply = receipt(payload); tasks[0] = newerIds ? { ...reply.data.task, dependency_ids: newerIds, dependency_revision: 2 } : reply.data.task;
+ globalThis.__deps.get = async path => path === '/tasks' ? { data: tasks } : reply;
+ await store.getState().fetch(); await open(); await act(async () => store.getState().verifyDependencies(id, payload.client_request_id));
+ const expected = (unsaved ? '原请求已确认保存，当前草稿尚未保存。' : '前置任务关系已确认。') + '已有正文保留，请核对是否需要保存新的复核版本';
+ assert.equal(store.getState().dependencyNotices[id], expected); assert.ok([...container.querySelectorAll('[role="status"]')].some(el => el.textContent === expected)); assert.deepEqual(store.getState().dependencyDrafts[id], localDraft);
+ if (!unsaved) assert.doesNotMatch(container.textContent, /当前草稿尚未保存/);
+});
+test('dependency receipt notice never calls another command-bound draft unsaved', async () => {
+ await draft([prior]);
+ const payload = { client_request_id: crypto.randomUUID(), expected_revision: 0, dependency_ids: [other] };
+ const pending = { client_request_id: crypto.randomUUID(), expected_revision: 0, dependency_ids: [prior] };
+ for (const body of [payload, pending]) localStorage.setItem(`qunthink_dependency_command_v1_alice:${id}:${body.client_request_id}`, JSON.stringify({ taskId: id, payload: body }));
+ store.setState({ dependencyDrafts: { [id]: { ...store.getState().dependencyDrafts[id], commandKey: pending.client_request_id } } });
+ const localDraft = store.getState().dependencyDrafts[id]; tasks[0] = receipt(payload).data.task;
+ globalThis.__deps.get = async path => path === '/tasks' ? { data: tasks } : receipt(payload, tasks[0]);
+ await store.getState().fetch(); await open(); await act(async () => store.getState().verifyDependencies(id, payload.client_request_id));
+ assert.equal(store.getState().dependencyNotices[id], '前置任务关系已确认。已有正文保留，请核对是否需要保存新的复核版本'); assert.doesNotMatch(container.textContent, /当前草稿尚未保存/); assert.match(container.textContent, /结果待核验/);
+ assert.deepEqual(store.getState().dependencyDrafts[id], localDraft); assert.equal(store.getState().dependencyIntents[id].payload.client_request_id, pending.client_request_id); assert.equal(store.getState().dependencyQueues[id].length, 1);
 });

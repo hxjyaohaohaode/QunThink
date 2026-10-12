@@ -102,8 +102,16 @@ export function createMetadataSlice<Context extends { user: string | null }>(
       if (receipt.status === 'succeeded' && metadataDrafts[id]?.commandKey === item.key) delete metadataDrafts[id];
       // A cancellation never rebases the original draft. Explicit reread is required.
       const active = state.tasks.find(value => value.id === id);
+      const saved = active && (active.metadata_revision ?? 0) > (task?.metadata_revision ?? 0) ? active : task;
+      const draft = metadataDrafts[id];
+      const unsaved = !!draft && !draft.commandKey && !!saved && (['title', 'auto_run', 'run_at'] as const).some(field => {
+        const value = field === 'title' ? draft.values.title.trim() : draft.values[field];
+        const base = field === 'title' ? draft.base.title.trim() : draft.base[field];
+        const confirmed = field === 'title' ? saved.title.trim() : saved[field];
+        return value !== base && value !== confirmed;
+      });
       const canProject = snapshot === sequence() && (!task || !active || (task.metadata_revision ?? 0) >= (active.metadata_revision ?? 0));
-      return { metadataDrafts, metadataErrors: { ...state.metadataErrors, [id]: '' }, metadataConflicts: { ...state.metadataConflicts, [id]: receipt.status === 'cancelled' || !!metadataDrafts[id] }, metadataNotices: { ...state.metadataNotices, [id]: response.task_deleted ? '原请求已确认；任务已删除，没有重新创建。' : receipt.status === 'cancelled' ? '原请求已结束。已保存设置保持不变，请读取最新设置后明确重新编辑。' : '任务设置已确认保存。' }, ...(canProject ? { tasks: task ? state.tasks.map(value => value.id === id ? task : value) : state.tasks.filter(value => value.id !== id) } : {}) };
+      return { metadataDrafts, metadataErrors: { ...state.metadataErrors, [id]: '' }, metadataConflicts: { ...state.metadataConflicts, [id]: receipt.status === 'cancelled' || !!metadataDrafts[id] }, metadataNotices: { ...state.metadataNotices, [id]: response.task_deleted ? '原请求已确认；任务已删除，没有重新创建。' : receipt.status === 'cancelled' ? '原请求已结束。已保存设置保持不变，请读取最新设置后明确重新编辑。' : unsaved ? '原请求已确认保存，当前草稿尚未保存。' : '任务设置已确认保存。' }, ...(canProject ? { tasks: task ? state.tasks.map(value => value.id === id ? task : value) : state.tasks.filter(value => value.id !== id) } : {}) };
     });
   }
   function recordError(id: string, error: unknown) {

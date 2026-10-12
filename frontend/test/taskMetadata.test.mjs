@@ -60,7 +60,7 @@ test('double click sends one guarded command, freezes controls, never writes pri
  let resolve, calls = []; globalThis.__metadata.put = (...args) => { calls.push(args); return new Promise(done => { resolve = done; }); };
  await open(); await act(async () => draft()); await act(async () => { button('保存任务设置').click(); button('保存任务设置')?.click(); await until(() => calls.length); });
  assert.equal(calls.length, 1); assert.equal(container.querySelector('fieldset').disabled, true); assert.equal(calls[0][2].headers['X-Expected-User-Id'], 'alice'); assert.deepEqual(Object.keys(calls[0][1].changes).sort(), ['auto_run', 'run_at', 'title']); assert.doesNotMatch(JSON.stringify(Object.values(localStorage)), /私密标题|2030-02|PRIVATE/);
- await act(async () => { tasks[0] = receipt(calls[0][1]).data.task; resolve(receipt(calls[0][1])); await until(() => !store.getState().pending[id]); }); assert.equal(store.getState().metadataIntents[id], undefined);
+ await act(async () => { tasks[0] = receipt(calls[0][1]).data.task; resolve(receipt(calls[0][1])); await until(() => !store.getState().pending[id]); }); assert.equal(store.getState().metadataIntents[id], undefined); assert.equal(store.getState().metadataDrafts[id], undefined); assert.equal(store.getState().metadataNotices[id], '任务设置已确认保存。'); assert.match(container.textContent, /任务设置已确认保存。/); assert.doesNotMatch(container.textContent, /当前草稿尚未保存/);
 });
 test('recovery off reloads only ID; query404 never permits replacement or blind replay', async () => {
  const item = await lost(); store.getState().cleanup(); await store.getState().fetch(); assert.equal(store.getState().metadataIntents[id].key, item.key); assert.equal(store.getState().metadataIntents[id].payload, undefined); await assert.rejects(store.getState().verifyMetadata(id, item.key)); await assert.rejects(store.getState().saveMetadata(id), /不能换编号覆盖/); await assert.rejects(store.getState().retryMetadata(id, item.key), /只能核验或结束/); await open(); assert.equal(button('按原设置同号重试').disabled, true);
@@ -93,10 +93,10 @@ test('A-B-A epoch rejects delayed receipt without new-account fetch or content',
  let finish, payload, reads = 0; globalThis.__metadata.put = (_, body) => { payload = body; return new Promise(resolve => { finish = resolve; }); }; draft(); const work = store.getState().saveMetadata(id); await until(() => finish); store.getState().cleanup(); globalThis.__metadata.user = 'bob'; globalThis.__metadata.auth++; globalThis.__metadata.get = async () => { reads++; return { data: [] }; }; await store.getState().fetch(); assert.deepEqual(store.getState().metadataIntents, {}); store.getState().cleanup(); globalThis.__metadata.user = 'alice'; globalThis.__metadata.auth++; const before = reads; finish(receipt(payload)); await assert.rejects(work, /账号已切换/); assert.equal(reads, before); assert.deepEqual(store.getState().tasks, []); assert.deepEqual(store.getState().metadataIntents, {});
 });
 test('deleted task exposes recovery; query never recreates it', async () => {
- const item = await lost(); tasks = []; await store.getState().fetch(); await open(); assert.match(container.textContent, /不会重新创建/); assert.ok(button('核对并结束原设置请求')); globalThis.__metadata.get = async path => path === '/tasks' ? { data: [] } : receipt(item.payload, null); await act(async () => store.getState().verifyMetadata(id, item.key)); assert.deepEqual(store.getState().tasks, []); assert.equal(store.getState().metadataIntents[id], undefined);
+ const item = await lost(); tasks = []; await store.getState().fetch(); await open(); assert.match(container.textContent, /不会重新创建/); assert.ok(button('核对并结束原设置请求')); globalThis.__metadata.get = async path => path === '/tasks' ? { data: [] } : receipt(item.payload, null); await act(async () => store.getState().verifyMetadata(id, item.key)); assert.deepEqual(store.getState().tasks, []); assert.equal(store.getState().metadataIntents[id], undefined); assert.equal(store.getState().metadataNotices[id], '原请求已确认；任务已删除，没有重新创建。');
 });
 test('close lost ACK/malformed cancel retain key; authoritative close cannot alter saved values', async () => {
- const item = await lost(); globalThis.__metadata.post = async () => { throw new Error('lost close'); }; await assert.rejects(store.getState().closeMetadata(id, item.key)); globalThis.__metadata.post = async () => { const reply = cancelled(item); reply.data.receipt.committed_revision = 1; return reply; }; await assert.rejects(store.getState().closeMetadata(id, item.key)); globalThis.__metadata.post = async (path, body) => { assert.equal(path, `/tasks/${id}/metadata/commands/${item.key}/close`); assert.deepEqual(body, {}); return cancelled(item); }; await store.getState().closeMetadata(id, item.key); assert.equal(tasks[0].title, '原任务'); assert.equal(readMetadataJournal().length, 0);
+ const item = await lost(); globalThis.__metadata.post = async () => { throw new Error('lost close'); }; await assert.rejects(store.getState().closeMetadata(id, item.key)); globalThis.__metadata.post = async () => { const reply = cancelled(item); reply.data.receipt.committed_revision = 1; return reply; }; await assert.rejects(store.getState().closeMetadata(id, item.key)); globalThis.__metadata.post = async (path, body) => { assert.equal(path, `/tasks/${id}/metadata/commands/${item.key}/close`); assert.deepEqual(body, {}); return cancelled(item); }; await store.getState().closeMetadata(id, item.key); assert.equal(tasks[0].title, '原任务'); assert.equal(readMetadataJournal().length, 0); assert.equal(store.getState().metadataNotices[id], '原请求已结束。已保存设置保持不变，请读取最新设置后明确重新编辑。');
 });
 test('close already-successful returns original receipt without undoing newer settings', async () => {
  const item = await lost(); tasks[0] = makeTask({ title: '更新第三版', metadata_revision: 3 }); globalThis.__metadata.post = async () => receipt(item.payload, tasks[0]); await store.getState().closeMetadata(id, item.key); assert.equal(store.getState().tasks[0].title, '更新第三版'); assert.equal(store.getState().metadataIntents[id], undefined);
@@ -128,12 +128,52 @@ test('invalid enabled scheduling and completed task cannot dispatch metadata com
  draft({ auto_run: true }); await assert.rejects(store.getState().saveMetadata(id), /下次生成时间/); store.getState().cleanup(); tasks=[makeTask({status:'completed'})];store.setState({tasks});draft({auto_run:true,run_at:'2030-01-01T00:00:00.000Z'});await assert.rejects(store.getState().saveMetadata(id),/不能启用/);
 });
 test('another tab success cannot erase this tabs unsent dirty metadata draft', async () => {
- draft({ title: '本标签尚未提交的私密草稿' });
+ await open(); await act(async () => draft({ title: '本标签尚未提交的私密草稿' }));
  const payload = { client_request_id: crypto.randomUUID(), expected_revision: 0, changes: { title: '另一标签已经提交' } };
  persistMetadataJournal({ taskId: id, key: payload.client_request_id, revision: 0, fields: ['title'], payloadHash: await textHash(canonicalMetadata(payload)), createdAt: new Date().toISOString() });
  tasks[0] = receipt(payload).data.task; globalThis.__metadata.get = async path => path === '/tasks' ? { data: tasks } : receipt(payload, tasks[0]);
- await store.getState().fetch(); await store.getState().verifyMetadata(id, payload.client_request_id);
+ await act(async () => store.getState().fetch()); await act(async () => { button('核验任务设置请求').click(); await until(() => !store.getState().metadataIntents[id]); });
  assert.equal(store.getState().metadataDrafts[id].values.title, '本标签尚未提交的私密草稿'); assert.equal(store.getState().metadataDrafts[id].revision, 0); assert.equal(store.getState().metadataConflicts[id], true); await assert.rejects(store.getState().saveMetadata(id), /读取最新/);
+ assert.equal(store.getState().metadataNotices[id], '原请求已确认保存，当前草稿尚未保存。'); assert.match(container.textContent, /原请求已确认保存，当前草稿尚未保存。/); assert.equal(container.querySelector('input').value, '本标签尚未提交的私密草稿'); assert.equal(button('保存任务设置').disabled, true);
+});
+
+
+for (const [name, changes, savedChanges, newerChanges, unsaved] of [
+ ['no local draft', null, {}, null, false],
+ ['unchanged draft shell', {}, {}, null, false],
+ ['draft returned to base', { title: '原任务' }, {}, null, false],
+ ['title whitespace only', { title: ' 原任务 ' }, {}, null, false],
+ ['same normalized saved title', { title: '  另一标签已经提交  ' }, {}, null, false],
+ ['untouched fields changed remotely', { title: '另一标签已经提交' }, { auto_run: true, run_at: '2030-02-03T04:05:00.000Z' }, null, false],
+ ['different auto-run draft', { auto_run: true }, {}, null, true],
+ ['different schedule draft', { run_at: '2030-02-03T04:05:00.000Z' }, {}, null, true],
+ ['same saved schedule draft', { run_at: '2030-02-03T04:05:00.000Z' }, { run_at: '2030-02-03T04:05:00.000Z' }, null, false],
+ ['newer saved projection matches draft', { title: '更新标题' }, {}, { title: '更新标题' }, false],
+ ['newer saved projection differs from draft', { title: '另一标签已经提交' }, {}, { title: '更新标题' }, true],
+]) test(`metadata receipt notice distinguishes ${name}`, async () => {
+ if (changes) draft(changes);
+ const localDraft = store.getState().metadataDrafts[id];
+ const payload = { client_request_id: crypto.randomUUID(), expected_revision: 0, changes: { title: '另一标签已经提交', ...savedChanges } };
+ persistMetadataJournal({ taskId: id, key: payload.client_request_id, revision: 0, fields: Object.keys(payload.changes), payloadHash: await textHash(canonicalMetadata(payload)), createdAt: new Date().toISOString() });
+ const reply = receipt(payload); tasks[0] = newerChanges ? { ...reply.data.task, ...newerChanges, metadata_revision: 2 } : reply.data.task;
+ globalThis.__metadata.get = async path => path === '/tasks' ? { data: tasks } : reply;
+ await store.getState().fetch(); await open(); await act(async () => store.getState().verifyMetadata(id, payload.client_request_id));
+ const expected = unsaved ? '原请求已确认保存，当前草稿尚未保存。' : '任务设置已确认保存。';
+ assert.equal(store.getState().metadataNotices[id], expected); assert.ok([...container.querySelectorAll('[role="status"]')].some(el => el.textContent === expected));
+ assert.deepEqual(store.getState().metadataDrafts[id], localDraft); assert.equal(store.getState().tasks[0].metadata_revision, newerChanges ? 2 : 1);
+ if (!unsaved) assert.doesNotMatch(container.textContent, /当前草稿尚未保存/);
+});
+test('metadata receipt notice never calls another command-bound draft unsaved', async () => {
+ draft({ title: '另一笔结果未知的设置' });
+ const payload = { client_request_id: crypto.randomUUID(), expected_revision: 0, changes: { title: '另一标签已经提交' } };
+ const pending = { client_request_id: crypto.randomUUID(), expected_revision: 0, changes: { title: '另一笔结果未知的设置' } };
+ for (const [index, body] of [payload, pending].entries()) persistMetadataJournal({ taskId: id, key: body.client_request_id, revision: 0, fields: ['title'], payloadHash: await textHash(canonicalMetadata(body)), createdAt: `2030-01-01T00:00:0${index}.000Z` });
+ store.setState({ metadataDrafts: { [id]: { ...store.getState().metadataDrafts[id], commandKey: pending.client_request_id } } });
+ const localDraft = store.getState().metadataDrafts[id]; tasks[0] = receipt(payload).data.task;
+ globalThis.__metadata.get = async path => path === '/tasks' ? { data: tasks } : receipt(payload, tasks[0]);
+ await store.getState().fetch(); await open(); await act(async () => store.getState().verifyMetadata(id, payload.client_request_id));
+ assert.equal(store.getState().metadataNotices[id], '任务设置已确认保存。'); assert.doesNotMatch(container.textContent, /当前草稿尚未保存/); assert.match(container.textContent, /结果待核验/);
+ assert.deepEqual(store.getState().metadataDrafts[id], localDraft); assert.equal(store.getState().metadataIntents[id].key, pending.client_request_id); assert.equal(store.getState().metadataQueues[id].length, 1);
 });
 
 for (const [status, code, message, expected] of [

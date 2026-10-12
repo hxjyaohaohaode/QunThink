@@ -200,7 +200,11 @@ export const useTasksStore = create<TaskState>((set, get) => {
       const dependencyDrafts = { ...state.dependencyDrafts };
       if (receipt.status === 'succeeded' && dependencyDrafts[id]?.commandKey === intent.payload.client_request_id) delete dependencyDrafts[id];
       else if (receipt.status === 'cancelled' && !dependencyDrafts[id]) dependencyDrafts[id] = { revision: intent.payload.expected_revision, ids: [...intent.payload.dependency_ids] };
-      return { dependencyDrafts, dependencyErrors: { ...state.dependencyErrors, [id]: '' }, dependencyConflicts: { ...state.dependencyConflicts, [id]: receipt.status === 'succeeded' && !!dependencyDrafts[id] }, dependencyNotices: { ...state.dependencyNotices, [id]: response.task_deleted ? '前置任务请求已确认；原任务已删除，没有重新创建' : receipt.status === 'cancelled' ? '原前置任务请求已结束，已保存的关系保持不变。处理完其余请求后可重新选择' : '前置任务关系已确认。已有正文保留，请核对是否需要保存新的复核版本' }, ...(snapshot === fetchSequence ? { tasks: response.task ? state.tasks.map(task => task.id === id ? response.task! : task) : state.tasks.filter(task => task.id !== id) } : {}) };
+      const active = state.tasks.find(task => task.id === id);
+      const saved = active && (active.dependency_revision ?? 0) > (response.task?.dependency_revision ?? 0) ? active : response.task;
+      const draft = dependencyDrafts[id];
+      const unsaved = !!draft && !draft.commandKey && !!saved && JSON.stringify([...draft.ids].sort()) !== JSON.stringify([...(saved.dependency_ids || [])].sort());
+      return { dependencyDrafts, dependencyErrors: { ...state.dependencyErrors, [id]: '' }, dependencyConflicts: { ...state.dependencyConflicts, [id]: receipt.status === 'succeeded' && !!dependencyDrafts[id] }, dependencyNotices: { ...state.dependencyNotices, [id]: response.task_deleted ? '前置任务请求已确认；原任务已删除，没有重新创建' : receipt.status === 'cancelled' ? '原前置任务请求已结束，已保存的关系保持不变。处理完其余请求后可重新选择' : unsaved ? '原请求已确认保存，当前草稿尚未保存。已有正文保留，请核对是否需要保存新的复核版本' : '前置任务关系已确认。已有正文保留，请核对是否需要保存新的复核版本' }, ...(snapshot === fetchSequence ? { tasks: response.task ? state.tasks.map(task => task.id === id ? response.task! : task) : state.tasks.filter(task => task.id !== id) } : {}) };
     });
   }
   async function sendDependencies(intent: DependencyIntent, replay: boolean) {
