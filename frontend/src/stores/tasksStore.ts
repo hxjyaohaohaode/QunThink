@@ -218,7 +218,10 @@ export const useTasksStore = create<TaskState>((set, get) => {
         if (current(origin)) {
           const status = (error as { status?: number; response?: { status?: number } }).status ?? (error as { response?: { status?: number } }).response?.status;
           const code = (error as { response?: { data?: { code?: string; error?: { code?: string } } }; code?: string }).response?.data;
-          const revisionConflict = status === 409 && (code?.code === 'TASK_DEPENDENCY_REVISION_CONFLICT' || code?.error?.code === 'TASK_DEPENDENCY_REVISION_CONFLICT');
+          // Friendly Axios errors retain a structured top-level code. Use it
+          // only for conflict classification, never to broaden key release.
+          const revisionCode = code?.code ?? code?.error?.code ?? (error as { code?: string }).code;
+          const revisionConflict = status === 409 && revisionCode === 'TASK_DEPENDENCY_REVISION_CONFLICT';
           const idConflict = code?.code === 'TASK_DEPENDENCY_IDEMPOTENCY_CONFLICT' || code?.error?.code === 'TASK_DEPENDENCY_IDEMPOTENCY_CONFLICT';
           const explicitCode = code?.code || code?.error?.code;
           const knownRejection = status === 400 || status === 422 || status === 404 && explicitCode === 'TASK_DEPENDENCY_NOT_FOUND';

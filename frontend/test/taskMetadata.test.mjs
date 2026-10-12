@@ -36,6 +36,17 @@ async function open() { mounted = await mount(container, id); }
 async function close() { if (mounted) await act(async () => mounted.unmount()); mounted = null; }
 function draft(changes = { title: '私密标题-NEW', auto_run: true, run_at: '2030-02-03T04:05:00.000Z' }) { store.getState().editMetadata(id, changes); }
 async function lost() { globalThis.__metadata.put = async () => { throw new Error('lost ACK'); }; draft(); await assert.rejects(store.getState().saveMetadata(id)); return store.getState().metadataIntents[id]; }
+// Keep the real Axios friendly-error interceptor in this second fixture. The
+// ordinary transport stub above deliberately tests raw Axios response shapes.
+const realTransportBuilt = await build({ stdin: { resolveDir: root, loader: 'tsx', contents: `import {createRoot} from 'react-dom/client';import {act} from 'react';import {TaskMetadata} from './src/components/Writing/TaskMetadata';import {TaskDependencies} from './src/components/Writing/TaskDependencies';export {act};export {useTasksStore} from './src/stores/tasksStore';export {axiosInstance,confirmAuthIdentity} from './src/services/api';export async function mount(el,id){const root=createRoot(el);await act(async()=>root.render(<TaskMetadata taskId={id}/>));return root;}export async function mountDependencies(el,id){const root=createRoot(el);await act(async()=>root.render(<TaskDependencies taskId={id}/>));return root;}` }, bundle: true, write: false, format: 'esm', platform: 'browser', jsx: 'automatic', define: { 'import.meta.env.DEV': 'false', 'import.meta.env.VITE_AUTH_MODE': '"session"' }, plugins: [{ name: 'real-metadata-transport', setup(build) {
+ build.onResolve({ filter: /(?:utils\/|\.\/)cacheUtils$/ }, () => ({ path: 'cache', namespace: 'mock' }));
+ build.onResolve({ filter: /^\.\/modelsStore$/ }, () => ({ path: 'models', namespace: 'mock' }));
+ build.onResolve({ filter: /\.\/runtimeConfig$/ }, () => ({ path: 'runtime', namespace: 'mock' }));
+ build.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({ loader: 'js', contents: path === 'models' ? `export const requestError=error=>error.message;` : path === 'cache' ? `export const getCacheUserId=()=>globalThis.__metadata.user;` : `export const getApiBaseUrl=()=>'/api';export const getApiBaseUrlCandidates=()=>['/api'];export const rememberBackendOrigin=()=>{};` }));
+} }] });
+await writeFile(join(folder, 'real-transport.mjs'), realTransportBuilt.outputFiles[0].text);
+const realTransport = await import(join(folder, 'real-transport.mjs'));
+
 beforeEach(async () => {
  await close(); container?.remove(); localStorage.clear(); databases.clear(); store.getState().cleanup(); tasks = [makeTask()];
  globalThis.__metadata = { user: 'alice', auth: 1, get: async path => { if (path === '/tasks') return { data: tasks }; throw failure(404); }, put: async (_, payload) => { const result = receipt(payload); tasks[0] = result.data.task; return result; }, post: async () => { throw new Error('MODEL-MUST-NOT-RUN'); }, patch: async () => { throw new Error('NO-BARE-PATCH'); } };
@@ -123,4 +134,59 @@ test('another tab success cannot erase this tabs unsent dirty metadata draft', a
  tasks[0] = receipt(payload).data.task; globalThis.__metadata.get = async path => path === '/tasks' ? { data: tasks } : receipt(payload, tasks[0]);
  await store.getState().fetch(); await store.getState().verifyMetadata(id, payload.client_request_id);
  assert.equal(store.getState().metadataDrafts[id].values.title, '本标签尚未提交的私密草稿'); assert.equal(store.getState().metadataDrafts[id].revision, 0); assert.equal(store.getState().metadataConflicts[id], true); await assert.rejects(store.getState().saveMetadata(id), /读取最新/);
+});
+
+for (const [status, code, message, expected] of [
+ [409, 'TASK_METADATA_REVISION_CONFLICT', '任务设置已变化，请核对原请求，再明确比较并重新编辑', /任务设置已被修改/],
+ [428, 'TASK_METADATA_PRECONDITION_REQUIRED', '任务设置需要带修订和原请求编号的新接口，请更新或刷新页面；未应用任何字段', /刷新或升级应用后核验原请求/],
+]) test(`real Axios interceptor and React controls preserve metadata ${status} classification and exact recovery UUID`, async () => {
+ const { axiosInstance, confirmAuthIdentity, useTasksStore: realStore, act: realAct, mount: realMount } = realTransport;
+ realStore.getState().cleanup(); confirmAuthIdentity('alice'); document.cookie = 'XSRF-TOKEN=synthetic'; realStore.setState({ tasks });
+ let payload, writes = 0, normalized;
+ const interceptor = axiosInstance.interceptors.response.use(undefined, error => { normalized = { status: error.status, code: error.code, responsePresent: !!error.response }; return Promise.reject(error); });
+ axiosInstance.defaults.adapter = config => {
+  let data = tasks, resultStatus = 200;
+  if (config.method === 'put') { writes++; payload = JSON.parse(config.data); resultStatus = status; data = { success: false, error: message, code }; if (status === 409) tasks = [makeTask({ title: '其他标签已保存', metadata_revision: 1 })]; }
+  const response = { config, status: resultStatus, data, headers: {}, statusText: String(resultStatus) };
+  return config.validateStatus(resultStatus) ? Promise.resolve(response) : Promise.reject(Object.assign(new Error('adapter-error'), { config, response }));
+ };
+ const rendered = await realMount(container, id);
+ try {
+  await realAct(async () => realStore.getState().editMetadata(id, { title: '需要完整保留的本地草稿' }));
+  await realAct(async () => { button('保存任务设置').click(); await until(() => writes === 1 && !realStore.getState().pending[id]); });
+  assert.deepEqual(normalized, { status, code, responsePresent: false }); assert.equal(writes, 1);
+  assert.match(container.textContent, expected); assert.equal(realStore.getState().metadataIntents[id].key, payload.client_request_id); assert.equal(readMetadataJournal()[0].key, payload.client_request_id);
+  assert.equal(realStore.getState().metadataDrafts[id].values.title, '需要完整保留的本地草稿'); assert.equal(realStore.getState().metadataDrafts[id].revision, 0); assert.equal(button('核对并结束原设置请求').disabled, false);
+  if (status === 409) assert.equal(realStore.getState().metadataConflicts[id], true);
+ } finally { axiosInstance.interceptors.response.eject(interceptor); await realAct(async () => rendered.unmount()); realStore.getState().cleanup(); }
+});
+test('raw Axios transport code never masks the structured metadata conflict code', async () => {
+ draft({ title: '保留草稿' }); globalThis.__metadata.put = async () => { throw Object.assign(failure(409, 'TASK_METADATA_REVISION_CONFLICT'), { code: 'ERR_BAD_REQUEST' }); };
+ await assert.rejects(store.getState().saveMetadata(id)); assert.equal(store.getState().metadataConflicts[id], true); assert.match(store.getState().metadataErrors[id], /任务设置已被修改/); assert.equal(readMetadataJournal().length, 1);
+});
+test('real Axios dependency409 classification preserves exact selected IDs, revision and recovery key', async () => {
+ const { axiosInstance, confirmAuthIdentity, useTasksStore: realStore, act: realAct, mountDependencies } = realTransport;
+ realStore.getState().cleanup(); confirmAuthIdentity('alice'); document.cookie = 'XSRF-TOKEN=synthetic'; tasks.push(makeTask({ id: other, title: '实际前置选项' })); realStore.setState({ tasks });
+ let payload, writes = 0;
+ axiosInstance.defaults.adapter = config => {
+  let data = tasks, status = 200;
+  if (config.method === 'put') { writes++; payload = JSON.parse(config.data); status = 409; data = { success: false, error: '前置任务关系已变化，请核对原请求', code: 'TASK_DEPENDENCY_REVISION_CONFLICT' }; tasks[0] = makeTask({ dependency_revision: 1 }); }
+  const response = { config, status, data, headers: {}, statusText: String(status) }; return config.validateStatus(status) ? Promise.resolve(response) : Promise.reject(Object.assign(new Error('adapter-error'), { config, response }));
+ };
+ const rendered = await mountDependencies(container, id);
+ try {
+  await realAct(async () => [...container.querySelectorAll('label')].find(label => label.textContent === '实际前置选项').querySelector('input').click());
+  await realAct(async () => { button('保存前置任务').click(); await until(() => writes === 1 && !realStore.getState().pending[id]); });
+  assert.equal(realStore.getState().dependencyConflicts[id], true); assert.equal(realStore.getState().dependencyIntents[id].payload.client_request_id, payload.client_request_id); assert.deepEqual(realStore.getState().dependencyDrafts[id].ids, [other]); assert.equal(realStore.getState().dependencyDrafts[id].revision, 0); assert.equal(button('核对并结束原前置请求').disabled, false); assert.equal(writes, 1);
+ } finally { await realAct(async () => rendered.unmount()); realStore.getState().cleanup(); }
+});
+test('real normalized dependency404 never gains permission to discard original request', async () => {
+ const { axiosInstance, confirmAuthIdentity, useTasksStore: realStore } = realTransport; realStore.getState().cleanup(); confirmAuthIdentity('alice'); document.cookie = 'XSRF-TOKEN=synthetic'; realStore.setState({ tasks }); let payload, writes = 0;
+ axiosInstance.defaults.adapter = config => { if (config.method !== 'put') return Promise.resolve({ config, status: 200, data: tasks, headers: {} }); writes++; payload = JSON.parse(config.data); return Promise.reject(Object.assign(new Error('adapter-error'), { config, response: { config, status: 404, data: { error: '任务不存在', code: 'TASK_DEPENDENCY_NOT_FOUND' }, headers: {} } })); };
+ realStore.getState().editDependencies(id, [other]); await assert.rejects(realStore.getState().saveDependencies(id)); assert.equal(writes, 1); assert.equal(realStore.getState().dependencyIntents[id].payload.client_request_id, payload.client_request_id); assert.equal(realStore.getState().dependencyDrafts[id].revision, 0); realStore.getState().cleanup();
+});
+test('real metadata network failure keeps original UUID without automatic retry or conflict inference', async () => {
+ const { axiosInstance, confirmAuthIdentity, useTasksStore: realStore } = realTransport; realStore.getState().cleanup(); confirmAuthIdentity('alice'); document.cookie = 'XSRF-TOKEN=synthetic'; realStore.setState({ tasks }); let payload, writes = 0;
+ axiosInstance.defaults.adapter = config => { if (config.method !== 'put') return Promise.resolve({ config, status: 200, data: tasks, headers: {} }); writes++; payload = JSON.parse(config.data); return Promise.reject(Object.assign(new Error('TASK_METADATA_REVISION_CONFLICT is only text'), { config, code: 'ERR_NETWORK' })); };
+ realStore.getState().editMetadata(id, { title: '未知必须保留' }); await assert.rejects(realStore.getState().saveMetadata(id)); assert.equal(writes, 1); assert.equal(realStore.getState().metadataIntents[id].key, payload.client_request_id); assert.equal(realStore.getState().metadataConflicts[id], false); assert.equal(readMetadataJournal()[0].key, payload.client_request_id); realStore.getState().cleanup();
 });

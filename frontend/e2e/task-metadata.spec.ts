@@ -1,7 +1,7 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { registerSyntheticAccount } from './authFixture';
-import { beginSessionTokenRecovery, navigateWithSessionTokenRecovery } from './sessionTokenRecovery';
+import { beginSessionBootstrapRecovery as beginSessionTokenRecovery, navigateWithSessionBootstrapRecovery as navigateWithSessionTokenRecovery } from './sessionBootstrapRecovery';
 import { assertLinuxBrowserSandbox, readSandboxDiagnostics, readVersionDiagnostics } from './sandboxDiagnostics';
 import type { WorkspaceTask, UpdateTaskMetadataInput } from '../../shared/tasks';
 
@@ -79,7 +79,12 @@ test('two real tabs preserve both requests, reject delayed stale PUT and require
   await secondPage.route(`**/api/tasks/${task.id}/metadata`, async route => { if (route.request().method() !== 'PUT') return route.continue(); secondSent = route.request().postDataJSON(); await route.continue(); });
   await Promise.all([first.getByRole('button', { name: '保存任务设置', exact: true }).click(), second.getByRole('button', { name: '保存任务设置', exact: true }).click()]);
   await Promise.all([releaseHash(page), releaseHash(secondPage)]); await expect.poll(() => !!firstSent && !!secondSent).toBe(true);
-  await expect.poll(async () => (await readTask(context, task.id))?.title).toBe('较新的标签设置'); expect(firstSent.client_request_id).not.toBe(secondSent.client_request_id); release();
+  await expect.poll(async () => (await readTask(context, task.id))?.title).toBe('较新的标签设置'); expect(firstSent.client_request_id).not.toBe(secondSent.client_request_id);
+  expect(firstSent.expected_revision).toBe(0); expect(secondSent.expected_revision).toBe(0);
+  const staleResponse = page.waitForResponse(response => new URL(response.url()).pathname === `/api/tasks/${task.id}/metadata` && response.request().method() === 'PUT' && response.request().postDataJSON().client_request_id === firstSent.client_request_id);
+  release(); const rejected = await staleResponse; expect(rejected.status()).toBe(409); expect(await rejected.json()).toMatchObject({ success: false, code: 'TASK_METADATA_REVISION_CONFLICT' });
+  const winner = await context.request.get(`/api/tasks/${task.id}/metadata/commands/${secondSent.client_request_id}`); expect(winner.status()).toBe(200); expect((await winner.json()).receipt).toMatchObject({ id: secondSent.client_request_id, task_id: task.id, operation: 'metadata', status: 'succeeded', committed_revision: 1 });
+  expect((await readTask(context, task.id))?.metadata_revision).toBe(1);
   await expect(first.getByText(/任务设置已被修改/)).toBeVisible(); await expect(first.getByRole('button', { name: '核对并结束原设置请求', exact: true })).toBeEnabled();
   await first.getByRole('button', { name: '核对并结束原设置请求', exact: true }).click();
   // Another tab may already have removed its durable key, but this page's

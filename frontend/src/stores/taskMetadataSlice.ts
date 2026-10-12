@@ -107,8 +107,10 @@ export function createMetadataSlice<Context extends { user: string | null }>(
     });
   }
   function recordError(id: string, error: unknown) {
-    const value = error as { response?: { status?: number; data?: { code?: string; error?: { code?: string } } } };
-    const status = value.response?.status, code = value.response?.data?.code || value.response?.data?.error?.code;
+    const value = error as { status?: number; code?: string; response?: { status?: number; data?: { code?: string; error?: { code?: string } } } };
+    // The shared Axios interceptor deliberately exposes only status/code. Keep
+    // raw Axios support too; message text never establishes command state.
+    const status = value.status ?? value.response?.status, code = value.response?.data?.code ?? value.response?.data?.error?.code ?? value.code;
     const conflict = status === 409 && code === 'TASK_METADATA_REVISION_CONFLICT';
     const message = !get().metadataIntents[id] ? (error instanceof Error ? error.message : '尚未发送，请检查任务设置') : status === 428 ? '服务端需要新版任务设置协议。请保留当前草稿，刷新或升级应用后核验原请求。' : conflict ? '任务设置已被修改。先核对并结束原请求，再读取最新设置重新编辑；不会自动覆盖。' : '保存结果待核验。连接失败、未找到或冲突都不能证明未保存，请核验或结束原请求。';
     set(state => ({ metadataErrors: { ...state.metadataErrors, [id]: message }, metadataConflicts: { ...state.metadataConflicts, [id]: conflict || !!state.metadataConflicts[id] } }));
