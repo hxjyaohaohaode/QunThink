@@ -12,7 +12,7 @@ export function createPhoneLoginRecovery({ page, deadline, now = Date.now, wait 
     if (active || failed) throw new Error('Concurrent or previously failed phone login cannot start another operation');
     active = true;
     const origin = new URL(page.url()).origin, frame = page.mainFrame();
-    let invalid = false, succeeded = false, armed = false, retried = false, form;
+    let invalid = false, succeeded = false, armed = false, retried = false, form, documents;
     let login = null, bootstrap = null, model = null, phase = 'prepare';
     const requests = new Map(), pendingAuthChecks = new Set();
     let closed = false;
@@ -23,6 +23,7 @@ export function createPhoneLoginRecovery({ page, deadline, now = Date.now, wait 
     };
     const current = () => {
       const timeout = budget();
+      documents?.assertCurrent();
       if (invalid || new URL(page.url()).origin !== origin) throw new Error('Phone login operation changed; stale evidence cannot authorize a click or success');
       return timeout;
     };
@@ -63,9 +64,16 @@ export function createPhoneLoginRecovery({ page, deadline, now = Date.now, wait 
     };
     const onFinished = request => { const observed = requests.get(request); if (observed) observed.finished = true; };
     const onFailed = request => { const observed = requests.get(request); if (observed) { observed.failed = true; observed.finished = true; if (observed.kind !== 'model') invalid = true; } };
-    const onNavigation = navigated => { if (navigated === frame) invalid = true; };
+    const onNavigation = navigated => {
+      if (navigated !== frame) return;
+      // Only an already accepted login/bootstrap may initialize App history.
+      // Raw CDP classification and current-context Document proof are separate.
+      if (!documents || login?.response?.status() !== 200 || bootstrap?.response?.status() !== 200) invalid = true;
+      else documents.navigate();
+    };
     const listeners = { request: onRequest, response: onResponse, requestfinished: onFinished, requestfailed: onFailed, framenavigated: onNavigation, close: () => { invalid = true; } };
-    const snapshot = () => ({ phase, retried, deadline, remainingBudgetMs: deadline - now(), loginStatus: login?.response?.status() ?? null,
+    const admitted = () => !invalid && login?.response?.status() === 200 && bootstrap?.response?.status() === 200;
+    const snapshot = () => ({ document: documents?.snapshot(), phase, retried, deadline, remainingBudgetMs: deadline - now(), loginStatus: login?.response?.status() ?? null,
       bootstrapStatus: bootstrap?.response?.status() ?? null, modelStatus: model?.response?.status() ?? null, expectedUserId });
     const checkForm = async rateLimited => {
       current();
@@ -73,8 +81,9 @@ export function createPhoneLoginRecovery({ page, deadline, now = Date.now, wait 
       if (!state.unchanged || !state.visible || !state.enabled || rateLimited && !state.rateLimited) throw new Error('Original phone login form changed or is not ready');
     };
     const settled = async read => { await poll(() => { current(); return read(); }, Math.min(5000, budget())); current(); };
-    const settleAuthentication = async () => {
-      await settled(() => pendingAuthChecks.size === 0);
+    const settleAuthentication = async (fresh = true) => {
+      if (fresh) documents.beginProof();
+      await settled(() => pendingAuthChecks.size === 0 && documents.verify());
       // A new 409 during the last polling await is unknown, never success.
       current();
       if (pendingAuthChecks.size) throw new Error('Phone login authentication response is still pending');
@@ -84,7 +93,7 @@ export function createPhoneLoginRecovery({ page, deadline, now = Date.now, wait 
       // The adapter calls this only after its final browser-side form read,
       // immediately before the native click. Requests during that read are stale.
       const beginClick = () => {
-        current();
+        current(); documents.assertNoNavigation(); documents.assertVerified();
         if (previous && (login !== previous || login.response !== previous.authorizingResponse || login.failed || !login.finished || login.response.status() !== 429)) throw new Error('Phone login 429 is no longer current');
         armed = true; login = null;
         return budget();
@@ -95,7 +104,8 @@ export function createPhoneLoginRecovery({ page, deadline, now = Date.now, wait 
     };
     try {
       for (const [event, listener] of Object.entries(listeners)) page.on(event, listener);
-      form = await prepare(budget); current();
+      form = await prepare(budget, admitted); documents = form.documents; current();
+      documents.beginProof(); await settled(() => documents.verify()); current(); documents.assertVerified();
       phase = 'submit'; await click(null);
       if (login.response.status() === 429) {
         retried = true; // Reserve the sole additional click before any recovery await.
@@ -129,11 +139,17 @@ export function createPhoneLoginRecovery({ page, deadline, now = Date.now, wait 
       await workspace(Math.min(5000, budget())); current(); await settleAuthentication();
       if (login !== accepted || bootstrap !== initialized) throw new Error('Phone login identity changed during the final workspace check');
       phase = 'workspace'; await capture(snapshot()); current(); await settleAuthentication();
-      await form.dispose(); form = null; current(); await settleAuthentication();
+      await form.dispose(); form = null; current();
+      // Disposal cannot classify any new navigation as benign. Prove the
+      // retained Document afresh after detach, then release it and only check
+      // the completed proof/revision while draining remaining auth responses.
+      await documents.detach(); current(); await settleAuthentication();
+      await documents.dispose(); current(); await settleAuthentication(false);
       // No await after these terminal checks: even the drain Promise can be
       // followed by a newly invalidating response before this continuation.
       current();
       if (pendingAuthChecks.size) throw new Error('Phone login authentication response is still pending');
+      documents.assertVerified();
       succeeded = true;
     } catch (error) {
       phase = 'failed';
@@ -141,6 +157,7 @@ export function createPhoneLoginRecovery({ page, deadline, now = Date.now, wait 
       throw error;
     } finally {
       try { if (form) await form.dispose(); } catch { /* The operation has already failed. */ }
+      try { if (!succeeded) await documents?.dispose(); } catch { /* Preserve an already failed operation. */ }
       for (const [event, listener] of Object.entries(listeners)) page.off(event, listener);
       closed = true; requests.clear(); pendingAuthChecks.clear(); active = false; failed = !succeeded;
     }

@@ -13,7 +13,7 @@ async function adapter() {
     b.onResolve({ filter: /^@playwright\/test$/ }, () => ({ path: 'playwright', namespace: 'controlled' }));
     b.onLoad({ filter: /.*/, namespace: 'controlled' }, () => ({ contents: `
       export function expect(locator) { return { toBeVisible: async ({ timeout } = {}) => { if (!await locator.isVisible(timeout)) throw new Error('workspace not visible'); } }; }
-      expect.poll = (read, { timeout } = {}) => ({ toBe: async expected => { for (let i=0; i<5; i++) { if (await read() === expected) return; await Promise.resolve(); } throw new Error('controlled poll still pending'); }, not: { toBe: async expected => { if (await read() === expected) throw new Error('navigation still pending'); } } });
+      expect.poll = (read, { timeout } = {}) => ({ toBe: async expected => { for (let i=0; i<20; i++) { if (await read() === expected) return; await Promise.resolve(); } throw new Error('controlled poll still pending'); }, not: { toBe: async expected => { if (await read() === expected) throw new Error('navigation still pending'); } } });
     `, loader: 'js' }));
   } }] });
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}#${Math.random()}`);
@@ -29,6 +29,15 @@ class Handle {
 class Page extends EventEmitter {
   frame = {}; clicks = 0; destination = false; status = [429, 200]; disposals = 0; screenshots = []; requests = []; hooks = {};
   constructor() { super(); this.window = new Window({ url: origin }); this.resetForm(); }
+  context() { return { newCDPSession: async () => {
+    const session = new EventEmitter(); this.cdp = session;
+    session.send = async command => { await this.hooks.cdpSend?.(this, command); return command === 'Page.getFrameTree' ? { frameTree: { frame: { id: 'main', loaderId: 'original', url: this.url() } } } : {}; };
+    session.detach = async () => { await this.hooks.detach?.(this); session.emit('close'); };
+    return session;
+  } }; }
+  async evaluateHandle() { return new Handle(this, this.currentDocument ?? this.window.document); }
+  async evaluate(fn, handle) { await this.hooks.proof?.(this); const previous = globalThis.document; globalThis.document = this.currentDocument ?? this.window.document; try { return fn(handle.value); } finally { globalThis.document = previous; } }
+  history(order = 'raw-first') { const raw = () => this.cdp.emit('Page.navigatedWithinDocument', { frameId: 'main', url: this.url(), navigationType: 'historyApi' }); const publicEvent = () => this.emit('framenavigated', this.frame); if (order === 'raw-first') { raw(); publicEvent(); } else { publicEvent(); raw(); } }
   url() { return origin + '/'; }
   mainFrame() { return this.frame; }
   resetForm() {
@@ -75,7 +84,7 @@ async function controlled(fn) {
 }
 
 test('actual adapter first200 confirms current bootstrap plus workspace, masks fields and cleans handles', async () => controlled(async s => {
-  s.page.status = [200]; await s.run(); assert.equal(s.page.clicks, 1); assert.deepEqual(s.waits, []); assert.equal(s.page.disposals, 3); assert.equal(s.attachments[0].body.deadline, 21000);
+  s.page.status = [200]; await s.run(); assert.equal(s.page.clicks, 1); assert.deepEqual(s.waits, []); assert.equal(s.page.disposals, 4); assert.equal(s.attachments[0].body.deadline, 21000);
   assert.equal(JSON.stringify(s.attachments).includes(password), false); assert.equal(JSON.stringify(s.attachments).includes(phone), false);
 }));
 test('actual adapter429→200 performs one unchanged control retry after the real server delay', async () => controlled(async s => {
@@ -196,7 +205,7 @@ for (const status of [401, 409]) test(`actual adapter catalog${status} in the fi
   s.setNowHook(() => {
     // Dispose has completed. The fifth clock read is the drain's last internal
     // currentness check, immediately before its Promise resolves to the caller.
-    if (s.page.disposals === 3 && ++afterCleanupReads === 5 && !emitted) {
+    if (s.page.disposals === 4 && ++afterCleanupReads === 5 && !emitted) {
       emitted = true;
       queueMicrotask(() => s.page.emitResponse(status, s.page.req('/api/user/model-catalog'), { json: async () => ({ code: 'ACCOUNT_CHANGED' }) }));
     }
@@ -248,4 +257,44 @@ for (const field of ['phone', 'password']) test(`replacing then restoring the ${
     original.replaceWith(replacement); replacement.dispatchEvent(new page.window.Event('input', { bubbles: true })); replacement.replaceWith(original);
   };
   await assert.rejects(s.run(), /did not submit/); assert.equal(s.page.requests.filter(r => r.method() === 'POST').length, 0); assert.equal(s.page.clicks, 1);
+}));
+
+for (const order of ['raw-first', 'public-first']) test(`actual adapter pairs two accepted history events (${order})`, async () => controlled(async s => {
+  s.page.status = [200]; s.page.hooks.workspace = page => { page.history(order); page.history(order); };
+  await s.run(); assert.equal(s.page.clicks, 1); assert.equal(s.attachments.at(-1).body.document.historyEvents, 2);
+}));
+test('raw pre-admission history cannot become authorized by a later public event', async () => controlled(async s => {
+  s.page.hooks.click = page => {
+    page.cdp.emit('Page.navigatedWithinDocument', { frameId: 'main', url: page.url(), navigationType: 'historyApi' });
+    page.emitResponse(200); page.initialize(); page.emit('framenavigated', page.frame);
+  };
+  await assert.rejects(s.run(), /changed/); assert.equal(s.page.clicks, 1);
+  await assert.rejects(s.run(), /previously failed/);
+}));
+for (const side of ['raw', 'public']) test(`unpaired ${side} history cannot reach success`, async () => controlled(async s => {
+  s.page.status = [200]; s.page.hooks.workspace = page => {
+    if (side === 'raw') page.cdp.emit('Page.navigatedWithinDocument', { frameId: 'main', url: page.url(), navigationType: 'historyApi' });
+    else page.emit('framenavigated', page.frame);
+  };
+  await assert.rejects(s.run(), /pending/); assert.equal(s.page.clicks, 1);
+}));
+test('fresh final proof rejects a replaced current Document even before its events arrive', async () => controlled(async s => {
+  s.page.status = [200]; s.page.hooks.screenshot = page => { page.currentDocument = {}; };
+  await assert.rejects(s.run(), /changed/); assert.equal(s.page.clicks, 1);
+}));
+for (const at of ['detach', 'document-dispose']) for (const event of ['cross-document', '401', '409']) test(`${event} during ${at} is terminal with zero extra POSTs`, async () => controlled(async s => {
+  s.page.status = [200]; let emitted = false;
+  const mutate = page => {
+    if (emitted || at === 'document-dispose' && page.disposals !== 4) return; emitted = true;
+    if (event === 'cross-document') page.cdp.emit('Page.frameNavigated', { frame: { id: 'main', loaderId: 'replacement', url: page.url() }, type: 'BackForwardCacheRestore' });
+    else page.emitResponse(Number(event), page.req('/api/user/model-catalog'), { json: async () => ({ code: 'ACCOUNT_CHANGED' }) });
+  };
+  s.page.hooks[at === 'detach' ? 'detach' : 'dispose'] = mutate;
+  await assert.rejects(s.run(), /changed|pending/); assert.equal(emitted, true); assert.equal(s.page.clicks, 1);
+  await assert.rejects(s.run(), /previously failed/);
+}));
+test('history arriving in the final drain continuation cannot reuse the completed proof', async () => controlled(async s => {
+  let reads = 0, emitted = false; s.page.status = [200];
+  s.setNowHook(() => { if (s.page.disposals === 4 && ++reads === 5 && !emitted) { emitted = true; queueMicrotask(() => s.page.history()); } });
+  await assert.rejects(s.run(), /changed|pending/); assert.equal(emitted, true); assert.equal(s.page.clicks, 1);
 }));
