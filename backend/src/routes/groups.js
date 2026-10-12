@@ -182,6 +182,15 @@ router.get('/groups/:id/background', asyncHandler(async (req, res) => {
     return res.status(404).json({ error: '背景图不存在' });
   }
 
+  try {
+    // Backgrounds share one directory: staying beneath it is insufficient.
+    // Reject A's storage key resolving to B's file, even within this directory.
+    const expected = path.join(fs.realpathSync(uploadRoot), storageKey);
+    if (fs.realpathSync(filePath) !== expected || !fs.lstatSync(filePath).isFile()) {
+      return res.status(404).json({ error: '背景图不存在' });
+    }
+  } catch { return res.status(404).json({ error: '背景图不存在' }); }
+
   const mimeByExtension = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp' };
   const mimeType = mimeByExtension[path.extname(storageKey).toLowerCase()];
   if (!mimeType) return res.status(415).json({ error: '背景图类型不受支持' });

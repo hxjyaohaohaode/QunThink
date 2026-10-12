@@ -21,7 +21,7 @@ function checkFreeRender(config) {
   }
   if (frontend.autoDeployTrigger !== 'off') fail('must retain manual service deploys during readiness preparation.');
   if ('rootDir' in frontend) fail('must omit rootDir so frontend builds retain repository-root shared contracts.');
-  if (frontend.buildCommand !== 'cd frontend && test -n "$VITE_BACKEND_URL" && npm ci && npm run build') {
+  if (frontend.buildCommand !== 'cd frontend && node scripts/validate-backend-origin.mjs && npm ci && npm run build') {
     fail('build command must require the existing backend origin and build from the repository root.');
   }
   if (frontend.staticPublishPath !== './frontend/dist') fail('must publish ./frontend/dist.');

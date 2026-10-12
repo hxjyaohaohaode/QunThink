@@ -23,6 +23,14 @@ services:
         sync: false
       - key: CORS_ORIGINS
         sync: false
+      - key: ALIYUN_ACCESS_KEY_ID
+        sync: false
+      - key: ALIYUN_ACCESS_KEY_SECRET
+        sync: false
+      - key: ALIYUN_SMS_SIGN_NAME
+        sync: false
+      - key: ALIYUN_SMS_TEMPLATE_CODE
+        sync: false
     disk:
       name: ai-chat-group-data
       mountPath: /var/data
@@ -32,7 +40,7 @@ services:
     runtime: static
     name: ai-chat-group-frontend
     autoDeployTrigger: checksPass
-    buildCommand: cd frontend && npm ci && npm run build
+    buildCommand: cd frontend && node scripts/validate-backend-origin.mjs && npm ci && npm run build
     staticPublishPath: ./frontend/dist
     envVars:
       - key: VITE_BACKEND_URL

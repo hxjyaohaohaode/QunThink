@@ -5,6 +5,9 @@ import { initUserDatabase, withWriteLock } from '../models/db.js';
 import { validateBody, smsSendSchema, smsVerifySchema } from '../validators/index.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import crypto from 'crypto';
+import { provisionNewLocalMemoryAccount } from '../services/memory/persistentMemory.js';
+import { writeSessionChanges } from '../services/sessionPersistence.js';
+import { revokeSessionConnections } from '../websocket/index.js';
 
 const router = express.Router();
 const SESSION_MAX_AGE = parseInt(process.env.SESSION_MAX_AGE) || 30 * 24 * 60 * 60 * 1000;
@@ -52,10 +55,11 @@ function clearVerifyFailures(phone) {
 function pruneUserSessions(db, userId) {
   const userSessions = db.data.sessions.filter(s => s.userId === userId);
   const excess = userSessions.length - (MAX_SESSIONS_PER_USER - 1);
-  if (excess <= 0) return;
+  if (excess <= 0) return [];
   userSessions.sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at));
   const tokensToRemove = new Set(userSessions.slice(0, excess).map(s => s.token));
   db.data.sessions = db.data.sessions.filter(s => !tokensToRemove.has(s.token));
+  return [...tokensToRemove];
 }
 
 router.post('/sms/send', validateBody(smsSendSchema), asyncHandler(async (req, res) => {
@@ -104,68 +108,36 @@ router.post('/sms/verify', validateBody(smsVerifySchema), asyncHandler(async (re
   let user;
   let isNewUser = false;
 
+  // Hash outside the auth lock; publication and ledger provisioning are one
+  // serialized admission. Provisioning takes only its independent memory lock.
+  const passwordHash = await hashPasswordAsync(crypto.randomBytes(32).toString('hex'));
+  const token = generateSessionToken();
   await withWriteLock('auth', async () => {
     await db.read();
     user = db.data.users.find(u => u.phone === phone);
-  });
-
-  if (!user) {
-    isNewUser = true;
-    const userId = crypto.randomUUID();
-    const phoneSuffix = phone.substring(phone.length - 4);
-    const username = `user_${phoneSuffix}_${Date.now().toString(36)}`;
-    const randomPassword = crypto.randomBytes(32).toString('hex');
-    const passwordHash = await hashPasswordAsync(randomPassword);
-
-    user = {
-      id: userId,
-      username,
-      password: passwordHash,
-      nickname: `用户${phoneSuffix}`,
-      phone,
-      role: 'user',
-      created_at: new Date().toISOString()
-    };
-
-    let raceDetected = false;
-    await withWriteLock('auth', async () => {
-      await db.read();
-      if (db.data.users.find(u => u.phone === phone)) {
-        raceDetected = true;
-        user = db.data.users.find(u => u.phone === phone);
-        isNewUser = false;
-        return;
-      }
-      db.data.users.push(user);
-      await db.write();
-    });
-
-    if (!raceDetected) {
-      try {
-        await initUserDatabase(userId);
-      } catch (error) {
-        await withWriteLock('auth', async () => {
-          await db.read();
-          db.data.users = db.data.users.filter(u => u.id !== userId);
-          await db.write();
-        });
-        return res.status(500).json({ error: '用户数据库初始化失败' });
-      }
+    if (!user) {
+      isNewUser = true;
+      const userId = crypto.randomUUID();
+      const suffix = phone.slice(-4);
+      user = {
+        id: userId, username: `user_${suffix}_${userId}`, password: passwordHash,
+        nickname: `用户${suffix}`, phone, role: 'user', created_at: new Date().toISOString()
+      };
+      const userDb = await initUserDatabase(userId);
+      await provisionNewLocalMemoryAccount(userId, userDb);
+      db.data.users = [...db.data.users, user];
     }
-  }
-
-  const token = generateSessionToken();
-  const session = {
-    token,
-    userId: user.id,
-    expires_at: new Date(Date.now() + SESSION_MAX_AGE).toISOString()
-  };
-
-  await withWriteLock('auth', async () => {
-    await db.read();
-    pruneUserSessions(db, user.id);
-    db.data.sessions.push(session);
-    await db.write();
+    const revokedTokens = pruneUserSessions(db, user.id);
+    db.data.sessions.push({ token, userId: user.id,
+      expires_at: new Date(Date.now() + SESSION_MAX_AGE).toISOString() });
+    // A lost acknowledgement must not leave the in-memory uncommitted account
+    // available. A forced authoritative read reconciles it before any response.
+    try { await writeSessionChanges(db, revokedTokens, revokeSessionConnections); }
+    catch (error) {
+      const committedUser = db.data.users?.find(entry => entry.id === user.id);
+      const committedSession = db.data.sessions?.find(entry => entry.token === token && entry.userId === user.id);
+      if (error.code === 'SESSION_UPDATE_UNKNOWN' || !committedUser || !committedSession) throw error;
+    }
   });
 
   res.cookie('session_token', token, buildSessionCookieOptions());

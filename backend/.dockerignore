@@ -15,3 +15,7 @@ uploads
 uploads/
 test
 test_results
+
+# Exclude every environment variant, including .env.production in subdirectories.
+.env*
+**/.env*

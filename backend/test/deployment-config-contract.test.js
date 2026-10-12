@@ -128,9 +128,11 @@ for (const [label, mutate] of [
 test('static frontend build requires a backend origin without calling the real npm', { skip: process.platform === 'win32' }, () => {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'render-free-build-'));
   try {
-    fs.mkdirSync(path.join(fixtureRoot, 'frontend'));
+    fs.mkdirSync(path.join(fixtureRoot, 'frontend/scripts'), { recursive: true });
+    fs.copyFileSync(path.join(root, 'frontend/scripts/validate-backend-origin.mjs'), path.join(fixtureRoot, 'frontend/scripts/validate-backend-origin.mjs'));
     const bin = path.join(fixtureRoot, 'bin');
     fs.mkdirSync(bin);
+    fs.symlinkSync(process.execPath, path.join(bin, 'node'));
     // A fake npm proves shell short-circuiting without building, loading .env or networking.
     fs.writeFileSync(path.join(bin, 'npm'), '#!/bin/sh\nprintf "FAKE_NPM_CALLED\\n"\n', { mode: 0o700 });
     for (const env of [{ PATH: bin }, { PATH: bin, VITE_BACKEND_URL: '' }]) {
@@ -140,7 +142,7 @@ test('static frontend build requires a backend origin without calling the real n
       assert.equal(result.error, undefined);
       assert.notEqual(result.status, 0);
       assert.equal(result.stdout, '');
-      assert.equal(result.stderr, '');
+      assert.match(result.stderr, /VITE_BACKEND_URL/);
     }
     const valid = spawnSync('/bin/sh', ['-c', freeBlueprint.services[0].buildCommand], {
       cwd: fixtureRoot, env: { PATH: bin, VITE_BACKEND_URL: 'https://backend.example.invalid' }, encoding: 'utf8'
@@ -200,3 +202,31 @@ for (const [label, config] of [
     } finally { fs.rmSync(fixtureRoot, { recursive: true, force: true }); }
   });
 }
+
+for (const origin of ['', 'http://backend.invalid', 'https://backend.invalid/path', 'https://backend.invalid/', 'https://user:secret@backend.invalid', 'https://backend.invalid?private=1', 'https://backend.invalid#private']) {
+  test(`static build guard rejects invalid origin shape ${JSON.stringify(origin.replace(/secret|private/g, 'redacted'))}`, () => {
+    const result = spawnSync(process.execPath, [path.join(root, 'frontend/scripts/validate-backend-origin.mjs')], { env: { ...process.env, VITE_BACKEND_URL: origin }, encoding: 'utf8' });
+    assert.equal(result.status, 1); assert.ok(!result.stderr.includes('secret')); assert.ok(!result.stderr.includes('private'));
+  });
+}
+test('Docker context excludes all environment variants and the backend has no host-published port', () => {
+  for (const file of ['.dockerignore','backend/.dockerignore']) {
+    const rules = fs.readFileSync(path.join(root, file), 'utf8').split('\n');
+    assert.ok(rules.includes('.env*')); assert.ok(rules.includes('**/.env*'));
+  }
+  const config = YAML.parse(fs.readFileSync(path.join(root, 'docker-compose.yml'), 'utf8'));
+  assert.equal(config.services.backend.ports, undefined);
+  assert.ok(config.services.backend.environment.includes('TRUST_PROXY=1'));
+  for (const key of ['ALIYUN_ACCESS_KEY_ID','ALIYUN_ACCESS_KEY_SECRET','ALIYUN_SMS_SIGN_NAME','ALIYUN_SMS_TEMPLATE_CODE']) {
+    assert.ok(config.services.backend.environment.includes(`${key}=${'${'}${key}:-}`));
+    assert.deepEqual(blueprint.services[0].envVars.find(entry => entry.key === key), { key, sync: false });
+  }
+});
+test('Nginx preserves multipart batch and background contracts with bounded envelopes and overwrites untrusted XFF', () => {
+  const source = fs.readFileSync(path.join(root, 'frontend/nginx.conf'), 'utf8');
+  assert.equal((source.match(/client_max_body_size 512m;/g)||[]).length, 2);
+  assert.ok(source.includes('location ~ ^/api/groups/[^/]+/upload-background$'));
+  assert.match(source, /client_max_body_size 11m;/); assert.match(source, /client_max_body_size 6m;/);
+  assert.equal((source.match(/proxy_set_header X-Forwarded-For \$remote_addr;/g)||[]).length, 2);
+  assert.ok(!source.includes('$proxy_add_x_forwarded_for'));
+});

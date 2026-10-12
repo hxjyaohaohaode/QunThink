@@ -194,3 +194,29 @@ test('missing local deletion receipt fails file metadata and public downloads cl
   const signed = await request.get(file.body.url);
   assert.equal(signed.status, 503);
 });
+
+test('a restored file symlink into another account cannot expose its bytes', async () => {
+  const owner = await account('link_owner'); const other = await account('link_other');
+  const own = await addFile(owner); const foreign = await addFile(other);
+  await fs.unlink(own.filePath); await fs.symlink(foreign.filePath, own.filePath);
+  const response = await request.get(`/api/files/${own.record.id}/download`)
+    .set('Cookie', owner.cookie).query({ group_id: owner.groupId });
+  assert.equal(response.status, 403);
+});
+
+test('background A to B symlink within the shared directory is denied, with normal own files readable', async () => {
+  const owner = await account('bg_owner'); const other = await account('bg_other');
+  const directory = path.join(getUploadsDir(), 'backgrounds'); await fs.mkdir(directory, { recursive: true });
+  const keyA = `bg_${randomUUID()}.png`; const keyB = `bg_${randomUUID()}.png`;
+  await fs.writeFile(path.join(directory, keyA), Buffer.from('own-background'));
+  await fs.writeFile(path.join(directory, keyB), Buffer.from('other-background'));
+  for (const [user, key] of [[owner, keyA], [other, keyB]]) {
+    const db = await getUserDb(user.id); await db.read();
+    db.data.groups.find(g => g.id === user.groupId).background_storage_key = key; await db.write();
+    assert.equal((await request.get(`/api/groups/${user.groupId}/background`).set('Cookie', user.cookie)).status, 200);
+  }
+  assert.equal((await request.get(`/api/groups/${owner.groupId}/background`)).status, 401);
+  await fs.unlink(path.join(directory, keyA)); await fs.symlink(path.join(directory, keyB), path.join(directory, keyA));
+  assert.equal((await request.get(`/api/groups/${owner.groupId}/background`).set('Cookie', owner.cookie)).status, 404);
+  assert.equal((await request.get(`/api/groups/${other.groupId}/background`).set('Cookie', other.cookie)).status, 200);
+});

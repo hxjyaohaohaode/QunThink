@@ -2,7 +2,7 @@ import { getCatalogData } from '../services/ai/catalog.js';
 import { buildMergedPersonas } from '../routes/personas.js';
 import { cancelGroupGeneration } from '../services/scheduler/index.js';
 import { getAuthDb } from '../models/authDb.js';
-import { getUserDb } from '../models/db.js';
+import { getUserDb, withWriteLock } from '../models/db.js';
 import { safeLog } from '../utils/logger.js';
 import wsPerformanceMonitor from './performanceMonitor.js';
 import crypto from 'crypto';
@@ -16,6 +16,8 @@ const typingTimeouts = new Map();
 const messageQueue = new Map();
 const sendBuffers = new Map();
 const sendBufferTimers = new Map();
+const sessionExpiryTimers = new Map();
+const MAX_TIMER_DELAY = 2 ** 31 - 1;
 const connectionRateLimit = new Map();
 const clientMsgRate = new Map();
 
@@ -23,15 +25,14 @@ const SEND_BUFFER_DELAY = 5;
 const HEARTBEAT_INTERVAL = 30000;
 const MAX_MISSED_PINGS = 3;
 const MAX_MESSAGE_BYTES = 1024 * 1024;
-const SESSION_CACHE_TTL = 60 * 1000;
 const AUTH_RECHECK_INTERVAL = 60 * 1000;
-const SESSION_CACHE_MAX_ENTRIES = 1000;
 
 let heartbeatCleanup = null;
 
-const sessionTokenCache = new Map();
 
 function cleanupClient(clientId) {
+  clearTimeout(sessionExpiryTimers.get(clientId));
+  sessionExpiryTimers.delete(clientId);
   const client = clients.get(clientId);
   if (client) {
     client.subscriptions.forEach(groupId => {
@@ -60,6 +61,36 @@ function cleanupClient(clientId) {
     buffer.length = 0;
     sendBuffers.delete(clientId);
   }
+}
+
+// Deadline checks sit at use and send boundaries as well as the timer. A
+// delayed event loop or a forward wall-clock jump must not release buffered data.
+function isClientActive(clientId, expected = clients.get(clientId)) {
+  const client = clients.get(clientId);
+  if (!client || client !== expected) return false;
+  if (client.token && (!Number.isFinite(client.expiresAt) || Date.now() >= client.expiresAt)) {
+    try { client.ws.terminate(); } catch {}
+    cleanupClient(clientId);
+    return false;
+  }
+  return true;
+}
+
+function armSessionExpiry(clientId) {
+  clearTimeout(sessionExpiryTimers.get(clientId));
+  sessionExpiryTimers.delete(clientId);
+  if (!isClientActive(clientId)) return;
+  const client = clients.get(clientId);
+  if (!client.token) return;
+  // Node turns an overflowing timeout (e.g. the default 30 days) into 1 ms.
+  // Re-arm in bounded segments; a backward clock adjustment is also rechecked.
+  const delay = Math.max(1, Math.min(MAX_TIMER_DELAY, client.expiresAt - Date.now()));
+  const timer = setTimeout(() => {
+    sessionExpiryTimers.delete(clientId);
+    if (isClientActive(clientId, client)) armSessionExpiry(clientId);
+  }, delay);
+  timer.unref?.();
+  sessionExpiryTimers.set(clientId, timer);
 }
 
 export function revokeUserConnections(userId) {
@@ -91,54 +122,34 @@ function parseCookies(cookieHeader) {
   return cookies;
 }
 
-function pruneSessionTokenCache(now) {
-  sessionTokenCache.forEach((entry, key) => {
-    if (now - entry.cachedAt >= SESSION_CACHE_TTL) {
-      sessionTokenCache.delete(key);
-    }
-  });
-}
-
+// Never admit a connection from a cached token. The caller holds the auth lock
+// through both this read and registration so logout cannot miss a late admission.
 async function verifySessionToken(token) {
   if (!token) return null;
   try {
-    const now = Date.now();
-    const cached = sessionTokenCache.get(token);
-    if (cached && now - cached.cachedAt < SESSION_CACHE_TTL) {
-      if (cached.expiresAt !== null && now >= cached.expiresAt) {
-        sessionTokenCache.delete(token);
-        return null;
-      }
-      return cached.userId;
-    }
-
-    const authDb = getAuthDb();
-    await authDb.read();
-    const session = authDb.data.sessions.find(s => {
-      if (s.token.length !== token.length) return false;
-      try {
-        return crypto.timingSafeEqual(Buffer.from(s.token), Buffer.from(token));
-      } catch {
-        return false;
-      }
+    const db = getAuthDb();
+    await db.read();
+    const session = db.data.sessions.find(s => {
+      if (typeof s.token !== 'string' || s.token.length !== token.length) return false;
+      try { return crypto.timingSafeEqual(Buffer.from(s.token), Buffer.from(token)); }
+      catch { return false; }
     });
-    if (!session || new Date(session.expires_at) < new Date()) {
-      return null;
-    }
+    if (!session || !Number.isFinite(Date.parse(session.expires_at)) || Date.parse(session.expires_at) <= Date.now()) return null;
+    return db.data.users.some(user => user.id === session.userId)
+      ? { userId: session.userId, expiresAt: Date.parse(session.expires_at) } : null;
+  } catch { return null; }
+}
 
-    const expiresAt = new Date(session.expires_at).getTime();
-    if (sessionTokenCache.size >= SESSION_CACHE_MAX_ENTRIES) {
-      pruneSessionTokenCache(Date.now());
+export function revokeSessionConnections(token) {
+  let count = 0;
+  for (const [clientId, client] of clients) {
+    if (client.token === token) {
+      count++;
+      try { client.ws.terminate(); } catch {}
+      cleanupClient(clientId);
     }
-    if (sessionTokenCache.size >= SESSION_CACHE_MAX_ENTRIES) {
-      sessionTokenCache.clear();
-    }
-    sessionTokenCache.set(token, { userId: session.userId, expiresAt, cachedAt: Date.now() });
-    return session.userId;
-  } catch (error) {
-    safeLog('error', 'WebSocket session verification failed', { error: error.message });
-    return null;
   }
+  return count;
 }
 
 function startServerHeartbeat() {
@@ -147,7 +158,7 @@ function startServerHeartbeat() {
   const timers = [];
   timers.push(setInterval(() => {
     clients.forEach((client, clientId) => {
-      if (client.ws.readyState !== 1) return;
+      if (!isClientActive(clientId, client) || client.ws.readyState !== 1) return;
 
       const isPending = pendingPings.get(clientId);
       if (isPending) {
@@ -164,6 +175,7 @@ function startServerHeartbeat() {
       }
 
       try {
+        if (!isClientActive(clientId, client)) return;
         client.ws.send(JSON.stringify({ type: 'ping' }));
         pendingPings.set(clientId, true);
       } catch (error) {
@@ -225,7 +237,7 @@ function flushSendBuffer(clientId) {
   const client = clients.get(clientId);
   const buffer = sendBuffers.get(clientId);
 
-  if (!client || client.ws.readyState !== 1 || !buffer || buffer.length === 0) {
+  if (!isClientActive(clientId, client) || client.ws.readyState !== 1 || !buffer || buffer.length === 0) {
     return;
   }
 
@@ -248,6 +260,7 @@ function flushSendBuffer(clientId) {
     });
 
   try {
+    if (!isClientActive(clientId, client)) return;
     client.ws.send(payload);
     buffer.length = 0;
     trackedIds.forEach(id => wsPerformanceMonitor.markDelivered(id));
@@ -259,7 +272,7 @@ function flushSendBuffer(clientId) {
 
 function sendToClientOptimized(clientId, message) {
   const client = clients.get(clientId);
-  if (!client) {
+  if (!isClientActive(clientId, client)) {
     const bufferTimer = sendBufferTimers.get(clientId);
     if (bufferTimer) {
       clearTimeout(bufferTimer);
@@ -367,6 +380,14 @@ export function setupWebSocket(wss) {
     const authMode = process.env.AUTH_MODE || 'session';
     let userId = null;
     let sessionToken = null;
+    let expiresAt = null;
+    const clientId = generateClientId();
+    const admit = () => {
+      if (ws.readyState !== 1 || (sessionToken && (!Number.isFinite(expiresAt) || Date.now() >= expiresAt))) return false;
+      clients.set(clientId, { ws, subscriptions: new Set(), userId, token: sessionToken, expiresAt, _lastAuthCheck: Date.now() });
+      armSessionExpiry(clientId);
+      return true;
+    };
 
     if (authMode === 'dev') {
       if (isProduction) {
@@ -380,6 +401,7 @@ export function setupWebSocket(wss) {
         return;
       }
       userId = devUserId;
+      if (!admit()) return;
     } else {
       const cookies = parseCookies(req.headers.cookie);
       const token = cookies.session_token;
@@ -390,7 +412,13 @@ export function setupWebSocket(wss) {
         return;
       }
 
-      userId = await verifySessionToken(token);
+      await withWriteLock('auth', async () => {
+        const session = await verifySessionToken(token);
+        userId = session?.userId || null;
+        expiresAt = session?.expiresAt ?? null;
+        sessionToken = token;
+        if (userId && !admit()) userId = null;
+      });
       if (!userId) {
         safeLog('info', 'WebSocket connection rejected: invalid session');
         ws.close(4001, '会话已过期或无效');
@@ -399,8 +427,7 @@ export function setupWebSocket(wss) {
       sessionToken = token;
     }
 
-    const clientId = generateClientId();
-    clients.set(clientId, { ws, subscriptions: new Set(), userId, token: sessionToken, _lastAuthCheck: Date.now() });
+    if (!isClientActive(clientId) || ws.readyState !== 1) return;
     missedPings.set(clientId, 0);
     messageQueue.set(clientId, []);
 
@@ -408,6 +435,7 @@ export function setupWebSocket(wss) {
 
     // The HTTP upgrade precedes async session verification. Tell the client
     // when authentication is finished so early subscriptions can be replayed.
+    if (!isClientActive(clientId)) return;
     ws.send(JSON.stringify({ type: 'connected' }));
 
     ws.on('message', async (data) => {
@@ -420,7 +448,7 @@ export function setupWebSocket(wss) {
         const raw = data.toString();
         const message = JSON.parse(raw);
         const currentClient = clients.get(clientId);
-        if (!currentClient) return;
+        if (!isClientActive(clientId, currentClient)) return;
         // 收到任何消息时重置 missedPings
         if (message.type !== 'ping' && message.type !== 'pong') {
           missedPings.set(clientId, 0);
@@ -428,14 +456,18 @@ export function setupWebSocket(wss) {
         const authNow = Date.now();
         if (currentClient.token && authNow - (currentClient._lastAuthCheck || 0) > AUTH_RECHECK_INTERVAL) {
           currentClient._lastAuthCheck = authNow;
-          const stillValid = await verifySessionToken(currentClient.token);
-          if (!stillValid) {
+          const stillValid = await withWriteLock('auth', () => verifySessionToken(currentClient.token));
+          if (!isClientActive(clientId, currentClient)) return;
+          if (!stillValid || stillValid.userId !== currentClient.userId) {
             safeLog('info', 'WebSocket session revoked during connection, terminating', { clientId });
             try { currentClient.ws.terminate(); } catch { }
             cleanupClient(clientId);
             return;
           }
+          currentClient.expiresAt = stillValid.expiresAt;
+          armSessionExpiry(clientId);
         }
+        if (!isClientActive(clientId, currentClient)) return;
         await runAsUser(currentClient.userId, () => handleMessage(clientId, message));
       } catch (error) {
         safeLog('error', 'WebSocket message error', { error: error?.message || error });
@@ -461,7 +493,7 @@ function generateClientId() {
 async function handleMessage(clientId, message) {
   const client = clients.get(clientId);
   safeLog('info', '[WS] Received message: ' + message.type, { group_id: message.group_id, content_length: message.content?.length });
-  if (!client) return;
+  if (!isClientActive(clientId, client)) return;
 
   // Per-client message rate limiting
   const now = Date.now();
@@ -494,6 +526,7 @@ async function handleMessage(clientId, message) {
     case 'ping':
       if (client.ws.readyState === 1) {
         try {
+          if (!isClientActive(clientId, client)) return;
           client.ws.send(JSON.stringify({ type: 'pong' }));
         } catch (e) {
           // Client might have disconnected
@@ -515,6 +548,7 @@ async function handleMessage(clientId, message) {
               });
               break;
             }
+            if (!isClientActive(clientId, client)) return;
             cancelGroupGeneration(message.group_id);
             broadcastToGroup(message.group_id, {
               type: 'generation_stopped',
@@ -568,6 +602,7 @@ async function joinGroup(clientId, groupId) {
     }
   }
 
+  if (!isClientActive(clientId, client)) return;
   if (!groupSubscriptions.has(groupId)) {
     groupSubscriptions.set(groupId, new Set());
   }

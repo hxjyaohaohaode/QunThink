@@ -16,3 +16,7 @@ test_results
 backend/data
 .runtime-logs
 tools/shots/node_modules
+
+# Exclude every environment variant, including .env.production in subdirectories.
+.env*
+**/.env*

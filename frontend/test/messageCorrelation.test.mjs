@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findMatchingLocalMessage } from '../src/services/messageCorrelation.ts';
+import { readFile } from 'node:fs/promises';
+import { transform } from 'esbuild';
+const source = await readFile(new URL('../src/services/messageCorrelation.ts', import.meta.url), 'utf8');
+const { code } = await transform(source, { loader: 'ts', format: 'esm', target: 'es2022' });
+const { findMatchingLocalMessage } = await import(`data:text/javascript;base64,${Buffer.from(code).toString('base64')}`);
 
 const pending = { id: 'temp-A', tempId: 'temp-A', sender_type: 'user', status: 'sending' };
 

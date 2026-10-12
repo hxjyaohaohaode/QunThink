@@ -259,20 +259,22 @@ function getStoredFilename(fileRecord) {
 function resolveStoredFilePath(fileRecord, currentUserId) {
   const ownerId = fileRecord.owner_user_id || fileRecord.uploader_id || currentUserId;
   const storedFilename = getStoredFilename(fileRecord);
-  if (!ownerId || !storedFilename) {
+  if (!ownerId || ownerId !== currentUserId || path.basename(ownerId) !== ownerId || !storedFilename) {
     return null;
   }
 
   const uploadsRoot = path.resolve(getUploadsDir());
-  const safeFilePath = path.resolve(path.join(uploadsRoot, ownerId, storedFilename));
-  const relativePath = path.relative(uploadsRoot, safeFilePath);
+  const ownerRoot = path.resolve(uploadsRoot, ownerId);
+  const safeFilePath = path.resolve(ownerRoot, storedFilename);
+  const relativePath = path.relative(ownerRoot, safeFilePath);
   if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
     return null;
   }
 
   if (fs.existsSync(safeFilePath)) {
     try {
-      const realRoot = fs.realpathSync(uploadsRoot);
+      const realRoot = fs.realpathSync(ownerRoot);
+      if (realRoot !== path.join(fs.realpathSync(uploadsRoot), ownerId)) return null;
       const realFile = fs.realpathSync(safeFilePath);
       const realRelative = path.relative(realRoot, realFile);
       if (!realRelative || realRelative.startsWith('..') || path.isAbsolute(realRelative)) return null;

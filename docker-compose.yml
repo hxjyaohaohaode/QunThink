@@ -5,13 +5,19 @@ services:
       dockerfile: Dockerfile
     container_name: ai-chat-backend
     restart: unless-stopped
-    ports:
-      - "3002:3002"
+    # Backend is reachable only through the single trusted frontend proxy.
+    expose:
+      - "3002"
     environment:
       - PORT=3002
       - NODE_ENV=production
       - AUTH_MODE=session
       - DATA_DIR=/app/data
+      - TRUST_PROXY=1
+      - ALIYUN_ACCESS_KEY_ID=${ALIYUN_ACCESS_KEY_ID:-}
+      - ALIYUN_ACCESS_KEY_SECRET=${ALIYUN_ACCESS_KEY_SECRET:-}
+      - ALIYUN_SMS_SIGN_NAME=${ALIYUN_SMS_SIGN_NAME:-}
+      - ALIYUN_SMS_TEMPLATE_CODE=${ALIYUN_SMS_TEMPLATE_CODE:-}
       # ENCRYPTION_KEY 为 base64 编码的 32 字节随机串。
       # 生成方式（任选其一）：
       #   openssl rand -base64 32

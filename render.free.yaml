@@ -9,7 +9,7 @@ services:
     runtime: static
     name: ai-chat-group-frontend-free
     autoDeployTrigger: off
-    buildCommand: cd frontend && test -n "$VITE_BACKEND_URL" && npm ci && npm run build
+    buildCommand: cd frontend && node scripts/validate-backend-origin.mjs && npm ci && npm run build
     staticPublishPath: ./frontend/dist
     envVars:
       - key: NODE_VERSION

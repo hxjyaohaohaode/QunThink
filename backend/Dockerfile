@@ -10,7 +10,11 @@ RUN npm ci --omit=dev
 
 COPY . .
 
-RUN mkdir -p /app/data /app/uploads
+RUN mkdir -p /app/data /app/uploads \
+    && chown node:node /app/data /app/uploads \
+    && chmod 0700 /app/data /app/uploads
+
+USER node
 
 EXPOSE 3002
 

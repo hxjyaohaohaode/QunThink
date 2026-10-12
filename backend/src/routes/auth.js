@@ -1,4 +1,6 @@
 import express from 'express';
+import { writeSessionChanges } from '../services/sessionPersistence.js';
+import { revokeSessionConnections } from '../websocket/index.js';
 import { getAuthDb, hashPasswordAsync, verifyPasswordAsync, generateSessionToken, findSessionByToken } from '../models/authDb.js';
 import { initUserDatabase, withWriteLock } from '../models/db.js';
 import crypto from 'crypto';
@@ -35,10 +37,11 @@ function buildClearSessionCookieOptions() {
 function pruneUserSessions(db, userId) {
   const userSessions = db.data.sessions.filter(s => s.userId === userId);
   const excess = userSessions.length - (MAX_SESSIONS_PER_USER - 1);
-  if (excess <= 0) return;
+  if (excess <= 0) return [];
   userSessions.sort((a, b) => new Date(a.expires_at) - new Date(b.expires_at));
   const tokensToRemove = new Set(userSessions.slice(0, excess).map(s => s.token));
   db.data.sessions = db.data.sessions.filter(s => !tokensToRemove.has(s.token));
+  return [...tokensToRemove];
 }
 
 async function confirmRegistrationWrite(db, userId, token, originalError) {
@@ -151,9 +154,9 @@ router.post('/auth/login-phone', validateBody(phoneLoginSchema), asyncHandler(as
 
   await withWriteLock('auth', async () => {
     await db.read();
-    pruneUserSessions(db, user.id);
+    const revokedTokens = pruneUserSessions(db, user.id);
     db.data.sessions.push(session);
-    await db.write();
+    await writeSessionChanges(db, revokedTokens, revokeSessionConnections);
   });
 
   res.cookie('session_token', token, buildSessionCookieOptions());
@@ -234,9 +237,9 @@ router.post('/auth/register-sms', validateBody(smsRegisterSchema), asyncHandler(
 
   await withWriteLock('auth', async () => {
     await db.read();
-    pruneUserSessions(db, userId);
+    const revokedTokens = pruneUserSessions(db, userId);
     db.data.sessions.push(session);
-    await db.write();
+    await writeSessionChanges(db, revokedTokens, revokeSessionConnections);
   });
 
   res.cookie('session_token', token, buildSessionCookieOptions());
@@ -259,7 +262,7 @@ router.post('/auth/logout', asyncHandler(async (req, res) => {
         throw Object.assign(new Error('账号已切换，未退出另一个账号'), { status: 409, statusCode: 409, code: 'ACCOUNT_CHANGED', isOperational: true });
       }
       db.data.sessions = db.data.sessions.filter(s => s.token !== token);
-      await db.write();
+      await writeSessionChanges(db, [token], revokeSessionConnections);
     });
   }
 

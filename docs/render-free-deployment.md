@@ -4,7 +4,7 @@
 
 ## 结论和可用范围
 
-**当前可提供的是免费静态前端，连接用户已有、经过验证的持久后端。当前全功能后端不适合 Render Free Web Service。**
+**免费静态模板只能用于准备或有限验证；当前受保护媒体不支持直接前后端分站作为完整应用。完整交付优先采用[同源 HTTPS 方案](same-origin-https-deployment.md)。当前全功能后端不适合 Render Free Web Service。**
 
 - `render.free.yaml` 仅定义一个 `runtime: static` 前端；`VITE_BACKEND_URL` 留给用户填写已有后端的真实 HTTPS origin。没有 Node 后端、数据库、持久盘或自动生成的密钥。
 - 原有 `render.yaml` 的付费 `starter` 后端、`/var/data` 持久盘及其他设置保持不变；不要用免费模板覆盖它，也不要把已有服务改为 free 后继续接收上传。
@@ -67,7 +67,7 @@ PG 故障不应通过清空 `SUPABASE_DB_URL` 回退到另一份本地用户数�
 1. 先确认上述既有后端可用。没有持久后端时停在准备阶段，不为凑齐演示而创建免费无盘后端。
 2. 在获授权的源码发布之后，创建 Blueprint 时明确选择 `render.free.yaml` 作为 Blueprint Path，核对变更列表**只有一个新静态前端**。不要把同一服务交给两个 Blueprint 管理。参见 [Render Blueprint 创建和自定义路径](https://render.com/docs/infrastructure-as-code)。
 3. 在前端设置 `VITE_BACKEND_URL` 为已核验后端的 HTTPS origin，不带 `/api`、路径、查询或凭据；保持 `VITE_AUTH_MODE=session`。所有 `VITE_*` 值会进入浏览器，不放数据库 URL、密钥或用户凭据。
-4. 模板从仓库根目录执行 `cd frontend` 后安装锁定依赖并构建，发布 `frontend/dist`，从而保留对根目录 `shared/` 的访问。不要再设置 `rootDir: frontend`。后端 origin 缺失时 build guard 会提前失败；非空值仍需人工核验真实性与格式。
+4. 模板从仓库根目录执行 `cd frontend` 后安装锁定依赖并构建，发布 `frontend/dist`，从而保留对根目录 `shared/` 的访问。不要再设置 `rootDir: frontend`。后端 origin 缺失时 build guard 会提前失败；构建门禁还会拒绝非HTTPS、凭据、路径、query/fragment和尾斜杠；真实域名可达性仍需人工核验。
 5. 把实际新前端 origin 加到既有后端 `CORS_ORIGINS` 需单独确认再执行；不能因为创建了静态站就视为后端已更新。修改 `VITE_BACKEND_URL` 后需要重新构建前端。
 6. `autoDeployTrigger: off` 只控制服务的 Git 自动部署，不等于关闭 Blueprint Auto Sync。若要保持人工控制，另在 Blueprint Settings 检查 Auto Sync；创建、同步、发布和费用确认均不由这次本地准备自动执行。
 
@@ -93,3 +93,7 @@ node backend/scripts/deployment-preflight.mjs compose
 - 后端健康 200 只说明当前健康路径检查通过，不证明删除账本、文件备份、浏览器 cookie、外部模型或跨境网络全部可用。
 
 本次未执行云端发布、真实 PG/账本安装、上传/TTS外部调用、线上重启或浏览器验收；不要把配置测试通过标为“全功能免费上线”。
+
+## 已确认的分站媒体阻断
+
+TTS AudioPlayer跨源anonymous请求不发送会话cookie；文件和背景明确设置CORP=same-origin，现有img/video/audio/CSS读取不能仅靠CORS允许列表变成同源。不要通过全局放开私人媒体安全头掩盖问题。静态站SPA rewrite不代理API或WSS。此限制同样影响render.yaml的双origin静态/API路线；模板结构通过不等于全功能可上线。

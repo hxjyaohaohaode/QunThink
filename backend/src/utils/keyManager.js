@@ -34,21 +34,130 @@ function getKeyDirectory() {
   return path.dirname(KEY_FILE_PATH);
 }
 
-async function ensureKeyDirectoryExists() {
-  const dir = getKeyDirectory();
+const RECOVERY_CODE = 'ENCRYPTION_KEY_RECOVERY_REQUIRED';
+const PERMISSION_CODES = new Set(['EACCES', 'EPERM', 'EROFS']);
+
+function recoveryError(resource, cause) {
+  // Do not attach the original error: messages, paths and JSON may contain secrets.
+  const permissionCode = PERMISSION_CODES.has(cause?.code) ? cause.code
+    : PERMISSION_CODES.has(cause?.permissionCode) ? cause.permissionCode : undefined;
+  const permission = permissionCode
+    ? ` 权限错误 ${permissionCode}；运行 UID=${process.getuid?.() ?? 'unknown'} GID=${process.getgid?.() ?? 'unknown'}。请检查原卷的属主、访问权限及只读挂载。`
+    : '';
+  return Object.assign(new Error(
+    `加密密钥恢复失败（${resource}）。为保护已有数据，已停止启动；请恢复原文件，勿生成或替换密钥。${permission}`
+  ), { code: RECOVERY_CODE, ...(permissionCode ? { permissionCode } : {}) });
+}
+
+function inspectPath(filePath, resource, directory = false, optional = false) {
+  let stat;
+  try { stat = fsSync.lstatSync(filePath); }
+  catch (error) {
+    if (optional && error.code === 'ENOENT') return null;
+    throw recoveryError(resource, error);
+  }
+  if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile())) {
+    throw recoveryError(resource);
+  }
+  return stat;
+}
+
+function readRecoveryFile(filePath, resource, optional = false) {
+  const stat = inspectPath(filePath, resource, false, optional);
+  if (!stat) return null;
+  let descriptor;
   try {
-    await fs.access(dir);
-  } catch {
-    await fs.mkdir(dir, { recursive: true });
+    // Refuse a symlink swapped in after lstat as well as non-regular files.
+    descriptor = fsSync.openSync(filePath, fsSync.constants.O_RDONLY | (fsSync.constants.O_NOFOLLOW || 0));
+    const opened = fsSync.fstatSync(descriptor);
+    if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino) throw recoveryError(resource);
+    return fsSync.readFileSync(descriptor, 'utf8');
+  } catch (error) {
+    throw recoveryError(resource, error);
+  } finally {
+    if (descriptor !== undefined) {
+      try { fsSync.closeSync(descriptor); }
+      catch (error) { throw recoveryError(resource, error); }
+    }
   }
 }
 
-async function ensureKeyHistoryDirExists() {
-  try {
-    await fs.access(KEY_HISTORY_DIR);
-  } catch {
-    await fs.mkdir(KEY_HISTORY_DIR, { recursive: true });
+function parseStoredKey(value, resource) {
+  const encoded = value.trim();
+  const key = Buffer.from(encoded, 'base64');
+  if (key.length !== KEY_LENGTH || key.toString('base64') !== encoded) throw recoveryError(resource);
+  return key;
+}
+
+function validVersion(value) {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+function validTimestamp(value) {
+  if (typeof value !== 'string') return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+}
+
+function readRecoveryState() {
+  inspectPath(dataDir, '数据目录', true, true);
+  const history = new Map();
+  if (inspectPath(KEY_HISTORY_DIR, '历史密钥目录', true, true)) {
+    let files;
+    try { files = fsSync.readdirSync(KEY_HISTORY_DIR); }
+    catch (error) { throw recoveryError('历史密钥目录', error); }
+    for (const file of files) {
+      if (!/^[1-9][0-9]*\.key$/.test(file)) throw recoveryError('历史密钥文件名');
+      const version = Number(file.slice(0, -4));
+      if (!validVersion(version)) throw recoveryError('历史密钥版本');
+      const value = readRecoveryFile(path.join(KEY_HISTORY_DIR, file), '历史密钥');
+      history.set(version, parseStoredKey(value, '历史密钥格式'));
+    }
   }
+  const value = readRecoveryFile(KEY_FILE_PATH + '.meta', '密钥元数据', true);
+  let metadata;
+  if (value === null) {
+    if (history.size) throw recoveryError('历史密钥缺少元数据');
+    metadata = { version: 1, createdAt: new Date().toISOString() };
+  } else {
+    try { metadata = JSON.parse(value); }
+    catch { throw recoveryError('密钥元数据格式'); }
+    const allowed = new Set(['version', 'createdAt', 'previousKeyVersion', 'rotatedAt']);
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)
+      || Object.keys(metadata).some(key => !allowed.has(key))
+      || !validVersion(metadata.version) || !validTimestamp(metadata.createdAt)
+      || (Object.hasOwn(metadata, 'rotatedAt') && !validTimestamp(metadata.rotatedAt))) {
+      throw recoveryError('密钥元数据格式');
+    }
+    if (metadata.version === 1) {
+      if (Object.hasOwn(metadata, 'previousKeyVersion') || Object.hasOwn(metadata, 'rotatedAt')) {
+        throw recoveryError('密钥元数据版本关系');
+      }
+    } else if (!validVersion(metadata.previousKeyVersion)
+      || metadata.previousKeyVersion !== metadata.version - 1
+      || !history.has(metadata.previousKeyVersion)) {
+      throw recoveryError('密钥元数据缺少有效前序密钥');
+    }
+  }
+  for (const version of history.keys()) {
+    if (version >= metadata.version) throw recoveryError('历史密钥版本关系');
+  }
+  return { metadata, history };
+}
+
+async function ensureDirectoryExists(directory, resource) {
+  if (inspectPath(directory, resource, true, true)) return;
+  try { await fs.mkdir(directory, { recursive: true, mode: 0o700 }); }
+  catch (error) { throw recoveryError(resource, error); }
+  inspectPath(directory, resource, true);
+}
+
+async function ensureKeyDirectoryExists() {
+  await ensureDirectoryExists(getKeyDirectory(), '数据目录');
+}
+
+async function ensureKeyHistoryDirExists() {
+  await ensureDirectoryExists(KEY_HISTORY_DIR, '历史密钥目录');
 }
 
 function setFilePermissions(filePath) {
@@ -66,39 +175,19 @@ function setFilePermissions(filePath) {
         console.warn('Windows密钥文件权限设置失败（非致命）: icacls exit ' + result.status);
       }
     } catch (error) {
-      console.warn('Windows密钥文件权限设置失败（非致命）:', error.message);
+      console.warn('Windows密钥文件权限设置失败（非致命）');
     }
   } else {
     try {
       fsSync.chmodSync(filePath, 0o600);
     } catch (error) {
-      console.error('设置密钥文件权限失败:', error.message);
+      throw recoveryError('密钥文件权限', error);
     }
   }
 }
 
 function generateKeyBuffer() {
   return crypto.randomBytes(KEY_LENGTH);
-}
-
-async function loadKeyHistory() {
-  await ensureKeyHistoryDirExists();
-  try {
-    const files = await fs.readdir(KEY_HISTORY_DIR);
-    for (const file of files) {
-      if (file.endsWith('.key')) {
-        const version = parseInt(file.replace('.key', ''));
-        if (!isNaN(version)) {
-          const keyData = await fs.readFile(path.join(KEY_HISTORY_DIR, file), 'utf8');
-          const keyBuffer = Buffer.from(keyData.trim(), 'base64');
-          if (keyBuffer.length === KEY_LENGTH) {
-            keyHistory.set(version, keyBuffer);
-          }
-        }
-      }
-    }
-  } catch {
-  }
 }
 
 async function saveKeyToHistory(version, keyBuffer) {
@@ -123,35 +212,27 @@ async function pruneOldKeyHistory() {
   }
 }
 
+// All recovery files are checked before a key can be generated or published.
+// This startup-only synchronous path is shared by sync and async accessors.
+function loadValidatedState() {
+  const state = readRecoveryState();
+  state.key = loadCurrentKey();
+  return state;
+}
+
+function publishState(state) {
+  currentKey = state.key;
+  keyMetadata = state.metadata;
+  keyHistory = state.history;
+}
+
 async function loadOrGenerateEncryptionKey() {
-  const envKey = process.env.ENCRYPTION_KEY;
-  const isProduction = process.env.NODE_ENV === 'production';
-
-  if (envKey) {
-    showMigrationWarning();
-    if (isProduction && envKey.length < 32) {
-      throw new Error('生产环境 ENCRYPTION_KEY 强度过低：要求 base64 编码的 32 字节密钥（openssl rand -base64 32）');
-    }
-    const keyBuffer = Buffer.from(envKey, 'base64');
-    if (keyBuffer.length < KEY_LENGTH) {
-      const hash = crypto.createHash('sha256');
-      hash.update(envKey);
-      return hash.digest().slice(0, KEY_LENGTH);
-    }
-    return keyBuffer.slice(0, KEY_LENGTH);
-  }
-
-  if (isProduction) {
-    throw new Error('生产环境必须设置 ENCRYPTION_KEY 环境变量');
-  }
-
-  console.warn('⚠️  未设置 ENCRYPTION_KEY，使用文件存储的密钥');
-  showMigrationWarning();
-
-  return loadLocalEncryptionKey({ dataDir, keyPath: KEY_FILE_PATH, prepareNewFile: setFilePermissions });
+  return loadValidatedState().key;
 }
 
 async function generateNewKey() {
+  getKey();
+  if (!validVersion(keyMetadata.version + 1)) throw recoveryError('密钥版本超出范围');
   const newKey = generateKeyBuffer();
 
   const oldVersion = keyMetadata ? keyMetadata.version : 1;
@@ -188,16 +269,13 @@ async function generateNewKey() {
 
 function getKey() {
   if (!currentKey) {
-    currentKey = loadOrGenerateEncryptionKeySync();
+    publishState(loadValidatedState());
   }
   return currentKey;
 }
 
 async function getKeyAsync() {
-  if (!currentKey) {
-    currentKey = await loadOrGenerateEncryptionKey();
-  }
-  return currentKey;
+  return getKey();
 }
 
 function getKeyByVersion(version) {
@@ -209,7 +287,7 @@ function getKeyByVersion(version) {
 
 // NOTE: This function uses synchronous I/O and is only called during server startup.
 // It should NEVER be called during request handling.
-function loadOrGenerateEncryptionKeySync() {
+function loadCurrentKey() {
   const envKey = process.env.ENCRYPTION_KEY;
   const isProduction = process.env.NODE_ENV === 'production';
 
@@ -231,44 +309,41 @@ function loadOrGenerateEncryptionKeySync() {
     throw new Error('生产环境必须设置 ENCRYPTION_KEY 环境变量');
   }
 
-  return loadLocalEncryptionKey({ dataDir, keyPath: KEY_FILE_PATH, prepareNewFile: setFilePermissions });
+  const stored = readRecoveryFile(KEY_FILE_PATH, '当前密钥', true);
+  if (stored !== null) return parseStoredKey(stored, '当前密钥格式');
+  // The local guard deliberately sanitizes its errors. Preserve only a safe
+  // permission code so its nested freshness checks still provide UID/GID advice.
+  let permissionFailure;
+  const io = { ...fsSync };
+  for (const method of ['lstatSync', 'readFileSync', 'readdirSync', 'mkdirSync', 'openSync',
+    'writeFileSync', 'fsyncSync', 'closeSync', 'linkSync', 'unlinkSync']) {
+    io[method] = (...args) => {
+      try { return fsSync[method](...args); }
+      catch (error) {
+        if (PERMISSION_CODES.has(error.code)) permissionFailure = { code: error.code };
+        throw error;
+      }
+    };
+  }
+  try {
+    return loadLocalEncryptionKey({ dataDir, keyPath: KEY_FILE_PATH, io, prepareNewFile: setFilePermissions });
+  } catch (error) {
+    throw recoveryError('当前密钥或数据目录', permissionFailure || error);
+  }
 }
 
 async function getKeyMetadataAsync() {
-  if (!keyMetadata) {
-    const metadataPath = KEY_FILE_PATH + '.meta';
-    try {
-      await fs.access(metadataPath);
-      const data = await fs.readFile(metadataPath, 'utf8');
-      keyMetadata = JSON.parse(data);
-    } catch {
-      keyMetadata = { version: 1, createdAt: new Date().toISOString() };
-    }
-  }
-  return keyMetadata;
+  return getKeyMetadata();
 }
 
 function getKeyMetadata() {
-  if (!keyMetadata) {
-    const metadataPath = KEY_FILE_PATH + '.meta';
-    if (fsSync.existsSync(metadataPath)) {
-      try {
-        const data = fsSync.readFileSync(metadataPath, 'utf8');
-        keyMetadata = JSON.parse(data);
-      } catch (error) {
-        keyMetadata = { version: 1, createdAt: new Date().toISOString() };
-      }
-    } else {
-      keyMetadata = { version: 1, createdAt: new Date().toISOString() };
-    }
-  }
+  if (!keyMetadata) publishState(loadValidatedState());
   return keyMetadata;
 }
 
 async function initializeKeyManager() {
-  currentKey = await loadOrGenerateEncryptionKey();
-  await loadKeyHistory();
-  await getKeyMetadataAsync();
+  const state = loadValidatedState();
+  publishState(state);
   console.log(`🔑 密钥管理器已初始化，当前版本: ${keyMetadata.version}, 历史密钥: ${keyHistory.size}个`);
 }
 
