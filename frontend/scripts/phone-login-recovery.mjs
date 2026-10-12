@@ -19,7 +19,7 @@ export function createPhoneLoginRecovery({ page, deadline, now = Date.now, wait 
     const budget = () => {
       const remaining = deadline - now() - 5000;
       if (!Number.isFinite(remaining) || remaining <= 0) throw new Error('Phone login exceeds the original test budget');
-      return Math.min(5000, remaining);
+      return remaining;
     };
     const current = () => {
       const timeout = budget();
@@ -72,7 +72,7 @@ export function createPhoneLoginRecovery({ page, deadline, now = Date.now, wait 
       const state = await form.read(); current();
       if (!state.unchanged || !state.visible || !state.enabled || rateLimited && !state.rateLimited) throw new Error('Original phone login form changed or is not ready');
     };
-    const settled = async read => { await poll(() => { current(); return read(); }, budget()); current(); };
+    const settled = async read => { await poll(() => { current(); return read(); }, Math.min(5000, budget())); current(); };
     const settleAuthentication = async () => {
       await settled(() => pendingAuthChecks.size === 0);
       // A new 409 during the last polling await is unknown, never success.
@@ -126,7 +126,7 @@ export function createPhoneLoginRecovery({ page, deadline, now = Date.now, wait 
       if (bootstrap !== initialized) throw new Error('Phone login bootstrap was superseded');
       // Catalog reads are diagnostic only: ordinary failures/repeated reads must
       // not invent an extra success gate beyond the actual product workspace.
-      await workspace(budget()); current(); await settleAuthentication();
+      await workspace(Math.min(5000, budget())); current(); await settleAuthentication();
       if (login !== accepted || bootstrap !== initialized) throw new Error('Phone login identity changed during the final workspace check');
       phase = 'workspace'; await capture(snapshot()); current(); await settleAuthentication();
       await form.dispose(); form = null; current(); await settleAuthentication();

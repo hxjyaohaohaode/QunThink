@@ -23,7 +23,7 @@ class Handle {
   async $(selector) { const element = this.value.querySelector(selector); return element ? new Handle(this.page, element) : null; }
   async evaluateHandle(fn, arg) { return new Handle(this.page, fn(this.value, arg)); }
   async evaluate(fn) { const result = fn(this.value); if (this.value.read) await this.page.hooks.guardRead?.(this.page, result); return result; }
-  async click({ timeout }) { assert.ok(timeout > 0 && timeout <= 5000); assert.equal(this.value, this.page.submit); await this.page.click(); }
+  async click({ timeout }) { assert.ok(timeout > 0 && timeout <= 15000); assert.equal(this.value, this.page.submit); await this.page.hooks.nativeClick?.(this.page, timeout); await this.page.click(); }
   async dispose() { this.page.disposals++; await this.page.hooks.dispose?.(this.page); }
 }
 class Page extends EventEmitter {
@@ -40,7 +40,7 @@ class Page extends EventEmitter {
   getByRole() { return {}; }
   getByPlaceholder(name) {
     const element = name === '请输入手机号' ? this.phone : this.password;
-    return { fill: async (value, { timeout } = {}) => { assert.ok(timeout > 0 && timeout <= 5000); element.value = value; element.dispatchEvent(new this.window.Event('input', { bubbles: true })); }, isVisible: async () => element.isConnected };
+    return { fill: async (value, { timeout } = {}) => { assert.ok(timeout > 0 && timeout <= 15000); await this.hooks.nativeFill?.(this, name, timeout); element.value = value; element.dispatchEvent(new this.window.Event('input', { bubbles: true })); }, isVisible: async () => element.isConnected };
   }
   locator(selector) { assert.equal(selector, 'form'); return { filter: () => ({ elementHandle: async () => new Handle(this, this.form) }) }; }
   getByTestId(name) { assert.equal(name, 'workspace'); return { isVisible: async () => { await this.hooks.workspace?.(this); return this.destination; } }; }
@@ -56,7 +56,7 @@ class Page extends EventEmitter {
     if (status === 200) this.initialize();
   }
   initialize() { this.emitResponse(200, this.req('/api/bootstrap')); this.emitResponse(200, this.req('/api/user/model-catalog')); this.form.remove(); this.destination = true; }
-  async screenshot(options) { this.screenshots.push(options); assert.equal(options.mask.length, 2); await this.hooks.screenshot?.(this); }
+  async screenshot(options) { await this.hooks.nativeScreenshot?.(this, options.timeout); this.screenshots.push(options); assert.equal(options.mask.length, 2); await this.hooks.screenshot?.(this); }
   clean() { for (const e of events) assert.equal(this.listenerCount(e), 0, e); }
 }
 async function controlled(fn) {
@@ -165,7 +165,7 @@ test('actual adapter valid native submit is not prevented and invokes exactly on
   await s.run(); assert.equal(submissions, 1); assert.equal(s.page.requests.filter(r => r.method() === 'POST').length, 1);
 }));
 test('actual adapter cancelled intent guard remains failed and cannot reopen an operation', async () => controlled(async s => {
-  s.page.hooks.beforeSubmit = page => { page.phone.dispatchEvent(new page.window.Event('input', { bubbles: true })); };
+  s.page.hooks.beforeSubmit = page => { page.phone.value = '13900000002'; page.phone.dispatchEvent(new page.window.Event('input', { bubbles: true })); };
   await assert.rejects(s.run(), /did not submit/); await assert.rejects(s.run(), /previously failed/);
   assert.equal(s.page.requests.filter(r => r.method() === 'POST').length, 0);
 }));
@@ -203,4 +203,49 @@ for (const status of [401, 409]) test(`actual adapter catalog${status} in the fi
   });
   await assert.rejects(s.run(), /changed|pending/); assert.equal(emitted, true); assert.equal(s.page.clicks, 1);
   await assert.rejects(s.run(), /previously failed/);
+}));
+for (const action of ['fill', 'click', 'screenshot']) test(`native ${action} lasting over five seconds uses remaining original budget without retry`, async () => controlled(async s => {
+  const durations = []; s.page.status = [200];
+  const act = timeout => { if (durations.length) return; assert.ok(timeout > 5000); assert.ok(timeout <= 15000); durations.push(6000); s.advance(6000); };
+  if (action === 'fill') s.page.hooks.nativeFill = (_page, _name, timeout) => act(timeout);
+  if (action === 'click') s.page.hooks.nativeClick = (_page, timeout) => act(timeout);
+  if (action === 'screenshot') s.page.hooks.nativeScreenshot = (_page, timeout) => act(timeout);
+  await s.run(); assert.deepEqual(durations, [6000]); assert.equal(s.page.clicks, 1); assert.equal(s.page.requests.filter(r => r.method() === 'POST').length, 1);
+  assert.equal(s.attachments.at(-1).body.deadline, 21000); assert.deepEqual(s.waits, []);
+}));
+for (const action of ['fill', 'click', 'screenshot']) test(`native ${action} exhausting its remaining budget stops without an action retry`, async () => controlled(async s => {
+  let calls = 0; s.page.status = [200];
+  const exhaust = timeout => { calls++; assert.ok(timeout > 5000 && timeout <= 15000); s.advance(timeout + 1); throw new Error('native action reached original deadline'); };
+  if (action === 'fill') s.page.hooks.nativeFill = (_page, _name, timeout) => exhaust(timeout);
+  if (action === 'click') s.page.hooks.nativeClick = (_page, timeout) => exhaust(timeout);
+  if (action === 'screenshot') s.page.hooks.nativeScreenshot = (_page, timeout) => exhaust(timeout);
+  await assert.rejects(s.run(), /original deadline/); await assert.rejects(s.run(), /previously failed/);
+  assert.equal(calls, 1); assert.equal(s.page.requests.filter(r => r.method() === 'POST').length, action === 'screenshot' ? 1 : 0);
+  assert.deepEqual(s.waits, []);
+}));
+test('long native click with an already dispatchedPOST and uncertain timeout never resends it', async () => controlled(async s => {
+  s.page.status = [200];
+  s.page.hooks.nativeClick = async (page, timeout) => { await page.click(); s.advance(timeout + 1); throw new Error('native click outcome timed out'); };
+  await assert.rejects(s.run(), /timed out/); assert.equal(s.page.clicks, 1); assert.equal(s.page.requests.filter(r => r.method() === 'POST').length, 1); assert.deepEqual(s.waits, []);
+}));
+test('actual form mutation during a long native click is sticky and blocks its POST', async () => controlled(async s => {
+  s.page.status = [200];
+  s.page.hooks.nativeClick = page => { s.advance(6000); page.phone.value = '13900000002'; page.phone.dispatchEvent(new page.window.Event('input', { bubbles: true })); page.phone.value = phone; };
+  await assert.rejects(s.run(), /did not submit/); assert.equal(s.page.requests.filter(r => r.method() === 'POST').length, 0); assert.equal(s.page.clicks, 1);
+}));
+test('account invalidation during a long native action fails and cannot authorize a second action', async () => controlled(async s => {
+  s.page.status = [200];
+  s.page.hooks.nativeClick = page => { s.advance(6000); page.emit('framenavigated', page.frame); };
+  await assert.rejects(s.run(), /changed/); assert.equal(s.page.clicks, 1); assert.equal(s.page.requests.filter(r => r.method() === 'POST').length, 1); assert.deepEqual(s.waits, []);
+}));
+test('a long native retry click still has no thirdPOST when its outcome is unknown', async () => controlled(async s => {
+  s.page.hooks.nativeClick = async (page, timeout) => { if (page.clicks === 1) { await page.click(); s.advance(timeout + 1); throw new Error('native retry result unknown'); } };
+  await assert.rejects(s.run(), /unknown/); assert.equal(s.page.requests.filter(r => r.method() === 'POST').length, 2); assert.equal(s.page.clicks, 2);
+}));
+for (const field of ['phone', 'password']) test(`replacing then restoring the ${field} node cannot revive an observed changed intent`, async () => controlled(async s => {
+  s.page.status = [200]; s.page.hooks.beforeSubmit = page => {
+    const original = page[field], replacement = original.cloneNode(true); replacement.value = original.value;
+    original.replaceWith(replacement); replacement.dispatchEvent(new page.window.Event('input', { bubbles: true })); replacement.replaceWith(original);
+  };
+  await assert.rejects(s.run(), /did not submit/); assert.equal(s.page.requests.filter(r => r.method() === 'POST').length, 0); assert.equal(s.page.clicks, 1);
 }));

@@ -25,11 +25,14 @@ export async function uiPhoneLogin(page: Page, info: TestInfo, phone: string, ex
         const passwordInput = element.querySelector<HTMLInputElement>('input[placeholder="请输入密码"]');
         const submit = element.querySelector<HTMLButtonElement>('button[type="submit"]');
         let changed = false, armed = false, submissions = 0;
-        const markChanged = () => { changed = true; };
+        const matchesIntent = () => element.isConnected && phoneInput === element.querySelector('input[placeholder="请输入手机号"]') && passwordInput === element.querySelector('input[placeholder="请输入密码"]') && submit === element.querySelector('button[type="submit"]') && phoneInput?.value === intent.phone && passwordInput?.value === intent.password;
+        // A filled text/password input may emit its unchanged commit on blur.
+        // Latch observed intent changes, not the mere arrival of a DOM event.
+        const markChanged = () => { if (!matchesIntent()) changed = true; };
         element.addEventListener('input', markChanged, true); element.addEventListener('change', markChanged, true);
         const read = () => ({
             submissions,
-            unchanged: !changed && element.isConnected && phoneInput === element.querySelector('input[placeholder="请输入手机号"]') && passwordInput === element.querySelector('input[placeholder="请输入密码"]') && submit === element.querySelector('button[type="submit"]') && phoneInput?.value === intent.phone && passwordInput?.value === intent.password,
+            unchanged: !changed && matchesIntent(),
             visible: !!phoneInput?.getClientRects().length && !!passwordInput?.getClientRects().length && !!submit?.getClientRects().length,
             enabled: !!submit && !submit.disabled,
             rateLimited: element.textContent?.includes('请求过于频繁') === true,
@@ -64,7 +67,9 @@ export async function uiPhoneLogin(page: Page, info: TestInfo, phone: string, ex
       const name = `phone-login-${sequence}-${state.phase}`;
       // IDs/statuses only: no phone, password, cookie, token, or response body.
       await info.attach(`${name}.json`, { body: JSON.stringify(state), contentType: 'application/json' });
-      await page.screenshot({ path: info.outputPath(`${name}.png`), fullPage: true, animations: 'disabled', timeout: Math.max(1, Math.min(5000, deadline - Date.now() - 5000)), mask: [page.getByPlaceholder('请输入手机号', { exact: true }), page.getByPlaceholder('请输入密码', { exact: true })] });
+      const timeout = deadline - Date.now() - 5000;
+      if (timeout <= 0) throw new Error('Phone evidence exceeds the original test budget');
+      await page.screenshot({ path: info.outputPath(`${name}.png`), fullPage: true, animations: 'disabled', timeout, mask: [page.getByPlaceholder('请输入手机号', { exact: true }), page.getByPlaceholder('请输入密码', { exact: true })] });
     },
     workspace: (timeout: number) => expect(page.getByTestId('workspace')).toBeVisible({ timeout }),
   });

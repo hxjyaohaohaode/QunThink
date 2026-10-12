@@ -106,3 +106,8 @@ test('old bootstrap response arriving after the current successful chain cannot 
   const s = setup({ click: s => { const old = s.req('/api/bootstrap'); s.success(); s.page.emit('response', s.response(200, old, { json: async () => ({ user: { id: 'synthetic-B' } }) })); s.page.emit('requestfinished', old); } });
   await s.run(); assert.equal(s.clicks(), 1); s.clean();
 });
+test('state polling and final workspace retain five-second bounds while native actions use original remaining time', async () => {
+  const s = setup({ status: 200 }), polls = [], destinations = [];
+  await s.run({ poll: async (read, timeout) => { polls.push(timeout); assert.equal(await read(), true); }, workspace: async timeout => { destinations.push(timeout); } });
+  assert.equal(s.timeouts[0], 15000); assert.ok(polls.length); assert.ok(polls.every(timeout => timeout === 5000)); assert.deepEqual(destinations, [5000]); s.clean();
+});
