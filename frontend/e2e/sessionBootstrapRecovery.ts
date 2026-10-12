@@ -46,3 +46,11 @@ export async function navigateWithSessionBootstrapRecovery(page: Page, action: (
     waitForDestination: () => expect(destination).toBeVisible({ timeout: Math.min(5000, budget()) }),
   });
 }
+
+// UI phone login shares this already-captured TestInfo budget. Never mint a
+// deadline after registration has changed info.timeout or after a navigation.
+export function capturedSessionDeadline(page: Page, info: TestInfo) {
+  const deadline = recoveries.get(page)?.deadline;
+  if (deadline === undefined || testDeadlines.get(info) !== deadline) throw new Error('Capture the original session budget before registration');
+  return deadline;
+}

@@ -5,6 +5,7 @@ import { beginSessionBootstrapRecovery as beginSessionTokenRecovery, navigateWit
 import { assertLinuxBrowserSandbox, readSandboxDiagnostics, readVersionDiagnostics } from './sandboxDiagnostics';
 import type { WorkspaceTask, UpdateTaskMetadataInput } from '../../shared/tasks';
 import { settleKnownMetadataQueue } from '../scripts/metadata-command-queue-recovery.mjs';
+import { uiPhoneLogin, assertExpectedLoginUser } from './phoneLoginRecovery';
 
 // Native-only suite. Do not relax host policy to execute it. The parent CI uses
 // its installed stable Chrome; happyDOM tests are a separate, labelled suite.
@@ -128,20 +129,19 @@ test('two real tabs preserve both requests, reject delayed stale PUT and require
   await page.screenshot({ path: info.outputPath('metadata-two-tabs-conflict-closed.png'), fullPage: true, animations: 'disabled' }); await secondPage.close();
 });
 
-async function apiLogin(context: BrowserContext, phone: string) { const response = await context.request.post('/api/auth/login-phone', { headers: await headers(context), data: { phone, password: 'Synthetic-Browser-Only-2026' } }); expect(response.status()).toBe(200); }
-async function uiLogin(page: Page, phone: string) { await page.getByPlaceholder('请输入手机号', { exact: true }).fill(phone); await page.getByPlaceholder('请输入密码', { exact: true }).fill('Synthetic-Browser-Only-2026'); await page.locator('button[type="submit"]').click(); await expect(page.getByTestId('workspace')).toBeVisible(); }
+async function apiLogin(context: BrowserContext, phone: string, expectedUserId: string) { const response = await context.request.post('/api/auth/login-phone', { headers: await headers(context), data: { phone, password: 'Synthetic-Browser-Only-2026' } }); await assertExpectedLoginUser(response, expectedUserId); }
 
 test('same live page A-B-A account transition fences delayed ACK and never exposes prior private title to B', async ({ page, context, browser }, info) => {
   const phoneA = '138' + String(Math.floor(Math.random() * 1e8)).padStart(8, '0'), phoneB = '139' + String(Math.floor(Math.random() * 1e8)).padStart(8, '0');
   const ownerA = await registerSyntheticAccount(context, { phone: phoneA }); const task = await createTask(context, '账号A设置原任务');
-  const foreign = await browser.newContext({ baseURL: 'http://127.0.0.1:3210' }); await registerSyntheticAccount(foreign, { phone: phoneB }); await createTask(foreign, '账号B自己的任务');
+  const foreign = await browser.newContext({ baseURL: 'http://127.0.0.1:3210' }); const ownerB = await registerSyntheticAccount(foreign, { phone: phoneB }); await createTask(foreign, '账号B自己的任务');
   await workspace(page); const panel = await open(page, task.title, task.id); const timeOrigin = await page.evaluate(() => performance.timeOrigin);
   let release!: () => void; const held = new Promise<void>(resolve => { release = resolve; }); let sent!: UpdateTaskMetadataInput, committed = false, fulfilled = false;
   await page.route(`**/api/tasks/${task.id}/metadata`, async route => { if (route.request().method() !== 'PUT') return route.continue(); sent = route.request().postDataJSON(); const response = await route.fetch(); expect(response.status()).toBe(200); committed = true; await held; await route.fulfill({ response }); fulfilled = true; });
   await panel.getByLabel('设置任务名称', { exact: true }).fill('账号A私密冻结标题-991'); await panel.getByRole('button', { name: '保存任务设置', exact: true }).click(); await expect.poll(() => committed).toBe(true);
-  await apiLogin(context, phoneB); await page.getByRole('button', { name: '刷新', exact: true }).click(); await expect(page.getByPlaceholder('请输入手机号', { exact: true })).toBeVisible(); await uiLogin(page, phoneB);
+  await apiLogin(context, phoneB, ownerB.id); await page.getByRole('button', { name: '刷新', exact: true }).click(); await expect(page.getByPlaceholder('请输入手机号', { exact: true })).toBeVisible(); await uiPhoneLogin(page, info, phoneB, ownerB.id);
   await expect(page.getByTestId('workspace')).toContainText('账号B自己的任务'); await expect(page.getByTestId('workspace')).not.toContainText('账号A私密冻结标题-991'); await expect(page.getByTestId('task-metadata')).toHaveCount(0);
-  await apiLogin(context, phoneA); await page.getByRole('button', { name: '刷新', exact: true }).click(); await expect(page.getByPlaceholder('请输入手机号', { exact: true })).toBeVisible(); await uiLogin(page, phoneA);
+  await apiLogin(context, phoneA, ownerA.id); await page.getByRole('button', { name: '刷新', exact: true }).click(); await expect(page.getByPlaceholder('请输入手机号', { exact: true })).toBeVisible(); await uiPhoneLogin(page, info, phoneA, ownerA.id);
   const newer = await context.request.put(`/api/tasks/${task.id}/metadata`, { headers: { ...await headers(context), 'X-Expected-User-Id': ownerA.id }, data: { client_request_id: randomUUID(), expected_revision: 1, changes: { title: '账号A当前新标题-992' } } }); expect(newer.status()).toBe(200);
   await page.getByRole('button', { name: '刷新', exact: true }).click(); await expect(page.getByRole('heading', { name: '账号A当前新标题-992', exact: true })).toBeVisible(); release(); await expect.poll(() => fulfilled).toBe(true);
   expect(await page.evaluate(() => performance.timeOrigin)).toBe(timeOrigin); await expect(page.getByRole('heading', { name: '账号A当前新标题-992', exact: true })).toBeVisible(); const current = await open(page, '账号A当前新标题-992', task.id);
