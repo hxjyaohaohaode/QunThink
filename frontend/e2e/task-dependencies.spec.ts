@@ -4,8 +4,26 @@ import { registerSyntheticAccount } from './authFixture';
 import { beginSessionTokenRecovery, navigateWithSessionTokenRecovery } from './sessionTokenRecovery';
 import type { TaskResultDocument, WorkspaceTask } from '../../shared/tasks';
 
-// Keep Chromium sandboxing enabled in local and CI runs. Never bypass a restricted host.
-test.use({ launchOptions: { chromiumSandbox: true } });
+// Use installed stable Chrome and its OS-provided AppArmor profile.
+// Keep sandboxing enabled; never weaken host policy for downloaded Chromium.
+test.use({ channel: 'chrome', launchOptions: { chromiumSandbox: true } });
+
+// Record the actual installed binary and sandbox diagnostics in CI evidence.
+// This reads Chrome's status page; it does not change a host security setting.
+test.beforeAll(async ({ browser }) => {
+  const cdp = await browser.newBrowserCDPSession();
+  const { arguments: argv } = await cdp.send('Browser.getBrowserCommandLine');
+  await cdp.detach();
+  expect(argv).not.toContain('--no-sandbox');
+  expect(argv).not.toContain('--disable-setuid-sandbox');
+  const diagnostic = await browser.newContext();
+  try {
+    const page = await diagnostic.newPage();
+    await page.goto('chrome://sandbox');
+    const status = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
+    console.log('[dependency-browser]', JSON.stringify({ version: browser.version(), executable: argv[0], chromiumSandbox: true, noSandboxFlag: false, status }));
+  } finally { await diagnostic.close(); }
+});
 
 test.beforeEach(async ({ page }, info) => { beginSessionTokenRecovery(page, info); });
 async function headers(context: BrowserContext) {
