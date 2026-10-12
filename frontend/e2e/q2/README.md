@@ -24,6 +24,6 @@ CI 将 `core`（原浏览器套件及 Q1）与 `q2` 分开运行、存档。所�
 
 ## 工件核验
 
-Q2 工件名含 `qunthink-browser-evidence-q2-<project>`，以及 `qunthink-browser-evidence-q2-parts-<project>-manifest/part-NNN`。每片20MiB，最多16片；超限明确失败，不丢弃视频或压缩质量。用仓库 `scripts/pack-ci-evidence.mjs restore` 校验并还原完整 tar，核对官方 artifact ID、size、digest、run/head 和 PR 虚拟合并树。列表连接器只有一页时，按完整工件名查询，不能将第一页误当全部。
+Q2 工件名含 `qunthink-browser-evidence-q2-<project>`，以及 `qunthink-browser-evidence-q2-parts-<project>-manifest/part-NNN`。每片20MiB，最多24片（总上限480MiB）；本轮之后新生成工件保留1天，原始完整证据须到期前校验并备份到交付存储，已有工件保留期不变；超限明确失败，不丢弃视频或压缩质量。用仓库 `scripts/pack-ci-evidence.mjs restore` 校验并还原完整 tar，核对官方 artifact ID、size、digest、run/head 和 PR 虚拟合并树。列表连接器只有一页时，按完整工件名查询，不能将第一页误当全部。
 
 最终可用性结论以精确提交的实际运行结果、原图/视频/trace和独立产品审查为准；DOM、服务测试、`--list` 和测试数量均不替代这些证据。

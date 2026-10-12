@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 // Keep the fixed upload slots in ci.yml and their contract test in sync.
 export const PART_BYTES = 20 * 1024 * 1024;
-export const MAX_PARTS = 16;
+export const MAX_PARTS = 24;
 const MANIFEST_BYTES = 1024 * 1024;
 const digest = () => createHash('sha256');
 const partName = (index) => `evidence.part-${String(index + 1).padStart(3, '0')}`;

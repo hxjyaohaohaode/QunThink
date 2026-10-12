@@ -131,7 +131,7 @@ jobs:
           path: |
             frontend/playwright-report/
             frontend/test-results/
-          retention-days: 14
+          retention-days: 1
       - name: Losslessly package all browser evidence into bounded parts
         id: package-evidence
         if: always()
@@ -147,7 +147,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 001
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-001') != '' }}
         uses: actions/upload-artifact@v4
@@ -157,7 +157,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 002
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-002') != '' }}
         uses: actions/upload-artifact@v4
@@ -167,7 +167,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 003
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-003') != '' }}
         uses: actions/upload-artifact@v4
@@ -177,7 +177,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 004
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-004') != '' }}
         uses: actions/upload-artifact@v4
@@ -187,7 +187,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 005
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-005') != '' }}
         uses: actions/upload-artifact@v4
@@ -197,7 +197,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 006
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-006') != '' }}
         uses: actions/upload-artifact@v4
@@ -207,7 +207,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 007
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-007') != '' }}
         uses: actions/upload-artifact@v4
@@ -217,7 +217,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 008
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-008') != '' }}
         uses: actions/upload-artifact@v4
@@ -227,7 +227,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 009
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-009') != '' }}
         uses: actions/upload-artifact@v4
@@ -237,7 +237,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 010
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-010') != '' }}
         uses: actions/upload-artifact@v4
@@ -247,7 +247,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 011
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-011') != '' }}
         uses: actions/upload-artifact@v4
@@ -257,7 +257,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 012
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-012') != '' }}
         uses: actions/upload-artifact@v4
@@ -267,7 +267,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 013
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-013') != '' }}
         uses: actions/upload-artifact@v4
@@ -277,7 +277,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 014
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-014') != '' }}
         uses: actions/upload-artifact@v4
@@ -287,7 +287,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 015
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-015') != '' }}
         uses: actions/upload-artifact@v4
@@ -297,7 +297,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
       - name: Save browser-evidence-parts part 016
         if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-016') != '' }}
         uses: actions/upload-artifact@v4
@@ -307,7 +307,87 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           include-hidden-files: true
-          retention-days: 14
+          retention-days: 1
+      - name: Save browser-evidence-parts part 017
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-017') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-017
+          path: .ci-evidence/evidence.part-017
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 1
+      - name: Save browser-evidence-parts part 018
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-018') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-018
+          path: .ci-evidence/evidence.part-018
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 1
+      - name: Save browser-evidence-parts part 019
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-019') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-019
+          path: .ci-evidence/evidence.part-019
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 1
+      - name: Save browser-evidence-parts part 020
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-020') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-020
+          path: .ci-evidence/evidence.part-020
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 1
+      - name: Save browser-evidence-parts part 021
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-021') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-021
+          path: .ci-evidence/evidence.part-021
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 1
+      - name: Save browser-evidence-parts part 022
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-022') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-022
+          path: .ci-evidence/evidence.part-022
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 1
+      - name: Save browser-evidence-parts part 023
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-023') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-023
+          path: .ci-evidence/evidence.part-023
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 1
+      - name: Save browser-evidence-parts part 024
+        if: ${{ always() && steps.package-evidence.outcome == 'success' && hashFiles('.ci-evidence/evidence.part-024') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-browser-evidence${{ matrix.suite == 'q2' && '-q2' || '' }}-parts-${{ matrix.project }}-part-024
+          path: .ci-evidence/evidence.part-024
+          if-no-files-found: error
+          compression-level: 0
+          include-hidden-files: true
+          retention-days: 1
 
   docker:
     runs-on: ubuntu-latest

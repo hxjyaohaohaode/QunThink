@@ -54,6 +54,38 @@ test('overflow is explicit and never modifies the source or publishes a partial 
   await assert.rejects(splitArchive({ input, outputDir, maxParts: MAX_PARTS + 1 }), /Invalid evidence part bounds/);
 });
 
+test('the observed seventeenth part and exact twenty-four-part bound restore every byte', async (t) => {
+  const directory = await workspace(t);
+  assert.equal(MAX_PARTS, 24); assert.equal(PART_BYTES, 20 * 1024 * 1024);
+  for (const size of [16 * 16 + 1, 24 * 16]) {
+    const input = path.join(directory, `input-${size}.zip`), bytes = randomBytes(size);
+    await writeFile(input, bytes);
+    const outputDir = path.join(directory, `parts-${size}`);
+    const manifest = await splitArchive({ input, outputDir, partBytes: 16 });
+    assert.equal(manifest.parts.length, Math.ceil(size / 16)); assert.equal(manifest.maxParts, 24);
+    assert.equal(manifest.archive.bytes, size); assert.equal(manifest.archive.sha256, createHash('sha256').update(bytes).digest('hex'));
+    const restored = path.join(directory, `restored-${size}.zip`); await verifyParts(outputDir, restored);
+    assert.deepEqual(await readFile(restored), bytes); assert.equal(await hashFile(restored), await hashFile(input));
+    if (manifest.parts.length === 17) {
+      const oldOutput = path.join(directory, 'old-capacity');
+      await assert.rejects(splitArchive({ input, outputDir: oldOutput, partBytes: 16, maxParts: 16 }), /needs 17 parts; upload capacity is 16/);
+      await assert.rejects(stat(oldOutput), { code: 'ENOENT' }); assert.deepEqual(await readFile(input), bytes);
+    }
+  }
+});
+
+test('twenty-fifth part fails before output creation and a forged oversized manifest also fails closed', async (t) => {
+  const directory = await workspace(t), input = path.join(directory, 'too-large.zip'), bytes = randomBytes(24 * 16 + 1), outputDir = path.join(directory, 'refused');
+  await writeFile(input, bytes);
+  await assert.rejects(splitArchive({ input, outputDir, partBytes: 16 }), /needs 25 parts; upload capacity is 24/);
+  await assert.rejects(stat(outputDir), { code: 'ENOENT' }); assert.deepEqual(await readFile(input), bytes);
+  await writeFile(input, bytes.subarray(0, 24 * 16));
+  const accepted = path.join(directory, 'accepted'), manifest = await splitArchive({ input, outputDir: accepted, partBytes: 16 });
+  const last = { ...manifest.parts.at(-1), name: 'evidence.part-025' }; manifest.parts.push(last); manifest.archive.bytes += last.bytes;
+  await writeFile(path.join(accepted, 'manifest.json'), JSON.stringify(manifest));
+  await assert.rejects(verifyParts(accepted), /Invalid evidence manifest/);
+});
+
 test('stale output, empty input and missing input fail rather than masquerading as complete evidence', async (t) => {
   const directory = await workspace(t);
   const input = path.join(directory, 'input.zip');
@@ -138,6 +170,11 @@ test('tar round trip retains nested, hidden, Unicode and binary files plus empty
 test('workflow uploads each bounded part separately, preserves full evidence and does not repeat historical recovery', async () => {
   const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
   const blocks = workflow.split(/(?=^      - name:)/m);
+  const uploadBlocks = blocks.filter(block => /uses: actions\/upload-artifact@v4/.test(block));
+  assert.equal(uploadBlocks.length, MAX_PARTS + 2, 'all parts, one manifest and the complete original artifact');
+  for (const block of uploadBlocks) assert.match(block, /^          retention-days: 1$/m, 'every newly uploaded artifact has exactly one-day retention');
+  const actualSlots = [...workflow.matchAll(/^      - name: Save browser-evidence-parts part (\d{3})$/gm)].map(match => match[1]);
+  assert.deepEqual(actualSlots, Array.from({ length: MAX_PARTS }, (_, index) => String(index + 1).padStart(3, '0')), 'exactly the bounded ordered upload slots, no extra or duplicate slots');
   for (const directory of ['.ci-evidence']) {
     const filenames = ['manifest.json', ...Array.from({ length: MAX_PARTS }, (_, index) => `evidence.part-${String(index + 1).padStart(3, '0')}`)];
     for (const filename of filenames) {
@@ -147,6 +184,9 @@ test('workflow uploads each bounded part separately, preserves full evidence and
       assert.match(matching[0], /include-hidden-files: true/, 'explicitly include only this exact file under the hidden staging directory');
       assert.match(matching[0], /compression-level: 0/);
       assert.match(matching[0], /if-no-files-found: error/);
+      assert.match(matching[0], /^          retention-days: 1$/m);
+      assert.match(matching[0], /steps\.package-evidence\.outcome == 'success'/);
+      if (filename !== 'manifest.json') assert.ok(matching[0].includes(`hashFiles('${directory}/${filename}') != ''`));
       assert.match(matching[0], /name: qunthink-.*-\$\{\{ matrix.project \}\}-(manifest|part-\d{3})/);
     }
   }
