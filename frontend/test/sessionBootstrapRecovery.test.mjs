@@ -248,3 +248,17 @@ test('separate pages in one test preserve both epoch screenshots and JSON identi
   assert.deepEqual(a.attached.map(value => value.navigationEpoch), [1, 2]);
   assert.equal(a.page.clicks, 1); assert.equal(b.page.clicks, 1); a.clean(); b.clean();
 });
+
+for (const changed of ['token401', 'token-pending', 'new-successful-pair', 'me-network-failure', 'me429', 'me-pending']) test(`final UI await cannot accept a changed ${changed} bootstrap or open another epoch`, async () => {
+  const s = setup();
+  await assert.rejects(s.run(async () => s.emit(429), 'recovery', { waitForDestination: async () => {
+    if (changed === 'token401') s.emit(401);
+    if (changed === 'token-pending') s.page.emit('request', request());
+    if (changed === 'new-successful-pair') { s.emit(200); s.emit(200, '/api/auth/me'); }
+    if (changed === 'me429') s.emit(429, '/api/auth/me');
+    if (changed === 'me-pending' || changed === 'me-network-failure') { const r = request('/api/auth/me'); s.page.emit('request', r); if (changed === 'me-network-failure') s.page.emit('requestfailed', r); }
+    await Promise.resolve();
+  } }), /current bootstrap changed/);
+  await assert.rejects(s.run(async () => s.emit(429)), /prior bootstrap navigation failed/);
+  assert.equal(s.recovered.length, 1); s.clean();
+});

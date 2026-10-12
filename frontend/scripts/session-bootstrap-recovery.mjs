@@ -86,7 +86,9 @@ export function createScopedBootstrapNavigator({ page, origin, recover, createRe
       assertCurrent();
       await recoverEpoch(response, assertCurrent);
       if (await knownState() !== 'destination') throw new Error('Bootstrap recovery did not reach current successful token and me reads');
+      const completedToken = token, completedUser = currentUser();
       await waitForDestination();
+      if (token !== completedToken || currentUser() !== completedUser || token?.failed || currentUser()?.failed || !token?.finished || !currentUser()?.finished || token.response?.status() !== 200 || currentUser()?.response?.status() !== 200) throw new Error('The current bootstrap changed during the final UI check; no successful epoch');
       succeeded = true;
     } finally {
       page.off('request', onRequest); page.off('response', onResponse); page.off('requestfinished', onFinished); page.off('requestfailed', onFailed);

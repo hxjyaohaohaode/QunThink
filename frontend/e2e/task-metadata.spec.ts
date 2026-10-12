@@ -4,6 +4,7 @@ import { registerSyntheticAccount } from './authFixture';
 import { beginSessionBootstrapRecovery as beginSessionTokenRecovery, navigateWithSessionBootstrapRecovery as navigateWithSessionTokenRecovery } from './sessionBootstrapRecovery';
 import { assertLinuxBrowserSandbox, readSandboxDiagnostics, readVersionDiagnostics } from './sandboxDiagnostics';
 import type { WorkspaceTask, UpdateTaskMetadataInput } from '../../shared/tasks';
+import { settleKnownMetadataQueue } from '../scripts/metadata-command-queue-recovery.mjs';
 
 // Native-only suite. Do not relax host policy to execute it. The parent CI uses
 // its installed stable Chrome; happyDOM tests are a separate, labelled suite.
@@ -70,12 +71,12 @@ async function gateNextHash(page: Page) {
 async function releaseHash(page: Page) { await expect.poll(() => page.evaluate(() => typeof (window as unknown as { releaseMetadataHash?: unknown }).releaseMetadataHash)).toBe('function'); await page.evaluate(() => (window as unknown as { releaseMetadataHash: () => void }).releaseMetadataHash()); }
 
 test('two real tabs preserve both requests, reject delayed stale PUT and require close then deliberate reedit', async ({ page, context }, info) => {
-  await registerSyntheticAccount(context); const task = await createTask(context, '设置双标签原任务'); await workspace(page); const first = await open(page, task.title, task.id);
+  const owner = await registerSyntheticAccount(context); const task = await createTask(context, '设置双标签原任务'); await workspace(page); const first = await open(page, task.title, task.id);
   const secondPage = await context.newPage(); beginSessionTokenRecovery(secondPage, info); await workspace(secondPage); const second = await open(secondPage, task.title, task.id);
   await first.getByLabel('设置任务名称', { exact: true }).fill('较早的标签草稿'); await second.getByLabel('设置任务名称', { exact: true }).fill('较新的标签设置');
   await gateNextHash(page); await gateNextHash(secondPage);
   let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; }); let firstSent!: UpdateTaskMetadataInput, secondSent!: UpdateTaskMetadataInput;
-  await page.route(`**/api/tasks/${task.id}/metadata`, async route => { if (route.request().method() !== 'PUT') return route.continue(); firstSent = route.request().postDataJSON(); await gate; await route.continue(); });
+  await page.route(`**/api/tasks/${task.id}/metadata`, async route => { if (route.request().method() !== 'PUT') return route.continue(); firstSent ??= route.request().postDataJSON(); await gate; await route.continue(); });
   await secondPage.route(`**/api/tasks/${task.id}/metadata`, async route => { if (route.request().method() !== 'PUT') return route.continue(); secondSent = route.request().postDataJSON(); await route.continue(); });
   await Promise.all([first.getByRole('button', { name: '保存任务设置', exact: true }).click(), second.getByRole('button', { name: '保存任务设置', exact: true }).click()]);
   await Promise.all([releaseHash(page), releaseHash(secondPage)]); await expect.poll(() => !!firstSent && !!secondSent).toBe(true);
@@ -86,12 +87,45 @@ test('two real tabs preserve both requests, reject delayed stale PUT and require
   const winner = await context.request.get(`/api/tasks/${task.id}/metadata/commands/${secondSent.client_request_id}`); expect(winner.status()).toBe(200); expect((await winner.json()).receipt).toMatchObject({ id: secondSent.client_request_id, task_id: task.id, operation: 'metadata', status: 'succeeded', committed_revision: 1 });
   expect((await readTask(context, task.id))?.metadata_revision).toBe(1);
   await expect(first.getByText(/任务设置已被修改/)).toBeVisible(); await expect(first.getByRole('button', { name: '核对并结束原设置请求', exact: true })).toBeEnabled();
-  await first.getByRole('button', { name: '核对并结束原设置请求', exact: true }).click();
-  // Another tab may already have removed its durable key, but this page's
-  // observed second UUID remains until explicitly queried here.
-  const verify = first.getByRole('button', { name: '核验任务设置请求', exact: true }); if (await verify.count()) { await expect(verify).toBeEnabled(); await verify.click(); }
-  await first.getByRole('button', { name: '读取最新设置并重新编辑', exact: true }).click(); await expect(first.getByLabel('设置任务名称', { exact: true })).toHaveValue('较新的标签设置');
-  expect((await readTask(context, task.id))?.metadata_revision).toBe(1); await page.screenshot({ path: info.outputPath('metadata-two-tabs-conflict-closed.png'), fullPage: true, animations: 'disabled' }); await secondPage.close();
+  const verify = first.getByRole('button', { name: '核验任务设置请求', exact: true });
+  const reedit = first.getByRole('button', { name: '读取最新设置并重新编辑', exact: true });
+  const details = first.locator('details').filter({ has: page.getByText('原设置请求编号', { exact: true }) });
+  const requestId = details.locator('p');
+  async function readState() {
+    if (await verify.isVisible()) return { kind: 'pending', id: (await requestId.textContent())?.trim() };
+    return { kind: await reedit.isVisible() ? 'ready' : 'waiting' };
+  }
+  await settleKnownMetadataQueue({ winner: secondSent, loser: firstSent, ownerId: owner.id, taskId: task.id,
+    observe: async () => {
+      let state: { kind: string; id?: string } = { kind: 'waiting' };
+      await expect.poll(async () => { state = await readState(); return state.kind; }).not.toBe('waiting');
+      if (state.kind === 'pending') {
+        if (await details.getAttribute('open') === null) await details.locator('summary').click();
+        await expect(requestId).toBeVisible(); await expect(requestId).toHaveText(state.id!);
+      }
+      return state;
+    },
+    act: async ({ id, operation, path }: { id: string; operation: 'close' | 'verify'; path: string }) => {
+      const method = operation === 'close' ? 'POST' : 'GET';
+      const response = page.waitForResponse(value => new URL(value.url()).pathname === path && value.request().method() === method);
+      const exactPanel = first.filter({ has: page.getByText(id, { exact: true }) });
+      await exactPanel.getByRole('button', { name: operation === 'close' ? '核对并结束原设置请求' : '核验任务设置请求', exact: true }).click();
+      const result = await response, request = result.request();
+      return { status: result.status(), method: request.method(), path: new URL(request.url()).pathname, ownerId: request.headers()['x-expected-user-id'], requestBody: operation === 'close' ? request.postDataJSON() : undefined, body: await result.json() };
+    },
+    waitForAdvance: async (id: string) => { await expect.poll(async () => { const state = await readState(); return state.kind === 'ready' || state.kind === 'pending' && state.id !== id; }).toBe(true); },
+  });
+  await expect(verify).toHaveCount(0); await expect(reedit).toBeEnabled();
+  await reedit.click(); await expect(first.getByLabel('设置任务名称', { exact: true })).toHaveValue('较新的标签设置');
+  expect((await readTask(context, task.id))?.metadata_revision).toBe(1);
+  const newResponse = page.waitForResponse(value => new URL(value.url()).pathname === `/api/tasks/${task.id}/metadata` && value.request().method() === 'PUT');
+  await first.getByLabel('设置任务名称', { exact: true }).fill('明确重编后的新设置');
+  await first.getByRole('button', { name: '保存任务设置', exact: true }).click();
+  const saved = await newResponse, newCommand = saved.request().postDataJSON() as UpdateTaskMetadataInput;
+  expect(newCommand.client_request_id).not.toBe(firstSent.client_request_id); expect(newCommand.client_request_id).not.toBe(secondSent.client_request_id); expect(newCommand.expected_revision).toBe(1);
+  expect(saved.status()).toBe(200); expect((await saved.json()).receipt).toMatchObject({ id: newCommand.client_request_id, task_id: task.id, status: 'succeeded', committed_revision: 2 });
+  await expect(verify).toHaveCount(0); expect(await readTask(context, task.id)).toMatchObject({ title: '明确重编后的新设置', metadata_revision: 2 });
+  await page.screenshot({ path: info.outputPath('metadata-two-tabs-conflict-closed.png'), fullPage: true, animations: 'disabled' }); await secondPage.close();
 });
 
 async function apiLogin(context: BrowserContext, phone: string) { const response = await context.request.post('/api/auth/login-phone', { headers: await headers(context), data: { phone, password: 'Synthetic-Browser-Only-2026' } }); expect(response.status()).toBe(200); }
