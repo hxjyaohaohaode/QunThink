@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { registerSyntheticAccount } from './authFixture';
 import { beginSessionTokenRecovery, navigateWithSessionTokenRecovery } from './sessionTokenRecovery';
 import type { TaskResultDocument, WorkspaceTask } from '../../shared/tasks';
+import { assertLinuxBrowserSandbox, readSandboxDiagnostics, readVersionDiagnostics } from './sandboxDiagnostics';
 
 // Use installed stable Chrome and its OS-provided AppArmor profile.
 // Keep sandboxing enabled; never weaken host policy for downloaded Chromium.
@@ -11,17 +12,20 @@ test.use({ channel: 'chrome', launchOptions: { chromiumSandbox: true } });
 // Record the actual installed binary and sandbox diagnostics in CI evidence.
 // This reads Chrome's status page; it does not change a host security setting.
 test.beforeAll(async ({ browser }) => {
-  const cdp = await browser.newBrowserCDPSession();
-  const { arguments: argv } = await cdp.send('Browser.getBrowserCommandLine');
-  await cdp.detach();
-  expect(argv).not.toContain('--no-sandbox');
-  expect(argv).not.toContain('--disable-setuid-sandbox');
   const diagnostic = await browser.newContext();
   try {
     const page = await diagnostic.newPage();
+    // The CDP command-line method requires an automation flag. Read the normal
+    // built-in version page instead, without changing any launch option.
+    await page.goto('chrome://version');
+    const version = await page.evaluate(readVersionDiagnostics);
     await page.goto('chrome://sandbox');
-    const status = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
-    console.log('[dependency-browser]', JSON.stringify({ version: browser.version(), executable: argv[0], chromiumSandbox: true, noSandboxFlag: false, status }));
+    const sandbox = await page.evaluate(readSandboxDiagnostics);
+    // Log observations even if incomplete, but only claim verified after every
+    // required field has passed. Do not log a full command line/profile path.
+    console.log('[dependency-browser-observed]', JSON.stringify({ version: browser.version(), executable: version.executable, sandbox }));
+    const verified = assertLinuxBrowserSandbox(version, sandbox);
+    console.log('[dependency-browser-verified]', JSON.stringify({ version: browser.version(), chromiumSandbox: true, noSandboxFlag: false, ...verified }));
   } finally { await diagnostic.close(); }
 });
 
