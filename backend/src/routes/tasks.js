@@ -1,7 +1,7 @@
 import express from 'express';
 import { z } from 'zod';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { acceptTaskResult, getTaskCreationReceipt, closeTaskCreationCommand, createTask, deleteTask, listTasks, runTask, updateTask, resolveUnknownTaskRun, taskRunInput } from '../services/tasks.js';
+import { closeTaskDependencyCommand, updateTaskDependencies, getTaskDependencyCommand, acceptTaskResult, getTaskCreationReceipt, closeTaskCreationCommand, createTask, deleteTask, listTasks, runTask, updateTask, resolveUnknownTaskRun, taskRunInput } from '../services/tasks.js';
 
 import { getTaskResult, getTaskResultCommand, closeTaskResultCommand, saveTaskResultVersion, acceptTaskResultVersion, adoptTaskResultVersion, rebaseTaskBrief } from '../services/taskResults.js';
 
@@ -36,6 +36,16 @@ router.post('/tasks/commands/:requestId/close', asyncHandler(async (req, res) =>
 }));
 router.post('/tasks', asyncHandler(async (req, res) => {
   res.status(201).json(await createTask(req.userId, withRequestId(req)));
+}));
+router.put('/tasks/:taskId/dependencies', asyncHandler(async (req, res) => {
+  res.json(await updateTaskDependencies(req.userId, req.params.taskId, withRequestId(req)));
+}));
+router.get('/tasks/:taskId/dependencies/commands/:requestId', asyncHandler(async (req, res) => {
+  res.json(await getTaskDependencyCommand(req.userId, req.params.taskId, req.params.requestId));
+}));
+router.post('/tasks/:taskId/dependencies/commands/:requestId/close', asyncHandler(async (req, res) => {
+  z.object({}).strict().parse(req.body || {});
+  res.json(await closeTaskDependencyCommand(req.userId, req.params.taskId, req.params.requestId));
 }));
 router.patch('/tasks/:taskId', asyncHandler(async (req, res) => {
   res.json(await updateTask(req.userId, req.params.taskId, req.body));

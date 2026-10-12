@@ -7,6 +7,7 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { setWritingPreferences, writingPreferences } from '../../utils/taskRecovery';
 import { MessageContent } from '../Chat/MessageContent';
 import { useConfirm } from '../Common/useConfirm';
+import { DependencySummary } from './TaskDependencies';
 import { getAuthGeneration } from '../../services/api';
 import { getCacheUserId } from '../../utils/cacheUtils';
 
@@ -22,6 +23,7 @@ export function TaskResultEditor({ taskId, onOpenConversation }: { taskId: strin
   const notice = useTaskResultsStore(state => state.notices[taskId]);
   const loading = useTaskResultsStore(state => state.loading[taskId]);
   const task = useTasksStore(state => state.tasks.find(item => item.id === taskId));
+  const dependencyIntent = useTasksStore(state => state.dependencyIntents?.[taskId]);
   const taskPending = useTasksStore(state => state.pending[taskId]);
   const ready = useModelsStore(state => state.catalog?.models.some(model => model.ready && model.verifiedCapabilities?.includes('chat')));
   const brief = useTaskResultsStore(state => state.briefs[taskId] ?? null);
@@ -39,7 +41,7 @@ export function TaskResultEditor({ taskId, onOpenConversation }: { taskId: strin
     void useTaskResultsStore.getState().select(taskId);
     const refresh = () => { if (!window.document.hidden) void useTaskResultsStore.getState().fetch(taskId); };
     const timer = setInterval(refresh, 10000);
-    const recover = () => { void useTaskResultsStore.getState().recover(taskId); };
+    const recover = () => { void useTaskResultsStore.getState().recover(taskId); void useTasksStore.getState().fetch(); };
     window.addEventListener('storage', recover);
     window.addEventListener('online', refresh); window.document.addEventListener('visibilitychange', refresh);
     return () => { clearInterval(timer); window.removeEventListener('storage', recover); window.removeEventListener('online', refresh); window.document.removeEventListener('visibilitychange', refresh); };
@@ -50,10 +52,15 @@ export function TaskResultEditor({ taskId, onOpenConversation }: { taskId: strin
     window.addEventListener('beforeunload', guard); return () => window.removeEventListener('beforeunload', guard);
   }, [editor?.dirty, uncertain, brief]);
   useEffect(() => { setMode('edit'); setFeedback(''); }, [taskId]);
+  useEffect(() => { if (task?.dependency_state) void useTaskResultsStore.getState().fetch(taskId); }, [taskId, task?.dependency_revision, task?.dependency_state?.signature, task?.dependency_state?.blocked]);
   const version = resultHead(document);
+  const dependencies = document?.dependency_state;
+  const dependencyBlocked = dependencies?.blocked === true || task?.dependency_state?.blocked === true;
+  const dependencyReviewRequired = !!dependencies && editor?.reviewedDependencySignature !== dependencies.signature;
+  const dependencyStale = dependencies?.result_stale === true || (task?.dependency_state?.result_stale === true && (task.dependency_state.signature !== dependencies?.signature || task.result_head_version_id === document?.head_version_id));
   const blocked = document?.source.status === 'blocked';
   const stale = document?.source.status === 'changed' || version?.source_status === 'changed';
-  const accepted = !!version && document?.accepted_version_id === version.id && document.accepted_content_hash === version.content_hash && !stale && !blocked;
+  const accepted = !!version && document?.accepted_version_id === version.id && document.accepted_content_hash === version.content_hash && !stale && !blocked && !dependencyBlocked && !dependencyStale;
   async function action(fn: () => Promise<void>) { setFeedback(''); try { await fn(); } catch (error) { setFeedback(error instanceof Error ? error.message : '暂时无法完成，请保留文字并重试'); } }
   function selectText() {
     setMode('edit');
@@ -77,7 +84,7 @@ export function TaskResultEditor({ taskId, onOpenConversation }: { taskId: strin
     catch (error) { setFeedback(error instanceof Error ? error.message : '无法保存选择'); }
   }
   async function run() {
-    if (!task || editor?.dirty || uncertain) return;
+    if (!task || editor?.dirty || uncertain || dependencyBlocked || dependencyIntent) return;
     if (!await confirm({ title: '让 AI 提供一个候选稿？', description: '会将任务用途和关联会话资料发送给已配置的模型服务商，可能产生费用。现有人工正文保留，新文字需要你选择是否采用。' })) return;
     await action(async () => { await useTasksStore.getState().run(taskId); await useTaskResultsStore.getState().fetch(taskId); });
   }
@@ -104,8 +111,10 @@ export function TaskResultEditor({ taskId, onOpenConversation }: { taskId: strin
   if (!document || !editor) return <div className="writing-loading" aria-live="polite"><p>{loading ? '正在打开同一份文稿…' : error || notice || '尚未读取到文稿'}</p>{pendingRecovery}<button className="workspace-button" onClick={() => void useTaskResultsStore.getState().select(taskId)}>重新读取</button>{ConfirmModal}</div>;
   const recoveryLabel = editor.recovery === 'saved' ? '未提交修改已加密保存在此设备' : editor.recovery === 'saving' ? '正在加密保存此设备草稿…' : editor.recovery === 'failed' ? '设备恢复保存失败，请保存版本或下载文本' : '未提交修改只在当前页面；可开启设备草稿恢复';
   return <div className="task-result-editor" data-testid="task-result-editor" data-observe="writing" data-task-id={taskId}>
-    <header className="writing-document-heading"><div><p className="writing-eyebrow">同一会话 · 持续编辑</p><h2>{document.title}</h2></div><span className={`writing-state ${stale || blocked ? 'is-warning' : accepted ? 'is-accepted' : ''}`}>{blocked ? '来源不可用' : stale ? '需要复核' : editor.dirty ? '有未提交修改' : accepted ? `版本 ${version?.sequence} 已验收` : version ? `版本 ${version.sequence} 待检查` : '开始写正文'}</span></header>
+    <header className="writing-document-heading"><div><p className="writing-eyebrow">同一会话 · 持续编辑</p><h2>{document.title}</h2></div><span className={`writing-state ${stale || blocked || dependencyBlocked || dependencyStale ? 'is-warning' : accepted ? 'is-accepted' : ''}`}>{blocked ? '来源不可用' : dependencyBlocked ? '等待前置任务' : dependencyStale ? '依赖变化待复核' : stale ? '需要复核' : editor.dirty ? '有未提交修改' : accepted ? `版本 ${version?.sequence} 已验收` : version ? `版本 ${version.sequence} 待检查` : '开始写正文'}</span></header>
     {recoveryError && <section className="writing-warning" aria-label="待核验记录读取失败"><p role="alert">{recoveryError}</p><button className="workspace-button" onClick={() => void useTaskResultsStore.getState().recover(taskId)}>重新读取待核验记录</button></section>}
+    <DependencySummary state={dependencies} />
+    {dependencies && <section className="writing-context" aria-label="前置任务复核"><p className="writing-help">前置关系与正文各自保存。前置任务正文不会自动发送给 AI；请根据最新关系自行核对当前文稿。</p>{(dependencyStale || dependencyReviewRequired) && <label className="writing-source-check"><input type="checkbox" checked={!dependencyReviewRequired} disabled={!!offline || !!pending || !!uncertain} onChange={event => useTaskResultsStore.getState().reviewDependencies(taskId, event.target.checked ? dependencies.signature : undefined)} />我已核对当前前置任务状态，保存时记录此次复核</label>}</section>}
     {pendingRecovery}
     {offline && <div className="writing-warning" role="status">离线副本 · 来源和权限尚未联网核对，可编辑此设备草稿，联网后再保存版本</div>}
     <p className="writing-help">{task?.prompt?.trim() ? <>用途：{task.prompt.slice(0, 120)}{task.prompt.length > 120 ? '…' : ''}</> : document.generation.source_input_stale ? '原用途待重新确认，展开用途与来源核对' : '用途暂不可读，请核对来源与当前账号权限'}</p>
@@ -122,10 +131,10 @@ export function TaskResultEditor({ taskId, onOpenConversation }: { taskId: strin
     {stale && <div className="writing-warning" role="status">来源已变化，先前验收不再代表当前材料。人工文字已保留，请核对正文、勾选来源复核，再保存一个新版本。</div>}
     {blocked ? <div className="writing-warning" role="alert">来源已撤回或权限已变化。为避免继续使用失效资料，正文暂不显示，也不能保存、复制或验收。请恢复合法来源后重新读取。</div> : <>
       <div className="writing-mode" role="group" aria-label="正文显示方式"><button aria-pressed={mode === 'edit'} onClick={() => setMode('edit')}>编辑正文</button><button aria-pressed={mode === 'preview'} onClick={() => setMode('preview')}>全文预览</button><span>{editor.body.length.toLocaleString()} 字</span></div>
-      {mode === 'edit' ? <label className="writing-body-label">文稿正文<textarea ref={bodyRef} aria-label="文稿正文" className="writing-body" value={editor.body} maxLength={64000} spellCheck onChange={event => useTaskResultsStore.getState().edit(taskId, event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && !event.nativeEvent.isComposing && !composing.current) { event.preventDefault(); if (!pending && !uncertain && !editor.conflict && !offline) void action(() => useTaskResultsStore.getState().save(taskId)); } }} placeholder="直接写下邀请、文章或学习笔记。也可以连接模型后获取候选稿。" /></label> : <section className="writing-preview" aria-label="文稿全文预览"><MessageContent content={editor.body} isUser={false} alwaysExpanded /></section>}
+      {mode === 'edit' ? <label className="writing-body-label">文稿正文<textarea ref={bodyRef} aria-label="文稿正文" className="writing-body" value={editor.body} maxLength={64000} spellCheck onChange={event => useTaskResultsStore.getState().edit(taskId, event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's' && !event.nativeEvent.isComposing && !composing.current) { event.preventDefault(); if (!pending && !uncertain && !editor.conflict && !offline && !dependencyReviewRequired) void action(async () => { await useTaskResultsStore.getState().save(taskId); await useTasksStore.getState().fetch(); }); } }} placeholder="直接写下邀请、文章或学习笔记。也可以连接模型后获取候选稿。" /></label> : <section className="writing-preview" aria-label="文稿全文预览"><MessageContent content={editor.body} isUser={false} alwaysExpanded /></section>}
       <p className={`writing-recovery ${editor.recovery === 'failed' ? 'is-warning' : ''}`} role="status">{editor.dirty ? recoveryLabel : version ? `服务器已保存版本 ${version.sequence} · ${editor.recovery === 'off' ? '设备草稿恢复未开启' : '设备草稿恢复已开启'}` : recoveryLabel}</p>
       {editor.conflict && <div className="writing-warning" role="alert"><p>服务器有较新的版本，你的输入没有被替换。请比较下面的服务器全文，再决定是否将当前输入保存为它之后的新版本。</p><details><summary>比较服务器当前版本</summary><div className="writing-comparison"><MessageContent content={version?.content || ''} isUser={false} alwaysExpanded /></div></details><button className="workspace-button" disabled={!!uncertain || !!pending} onClick={() => useTaskResultsStore.getState().rebase(taskId)}>已比较，保留我的文字继续</button></div>}
-      <div className="writing-primary-actions"><button className="workspace-primary" disabled={!!recoveryError || !!offline || !!pending || !!uncertain || editor.conflict || !editor.body.trim()} onClick={() => void action(() => useTaskResultsStore.getState().save(taskId))}>{pending || (stale && editor.reviewedSourceHash ? '保存复核后的新版本' : '保存为新版本')}</button>{version && <button className="workspace-button" disabled={!!recoveryError || !!offline || !!pending || !!uncertain || editor.dirty || !!stale || editor.conflict || accepted || ['running', 'outcome_unknown'].includes(document.generation.status)} onClick={() => void action(() => useTaskResultsStore.getState().accept(taskId, version.id, version.content_hash, document.source.hash))}>{accepted ? `已验收版本 ${version.sequence}` : `验收版本 ${version.sequence}`}</button>}</div>
+      <div className="writing-primary-actions"><button className="workspace-primary" disabled={!!recoveryError || !!offline || !!pending || !!uncertain || editor.conflict || dependencyReviewRequired || !editor.body.trim()} onClick={() => void action(async () => { await useTaskResultsStore.getState().save(taskId); await useTasksStore.getState().fetch(); })}>{pending || (dependencyStale && !dependencyBlocked ? '保存依赖复核后的新版本' : stale && editor.reviewedSourceHash ? '保存复核后的新版本' : '保存为新版本')}</button>{version && <button className="workspace-button" disabled={!!recoveryError || !!offline || !!pending || !!uncertain || editor.dirty || !!stale || dependencyBlocked || dependencyStale || !!dependencyIntent || editor.conflict || accepted || ['running', 'outcome_unknown'].includes(document.generation.status)} onClick={() => void action(() => useTaskResultsStore.getState().accept(taskId, version.id, version.content_hash, document.source.hash))}>{accepted ? `已验收版本 ${version.sequence}` : `验收版本 ${version.sequence}`}</button>}</div>
       {editor.dirty && version && <p className="writing-help">先保存修改，再验收你实际检查过的版本</p>}
       <div className="writing-delivery"><button className="writing-link" onClick={() => void copy()}>复制全文</button><button className="writing-link" onClick={selectText}>选择全文</button><button className="writing-link" onClick={download}>下载文本</button></div>
     </>}
@@ -133,7 +142,7 @@ export function TaskResultEditor({ taskId, onOpenConversation }: { taskId: strin
 
     <details className="writing-history"><summary>版本与生成记录 · {document.versions.length} 个版本</summary><ol>{[...document.versions].reverse().map(item => <li key={item.id}><p><strong>版本 {item.sequence}</strong> · {item.kind === 'manual' ? '人工编辑' : 'AI 候选'}{item.id === document.head_version_id ? ' · 当前正文' : ''}{item.id === document.accepted_version_id ? ' · 曾验收' : ''}{item.source_status !== 'current' ? ' · 来源待复核' : ''}</p><p className="writing-version-meta">{new Date(item.created_at).toLocaleString('zh-CN')}</p><details className="writing-version-meta"><summary>技术核验标识</summary><p>SHA-256 {item.content_hash}</p></details>{!item.content_hidden && <details><summary>展开完整版本</summary><MessageContent content={item.content} isUser={false} alwaysExpanded /></details>}{!item.content_hidden && item.id !== document.head_version_id && <button className="workspace-button" disabled={!!offline || editor.dirty || !!pending || !!uncertain || blocked} onClick={() => void action(async () => { if (await confirm({ title: `采用版本 ${item.sequence}？`, description: '将它设为当前正文；已有版本仍保留。请先检查全文和来源，采用不等于验收。' })) await useTaskResultsStore.getState().adopt(taskId, item.id); })}>检查后采用此版本</button>}</li>)}</ol></details>
     {document.generation.status === 'outcome_unknown' && <section className="writing-warning" aria-label="生成请求核验"><h3>上次生成结果与费用需要核验</h3><p>连接中断不代表服务商未处理。先检查服务商的调用记录，再选择下一步；人工文稿可继续保存。</p><div className="writing-primary-actions"><button className="workspace-button" disabled={!!taskPending || !document.generation.run_id} onClick={() => void resolveRun('allow_retry')}>已核验，允许重试</button><button className="workspace-button" disabled={!!taskPending || !document.generation.run_id} onClick={() => void resolveRun('abandon')}>停止后续生成</button></div><details><summary>本次运行标识</summary><p className="break-all">{document.generation.run_id || '暂缺，请刷新核验'}</p></details></section>}
-    {task && !blocked && <div className="writing-generation"><p className="writing-help">{ready ? 'AI 只提供候选文字，你保留最终选择' : '可以先人工写作；需要 AI 时再到模型中心连接服务商'}</p><button className="workspace-button" disabled={!!offline || !ready || editor.dirty || !!pending || !!uncertain || !!taskPending || document.generation.status === 'running' || document.generation.status === 'outcome_unknown' || task.source_input_stale} onClick={() => void run()}>{taskPending || (document.generation.status === 'outcome_unknown' ? '本次调用需要先核验' : document.generation.status === 'running' ? '正在生成候选稿' : '让 AI 提供候选稿')}</button>{task.source_input_stale && <p className="writing-help">原任务要求引用的消息已修改。请先核对任务要求，不能直接复用旧输入调用模型。</p>}</div>}
+    {task && !blocked && <div className="writing-generation"><p className="writing-help">{ready ? 'AI 只提供候选文字，你保留最终选择' : '可以先人工写作；需要 AI 时再到模型中心连接服务商'}</p><button className="workspace-button" disabled={!!dependencyIntent || dependencyBlocked || task.dependency_state?.blocked || !!offline || !ready || editor.dirty || !!pending || !!uncertain || !!taskPending || document.generation.status === 'running' || document.generation.status === 'outcome_unknown' || task.source_input_stale} onClick={() => void run()}>{taskPending || (document.generation.status === 'outcome_unknown' ? '本次调用需要先核验' : document.generation.status === 'running' ? '正在生成候选稿' : '让 AI 提供候选稿')}</button>{task.source_input_stale && <p className="writing-help">原任务要求引用的消息已修改。请先核对任务要求，不能直接复用旧输入调用模型。</p>}</div>}
     <details className="writing-device"><summary>此设备的保存选择</summary><label><input type="checkbox" checked={settings.recoverDrafts} onChange={event => void preference('recoverDrafts', event.target.checked)} />加密恢复未提交草稿</label><p>仅此浏览器，退出时清除。未开启时，切换页面仍可继续，刷新或关闭会失去未提交修改。</p><label><input type="checkbox" checked={settings.offlineCopies} onChange={event => void preference('offlineCopies', event.target.checked)} />保留私人已保存文稿的加密离线副本</label><p>与草稿恢复、服务器版本和必要请求编号分别管理。离线副本不证明当前权限；重新联网核对后才能使用。</p></details>
     <button className="writing-link writing-refresh" disabled={loading || !!pending} onClick={() => void useTaskResultsStore.getState().fetch(taskId)}>{loading ? '正在同步…' : '核对服务器最新状态'}</button>
     {ConfirmModal}

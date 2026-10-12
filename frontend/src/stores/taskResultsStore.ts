@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { axiosInstance, getAuthGeneration } from '../services/api';
+import { readDependencyIntents } from '../utils/taskDependencyRecovery';
 import { getCacheUserId } from '../utils/cacheUtils';
 import { loadWritingContent, persistTaskReceipt, readTaskReceipts, removeTaskReceipt, removeWritingDraft, saveWritingContent, textHash, writingPreferences, type TaskCommandReceipt } from '../utils/taskRecovery';
 import type { TaskResultDocument, TaskResultMutationResponse, TaskResultVersion } from '../../../shared/tasks';
@@ -7,6 +8,7 @@ import type { TaskResultDocument, TaskResultMutationResponse, TaskResultVersion 
 interface Editor {
   body: string; baseVersionId: string | null; editSequence: number; dirty: boolean;
   recovery: 'off' | 'saving' | 'saved' | 'failed'; conflict: boolean;
+  reviewedDependencySignature?: string | null;
   reviewedSourceHash: string | null; loaded: boolean;
 }
 interface PendingCommand { receipt: TaskCommandReceipt; payload?: Record<string, unknown>; editSequence?: number; }
@@ -31,6 +33,7 @@ interface ResultState {
   accept: (taskId: string, versionId: string, contentHash: string, sourceHash: string | null) => Promise<void>;
   adopt: (taskId: string, versionId: string) => Promise<void>;
   updateBrief: (taskId: string, prompt: string, sourceHash: string | null) => Promise<void>;
+  reviewDependencies: (taskId: string, signature: string | null | undefined) => void;
   reviewSources: (taskId: string, hash: string) => void;
   verify: (taskId: string, key?: string) => Promise<void>;
   retry: (taskId: string, key?: string) => Promise<void>;
@@ -50,7 +53,7 @@ const initialized = new Set<string>();
 const context = () => ({ user: getCacheUserId(), auth: getAuthGeneration(), epoch });
 const current = (scope: ReturnType<typeof context>) => scope.user === getCacheUserId() && scope.auth === getAuthGeneration() && scope.epoch === epoch;
 const head = (document: TaskResultDocument) => document.versions.find(version => version.id === document.head_version_id);
-const freshEditor = (document: TaskResultDocument): Editor => ({ body: head(document)?.content || '', baseVersionId: document.head_version_id, editSequence: 0, dirty: false, recovery: writingPreferences().recoverDrafts ? 'saved' : 'off', conflict: false, reviewedSourceHash: null, loaded: true });
+const freshEditor = (document: TaskResultDocument): Editor => ({ body: head(document)?.content || '', baseVersionId: document.head_version_id, editSequence: 0, dirty: false, recovery: writingPreferences().recoverDrafts ? 'saved' : 'off', conflict: false, reviewedSourceHash: null, reviewedDependencySignature: document.dependency_state?.result_stale ? undefined : document.dependency_state?.signature, loaded: true });
 function errorMessage(error: unknown) {
   const status = (error as { response?: { status: number }; status?: number }).response?.status ?? (error as { status?: number }).status;
   if (status === 409) return '服务器上已有更新或同一请求正在处理。你的文字仍在；请先核验或结束原请求，再比较版本继续';
@@ -167,6 +170,7 @@ export const useTaskResultsStore = create<ResultState>((set, get) => {
     const scope = context(); if (!scope.user) throw new Error('请先登录');
     if (get().documents[id]?.source.status === 'blocked') { markUnknown(id, command, '来源目前不可用，仅可核验原请求，不能重发正文'); return; }
     if (!command.payload) throw new Error('原请求正文未保存在此设备。可以核验回执，不能用新文字代替原请求重发');
+    if (command.receipt.action === 'accept_revision' && readDependencyIntents().some(intent => intent.taskId === id)) throw new Error('前置任务关系待核验，暂时不能验收');
     const snapshotSequence = (sequences.get(id) || 0) + 1; sequences.set(id, snapshotSequence);
     try {
       const { data } = await axiosInstance.post<TaskResultMutationResponse>(`/tasks/${id}/result/${endpoint(command.receipt.action)}`, command.payload, { headers: { 'Idempotency-Key': command.receipt.key, 'X-Expected-User-Id': scope.user } });
@@ -269,11 +273,13 @@ export const useTaskResultsStore = create<ResultState>((set, get) => {
     save: async id => {
       const document = get().documents[id], editor = get().editors[id];
       if (!document || !editor || document.source.status === 'blocked' || editor.conflict) return;
-      await mutate(id, 'save_revision', { expected_revision: document.revision, base_version_id: editor.baseVersionId, content: editor.body, ...(editor.reviewedSourceHash ? { reviewed_source_hash: editor.reviewedSourceHash } : {}) }, '保存版本中');
+      if (document.dependency_state && editor.reviewedDependencySignature !== document.dependency_state.signature) throw new Error('前置任务状态已变化，请先核对当前关系并明确勾选复核');
+      await mutate(id, 'save_revision', { expected_revision: document.revision, base_version_id: editor.baseVersionId, content: editor.body, ...(editor.reviewedSourceHash ? { reviewed_source_hash: editor.reviewedSourceHash } : {}), ...(editor.reviewedDependencySignature !== undefined ? { reviewed_dependency_signature: editor.reviewedDependencySignature } : {}) }, '保存版本中');
     },
     accept: async (id, versionId, contentHash, sourceHash) => {
+      if (readDependencyIntents().some(intent => intent.taskId === id)) throw new Error('前置任务关系待核验，暂时不能验收');
       const document = get().documents[id], editor = get().editors[id];
-      if (!document || editor?.dirty || document.source.status !== 'current') return;
+      if (!document || editor?.dirty || document.source.status !== 'current' || document.dependency_state?.blocked || document.dependency_state?.result_stale) return;
       await mutate(id, 'accept_revision', { expected_revision: document.revision, version_id: versionId, content_hash: contentHash, source_hash: sourceHash }, '记录验收中');
     },
     adopt: async (id, versionId) => {
@@ -283,6 +289,11 @@ export const useTaskResultsStore = create<ResultState>((set, get) => {
     updateBrief: async (id, prompt, sourceHash) => {
       const document = get().documents[id]; if (!document || document.source.status === 'blocked') return;
       await mutate(id, 'review_brief', { expected_revision: document.revision, prompt, source_hash: sourceHash }, '保存任务用途中');
+    },
+    reviewDependencies: (id, signature) => {
+      const document = get().documents[id], editor = get().editors[id];
+      if (!document || !editor || (signature !== undefined && signature !== document.dependency_state?.signature)) return;
+      set(state => ({ editors: { ...state.editors, [id]: { ...editor, reviewedDependencySignature: signature } } }));
     },
     reviewSources: (id, hash) => {
       const document = get().documents[id], editor = get().editors[id]; if (!document || !editor || (hash && document.source.hash !== hash) || document.source.status === 'blocked') return;

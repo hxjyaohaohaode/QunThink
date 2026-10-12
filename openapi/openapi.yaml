@@ -3520,6 +3520,100 @@ paths:
           description: 任务不存在
         "409":
           description: 请先停止运行中的任务
+  /api/tasks/{taskId}/dependencies:
+    put:
+      operationId: updateWorkspaceTaskDependencies
+      summary: 同账号前置关系CAS编辑；不共享前置正文、不触发模型
+      tags: [Tasks]
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: X-Expected-User-Id
+          in: header
+          required: false
+          schema: { type: string }
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateTaskDependenciesInput" }
+      responses:
+        "200":
+          description: 同编号同内容重放不再次修改；新命令revision增加1
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskDependencyCommandResponse" }
+        "400": { description: 无效UUID、重复引用、超过32项或未知字段 }
+        "404": { description: 任务或前置任务不存在或不属当前账号，不区分两者 }
+        "409": { description: TASK_DEPENDENCY_REVISION_CONFLICT、TASK_DEPENDENCY_CYCLE、TASK_DEPENDENCY_RUN_PENDING或TASK_DEPENDENCY_IDEMPOTENCY_CONFLICT；本次拒绝不证明同号并发未提交，原请求须查询或封存 }
+        "410": { description: TASK_DEPENDENCY_COMMAND_CLOSED；原请求已耐久封存，迟到提交不生效 }
+        "429": { description: 当前账号10000条依赖编辑回执限额，不遗忘旧命令 }
+        "503": { description: TASK_DEPENDENCY_STORAGE_UNCERTAIN；可能已提交，按原编号核验 }
+  /api/tasks/{taskId}/dependencies/commands/{requestId}:
+    get:
+      operationId: getWorkspaceTaskDependencyCommand
+      summary: 核对当前账号原依赖编辑回执及最新任务状态
+      tags: [Tasks]
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: X-Expected-User-Id
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: 已提交回执；任务删除后不重建，task为null
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskDependencyCommandResponse" }
+        "404": { description: 当前账号该任务没有此回执；不证明换新编号安全 }
+        "409": { description: ACCOUNT_CHANGED }
+        "503": { description: 回执或存储状态暂不可核实 }
+  /api/tasks/{taskId}/dependencies/commands/{requestId}/close:
+    post:
+      operationId: closeWorkspaceTaskDependencyCommand
+      summary: 核验或耐久封存原依赖编辑请求；已成功的关系不会撤销
+      tags: [Tasks]
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: requestId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: X-Expected-User-Id
+          in: header
+          required: false
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        "200":
+          description: 返回已有成功回执或持久cancelled；只有该回执才证明迟到提交不能另行生效
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TaskDependencyCommandResponse" }
+        "409": { description: 原编号已绑定另一任务，或并发CAS冲突；保留原号继续核验 }
+        "429": { description: 回执达到限额，不遗忘旧命令 }
+        "503": { description: 封存结果未知；保留原号继续查询或封存，不换新编号 }
   /api/tasks/{taskId}/run:
     parameters:
       - name: X-Expected-User-Id
@@ -4381,6 +4475,7 @@ components:
       type: object
       additionalProperties: false
       properties:
+        dependency_state: { $ref: "#/components/schemas/TaskDependencyState" }
         task_id: *a4
         title: *a1
         group_id:
@@ -4582,6 +4677,10 @@ components:
       type: object
       additionalProperties: false
       properties:
+        reviewed_dependency_signature:
+          type: [string, "null"]
+          pattern: "^[a-f0-9]{64}$"
+          description: 用户实际核对的前置成果签名；有或曾编辑依赖时必须显式传入。服务器当前值不符拒绝，不给旧正文自动盖新签名。blocked时null只允许存草稿。
         client_request_id: *a4
         expected_revision: *a6
         base_version_id:
@@ -5708,9 +5807,65 @@ components:
         - providers
         - models
         - defaults
+    TaskDependencyIds:
+      type: array
+      maxItems: 32
+      uniqueItems: true
+      items: { type: string, format: uuid }
+    TaskDependencyState:
+      type: object
+      additionalProperties: false
+      required: [blocked, reasons, signature, result_stale]
+      properties:
+        blocked: { type: boolean }
+        signature: { type: [string, "null"] }
+        result_stale:
+          type: boolean
+          description: 旧正文及验收记录保留，但依赖版本或来源已失效，不能沿用验收派发
+        reasons:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [task_id, code]
+            properties:
+              task_id: { type: string }
+              code:
+                type: string
+                enum: [missing, unaccepted, failed, cancelled, outcome_unknown, running, source_changed, dependency_changed, invalid]
+              title: { type: string, description: 仅同账号仍存在的前置任务可返回标题 }
+    UpdateTaskDependenciesInput:
+      type: object
+      additionalProperties: false
+      required: [client_request_id, expected_revision, dependency_ids]
+      properties:
+        client_request_id: { type: string, format: uuid }
+        expected_revision: { type: integer, minimum: 0 }
+        dependency_ids: { $ref: "#/components/schemas/TaskDependencyIds" }
+    TaskDependencyCommandResponse:
+      type: object
+      additionalProperties: false
+      required: [receipt, task]
+      properties:
+        receipt:
+          type: object
+          additionalProperties: false
+          required: [id, operation, task_id, committed_revision, status]
+          properties:
+            id: { type: string, format: uuid }
+            operation: { const: dependencies }
+            task_id: { type: string, format: uuid }
+            committed_revision: { type: [integer, "null"], minimum: 1, description: succeeded为提交修订号，cancelled为null }
+            status: { type: string, enum: [succeeded, cancelled] }
+        task:
+          anyOf:
+            - { $ref: "#/components/schemas/WorkspaceTask" }
+            - { type: "null" }
+        task_deleted: { type: boolean }
     WorkspaceTaskInput:
       type: object
       properties:
+        dependency_ids: { $ref: "#/components/schemas/TaskDependencyIds" }
         client_request_id:
           type: string
           format: uuid
@@ -5768,6 +5923,9 @@ components:
     WorkspaceTask:
       type: object
       properties:
+        dependency_ids: { $ref: "#/components/schemas/TaskDependencyIds" }
+        dependency_revision: { type: integer, minimum: 0 }
+        dependency_state: { $ref: "#/components/schemas/TaskDependencyState" }
         client_request_id:
           type: string
           format: uuid

@@ -10,6 +10,7 @@ import { readableSourceGroups, readableSourceMessages } from './memory/persisten
 import { sourceMessages, linkedFile, sourceHash, sourceSnapshot, taskSourceMessages, isTaskInputSourceStale, isRunSourceStale, isResultSourceStale } from './taskSources.js';
 
 import { currentTaskResultHead, synchronizeTaskResults, taskResultState, TASK_RESULT_LIMITS } from './taskResults.js';
+import { dependencyIdsInput, editTaskDependenciesInput, dependencyIds, dependencyRevision, validateDependencyEdit, dependencyContext, currentTaskDependencies, assertDependencyReady, dependencyError, TASK_DEPENDENCY_LIMITS } from './taskDependencies.js';
 
 const requestIdInput = z.string().uuid().transform(value => value.toLowerCase());
 const CREATE_COMMAND_LIMIT = 10000;
@@ -20,6 +21,7 @@ const taskError = (code, message, status = 409) => Object.assign(new Error(messa
 
 export const taskInput = z.object({
   client_request_id: requestIdInput.optional(),
+  dependency_ids: dependencyIdsInput.optional(),
   title: z.string().trim().min(1).max(150), prompt: z.string().trim().min(1).max(12000),
   category: z.enum(['work', 'social', 'play']).default('work'),
   model_id: z.string().max(80).nullable().default(null),
@@ -43,6 +45,7 @@ function runEvidence(task) {
     retry_of_run_id: task.retry_of_run_id || null, started_at: task.started_at,
     source_hash: task.source_hash, source_hash_version: task.source_hash_version || 1, source_messages: task.source_messages || [],
     dispatch_status: task.dispatch_status || 'sent_or_unknown',
+    dependency_signature: task.dependency_signature ?? null,
     result_base_version_id: task.result_base_version_id || null, source_file_ids: task.source_file_ids || []
   };
 }
@@ -98,7 +101,7 @@ function compileTaskContext(messages, db, config, prompt, system) {
 }
 
 function unpack(value) { return value ? decryptText(value) : ''; }
-export function publicTask(task, db = null, snapshot = null) {
+export function publicTask(task, db = null, snapshot = null, dependencies = null) {
   const inputStale = db ? isTaskInputSourceStale(task, db, snapshot) : false;
   // Editing/confirming a manual result and refreshing a generation brief are
   // separate decisions. An old brief must not mark a reviewed manual body stale.
@@ -110,7 +113,7 @@ export function publicTask(task, db = null, snapshot = null) {
     !snapshot.messages.some(message => message.id === task.source_message_id && message.group_id === task.group_id));
   const sourceStale = originBlocked || (!hasEditorHead && inputStale) || (db ? isResultSourceStale(task, db, snapshot) : false);
   const { result_editor, ...visible } = task;
-  return { ...visible, ...(result_editor ? { result_editor_available: true, result_head_version_id: result_editor.head_version_id, result_accepted_version_id: result_editor.accepted_version_id } : {}), ...(db ? { source_stale: sourceStale, source_input_stale: inputStale } : {}),
+  return { ...visible, dependency_ids: dependencyIds(task), dependency_revision: dependencyRevision(task), ...(dependencies ? { dependency_state: dependencies } : {}), ...(result_editor ? { result_editor_available: true, result_head_version_id: result_editor.head_version_id, result_accepted_version_id: result_editor.accepted_version_id } : {}), ...(db ? { source_stale: sourceStale, source_input_stale: inputStale } : {}),
     prompt: inputStale ? '' : unpack(task.prompt), result: sourceStale ? '' : unpack(task.result),
     history: (task.history || []).map(h => {
       const stale = inputStale || (db ? isRunSourceStale(task, h, db, snapshot) : false);
@@ -119,16 +122,17 @@ export function publicTask(task, db = null, snapshot = null) {
 }
 
 async function viewTask(userId, task, db) {
-  return publicTask(task, db, await sourceSnapshot(userId, db));
+  return publicTask(task, db, await sourceSnapshot(userId, db), await currentTaskDependencies(userId, task, db));
 }
 export async function listTasks(userId) {
   const db = await getUserDb(userId);
-  return withWriteLock(userId, async () => {
-    await db.read();
+  return withStableTaskLock(userId, db, async () => {
     if (!db.data.tasks?.length) return [];
     const snapshot = await sourceSnapshot(userId, db);
-    return db.data.tasks.map(task => publicTask(task, db, snapshot))
-      .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    const context = db.data.tasks.some(task => dependencyIds(task).length) ? await dependencyContext(userId, db, snapshot) : null;
+    const values = [];
+    for (const task of db.data.tasks) values.push(publicTask(task, db, snapshot, await currentTaskDependencies(userId, task, db, context)));
+    return values.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
   });
 }
 function createCommands(db) {
@@ -208,6 +212,7 @@ export async function createTask(userId, input) {
     const before = structuredClone(db.data);
     const now = new Date().toISOString();
     const task = { ...data, ...(sourceInputHash ? { source_input_hash: sourceInputHash } : {}), ...(requestId ? { client_request_id: requestId } : {}), id: randomUUID(), prompt: encryptText(data.prompt), status: 'pending', result: '', error: null, history: [], run_count: 0, created_at: now, updated_at: now };
+    if (data.dependency_ids?.length) validateDependencyEdit(task, data.dependency_ids, db);
     db.data.tasks ||= [];
     db.data.tasks.push(task);
     if (requestId) {
@@ -216,7 +221,88 @@ export async function createTask(userId, input) {
       db.data.taskCreateRequests.push({ id: requestId, input_hash: inputHash, task_id: task.id });
     }
     await writeOrRestore(db, before);
-    return publicTask(task);
+    return viewTask(userId, task, db);
+  });
+}
+
+function dependencyCommands(db) {
+  const list = db.data.taskDependencyCommands || [];
+  if (!Array.isArray(list) || list.length > TASK_DEPENDENCY_LIMITS.commands ||
+      new Set(list.map(item => item.id)).size !== list.length ||
+      list.some(item => !requestIdInput.safeParse(item.id).success || !requestIdInput.safeParse(item.task_id).success ||
+        !['succeeded', 'cancelled'].includes(item.status) ||
+        (item.status === 'succeeded' ? !/^[a-f0-9]{64}$/.test(item.input_hash) || !Number.isSafeInteger(item.committed_revision) || item.committed_revision < 1 : item.committed_revision !== null))) {
+    throw dependencyError('TASK_DEPENDENCY_STORAGE_UNCERTAIN', '前置关系回执无法核实，请保留原请求编号', 503);
+  }
+  return list;
+}
+async function dependencyResponse(userId, receipt, db) {
+  const task = db.data.tasks?.find(item => item.id === receipt.task_id);
+  return { receipt: { id: receipt.id, operation: 'dependencies', task_id: receipt.task_id,
+    committed_revision: receipt.committed_revision, status: receipt.status },
+    task: task ? await viewTask(userId, task, db) : null, ...(!task ? { task_deleted: true } : {}) };
+}
+export async function getTaskDependencyCommand(userId, taskId, requestId) {
+  requestId = requestIdInput.parse(requestId);
+  const db = await getUserDb(userId);
+  return withStableTaskLock(userId, db, async () => {
+    const receipt = dependencyCommands(db).find(item => item.id === requestId && item.task_id === taskId);
+    if (!receipt) throw dependencyError('TASK_DEPENDENCY_COMMAND_NOT_FOUND', '尚未找到这次前置关系保存记录，请保留原请求编号核验', 404);
+    return dependencyResponse(userId, receipt, db);
+  });
+}
+function dependencyWriteFailure(error) {
+  // PgLow/MongoLow CAS conflicts are definite non-commits, unlike lost ACKs.
+  if (error?.code === 'REVISION_CONFLICT') return dependencyError('TASK_DEPENDENCY_REVISION_CONFLICT', '任务图已在另一进程变化，请读取最新关系后重新选择');
+  return dependencyError('TASK_DEPENDENCY_STORAGE_UNCERTAIN', '保存结果暂时无法核实，请按原请求编号查询，不要换编号覆盖', 503);
+}
+export async function closeTaskDependencyCommand(userId, taskId, requestId) {
+  taskId = requestIdInput.parse(taskId);
+  requestId = requestIdInput.parse(requestId);
+  const db = await getUserDb(userId);
+  return withStableTaskLock(userId, db, async () => {
+    const list = dependencyCommands(db), existing = list.find(item => item.id === requestId);
+    if (existing) {
+      if (existing.task_id !== taskId) throw dependencyError('TASK_DEPENDENCY_IDEMPOTENCY_CONFLICT', '原请求编号绑定了另一项前置关系编辑');
+      return dependencyResponse(userId, existing, db);
+    }
+    if (list.length >= TASK_DEPENDENCY_LIMITS.commands) throw dependencyError('TASK_DEPENDENCY_COMMAND_LIMIT', '前置关系回执已达上限，需要归档核验', 429);
+    const before = structuredClone(db.data);
+    const receipt = { id: requestId, task_id: taskId, committed_revision: null, status: 'cancelled' };
+    db.data.taskDependencyCommands = [...list, receipt];
+    try { await writeOrRestore(db, before); } catch (error) { throw dependencyWriteFailure(error); }
+    return dependencyResponse(userId, receipt, db);
+  });
+}
+export async function updateTaskDependencies(userId, taskId, raw) {
+  const input = editTaskDependenciesInput.parse(raw);
+  const inputHash = createHash('sha256').update(JSON.stringify({ userId, taskId, operation: 'dependencies', input })).digest('hex');
+  const db = await getUserDb(userId);
+  return withStableTaskLock(userId, db, async () => {
+    const list = dependencyCommands(db), prior = list.find(item => item.id === input.client_request_id);
+    if (prior) {
+      if (prior.task_id !== taskId) throw dependencyError('TASK_DEPENDENCY_IDEMPOTENCY_CONFLICT', '原请求编号绑定了另一项前置关系编辑');
+      if (prior.status === 'cancelled') throw dependencyError('TASK_DEPENDENCY_COMMAND_CLOSED', '原前置关系请求已封存，迟到提交不会生效；请读取最新关系后重新选择', 410);
+      if (prior.input_hash !== inputHash) throw dependencyError('TASK_DEPENDENCY_IDEMPOTENCY_CONFLICT', '原请求编号绑定了另一项前置关系编辑');
+      return dependencyResponse(userId, prior, db);
+    }
+    const task = db.data.tasks?.find(item => item.id === taskId);
+    if (!task) throw dependencyError('TASK_DEPENDENCY_NOT_FOUND', '任务已删除或不属于当前账号', 404);
+    if (dependencyRevision(task) !== input.expected_revision) throw dependencyError('TASK_DEPENDENCY_REVISION_CONFLICT', '前置关系已变化，请刷新并重新选择，不会覆盖其他修改');
+    if (['running', 'outcome_unknown'].includes(task.status)) throw dependencyError('TASK_DEPENDENCY_RUN_PENDING', '运行中或结果未知时不能修改前置关系，请先核验当前运行');
+    if (list.length >= TASK_DEPENDENCY_LIMITS.commands) throw dependencyError('TASK_DEPENDENCY_COMMAND_LIMIT', '前置关系回执已达上限，需要归档核验', 429);
+    validateDependencyEdit(task, input.dependency_ids, db);
+    const before = structuredClone(db.data);
+    task.dependency_ids = [...input.dependency_ids];
+    task.dependency_revision = input.expected_revision + 1;
+    task.dependency_retry_at = null;
+    task.updated_at = new Date().toISOString();
+    const receipt = { id: input.client_request_id, task_id: taskId, input_hash: inputHash,
+      committed_revision: task.dependency_revision, status: 'succeeded' };
+    db.data.taskDependencyCommands = [...list, receipt];
+    try { await writeOrRestore(db, before); }
+    catch (error) { throw dependencyWriteFailure(error); }
+    return dependencyResponse(userId, receipt, db);
   });
 }
 
@@ -346,6 +432,8 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
       if (task.source_message_id && isTaskInputSourceStale(task, db, await sourceSnapshot(userId, db))) {
         throw taskError('TASK_SOURCE_CHANGED', '任务原始消息已更新或撤销，请从当前消息重新创建任务');
       }
+      const dependencies = await currentTaskDependencies(userId, task, db);
+      assertDependencyReady(dependencies);
       const resultState = taskResultState(task, db);
       if (resultState.versions.length >= TASK_RESULT_LIMITS.versions) throw taskError('RESULT_VERSION_LIMIT', '文稿版本记录已满，请先导出并归档；不会继续产生收费调用');
       const today = new Date().toISOString().slice(0, 10);
@@ -357,6 +445,7 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
       db.data.taskDailyBudget = { date: today, count: budget.count + 1 };
       Object.assign(task, { status: 'running', error: null, retry_of_run_id: task.run_id || null,
         run_id: runId, run_request_id: requestId, dispatch_status: 'not_sent', source_hash_version: 2,
+        dependency_signature: dependencies.signature, run_budget_date: today, dependency_retry_at: null,
         source_messages: messages.map(message => ({ id: message.id, revision: message.revision ?? null, edited_at: message.edited_at ?? null })),
         source_file_ids: [...new Set(messages.flatMap(message => (message.attachments || []).filter(attachment => linkedFile(db, message, attachment)).map(attachment => attachment.id)))],
         result_base_version_id: currentTaskResultHead(task, db),
@@ -376,7 +465,7 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
     if (prepared.replay) return prepared.replay;
     const { task, messages, contextDb } = prepared;
     let content = '', failure = null, contextAudit = null, observedUsage = null,
-      usedModelId = null, dispatched = false, receivedResponse = false, unknownOutcome = false;
+      usedModelId = null, dispatched = false, receivedResponse = false, unknownOutcome = false, dependencyFailure = false;
     try {
       const modelId = task.model_id || await defaultModelId(userId);
       usedModelId = modelId;
@@ -415,6 +504,7 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
               throw sourceChanged();
             }
           }
+          assertDependencyReady(await currentTaskDependencies(userId, latest, db), latest.dependency_signature ?? null);
           // Persist the dispatch intent before crossing the paid-request boundary.
           // A crash after this write is conservatively unknown, never auto-retried.
           const before = structuredClone(db.data);
@@ -431,12 +521,13 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
       });
       if (!content.trim()) failure = '模型没有返回可验收的内容';
     } catch (error) {
+      dependencyFailure = ['TASK_DEPENDENCY_BLOCKED', 'TASK_DEPENDENCY_CHANGED'].includes(error?.code);
       const responseStatus = error?.response?.status;
       unknownOutcome = dispatched && !receivedResponse &&
         (!responseStatus || responseStatus === 408 || responseStatus === 499 || responseStatus >= 500);
       failure = unknownOutcome ? '模型调用可能已执行或计费，但回执无法确认；请先核验再决定是否重试'
         : controller.signal.aborted ? '任务已停止'
-        : error?.code === 'TASK_SOURCE_CHANGED' ? error.message : describeProviderError(error);
+        : error?.code === 'TASK_SOURCE_CHANGED' || dependencyFailure ? error.message : describeProviderError(error);
     }
     return await withStableTaskLock(userId, db, async () => {
       const latest = db.data.tasks?.find(t => t.id === taskId);
@@ -446,14 +537,26 @@ export async function runTask(userId, taskId, { scheduled = false, client_reques
       const readableGroup = !latest.group_id || (await readableSourceGroups(userId, db))
         .some(group => group.id === latest.group_id);
       const inputStale = latest.source_message_id && isTaskInputSourceStale(latest, db, await sourceSnapshot(userId, db));
-      const stale = !failure && !!latest.group_id &&
+      const dependencies = await currentTaskDependencies(userId, latest, db);
+      const dependencyStale = dependencies.blocked || dependencies.signature !== (latest.dependency_signature ?? null);
+      const stale = dependencyStale || !failure && !!latest.group_id &&
         (!readableGroup || sourceHash(currentMessages, db) !== latest.source_hash || inputStale);
+      // A rejected dependency recheck before send is not a model dispatch.
+      // Refund only this persisted, exact not-sent admission's same-day slot.
+      if (dependencyFailure && !dispatched && latest.dispatch_status === 'not_sent' &&
+          db.data.taskDailyBudget?.date === latest.run_budget_date) {
+        db.data.taskDailyBudget.count = Math.max(0, db.data.taskDailyBudget.count - 1);
+      }
       const now = new Date().toISOString();
       latest.run_count = (latest.run_count || 0) + 1;
       latest.updated_at = now;
       latest.error = failure;
       latest.result = content ? encryptText(content) : latest.result;
-      if (stale) latest.error = '关联会话在生成期间发生变化，草稿需要重新生成后才能验收';
+      if (stale) latest.error = dependencyStale
+        ? unknownOutcome ? '前置成果或来源已变化，模型调用结果或费用仍待核验；已发出的请求不能撤回，禁止自动重试，旧草稿保留但验收已失效'
+          : dispatched ? '前置成果或来源在生成期间变化，已发出的模型请求不能撤回；旧草稿保留但验收已失效'
+          : '前置成果或来源在派发前已变化，未发送模型请求；请核对前置后重试，旧草稿保留但验收已失效'
+        : '关联会话在生成期间发生变化，草稿需要重新生成后才能验收';
       latest.result_run_id = content ? runId : latest.result_run_id;
       latest.result_pending_review = !!content && !failure;
       latest.history = [...(latest.history || []), { ...runEvidence(latest), finished_at: now,
@@ -497,6 +600,8 @@ export async function acceptTaskResult(userId, taskId, runId) {
     const editor = taskResultState(task, db);
     if (editor.head_version_id && editor.head_version_id !== runId) throw taskError('RESULT_VERSION_REQUIRED', '当前有人工修订或另一份文稿，请在文稿编辑区核对并确认具体版本');
     const snapshot = await sourceSnapshot(userId, db);
+    const dependencyVersion = editor.versions.find(version => version.id === runId);
+    assertDependencyReady(await currentTaskDependencies(userId, task, db), dependencyVersion?.dependency_signature ?? null);
     if (isTaskInputSourceStale(task, db, snapshot)) throw taskError('TASK_SOURCE_CHANGED', '任务原始消息已更新或撤销，请从当前消息重新创建任务');
     if (task.accepted_run_id === runId) {
       if (task.run_id !== runId || task.result_run_id !== runId) throw catalogError('此验收属于较早运行，请检查当前成果', 409);
@@ -564,11 +669,21 @@ export async function tickTasks() {
   try {
     for (const userId of await listUserDatabases()) {
       const db = await getUserDb(userId); await db.read();
-      const dueIds = (db.data.tasks || []).filter(t => t.auto_run && !t.result_pending_review && t.status === 'pending' && t.run_at && Date.parse(t.run_at) <= Date.now()).map(task => task.id);
+      const dueIds = (db.data.tasks || []).filter(t => t.auto_run && !t.result_pending_review && t.status === 'pending' && t.run_at && Date.parse(t.run_at) <= Date.now() && (!t.dependency_retry_at || Date.parse(t.dependency_retry_at) <= Date.now())).map(task => task.id);
       for (const taskId of dueIds) {
         try {
           if (await runTask(userId, taskId, { scheduled: true })) break;
         } catch (error) {
+          if (error.code === 'TASK_DEPENDENCY_BLOCKED' || error.code === 'TASK_DEPENDENCY_CHANGED') {
+            await withStableTaskLock(userId, db, async () => {
+              const task = db.data.tasks?.find(item => item.id === taskId);
+              if (!task || task.status !== 'pending' || !task.auto_run) return;
+              const before = structuredClone(db.data);
+              task.dependency_retry_at = new Date(Date.now() + 60000).toISOString();
+              await writeOrRestore(db, before);
+            });
+            continue;
+          }
           safeLog('warn', '主动任务未执行', { userId, taskId, error: error.message });
           if (error.code === 'TASK_SOURCE_CHANGED' || [400, 404, 422].includes(error.status)) {
             // An invalid source/config must not be selected every tick and

@@ -9,7 +9,7 @@ Object.assign(globalThis,{window,document:window.document,localStorage:window.lo
 class Channel{port1={onmessage:null};port2={postMessage:()=>setTimeout(()=>this.port1.onmessage?.(),0)}};Object.defineProperty(globalThis,'MessageChannel',{value:Channel,configurable:true});
 globalThis.__editor={};
 const built=await build({stdin:{resolveDir:root,loader:'tsx',contents:`import{createRoot}from'react-dom/client';import{act}from'react';import{TaskResultEditor}from'./src/components/Writing/TaskResultEditor';import{MessageContent}from'./src/components/Chat/MessageContent';import{useTaskResultsStore}from'./src/stores/taskResultsStore';export{act,useTaskResultsStore};export async function mountMessage(el,props){const root=createRoot(el);await act(async()=>root.render(<MessageContent {...props}/>));return root;}export async function mount(el){const root=createRoot(el);await act(async()=>root.render(<TaskResultEditor taskId="task-1"/>));return root;}`},bundle:true,write:false,format:'esm',platform:'browser',jsx:'automatic',plugins:[{name:'editor-ui-fixtures',setup(build){
- const routes=[[/services\/api$/,'api'],[/utils\/cacheUtils$/,'cache'],[/utils\/taskRecovery$/,'recovery'],[/stores\/tasksStore$/,'tasks'],[/stores\/modelsStore$/,'models'],[/stores\/navigationStore$/,'nav'],[/Common\/useConfirm$/,'confirm']];for(const[filter,path]of routes)build.onResolve({filter},()=>({path,namespace:'fixture'}));
+ const routes=[[/services\/api$/,'api'],[/(?:utils\/|\.\/)cacheUtils$/,'cache'],[/utils\/taskRecovery$/,'recovery'],[/stores\/tasksStore$/,'tasks'],[/stores\/modelsStore$/,'models'],[/stores\/navigationStore$/,'nav'],[/Common\/useConfirm$/,'confirm']];for(const[filter,path]of routes)build.onResolve({filter},()=>({path,namespace:'fixture'}));
  build.onLoad({filter:/.*/,namespace:'fixture'},({path})=>({loader:'js',contents:{
  api:`export const getAuthGeneration=()=>1;export const axiosInstance={get:(...args)=>globalThis.__editor.get(...args),post:(...args)=>globalThis.__editor.post(...args)};`,
  cache:`export const getCacheUserId=()=> 'alice';`,
@@ -82,4 +82,23 @@ test('stale result confirmation cannot close a newly pending key after the displ
 
 test('hidden stale purpose has a visible next step rather than an empty purpose heading',async()=>{
  globalThis.__editor.hiddenPurpose=true;currentDocument=doc({generation:{status:'needs_review',run_id:'run-1',source_input_stale:true}});await act(async()=>store.getState().fetch('task-1'));assert.match(container.textContent,/原用途待重新确认，展开用途与来源核对/);assert.doesNotMatch(container.textContent,/用途：用途与来源/);
+});
+
+test('blocked dependencies preserve body editing and saving but disable acceptance and generation',async()=>{
+ currentDocument=doc({accepted_version_id:version().id,accepted_content_hash:version().content_hash,dependency_state:{blocked:true,reasons:[{task_id:'prior',code:'unaccepted',title:'前置准备'}],signature:null,result_stale:true}});
+ await act(async()=>store.getState().fetch('task-1'));assert.equal(container.querySelector('textarea[aria-label="文稿正文"]').value,longBody);assert.equal(button('验收版本 1').disabled,true);assert.equal(button('已验收版本 1'),undefined);assert.match(container.textContent,/前置任务尚未就绪/);
+ await type('仍可写下人工正文');const review=[...container.querySelectorAll('label')].find(el=>el.textContent.includes('我已核对当前前置任务状态')).querySelector('input');await act(async()=>review.click());assert.equal(button('保存为新版本').disabled,false);assert.equal(button('让 AI 提供候选稿').disabled,true);
+ let posts=0;globalThis.__editor.post=async()=>{posts++;throw new Error('must not accept')};await act(async()=>store.getState().accept('task-1',version().id,version().content_hash,null));assert.equal(posts,0);
+});
+test('dependency signature stays frozen across dirty refresh and explicit review is required before saving',async()=>{
+ currentDocument=doc({dependency_state:{blocked:false,reasons:[],signature:'first-signature',result_stale:false}});await act(async()=>store.getState().fetch('task-1'));await act(async()=>store.getState().reviewDependencies('task-1','first-signature'));await type('按第一组前置任务写出的文字');
+ currentDocument=doc({dependency_state:{blocked:false,reasons:[],signature:'second-signature',result_stale:true}});await act(async()=>store.getState().fetch('task-1'));
+ assert.equal(store.getState().editors['task-1'].reviewedDependencySignature,'first-signature');assert.equal(container.querySelector('textarea').value,'按第一组前置任务写出的文字');assert.equal(button('保存依赖复核后的新版本').disabled,true);assert.equal(button('验收版本 1').disabled,true);
+ await assert.rejects(store.getState().save('task-1'),/前置任务状态已变化/);const review=[...container.querySelectorAll('label')].find(el=>el.textContent.includes('我已核对当前前置任务状态')).querySelector('input');assert.equal(review.checked,false);await act(async()=>review.click());assert.equal(button('保存依赖复核后的新版本').disabled,false);
+ let sent;globalThis.__editor.post=async(path,payload)=>{sent=payload;throw new Error('lost ACK')};await act(async()=>{button('保存依赖复核后的新版本').click();await flush()});assert.equal(sent.reviewed_dependency_signature,'second-signature');assert.equal(sent.content,'按第一组前置任务写出的文字');
+ currentDocument=doc({dependency_state:{blocked:false,reasons:[],signature:'third-signature',result_stale:true}});await act(async()=>store.getState().fetch('task-1'));const original=structuredClone(sent);await act(async()=>store.getState().retry('task-1').catch(()=>{}));assert.deepEqual(sent,original);
+});
+test('reopening already-stale accepted document never implicitly reviews its current dependency signature',async()=>{
+ await act(async()=>mounted.unmount());store.getState().cleanup();currentDocument=doc({accepted_version_id:version().id,accepted_content_hash:version().content_hash,dependency_state:{blocked:false,reasons:[],signature:'new-current-signature',result_stale:true}});mounted=await mount(container);await act(async()=>flush());
+ assert.equal(store.getState().editors['task-1'].reviewedDependencySignature,undefined);assert.equal(button('已验收版本 1'),undefined);assert.equal(button('保存依赖复核后的新版本').disabled,true);assert.equal(button('验收版本 1').disabled,true);assert.match(container.textContent,/旧验收不再有效/);
 });

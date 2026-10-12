@@ -8,8 +8,9 @@ const deferred = () => { let resolve, reject; const promise = new Promise((a,b) 
 const tick = () => new Promise(resolve => setTimeout(resolve,0));
 globalThis.__result = {};
 const built = await build({ entryPoints:[resolve(root,'src/stores/taskResultsStore.ts')],bundle:true,write:false,format:'esm',platform:'browser',plugins:[{name:'result-protocol-boundaries',setup(build){
-  for (const [filter,path] of [[/services\/api$/,'api'],[/utils\/cacheUtils$/,'cache'],[/utils\/taskRecovery$/,'recovery']]) build.onResolve({filter},()=>({path,namespace:'fixture'}));
+  for (const [filter,path] of [[/services\/api$/,'api'],[/utils\/cacheUtils$/,'cache'],[/utils\/taskRecovery$/,'recovery'],[/utils\/taskDependencyRecovery$/,'dependencyRecovery']]) build.onResolve({filter},()=>({path,namespace:'fixture'}));
   build.onLoad({filter:/.*/,namespace:'fixture'},({path})=>({loader:'js',contents:{
+    dependencyRecovery:`export const readDependencyIntents=()=>globalThis.__result.dependencyIntents || [];`,
     api:`export const getAuthGeneration=()=>globalThis.__result.auth; export const axiosInstance={get:(...args)=>globalThis.__result.get(...args),post:(...args)=>globalThis.__result.post(...args)};`,
     cache:`export const getCacheUserId=()=>globalThis.__result.user;`,
     recovery:`export const writingPreferences=()=>({recoverDrafts:globalThis.__result.recovery,offlineCopies:false});export const textHash=value=>Promise.resolve(globalThis.__result.hash(value));export const readTaskReceipts=()=>[...globalThis.__result.receipts.values()];export const persistTaskReceipt=item=>{if(globalThis.__result.storageFailure)throw new Error('尚未发送：存储失败');globalThis.__result.receipts.set(item.key,item)};export const removeTaskReceipt=key=>globalThis.__result.receipts.delete(key);export const saveWritingContent=(id,value)=>{globalThis.__result.drafts.set(id,value);return Promise.resolve(globalThis.__result.recovery)};export const loadWritingContent=id=>globalThis.__result.loadDraft(id);export const removeWritingDraft=id=>globalThis.__result.drafts.delete(id);`
@@ -142,4 +143,7 @@ test('closing a deleted document command never promises retained text or continu
  await open();globalThis.__result.post=async()=>{throw new Error('lost ACK')};store.getState().edit('task-1','旧文字');await store.getState().save('task-1');const key=store.getState().uncertain['task-1'].key;
  globalThis.__result.post=async()=>({data:{receipt:{id:key,task_id:'task-1',operation:'save',status:'cancelled',version_id:null,committed_revision:null,committed_at:null,closed_at:'2026-10-05T00:00:00Z'},document:null,task_deleted:true}});
  await store.getState().closeCommand('task-1',key);assert.match(store.getState().notices['task-1'],/文稿已删除，未恢复旧正文/);assert.doesNotMatch(store.getState().notices['task-1'],/当前输入仍在|继续保存/);assert.equal(store.getState().editors['task-1'],undefined);
+});
+test('other-tab dependency request blocks current-version acceptance before creating or sending a new command',async()=>{
+ await store.getState().fetch('task-1');globalThis.__result.dependencyIntents=[{taskId:'task-1',payload:{client_request_id:'other-tab',expected_revision:0,dependency_ids:[]}}];let posts=0;globalThis.__result.post=async()=>{posts++;throw new Error('must not send')};await assert.rejects(store.getState().accept('task-1',version().id,version().content_hash,'source-20'),/前置任务关系待核验/);assert.equal(posts,0);assert.equal(globalThis.__result.receipts.size,0);
 });

@@ -1,10 +1,30 @@
 export type TaskCategory = 'work' | 'social' | 'play';
 export type TaskStatus = 'pending' | 'running' | 'needs_review' | 'outcome_unknown' | 'completed' | 'failed' | 'cancelled';
+export interface DependencyState {
+  blocked: boolean;
+  reasons: Array<{ task_id: string; code: string; title?: string }>;
+  signature: string | null;
+  result_stale: boolean;
+}
+export interface UpdateTaskDependenciesInput {
+  client_request_id: string;
+  expected_revision: number;
+  dependency_ids: string[];
+}
+export interface DependencyCommandResponse {
+  receipt: { id: string; operation: 'dependencies'; task_id: string } & ({ status: 'succeeded'; committed_revision: number } | { status: 'cancelled'; committed_revision: null });
+  task: WorkspaceTask | null;
+  task_deleted?: boolean;
+}
 export interface WorkspaceTask {
   id: string;
   /** UUID identifying the original creation intent; reusable only with the same input. */
   client_request_id?: string;
   title: string;
+  /** Relationship metadata only; prerequisites are never implicit model context. Legacy tasks have no dependencies. */
+  dependency_ids?: string[];
+  dependency_revision?: number;
+  dependency_state?: DependencyState;
   prompt: string;
   category: TaskCategory;
   model_id: string | null;
@@ -61,7 +81,7 @@ export interface WorkspaceTask {
     cost?: null;
   }>;
 }
-export type TaskCreateInput = Pick<WorkspaceTask, 'title' | 'prompt' | 'category' | 'model_id' | 'group_id' | 'run_at' | 'repeat_minutes' | 'auto_run'> & { client_request_id?: string; source_message_id?: string | null; source_message_edited_at?: string | null };
+export type TaskCreateInput = Pick<WorkspaceTask, 'title' | 'prompt' | 'category' | 'model_id' | 'group_id' | 'run_at' | 'repeat_minutes' | 'auto_run'> & { dependency_ids?: string[]; client_request_id?: string; source_message_id?: string | null; source_message_edited_at?: string | null };
 /** Prefer the Idempotency-Key header. A new UUID means an intentional new generation. */
 export interface TaskRunInput { client_request_id?: string }
 
@@ -86,6 +106,7 @@ export interface TaskResultVersion {
   content_hidden: boolean;
 }
 export interface TaskResultDocument {
+  dependency_state?: DependencyState;
   task_id: string; title: string; group_id: string | null;
   revision: number;
   head_version_id: string | null;
@@ -145,6 +166,8 @@ export interface SaveTaskResultInput {
   content: string;
   /** Only send after explicit review of this exact current source snapshot. */
   reviewed_source_hash?: string | null;
+  /** Exact dependency snapshot explicitly reviewed for this save; never upgraded by a refresh. */
+  reviewed_dependency_signature?: string | null;
 }
 export interface AcceptTaskResultVersionInput {
   client_request_id: string;

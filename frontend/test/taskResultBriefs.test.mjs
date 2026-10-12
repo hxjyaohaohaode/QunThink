@@ -8,8 +8,9 @@ const deferred = () => { let resolve, reject; const promise = new Promise((a,b) 
 const tick = () => new Promise(resolve => setTimeout(resolve,0));
 globalThis.__result = {};
 const built = await build({ entryPoints:[resolve(root,'src/stores/taskResultsStore.ts')],bundle:true,write:false,format:'esm',platform:'browser',plugins:[{name:'result-protocol-boundaries',setup(build){
-  for (const [filter,path] of [[/services\/api$/,'api'],[/utils\/cacheUtils$/,'cache'],[/utils\/taskRecovery$/,'recovery']]) build.onResolve({filter},()=>({path,namespace:'fixture'}));
+  for (const [filter,path] of [[/services\/api$/,'api'],[/utils\/cacheUtils$/,'cache'],[/utils\/taskRecovery$/,'recovery'],[/utils\/taskDependencyRecovery$/,'dependencyRecovery']]) build.onResolve({filter},()=>({path,namespace:'fixture'}));
   build.onLoad({filter:/.*/,namespace:'fixture'},({path})=>({loader:'js',contents:{
+    dependencyRecovery:`export const readDependencyIntents=()=>globalThis.__result.dependencyIntents || [];`,
     api:`export const getAuthGeneration=()=>globalThis.__result.auth; export const axiosInstance={get:(...args)=>globalThis.__result.get(...args),post:(...args)=>globalThis.__result.post(...args)};`,
     cache:`export const getCacheUserId=()=>globalThis.__result.user;`,
     recovery:`export const writingPreferences=()=>({recoverDrafts:globalThis.__result.recovery,offlineCopies:false});export const textHash=value=>Promise.resolve(globalThis.__result.hash(value));export const readTaskReceipts=()=>[...globalThis.__result.receipts.values()];export const persistTaskReceipt=item=>{if(globalThis.__result.storageFailure)throw new Error('尚未发送：存储失败');globalThis.__result.receipts.set(item.key,item)};export const removeTaskReceipt=key=>globalThis.__result.receipts.delete(key);export const saveWritingContent=(id,value)=>{globalThis.__result.drafts.set(id,value);return Promise.resolve(globalThis.__result.recovery)};export const loadWritingContent=id=>globalThis.__result.loadDraft(id);export const removeWritingDraft=id=>globalThis.__result.drafts.delete(id);`

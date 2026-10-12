@@ -4,13 +4,14 @@ import { getUserDb, withWriteLock, beginUserDbWriteBarrier } from '../models/db.
 import { encryptText, decryptData } from '../utils/encryption.js';
 import { readableSourceFiles } from './memory/persistentMemory.js';
 import { sourceHash, sourceSnapshot, isTaskInputSourceStale } from './taskSources.js';
+import { currentTaskDependencies, assertDependencyReady, dependencyIds, dependencyRevision, dependencyError } from './taskDependencies.js';
 
 export const TASK_RESULT_LIMITS = Object.freeze({ versions: 100, commands: 10000, content: 64000 });
 const uuid = z.string().uuid().transform(value => value.toLowerCase());
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const content = z.string().min(1).max(TASK_RESULT_LIMITS.content).refine(value => value.trim().length > 0, '正文不能为空');
 const commandBase = { client_request_id: uuid, expected_revision: z.number().int().nonnegative() };
-export const saveTaskResultInput = z.object({ ...commandBase, base_version_id: uuid.nullable(), content, reviewed_source_hash: hash.nullable().optional() }).strict();
+export const saveTaskResultInput = z.object({ ...commandBase, base_version_id: uuid.nullable(), content, reviewed_source_hash: hash.nullable().optional(), reviewed_dependency_signature: hash.nullable().optional() }).strict();
 export const acceptTaskResultVersionInput = z.object({ ...commandBase, version_id: uuid, content_hash: hash, source_hash: hash.nullable() }).strict();
 export const adoptTaskResultVersionInput = z.object({ ...commandBase, version_id: uuid }).strict();
 export const rebaseTaskBriefInput = z.object({ ...commandBase, prompt: z.string().trim().min(1).max(12000), source_hash: hash.nullable() }).strict();
@@ -51,6 +52,7 @@ export function taskResultState(task, db) {
     const version = { id: run.id, sequence: state.versions.length + 1, kind: 'generated', parent_version_id: run.result_base_version_id ?? null,
       run_id: run.id, content: run.result, content_hash: digest(text), created_at: run.finished_at,
       source_hash: run.source_hash ?? null, source_hash_version: run.source_hash_version || 1,
+      dependency_signature: run.dependency_signature ?? null,
       source_messages: structuredClone(sourceMessages), source_manifest_known: Array.isArray(run.source_messages), source_file_ids: run.source_file_ids || fileIds(legacyMessages) };
     state.versions.push(version); ids.add(version.id); state.revision++;
     // Human work always wins the editing position. A later model response is a
@@ -78,7 +80,7 @@ async function sourceView(userId, task, db) {
     blocked: !!task.group_id && (!snapshot.groupIds.has(task.group_id) || !!task.source_message_id && !origin),
     hash: task.group_id ? sourceHash(messages, db) : null, origin };
 }
-function versionSourceStatus(task, version, sources, db) {
+export function versionSourceStatus(task, version, sources, db) {
   if (sources.blocked) return 'blocked';
   if ((version.source_messages || []).some(ref => !sources.all.some(message => message.id === ref.id)) ||
       (version.source_file_ids || []).some(id => !sources.fileIds.has(id))) return 'blocked';
@@ -90,7 +92,7 @@ function versionSourceStatus(task, version, sources, db) {
       version.source_hash !== sourceHash(sources.messages, db, version.source_hash_version || 1)) return 'blocked';
   return version.source_hash && version.source_hash === sourceHash(sources.messages, db, version.source_hash_version || 1) ? 'current' : 'changed';
 }
-function plainVersion(task, version, sources, db) {
+export function plainVersion(task, version, sources, db) {
   const sourceStatus = versionSourceStatus(task, version, sources, db);
   const text = sourceStatus === 'blocked' ? '' : unpack(version.content);
   if (sourceStatus !== 'blocked' && digest(text) !== version.content_hash) throw storageError();
@@ -103,7 +105,8 @@ async function documentView(userId, task, db) {
   const head = state.versions.find(version => version.id === state.head_version_id);
   const status = head ? versionSourceStatus(task, head, sources, db) : sources.blocked ? 'blocked' : 'current';
   const previous = new Map((head?.source_messages || []).map(ref => [ref.id, ref]));
-  return { task_id: task.id, title: task.title, group_id: task.group_id, revision: state.revision,
+  const dependencies = await currentTaskDependencies(userId, task, db);
+  return { task_id: task.id, title: task.title, group_id: task.group_id, revision: state.revision, dependency_state: dependencies,
     head_version_id: state.head_version_id, accepted_version_id: state.accepted_version_id,
     accepted_content_hash: state.accepted_content_hash, accepted_at: state.accepted_at,
     versions: state.versions.map(version => plainVersion(task, version, sources, db)),
@@ -200,8 +203,9 @@ async function mutate(userId, taskId, operation, input, apply) {
     if (state.revision !== input.expected_revision) throw resultError('RESULT_REVISION_CONFLICT', '文稿已在其他页面更新。你的输入仍可保留，请先比较当前版本');
     if (sources.blocked) throw resultError('RESULT_SOURCE_BLOCKED', '来源已撤回或权限不可用，不能继续使用旧正文', 410);
     if (list.length >= TASK_RESULT_LIMITS.commands) throw resultError('RESULT_COMMAND_LIMIT', '保存回执记录已满，需要归档核验；不会遗忘旧请求后盲目重试', 429);
+    const dependencies = await currentTaskDependencies(userId, task, db);
     const before = structuredClone(db.data), now = new Date().toISOString();
-    const versionId = apply({ task, state, sources, db, now });
+    const versionId = apply({ task, state, sources, db, now, dependencies });
     state.revision++;
     task.result_editor = state; task.updated_at = now;
     const receipt = { id: input.client_request_id, task_id: taskId, operation, input_hash: inputHash,
@@ -223,15 +227,22 @@ function setHead(task, state, version) {
 }
 export async function saveTaskResultVersion(userId, taskId, raw) {
   const input = saveTaskResultInput.parse(raw);
-  return mutate(userId, taskId, 'save', input, ({ task, state, sources, db, now }) => {
+  return mutate(userId, taskId, 'save', input, ({ task, state, sources, db, now, dependencies }) => {
     if (state.head_version_id !== input.base_version_id) throw resultError('RESULT_REVISION_CONFLICT', '编辑依据已变化，请先比较当前文稿；不会覆盖你的输入');
     const parent = state.versions.find(version => version.id === state.head_version_id);
+    const dependencyReviewRequired = dependencyIds(task).length > 0 || dependencyRevision(task) > 0 || !!parent?.dependency_signature;
+    if (dependencyReviewRequired && !Object.hasOwn(input, 'reviewed_dependency_signature')) {
+      throw dependencyError('TASK_DEPENDENCY_REVIEW_REQUIRED', '请先核对当前前置任务，再明确保存复核后的新版本');
+    }
+    if (Object.hasOwn(input, 'reviewed_dependency_signature') && input.reviewed_dependency_signature !== dependencies.signature) {
+      throw dependencyError('TASK_DEPENDENCY_CHANGED', '前置成果又有变化，请核对最新关系；你的文字尚未被覆盖');
+    }
     if (parent) assertVisibleVersion(task, parent, sources, db);
     if (state.versions.length >= TASK_RESULT_LIMITS.versions) throw resultError('RESULT_VERSION_LIMIT', '文稿版本记录已满，请先导出并联系管理员归档；不会覆盖旧稿');
     const reviewed = Object.hasOwn(input, 'reviewed_source_hash');
     if (reviewed && input.reviewed_source_hash !== sources.hash) throw resultError('RESULT_SOURCE_CHANGED', '资料又有更新，请先看最新依据，再确认复核');
     const version = { id: randomUUID(), sequence: state.versions.length + 1, kind: 'manual', parent_version_id: parent?.id || null,
-      run_id: parent?.run_id || null, content: encryptText(input.content), content_hash: digest(input.content), created_at: now,
+      run_id: parent?.run_id || null, dependency_signature: dependencies.blocked ? 'blocked' : dependencies.signature, content: encryptText(input.content), content_hash: digest(input.content), created_at: now,
       source_hash: reviewed || !parent ? sources.hash : parent.source_hash,
       source_hash_version: reviewed || !parent ? 2 : parent.source_hash_version,
       source_messages: reviewed || !parent ? refs(sources.messages) : structuredClone(parent.source_messages),
@@ -242,12 +253,13 @@ export async function saveTaskResultVersion(userId, taskId, raw) {
 }
 export async function acceptTaskResultVersion(userId, taskId, raw) {
   const input = acceptTaskResultVersionInput.parse(raw);
-  return mutate(userId, taskId, 'accept', input, ({ task, state, sources, db, now }) => {
+  return mutate(userId, taskId, 'accept', input, ({ task, state, sources, db, now, dependencies }) => {
     const version = state.versions.find(version => version.id === input.version_id);
     assertVisibleVersion(task, version, sources, db);
     if (state.head_version_id !== version.id || version.content_hash !== input.content_hash) throw resultError('RESULT_REVISION_CONFLICT', '你核对的不是当前正文版本，请先打开当前稿');
     if (['running', 'outcome_unknown'].includes(task.status)) throw resultError('RESULT_RUN_PENDING', '这份文稿仍有生成请求待核验，请先处理该请求；人工文字会保留');
     if (sources.hash !== input.source_hash || versionSourceStatus(task, version, sources, db) !== 'current') throw resultError('RESULT_SOURCE_CHANGED', '依据已变化，请核对并保存复核版本后再确认');
+    assertDependencyReady(dependencies, version.dependency_signature ?? null);
     const generatedRun = version.kind === 'generated' ? task.history?.find(run => run.id === version.run_id) : null;
     if (version.kind === 'generated' && (!generatedRun || !['generated', 'accepted'].includes(generatedRun.status))) throw resultError('RESULT_RUN_UNAVAILABLE', '该生成版本的运行回执不可用，不能将其标为已确认');
     state.accepted_version_id = version.id; state.accepted_content_hash = version.content_hash; state.accepted_at = now;
