@@ -155,6 +155,57 @@ test('pure workflow contract: exact vendor digest/platform, existing PG, require
   assert.match(script, /subjectAltName=IP:127\.0\.0\.1,DNS:localhost/);
   assert.doesNotMatch(script, /mongosh|rejectUnauthorized|NODE_TLS_REJECT_UNAUTHORIZED|--privileged|--cap-add|sysctl|docker run|docker pull/);
 });
+function assertFrontendStartupDependencies(workflow) {
+  const steps = workflow.jobs?.['frontend-check']?.steps;
+  assert.ok(Array.isArray(steps), 'frontend-check must have its own steps');
+  const testsIndex = steps.findIndex(step => step.name === 'Frontend tests');
+  assert.ok(testsIndex >= 0, 'frontend-check must retain Frontend tests');
+  assert.equal(steps[testsIndex].run, 'npm test');
+  assert.equal(steps[testsIndex]['working-directory'], './frontend');
+  const setupIndex = steps.findIndex(step => step.uses === 'actions/setup-node@v4');
+  assert.ok(setupIndex >= 0, 'frontend-check must configure Node and npm cache');
+  assert.equal(steps[setupIndex].with.cache, 'npm');
+  assert.deepEqual(steps[setupIndex].with['cache-dependency-path'].trim().split(/\s+/).sort(),
+    ['./backend/package-lock.json', './frontend/package-lock.json']);
+  for (const directory of ['frontend', 'backend']) {
+    const installIndex = steps.findIndex(step => step.run === 'npm ci' && step['working-directory'] === `./${directory}`);
+    assert.ok(installIndex > setupIndex && installIndex < testsIndex,
+      `frontend-check must install ${directory} with npm ci after setup-node and before Frontend tests`);
+    for (const key of ['if', 'continue-on-error']) assert.equal(steps[installIndex][key], undefined,
+      `${directory} dependency installation must be unconditional and required`);
+  }
+}
+
+test('pure workflow contract: frontend startup tests install both locked dependency trees in their own job', async () => {
+  assertFrontendStartupDependencies(YAML.parse(await fs.readFile(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')));
+});
+
+test('pure negative workflow contract: frontend startup dependency preconditions cannot be misplaced or bypassed', async t => {
+  // A synthetic valid workflow keeps the mutation checks independent of the real workflow's current state.
+  const valid = { jobs: { 'frontend-check': { steps: [
+    { uses: 'actions/setup-node@v4', with: { cache: 'npm',
+      'cache-dependency-path': './frontend/package-lock.json\n./backend/package-lock.json' } },
+    { run: 'npm ci', 'working-directory': './frontend' },
+    { run: 'npm ci', 'working-directory': './backend' },
+    { name: 'Frontend tests', run: 'npm test', 'working-directory': './frontend' }
+  ] }, 'backend-check': { steps: [] } } };
+  assertFrontendStartupDependencies(valid);
+  for (const [label, mutate] of [
+    ['deleted backend installation', workflow => workflow.jobs['frontend-check'].steps.splice(2, 1)],
+    ['wrong backend installation directory', workflow => { workflow.jobs['frontend-check'].steps[2]['working-directory'] = './frontend'; }],
+    ['installation in another job', workflow => { workflow.jobs['backend-check'].steps.push(...workflow.jobs['frontend-check'].steps.splice(2, 1)); }],
+    ['installation after frontend tests', workflow => { const steps = workflow.jobs['frontend-check'].steps; steps.push(...steps.splice(2, 1)); }],
+    ['unlocked npm install', workflow => { workflow.jobs['frontend-check'].steps[2].run = 'npm install'; }],
+    ['conditional backend installation', workflow => { workflow.jobs['frontend-check'].steps[2].if = 'false'; }],
+    ['ignored backend installation failure', workflow => { workflow.jobs['frontend-check'].steps[2]['continue-on-error'] = true; }],
+    ['missing backend cache lock', workflow => { workflow.jobs['frontend-check'].steps[0].with['cache-dependency-path'] = './frontend/package-lock.json'; }],
+    ['missing frontend cache lock', workflow => { workflow.jobs['frontend-check'].steps[0].with['cache-dependency-path'] = './backend/package-lock.json'; }]
+  ]) await t.test(label, () => {
+    const workflow = structuredClone(valid); mutate(workflow);
+    assert.throws(() => assertFrontendStartupDependencies(workflow), assert.AssertionError);
+  });
+});
+
 test('real subprocess negative: required absent fixture exits before any old suite can produce green', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-ci-negative-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
