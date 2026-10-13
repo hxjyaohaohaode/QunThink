@@ -12,7 +12,6 @@ jobs:
     timeout-minutes: 30
     env:
       QUNTHINK_REQUIRE_STORAGE_FIXTURES: '1'
-      QUNTHINK_STORAGE_EVIDENCE_DIR: ${{ runner.temp }}/qunthink-storage-evidence
       QUNTHINK_TEST_PG_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_ci
       QUNTHINK_TEST_MEMORY_TLS_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_memory
       QUNTHINK_TEST_MEMORY_LEDGER_TLS_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_ledger
@@ -54,6 +53,12 @@ jobs:
       - name: Install backend dependencies
         run: npm ci
         working-directory: ./backend
+      - name: Initialize runner storage evidence directory
+        shell: bash
+        run: |
+          : "${RUNNER_TEMP:?runner temporary directory is required}"
+          : "${GITHUB_ENV:?runner environment file is required}"
+          printf 'QUNTHINK_STORAGE_EVIDENCE_DIR=%s/qunthink-storage-evidence\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Record exact backend storage source manifest
         run: node scripts/ci-storage-evidence.mjs
         working-directory: ./backend

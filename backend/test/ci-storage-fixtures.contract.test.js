@@ -337,3 +337,63 @@ test('real setup-log report subprocess redacts raw file before artifact/console 
   assert.equal(result.stdout, artifact); assert.doesNotMatch(artifact, /SYNTHETIC_SETUP_(?:KEY|PASSWORD)/);
   await assert.rejects(fs.stat(raw), { code: 'ENOENT' });
 });
+
+// GitHub validates job.env before a runner exists. This deliberately scoped
+// checker covers dotted context references used in this repository, not the
+// complete Actions expression grammar.
+function assertJobEnvironmentContexts(workflow) {
+  const allowed = new Set(['github', 'needs', 'strategy', 'matrix', 'vars', 'secrets', 'inputs']);
+  for (const [jobName, job] of Object.entries(workflow.jobs)) {
+    for (const [key, value] of Object.entries(job.env ?? {})) {
+      for (const expression of String(value).matchAll(/\$\{\{([\s\S]*?)\}\}/g)) {
+        for (const reference of expression[1].matchAll(/(?<![\w.])([A-Za-z_]\w*)\s*\./g)) {
+          assert.ok(allowed.has(reference[1]), `Unavailable job.env context ${reference[1]} at ${jobName}.${key}`);
+        }
+      }
+    }
+  }
+}
+
+test('workflow job environment uses only contexts available before runner assignment', async () => {
+  const workflow = YAML.parse(await fs.readFile(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8'));
+  assertJobEnvironmentContexts(workflow);
+  for (const context of ['runner', 'job', 'steps', 'env']) {
+    assert.throws(() => assertJobEnvironmentContexts({ jobs: { synthetic: { env: { VALUE: '${{ ' + context + '.temp }}' } } } }), /Unavailable job.env context/);
+  }
+  for (const context of ['github', 'needs', 'strategy', 'matrix', 'vars', 'secrets', 'inputs']) {
+    assertJobEnvironmentContexts({ jobs: { synthetic: { env: { VALUE: '${{ ' + context + '.value }}' } } } });
+  }
+});
+
+test('real runner-step contract: evidence path is initialized before every consumer and survives a spaced temporary path', async t => {
+  const workflow = YAML.parse(await fs.readFile(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8'));
+  const job = workflow.jobs['backend-check'];
+  assert.equal(Object.hasOwn(job.env, 'QUNTHINK_STORAGE_EVIDENCE_DIR'), false);
+  const name = 'Initialize runner storage evidence directory';
+  const index = job.steps.findIndex(step => step.name === name);
+  assert.ok(index >= 0, 'runner initialization step is required');
+  const init = job.steps[index];
+  assert.equal(init.shell, 'bash');
+  for (const name of ['Record exact backend storage source manifest', 'Prepare disposable verified storage fixtures', 'Backend tests with required real-storage preflight and zero-skip gate']) {
+    assert.ok(index < job.steps.findIndex(step => step.name === name), `initialization precedes ${name}`);
+  }
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-ci-env path-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const githubEnv = path.join(directory, 'github-env');
+  const env = { PATH: process.env.PATH, RUNNER_TEMP: directory, GITHUB_ENV: githubEnv };
+  const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', init.run], { env, encoding: 'utf8', timeout: 5000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '');
+  const expected = path.join(directory, 'qunthink-storage-evidence');
+  assert.equal(await fs.readFile(githubEnv, 'utf8'), `QUNTHINK_STORAGE_EVIDENCE_DIR=${expected}\n`);
+  const manifest = spawnSync(process.execPath, ['scripts/ci-storage-evidence.mjs'], { cwd: root,
+    env: { ...env, QUNTHINK_STORAGE_EVIDENCE_DIR: expected }, encoding: 'utf8', timeout: 10000 });
+  assert.equal(manifest.status, 0, manifest.stderr);
+  const files = await fs.readdir(expected);
+  assert.ok(files.length > 0, 'following source-manifest step writes the initialized directory');
+  for (const missing of ['RUNNER_TEMP', 'GITHUB_ENV']) {
+    const failedEnv = { ...env }; delete failedEnv[missing];
+    const failed = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', init.run], { env: failedEnv, encoding: 'utf8', timeout: 5000 });
+    assert.notEqual(failed.status, 0, `missing ${missing} fails explicitly`);
+  }
+});
