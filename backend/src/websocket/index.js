@@ -682,19 +682,34 @@ export function broadcastToGroup(groupId, message, userId = currentUserId()) {
   });
 }
 
-export function broadcastAIMessage(groupId, aiId, content, replyTo = null, messageId = null, quotedMessages = null) {
+function confirmedBroadcastMessage(groupId, message, messageId = message?.id, senderId = message?.sender_id) {
+  if (!message) return null;
+  if (!message.id || message.id !== messageId || message.group_id !== groupId || message.sender_id !== senderId ||
+      typeof message.created_at !== 'string' || !Number.isFinite(Date.parse(message.created_at)) ||
+      typeof message.server_order?.generation !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(message.server_order.generation) ||
+      typeof message.server_order.sequence !== 'string' || !/^[1-9][0-9]{0,18}$/.test(message.server_order.sequence) ||
+      BigInt(message.server_order.sequence) > 9223372036854775807n) {
+    throw new TypeError('Confirmed message identity/order does not match');
+  }
+  return structuredClone(message);
+}
+
+export function broadcastAIMessage(groupId, aiId, content, replyTo = null, messageId = null, quotedMessages = null, confirmedMessage = null) {
+  const confirmed = confirmedBroadcastMessage(groupId, confirmedMessage, messageId ?? confirmedMessage?.id, aiId);
   broadcastToGroup(groupId, {
+    ...(confirmed || (messageId ? { id: messageId } : {})),
     type: 'new_message',
     group_id: groupId,
-    id: messageId || `ai_${aiId}_${Date.now()}`,
     sender: aiId,
     sender_id: aiId,
-    sender_type: 'ai',
-    content,
-    content_type: 'text',
-    reply_to: replyTo,
-    quoted_messages: quotedMessages,
-    created_at: new Date().toISOString(),
+    sender_type: confirmed?.sender_type || 'ai',
+    content: confirmed ? confirmed.content : content,
+    content_type: confirmed?.content_type || 'text',
+    reply_to: confirmed ? (confirmed.reply_to ?? null) : replyTo,
+    quoted_messages: confirmed ? (confirmed.quoted_messages ?? null) : quotedMessages,
+    durable: Boolean(confirmed),
+    persistence_status: confirmed ? 'confirmed' : 'not_saved',
     timestamp: new Date().toISOString()
   });
 }
@@ -724,26 +739,33 @@ export function broadcastStreamStart(groupId, aiId, messageId) {
   });
 }
 
-export function broadcastStreamEnd(groupId, aiId, messageId, content, replyTo = null, replyToIds = null) {
+export function broadcastStreamEnd(groupId, aiId, messageId, content, replyTo = null, replyToIds = null, confirmedMessage = null) {
+  const confirmed = confirmedBroadcastMessage(groupId, confirmedMessage, messageId, aiId);
   broadcastToGroup(groupId, {
+    ...(confirmed || {}),
     type: 'message_stream_end',
     group_id: groupId,
     message_id: messageId,
     sender_id: aiId,
-    sender_type: 'ai',
-    content,
-    reply_to: replyTo,
-    reply_to_ids: replyToIds,
-    created_at: new Date().toISOString(),
+    sender_type: confirmed?.sender_type || 'ai',
+    content: confirmed ? confirmed.content : content,
+    reply_to: confirmed ? (confirmed.reply_to ?? null) : replyTo,
+    reply_to_ids: confirmed ? (confirmed.reply_to_ids ?? null) : replyToIds,
+    durable: Boolean(confirmed),
+    persistence_status: confirmed ? 'confirmed' : 'not_saved',
     timestamp: new Date().toISOString()
   });
 }
 
-export function broadcastSystemMessage(groupId, content) {
+export function broadcastSystemMessage(groupId, content, confirmedMessage = null) {
+  const confirmed = confirmedBroadcastMessage(groupId, confirmedMessage);
   broadcastToGroup(groupId, {
+    ...(confirmed || {}),
     type: 'system_message',
     group_id: groupId,
-    content,
+    content: confirmed ? confirmed.content : content,
+    durable: Boolean(confirmed),
+    persistence_status: confirmed ? 'confirmed' : 'not_saved',
     timestamp: new Date().toISOString()
   });
 }

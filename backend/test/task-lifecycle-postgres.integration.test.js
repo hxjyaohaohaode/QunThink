@@ -1,3 +1,4 @@
+import { initializeAccountStoreFixture } from './helpers/accountStoreFixtures.js';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -18,7 +19,7 @@ process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-task-lifecycle-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 process.env.ENCRYPTION_KEY = crypto.randomBytes(32).toString('base64');
-const { initDatabase, initUserDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
+const { initDatabase, createNewUserDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb, generateSessionToken } = await import('../src/models/authDb.js');
 const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
@@ -26,7 +27,7 @@ const { readCatalog, saveCatalog } = await import('../src/services/ai/catalog.js
 const { createTask, listTasks, runTask, updateTask, deleteTask, acceptTaskResult,
   resolveUnknownTaskRun, tickTasks, startTaskScheduler, stopTaskScheduler } = await import('../src/services/tasks.js');
 const request = (await import('supertest')).default(createTestApp());
-await initDatabase(); await initAuthDb();
+await initializeAccountStoreFixture(); await initDatabase(); await initAuthDb();
 
 const calls = [], held = [];
 let behavior = 'ok';
@@ -51,8 +52,9 @@ after(async () => { stopTaskScheduler(); provider.closeAllConnections(); await n
 
 async function session(withModel = false) {
   const userId = crypto.randomUUID(), token = generateSessionToken();
-  const db = await initUserDatabase(userId);
-  // PgLow does not use the local deletion ledger.
+  const db = await createNewUserDatabase(userId);
+  await provisionNewLocalMemoryAccount(userId, db);
+  // Legacy PgLow reports unsupported; configured independent PgLow provisions its ledger.
   const auth = getAuthDb(); await auth.read();
   auth.data.users.push({ id: userId, username: userId, password: 'unused' });
   auth.data.sessions.push({ token, userId, expires_at: new Date(Date.now() + 3600000).toISOString() });
@@ -103,7 +105,10 @@ test('real PgLow retains dispatch checkpoint across catalog re-reads and bound c
 
 test('real PgLow active task survives ordinary 50-account scheduler eviction pressure', async () => {
   const s = await session(true), task = await create(s), before = calls.length;
-  for (let i = 0; i < 51; i++) await initUserDatabase(crypto.randomUUID());
+  for (let i = 0; i < 51; i++) {
+    const userId = crypto.randomUUID(), db = await createNewUserDatabase(userId);
+    await provisionNewLocalMemoryAccount(userId, db);
+  }
   // Refresh canonical storage before admission; earlier setup may have evicted it.
   const active = await getUserDb(s.userId);
   behavior = 'hold'; const heldBefore = held.length;

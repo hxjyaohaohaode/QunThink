@@ -1,3 +1,4 @@
+import { initializeAccountStoreFixture } from './helpers/accountStoreFixtures.js';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -13,12 +14,14 @@ process.env.NODE_ENV = 'test'; process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-model-probes-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 process.env.ENCRYPTION_KEY = crypto.randomBytes(32).toString('base64');
-const { initDatabase, initUserDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
+const { initDatabase, createNewUserDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb, generateSessionToken } = await import('../src/models/authDb.js');
+const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
 const { readCatalog, saveCatalog, resolveModel } = await import('../src/services/ai/catalog.js');
 const { MODEL_PROBE_LIMITS } = await import('../src/services/ai/modelProbes.js');
 const request = (await import('supertest')).default(createTestApp());
+await initializeAccountStoreFixture();
 await initDatabase(); await initAuthDb();
 
 const calls = [], held = [];
@@ -41,7 +44,7 @@ const origin = `http://127.0.0.1:${provider.address().port}`;
 process.env.AI_ALLOWED_LOCAL_ORIGINS = origin;
 after(async () => { provider.closeAllConnections(); await new Promise(resolve => provider.close(resolve)); });
 async function session() {
-  const userId = crypto.randomUUID(), token = generateSessionToken(); await initUserDatabase(userId);
+  const userId = crypto.randomUUID(), token = generateSessionToken(); const userDb = await createNewUserDatabase(userId); await provisionNewLocalMemoryAccount(userId, userDb);
   const auth = getAuthDb(); await auth.read();
   auth.data.users.push({ id: userId, username: userId, password: 'unused' });
   auth.data.sessions.push({ token, userId, expires_at: new Date(Date.now() + 3600000).toISOString() }); await auth.write();
@@ -523,7 +526,7 @@ test('current required-key readiness prevents historical receipts claiming healt
 
 if (!process.env.SUPABASE_DB_URL) {
   test('lost claim ACK invalidates shared LowDB cache for catalog consumers even within one millisecond', async () => {
-    const s = await session(), db = await getUserDb(s.userId), originalWrite = db.write, originalRead = db.adapter.read, originalNow = Date.now;
+    const s = await session(), db = await getUserDb(s.userId), originalWrite = db.write, originalRead = db._readWithMetadata, originalNow = Date.now;
     const fixedNow = originalNow(); Date.now = () => fixedNow;
     try {
       assert.equal((await post(s, input())).body.healthy, true);
@@ -535,13 +538,13 @@ if (!process.env.SUPABASE_DB_URL) {
       // If durable reading fails, old verified data must not be treated as a
       // successful cache hit. Retrying must still attempt a fresh durable read.
       let readAttempts = 0;
-      db.adapter.read = async () => { readAttempts++; throw new Error('local read unavailable'); };
+      db._readWithMetadata = async () => { readAttempts++; throw new Error('local read unavailable'); };
       await assert.rejects(readCatalog(s.userId)); await assert.rejects(readCatalog(s.userId));
       assert.equal(readAttempts, 2);
-      db.adapter.read = originalRead;
+      db._readWithMetadata = originalRead;
       assert.deepEqual((await readCatalog(s.userId)).models.find(model => model.id === 'probe_a').verifiedCapabilities, []);
       await unverified(s);
-    } finally { Date.now = originalNow; db.write = originalWrite; db.adapter.read = originalRead; }
+    } finally { Date.now = originalNow; db.write = originalWrite; db._readWithMetadata = originalRead; }
   });
 }
 
@@ -624,7 +627,7 @@ test('catalog and model resolution cannot expose staged verification before fina
 if (!process.env.SUPABASE_DB_URL) {
   test('a catalog read begun before commit cannot overwrite newer acknowledged LowDB verification', async () => {
     const s = await session(), body = input(), db = await getUserDb(s.userId);
-    const originalRead = db.adapter.read, originalWrite = db.write, originalNow = Date.now, fixedNow = Date.now();
+    const originalRead = db._readWithMetadata, originalWrite = db.write, originalNow = Date.now, fixedNow = Date.now();
     let releaseRead, markRead, releaseAck, markCommit, delayed = false, pending, reading;
     const readStarted = new Promise(resolve => { markRead = resolve; }), readHold = new Promise(resolve => { releaseRead = resolve; });
     const committed = new Promise(resolve => { markCommit = resolve; }), ackHold = new Promise(resolve => { releaseAck = resolve; });
@@ -632,7 +635,7 @@ if (!process.env.SUPABASE_DB_URL) {
     try {
       behavior = async (req, res) => { held.push(res); };
       pending = post(s, body).then(result => result); await eventually(() => held.length);
-      db.adapter.read = async function () {
+      db._readWithMetadata = async function () {
         const snapshot = await originalRead.call(this);
         if (!delayed) { delayed = true; markRead(); await readHold; }
         return snapshot;
@@ -646,7 +649,7 @@ if (!process.env.SUPABASE_DB_URL) {
       assert.equal((await get(s, body.clientRequestId)).body.healthy, true);
     } finally {
       releaseRead(); releaseAck(); if (pending) await pending; if (reading) await reading;
-      db.adapter.read = originalRead; db.write = originalWrite; Date.now = originalNow;
+      db._readWithMetadata = originalRead; db.write = originalWrite; Date.now = originalNow;
     }
   });
 }

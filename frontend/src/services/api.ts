@@ -1,3 +1,5 @@
+import { protocolError, validateOrderedMessagesPage } from './orderedMessageProtocol';
+import type { OrderedMessagesQuery, OrderedMessagesResponse } from '../../../shared/contracts';
 import { probeReceipt } from './modelProbeReceipt';
 import { getCacheUserId } from '../utils/cacheUtils';
 import { recordDiagnostic, getDiagnosticSurface } from '../observability/runtimeDiagnostics';
@@ -57,7 +59,7 @@ const transport = axios.create({
 
 // Axios's asynchronous interceptors start in a later microtask. Capture the
 // initiating session at the public call boundary, before that scheduling gap.
-type ScopedRequestConfig = AxiosRequestConfig & { authGeneration?: number };
+type ScopedRequestConfig = AxiosRequestConfig & { authGeneration?: number; noInternalReadRetry?: boolean };
 function freezeRequestContext(config: ScopedRequestConfig = {}, url?: string): ScopedRequestConfig {
   const headers = new axios.AxiosHeaders(config.headers as Parameters<typeof axios.AxiosHeaders.from>[0]);
   const expected = activeRequestAccount();
@@ -272,7 +274,7 @@ axiosInstance.interceptors.response.use(
       console.log('[API Response] received');
     }
     if (response.status !== 204 && (typeof response.data !== 'object' || response.data === null)) {
-      const error = new Error('服务器返回了非预期的响应格式，请稍后重试');
+      const error = (response.config as ScopedRequestConfig).noInternalReadRetry ? protocolError() : new Error('服务器返回了非预期的响应格式，请稍后重试');
       return Promise.reject(error);
     }
     return response;
@@ -280,6 +282,7 @@ axiosInstance.interceptors.response.use(
   async (error) => {
     const config = error.config as (typeof error.config & {
       retryCount?: number;
+      noInternalReadRetry?: boolean;
       authGeneration?: number;
       baseUrlCandidates?: string[];
       activeBaseUrlIndex?: number;
@@ -311,7 +314,7 @@ axiosInstance.interceptors.response.use(
       (error.response.status === 500 || error.response.status === 502 || error.response.status === 503);
     const isCsrfError = error.response?.status === 403 && error.response?.data?.error === 'CSRF token validation failed';
     // A timeout does not prove that a write or a paid AI request was not accepted.
-    const canRetry = ['GET', 'HEAD', 'OPTIONS'].includes((config.method || 'GET').toUpperCase());
+    const canRetry = !config.noInternalReadRetry && ['GET', 'HEAD', 'OPTIONS'].includes((config.method || 'GET').toUpperCase());
 
     if (isCsrfError && isMutatingMethod(config.method) && config.retryCount < 1) {
       config.retryCount++;
@@ -384,6 +387,14 @@ axiosInstance.interceptors.response.use(
       return Promise.reject(error);
     }
 
+    if (config.noInternalReadRetry) {
+      const data = error.response.data;
+      return Promise.reject(Object.assign(new Error(typeof data?.error === 'string' ? data.error : '消息读取失败，请稍后重试'), {
+        status: error.response.status, code: typeof data?.code === 'string' ? data.code : undefined,
+        retryAfter: error.response.headers?.get?.('retry-after') ?? error.response.headers?.['retry-after'],
+      }));
+    }
+
     // Keep typed model-test outcomes through the friendly-error boundary, but
     // only on the exact probe routes and after identity/401 handling above.
     const probeRoute = (config.method?.toUpperCase() === 'POST' && /^\/?user\/model-catalog\/test$/.test(config.url || '')) ||
@@ -396,7 +407,7 @@ axiosInstance.interceptors.response.use(
     }
 
     if (typeof error.response.data === 'object' && error.response.data !== null && error.response.data.error) {
-      const detailedError = Object.assign(new Error(error.response.data.error), { status: error.response.status, code: error.response.data.code });
+      const detailedError = Object.assign(new Error(error.response.data.error), { status: error.response.status, code: error.response.data.code, retryAfter: error.response.headers?.get?.('retry-after') ?? error.response.headers?.['retry-after'] });
       return Promise.reject(detailedError);
     }
 
@@ -514,6 +525,23 @@ export const api = {
     if (after) params.after = after;
     const response = await axiosInstance.get(`/groups/${groupId}/messages`, { params });
     return response.data;
+  },
+
+  // This read has one external scheduling budget. No Axios retries or origin fallback.
+  getOrderedMessages: async (groupId: string, query: OrderedMessagesQuery = {}, signal?: AbortSignal): Promise<OrderedMessagesResponse> => {
+    const owner = activeRequestAccount();
+    const generation = authGeneration;
+    if (!owner) throw Object.assign(new Error('请先登录'), { status: 401 });
+    const limit = query.limit ?? 50;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200 || (query.before_cursor !== undefined && query.after_cursor !== undefined)) {
+      throw Object.assign(new Error('无效的消息分页参数'), { status: 400, code: 'INVALID_MESSAGE_CURSOR' });
+    }
+    const response = await axiosInstance.get(`/groups/${groupId}/messages`, {
+      params: { order: 'sequence_v1', limit, ...(query.before_cursor !== undefined ? { before_cursor: query.before_cursor } : {}), ...(query.after_cursor !== undefined ? { after_cursor: query.after_cursor } : {}) },
+      signal, authGeneration: generation, noInternalReadRetry: true,
+    } as ScopedRequestConfig);
+    if (generation !== authGeneration || owner !== activeRequestAccount()) throw staleSessionError();
+    return validateOrderedMessagesPage(response.data, { owner, group: groupId, ...query, limit });
   },
 
   sendMessage: async (

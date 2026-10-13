@@ -192,7 +192,7 @@ function transact<T>(owner: StorageSession, db: IDBDatabase, mode: IDBTransactio
 }
 
 function unconfirmed(message: Message): boolean {
-  return message.status === 'failed' || message.status === 'sending';
+  return message.status === 'failed' || message.status === 'sending' || message.confirmation === 'preview';
 }
 
 function sorted(messages: Message[]): Message[] {
@@ -219,6 +219,42 @@ export async function saveMessagesToIndexedDB(messages: Message[]): Promise<bool
   } catch (error) {
     notifyStorageError('save', error);
     return false;
+  }
+}
+
+export interface MessageDurabilityReceipt { durable: boolean; reason?: string }
+
+// Unlike the ordinary cache API, a true receipt requires a committed IndexedDB
+// write followed by a separate transaction reading the exact complete snapshot.
+// The fallback remains useful in memory but is never a refresh-recovery proof.
+export async function saveMessagesWithDurability(messages: Message[]): Promise<MessageDurabilityReceipt> {
+  const owner = session;
+  try {
+    const copies = structuredClone(messages);
+    const result = await openDB(owner);
+    assertCurrent(owner);
+    if ('fallback' in result) {
+      for (const msg of copies) result.fallback.set(msg.id, msg);
+      return { durable: false, reason: 'memory_only' };
+    }
+    await transact(owner, result, 'readwrite', undefined, store => {
+      for (const msg of copies) store.put(msg);
+    });
+    assertCurrent(owner);
+    const matches = await transact(owner, result, 'readonly', true, (store, value, fail) => {
+      for (const expected of copies) {
+        const request = store.get(expected.id);
+        request.onsuccess = () => {
+          if (JSON.stringify(request.result) !== JSON.stringify(expected)) value(false);
+        };
+        request.onerror = () => fail(request.error || new Error('Could not verify messages'));
+      }
+    });
+    assertCurrent(owner);
+    return matches ? { durable: true } : { durable: false, reason: 'readback_mismatch' };
+  } catch (error) {
+    notifyStorageError('save_durable', error);
+    return { durable: false, reason: error instanceof StaleStorageOperation ? 'account_changed' : 'storage_failed' };
   }
 }
 

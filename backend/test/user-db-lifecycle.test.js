@@ -127,8 +127,8 @@ for (const backend of ['PgLow', 'MongoLow']) {
         throw new Error('Unexpected synthetic query');
       } };
       const collection = {
-        updateOne: async () => { await update(); return { matchedCount: outcome === 'update succeeds' ? 1 : 0 }; },
-        insertOne: async () => { inserts++; return { insertedId: 'synthetic' }; }
+        updateOne: async () => { await update(); return { acknowledged: true, matchedCount: outcome === 'update succeeds' ? 1 : 0 }; },
+        insertOne: async () => { inserts++; return { acknowledged: true, insertedId: 'synthetic' }; }
       };
       const db = await registry.get('synthetic', protect => protect(backend === 'PgLow'
         ? new PgLow('user:synthetic', { marker: 'synthetic source' }, pool)

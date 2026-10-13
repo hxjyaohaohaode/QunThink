@@ -1,7 +1,8 @@
+import { accountDataExists } from './accountStoreLifecycle.js';
 import { assertPostgresMemoryLease } from '../services/memory/postgresDeletionLedger.js';
 import pg from 'pg';
 import { buildPostgresTlsConfig } from './postgresTls.js';
-import { readWithWriteBarrier } from './readBarrier.js';
+import { beginUserDbWriteBarrier, readWithWriteBarrier, assertSynchronousPublishHook, runSynchronousPublishHook, assertExplicitDbSnapshot } from './readBarrier.js';
 
 const { Pool } = pg;
 
@@ -93,17 +94,33 @@ export async function getPool() {
   return initializing;
 }
 
+function postgresRevision(value) {
+  // pg returns BIGINT as decimal text by default. Do not silently round it or
+  // coerce null, booleans, exponent notation, or malformed legacy revisions.
+  if (typeof value !== 'number' && !(typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value))) {
+    throw Object.assign(new Error('Invalid database revision'), { code: 'INVALID_DB_REVISION', status: 503 });
+  }
+  const revision = Number(value);
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw Object.assign(new Error('Invalid database revision'), { code: 'INVALID_DB_REVISION', status: 503 });
+  }
+  return revision;
+}
+
 export class PgLow {
-  constructor(key, defaultData, poolOverride = null) {
+  constructor(key, defaultData, poolOverride = null, { existingOnly = false } = {}) {
     this.key = key;
     this.data = JSON.parse(JSON.stringify(defaultData));
     this.defaultData = defaultData;
     this._lastAccess = Date.now();
     this._revision = 0;
+    this._exists = null;
     this._poolOverride = poolOverride;
+    this._existingOnly = existingOnly;
   }
 
-  async read() {
+  async read({ onPublished } = {}) {
+    assertSynchronousPublishHook(onPublished);
     try {
       const p = this._poolOverride || await getPool();
       this.assertCurrentLease?.();
@@ -115,37 +132,84 @@ export class PgLow {
         return p.query('SELECT data, revision FROM kv_store WHERE key = $1', [this.key]);
       }, result => {
         assertPostgresMemoryLease();
-        if (result.rows.length > 0 && result.rows[0].data) {
-          this.data = result.rows[0].data;
-          this._revision = Number(result.rows[0].revision);
-        } else {
-          this.data = JSON.parse(JSON.stringify(this.defaultData));
-          this._revision = 0;
-        }
+        const exists = result.rows.length > 0;
+        const revision = exists ? postgresRevision(result.rows[0].revision) : 0;
+        const data = exists ? result.rows[0].data : JSON.parse(JSON.stringify(this.defaultData));
+        this._accountStoreContract?.read(data, exists);
+        this.data = data;
+        this._revision = revision;
+        this._exists = exists;
+        runSynchronousPublishHook(onPublished, { data, revision, exists, supportsRevisionCas: true });
       });
     } catch (err) {
+      this._accountStoreContract?.uncertain();
       console.warn('PgLow read failed:', err.message);
       throw err;
     }
   }
 
-  async write() {
+  async create({ snapshot }) {
+    const releaseBarrier = beginUserDbWriteBarrier(this);
     try {
+      assertExplicitDbSnapshot(snapshot);
+      const data = JSON.parse(JSON.stringify(snapshot));
+      assertExplicitDbSnapshot(data);
+      const p = this._poolOverride || await getPool();
+      this.assertCurrentLease?.(); assertPostgresMemoryLease();
+      if (!p) throw new Error('PostgreSQL连接不可用');
+      const result = await p.query(
+        `INSERT INTO kv_store(key,data,revision,updated_at)
+         VALUES($1,$2,1,NOW()) ON CONFLICT (key) DO NOTHING RETURNING revision`, [this.key, data]);
+      this.assertCurrentLease?.(); assertPostgresMemoryLease();
+      if (result?.rowCount === 0) throw accountDataExists();
+      if (result?.rowCount !== 1 || ![1, '1'].includes(result.rows?.[0]?.revision)) {
+        throw Object.assign(new Error('Unconfirmed database create'), { code: 'WRITE_ACK_UNKNOWN', status: 503 });
+      }
+      this.data = data; this._revision = 1; this._exists = true;
+    } finally {
+      releaseBarrier();
+    }
+  }
+
+  async write(options) {
+    const releaseBarrier = beginUserDbWriteBarrier(this);
+    try {
+      const explicit = options !== undefined;
+      if (explicit && (!options || !Object.hasOwn(options, 'snapshot'))) throw new TypeError('write options must include snapshot');
+      if (explicit) assertExplicitDbSnapshot(options.snapshot);
+      const data = JSON.parse(JSON.stringify(explicit ? options.snapshot : this.data));
+      if (explicit) assertExplicitDbSnapshot(data);
+      const permit = this._accountStoreContract?.beforeWrite(data);
+      const expectedRevision = postgresRevision(explicit && Object.hasOwn(options, 'expectedRevision') ? options.expectedRevision : this._revision);
+      if (expectedRevision === Number.MAX_SAFE_INTEGER) {
+        throw Object.assign(new Error('Database revision exhausted'), { code: 'DB_REVISION_EXHAUSTED', status: 503 });
+      }
+      const nextRevision = expectedRevision + 1;
       const p = this._poolOverride || await getPool();
       this.assertCurrentLease?.();
       assertPostgresMemoryLease();
       if (!p) throw new Error('PostgreSQL连接不可用，拒绝丢弃写入');
-      const data = JSON.parse(JSON.stringify(this.data));
+      this._accountStoreContract?.checkWrite(permit);
+      const publish = result => {
+        const revision = postgresRevision(result.rows?.[0]?.revision);
+        if (revision !== nextRevision) throw Object.assign(new Error('Unconfirmed database write revision'), { code: 'WRITE_ACK_UNKNOWN', status: 503 });
+        this.assertCurrentLease?.();
+        assertPostgresMemoryLease();
+        this._accountStoreContract?.checkWrite(permit, { afterIo: true });
+        if (explicit) this.data = data;
+        this._revision = revision;
+        this._exists = true;
+        this._accountStoreContract?.committed(data);
+      };
       const updated = await p.query(
         `UPDATE kv_store SET data=$2, revision=revision+1, updated_at=NOW()
          WHERE key=$1 AND revision=$3 RETURNING revision`,
-        [this.key, data, this._revision]
+        [this.key, data, expectedRevision]
       );
-      if (updated.rowCount === 1) {
-        this._revision = Number(updated.rows[0].revision);
-        return;
-      }
-      if (this._revision === 0) {
+      if (updated.rowCount === 1) { publish(updated); return; }
+      this._accountStoreContract?.checkWrite(permit, { afterIo: true });
+      if (updated.rowCount !== 0) throw Object.assign(new Error('Unconfirmed database write'), { code: 'WRITE_ACK_UNKNOWN', status: 503 });
+      if (expectedRevision === 0 && !this._accountStoreContract && !this._existingOnly) {
         this.assertCurrentLease?.();
         assertPostgresMemoryLease();
         const inserted = await p.query(
@@ -153,15 +217,16 @@ export class PgLow {
            VALUES($1,$2,1,NOW()) ON CONFLICT (key) DO NOTHING RETURNING revision`,
           [this.key, data]
         );
-        if (inserted.rowCount === 1) {
-          this._revision = 1;
-          return;
-        }
+        if (inserted.rowCount === 1) { publish(inserted); return; }
+        if (inserted.rowCount !== 0) throw Object.assign(new Error('Unconfirmed database insert'), { code: 'WRITE_ACK_UNKNOWN', status: 503 });
       }
       throw Object.assign(new Error('数据已在其他进程更新，请刷新后重试'), { status: 409, code: 'REVISION_CONFLICT' });
     } catch (err) {
+      this._accountStoreContract?.uncertain();
       console.warn('PgLow write failed:', err.message);
       throw err;
+    } finally {
+      releaseBarrier();
     }
   }
 }

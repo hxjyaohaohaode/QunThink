@@ -1,3 +1,4 @@
+import { initializeAccountStoreFixture } from './helpers/accountStoreFixtures.js';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
@@ -16,13 +17,13 @@ process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-metadata-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 process.env.ENCRYPTION_KEY = randomBytes(32).toString('base64');
-const { initDatabase, initUserDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
+const { initDatabase, createNewUserDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb, generateSessionToken } = await import('../src/models/authDb.js');
 const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
 const { createTask, listTasks, runTask, updateTask, updateTaskMetadata, deleteTask, startTaskScheduler, stopTaskScheduler, tickTasks } = await import('../src/services/tasks.js');
 const { getTaskResult, saveTaskResultVersion, acceptTaskResultVersion, rebaseTaskBrief } = await import('../src/services/taskResults.js');
-await initDatabase(); await initAuthDb();
+await initializeAccountStoreFixture(); await initDatabase(); await initAuthDb();
 const server = createServer(createTestApp());
 server.listen(0, '127.0.0.1'); await once(server, 'listening');
 const request = (await import('supertest')).default(server);
@@ -39,7 +40,7 @@ const lookup = (s, task, id) => request.get(`${route(task)}/commands/${id}`).set
 const close = (s, task, id) => request.post(`${route(task)}/commands/${id}/close`).set('Cookie', s.cookie).set('X-Expected-User-Id', s.userId).send({});
 const current = async (s, task) => (await listTasks(s.userId)).find(item => item.id === task.id);
 async function session() {
-  const userId = uuid(), token = generateSessionToken(), db = await initUserDatabase(userId);
+  const userId = uuid(), token = generateSessionToken(), db = await createNewUserDatabase(userId);
   if (!process.env.SUPABASE_DB_URL) await provisionNewLocalMemoryAccount(userId, db);
   const auth = getAuthDb(); await auth.read();
   auth.data.users.push({ id: userId, username: userId, password: 'unused' });

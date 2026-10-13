@@ -1,0 +1,14 @@
+{
+  "public_commit": "533d7be3cdd47691602574ccac7c6524e7ed7ab3",
+  "tree": "9392ba1ec25863eaed1e00ece649479981d7e87a",
+  "source_sha256": {
+    "backend/src/utils/encryption.js": "075381cd3f73d104d2cfa688bd98f8c9e1cdbd4c3181cd9399f5bcc3eef748a7",
+    "backend/src/utils/keyManager.js": "6b808d76c53ac3594163496d2ba460303ede5bbb24e0709cb8f7ed21f535a587",
+    "backend/src/utils/localKeyGuard.js": "5407561daa8cf6f83c5c1f7347da12ea22c805575675c05ad2deed6d87fe099d",
+    "backend/src/services/taskSources.js": "d770d787582f991e5bb7d9bf2672b90b0faed67a0db37f4d35cde2482032a535",
+    "backend/src/services/tasks.js": "3e3715950a2a6e607f39b07c4c92dcee2ef6db9d92c8390d57b5027d1d6caeb4",
+    "backend/src/services/taskMetadata.js": "1f6ade5701b68e4dc2d62d2bfd02eb7f1386b3c28733f445cc0e75b8e65ccffe",
+    "backend/src/services/taskDependencies.js": "e27b14c6002d4f1c9ec0e18f99eeccb6538871bcfa4c9f364f98f0a351172f4e",
+    "backend/src/services/taskResults.js": "73a79f647bc9b442d463abee032fe7027290b92ea6370095d86da867d42c6b78"
+  }
+}

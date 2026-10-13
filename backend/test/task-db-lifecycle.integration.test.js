@@ -11,15 +11,20 @@ const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-task-db-lifecycle-
 Object.assign(process.env, { NODE_ENV: 'test', AUTH_MODE: 'session', DATA_DIR: dir,
   AUTH_DB_PATH: path.join(dir, 'auth.json'), ENCRYPTION_KEY: randomBytes(32).toString('base64'),
   AI_ALLOWED_LOCAL_ORIGINS: 'http://127.0.0.1:55555', AI_HEALTH_PROBES: '0' });
-const { initDatabase, initUserDatabase, getUserDb, clearUserDbCache, withWriteLock } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, createNewUserDatabase, getUserDb, clearUserDbCache, withWriteLock } = await import('../src/models/db.js');
 const { initAuthDb } = await import('../src/models/authDb.js');
 const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { saveCatalog, readCatalog, recordCapabilityProbe } = await import('../src/services/ai/catalog.js');
 const { createTask, runTask, listTasks, updateTask, resolveUnknownTaskRun,
   startTaskScheduler, stopTaskScheduler, tickTasks } = await import('../src/services/tasks.js');
 const axios = (await import('axios')).default;
-await initDatabase(); await initAuthDb();
-for (let i = 0; i < 51; i++) await initUserDatabase(`synthetic-pressure-${i}`);
+await initializeEmptyInstallation(); await initDatabase(); await initAuthDb();
+// Preserve the original synthetic-pressure-* ordering: pressure accounts sort
+// after the active account, so each completed sweep actually forces eviction.
+for (let i = 0; i < 51; i++) {
+  const user = 'f' + randomUUID().slice(1), db = await createNewUserDatabase(user);
+  await provisionNewLocalMemoryAccount(user, db);
+}
 await startTaskScheduler();
 after(async () => { stopTaskScheduler(); await fs.rm(dir, { recursive: true, force: true }); });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
@@ -35,7 +40,7 @@ axios.defaults.adapter = async config => {
     data: { choices: [{ message: { content } }], usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 } } };
 };
 async function fresh() {
-  const user = randomUUID(), db = await initUserDatabase(user);
+  const user = '0' + randomUUID().slice(1), db = await createNewUserDatabase(user);
   await provisionNewLocalMemoryAccount(user, db);
   const catalog = await readCatalog(user);
   catalog.providers.push({ id: 'synthetic', name: 'Synthetic', baseUrl: 'http://127.0.0.1:55555/v1', protocol: 'openai', enabled: true, keyRequired: false });

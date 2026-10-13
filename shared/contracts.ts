@@ -116,7 +116,16 @@ export interface MessageTTSAudio {
   provider?: string;
 }
 
+export interface MessageOrder {
+  generation: string;
+  sequence: string;
+}
+
 export interface Message {
+  server_order?: MessageOrder;
+  /** Client-only display trust. Never a persisted consumption cursor. */
+  confirmation?: 'confirmed' | 'preview';
+  preview_reason?: 'cached' | 'streaming' | 'not_saved' | 'unverified';
   id: string;
   group_id: string;
   sender_type: SenderType;
@@ -148,6 +157,23 @@ export interface Message {
 export interface PaginatedMessagesResponse {
   messages: Message[];
   hasMore: boolean;
+}
+
+export interface OrderedMessagesResponse {
+  messages: Message[];
+  hasMore: boolean;
+  order: 'sequence_v1';
+  generation: string;
+  high_watermark: string;
+  consumed_through: string | null;
+  before_cursor: string | null;
+  after_cursor: string | null;
+}
+
+export interface OrderedMessagesQuery {
+  limit?: number;
+  before_cursor?: string;
+  after_cursor?: string;
 }
 
 export interface GroupCreateInput {

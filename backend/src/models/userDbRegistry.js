@@ -1,3 +1,5 @@
+import { beginUserDbWriteBarrier } from './readBarrier.js';
+
 // One active database instance per account. Retirement is permanent for old
 // callers: they must not silently replay a request against a replacement store.
 export function createUserDbRegistry({ maxSize = 50, isLocked = () => false, onEvict = () => {} } = {}) {
@@ -55,7 +57,7 @@ export function createUserDbRegistry({ maxSize = 50, isLocked = () => false, onE
         evict();
       };
     };
-    const read = db.read.bind(db), write = db.write.bind(db);
+    const read = db.read.bind(db);
     db.read = async (...args) => {
       assertCurrent(token);
       try {
@@ -67,56 +69,51 @@ export function createUserDbRegistry({ maxSize = 50, isLocked = () => false, onE
         throw error;
       }
     };
-    db.write = async (...args) => {
-      assertCurrent(token);
-      let finish;
-      const pending = new Promise(resolve => { finish = resolve; });
-      token.writes.add(pending);
-      try {
-        const result = await write(...args);
+    for (const method of ['write', 'create']) {
+      if (typeof db[method] !== 'function') continue;
+      const write = db[method].bind(db);
+      db[method] = async (...args) => {
         assertCurrent(token);
-        return result;
-      } catch (error) {
-        if (token.retired) throw changed(error);
-        throw error;
-      } finally {
-        token.writes.delete(pending); finish();
-      }
-    };
+        // Retain the read fence through this wrapper's final lease check too.
+        // Adapter and caller fences nest without waiting on one another.
+        const releaseBarrier = beginUserDbWriteBarrier(db);
+        let finish;
+        const pending = new Promise(resolve => { finish = resolve; });
+        token.writes.add(pending);
+        try {
+          const result = await write(...args);
+          assertCurrent(token);
+          return result;
+        } catch (error) {
+          if (token.retired) throw changed(error);
+          throw error;
+        } finally {
+          token.writes.delete(pending); finish();
+          releaseBarrier();
+        }
+      };
+    }
     return db;
   };
 
-  return {
+  const api = {
     cache,
     async get(userId, load) {
       const existing = cache.get(userId);
       if (existing) { existing._lastAccess = Date.now(); return existing; }
-      if (loading.has(userId)) return loading.get(userId).promise;
-      const token = { userId, retired: false, writes: new Set(), holds: 0 };
-      const entry = { token, promise: null };
-      loading.set(userId, entry);
-      entry.promise = (async () => {
-        try {
-          while (drainingWrites.get(userId)?.size) {
-            await Promise.all([...drainingWrites.get(userId)]);
-            assertCurrent(token);
-          }
-          assertCurrent(token);
-          const db = await load(candidate => protect(candidate, token));
-          assertCurrent(token);
-          db._lastAccess = Date.now();
-          cache.set(userId, db);
-          evict();
-          return db;
-        } catch (error) {
-          retire(token);
-          throw error;
-        } finally {
-          // A cleared old loader may finish after a new flight has started.
-          if (loading.get(userId) === entry) loading.delete(userId);
-        }
-      })();
-      return entry.promise;
+      if (loading.has(userId)) {
+        const active = loading.get(userId);
+        return active.maintenance ? active.promise.then(() => api.get(userId, load)) : active.promise;
+      }
+      return start(userId, load, false);
+    },
+    async maintain(userId, work) {
+      if (loading.has(userId)) {
+        await loading.get(userId).promise;
+        return api.maintain(userId, work);
+      }
+      api.clear(userId);
+      return start(userId, work, true);
     },
     clear(userId) {
       const ids = userId ? [userId] : [...new Set([...cache.keys(), ...loading.keys()])];
@@ -127,4 +124,34 @@ export function createUserDbRegistry({ maxSize = 50, isLocked = () => false, onE
       }
     }
   };
+  function start(userId, load, maintenance) {
+      const token = { userId, retired: false, writes: new Set(), holds: 0 };
+      const entry = { token, promise: null, maintenance };
+      loading.set(userId, entry);
+      entry.promise = (async () => {
+        try {
+          while (drainingWrites.get(userId)?.size) {
+            await Promise.all([...drainingWrites.get(userId)]);
+            assertCurrent(token);
+          }
+          assertCurrent(token);
+          const db = await load(candidate => protect(candidate, token));
+          assertCurrent(token);
+          if (!maintenance) {
+            db._lastAccess = Date.now();
+            cache.set(userId, db);
+            evict();
+          } else retire(token);
+          return db;
+        } catch (error) {
+          retire(token);
+          throw error;
+        } finally {
+          // A cleared old loader may finish after a new flight has started.
+          if (loading.get(userId) === entry) loading.delete(userId);
+        }
+      })();
+      return entry.promise;
+  }
+  return api;
 }

@@ -72,7 +72,7 @@ test('double form submit sends once; new typing stays separate from explicit fro
   await act(async () => { rejectFirst(new Error('连接中断')); await settle(); });
   assert.equal(container.querySelector('fieldset').disabled, false); assert.ok(button('按原内容重试')); await type(container.querySelector('textarea'),'这次新输入');
   globalThis.__workspaceTest.post = async (...args) => { calls.push(args); const task = { priority: null, estimated_minutes: null, metadata_revision: 0, ...args[1], client_request_id:args[2].headers['Idempotency-Key'], id:'created', status:'pending', history:[], result:'', run_count:0 }; globalThis.__workspaceTest.tasks = [task]; return {data:task}; };
-  await act(async () => { button('按原内容重试').click(); await settle(); });
+  await act(async () => { button('按原内容重试').click(); await waitFor(() => calls.length === 2); });
   assert.equal(calls[0][2].headers['Idempotency-Key'], calls[1][2].headers['Idempotency-Key']);
   assert.equal(calls[1][1].prompt,'内容'); assert.equal(container.querySelector('textarea').value,'这次新输入'); assert.match(container.textContent, /保存回执测试/);
 });
@@ -111,7 +111,7 @@ test('uncertain create can still verify its original receipt after source group 
   await act(async () => store.getState().fetch());
   assert.equal(button('按原内容重试').disabled, false);
   globalThis.__workspaceTest.post = async (...args) => { requests.push(args); throw Object.assign(new Error('来源已删除'), {status:404}); };
-  await act(async () => { button('按原内容重试').click(); await settle(); });
+  await act(async () => { button('按原内容重试').click(); await waitFor(() => requests.length === 2); });
   assert.equal(requests[0][2].headers['Idempotency-Key'], requests[1][2].headers['Idempotency-Key']);
   assert.equal(store.getState().uncertainCreate, true);
   const key=requests[0][2].headers['Idempotency-Key'];globalThis.__workspaceTest.post=async path=>({data:{status:'cancelled',operation:'create',client_request_id:key,task_id:null,task_deleted:false,task:null,closed_at:'2026-10-04'}});

@@ -1,3 +1,4 @@
+import { appendFixtureMessages } from './helpers/accountStoreFixtures.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
@@ -23,8 +24,9 @@ test('real PostgreSQL independent ledger protects every persisted memory API and
   const ledgerPool = new pg.Pool(buildPostgresTlsConfig(process.env.MEMORY_DELETION_DATABASE_URL, process.env.MEMORY_DELETION_DATABASE_CA_FILE));
   try {
     await ensureKvSchema(businessPool);
+    const { initializeEmptyInstallation, initDatabase, getUserDb, clearUserDbCache, withWriteLock } = await import('../src/models/db.js');
+    await initializeEmptyInstallation();
     await installPostgresLedger({ businessPool, ledgerPool, installationId: process.env.MEMORY_DELETION_INSTALLATION_ID });
-    const { initDatabase, getUserDb, clearUserDbCache, withWriteLock } = await import('../src/models/db.js');
     const { initAuthDb } = await import('../src/models/authDb.js');
     const { initializeKeyManager } = await import('../src/utils/keyManager.js');
     await initializeKeyManager();
@@ -38,7 +40,7 @@ test('real PostgreSQL independent ledger protects every persisted memory API and
     const db = await getUserDb(userId);
     const groupId = db.data.groups[0].id;
     const msg = { id: 'synthetic_message', group_id: groupId, sender_id: userId, sender_type: 'user', content: 'synthetic source searchable', metadata: {}, created_at: new Date().toISOString() };
-    await withWriteLock(userId, async () => { await db.read(); db.data.messages.push(msg); await db.write(); });
+    await withWriteLock(userId, async () => { await db.read(); appendFixtureMessages(db.data, msg); await db.write(); });
     const stored = await request.post('/api/memory/store').set('Cookie', cookie).set('Idempotency-Key', 'synthetic-note').send({ content: 'synthetic note searchable', category: 'note' });
     assert.equal(stored.status, 200, JSON.stringify(stored.body));
     const noteId = stored.body.memoryId;
@@ -99,7 +101,7 @@ test('real PostgreSQL independent ledger protects every persisted memory API and
       const db = sourceDb;
       await db.read();
       const revision = { ...msg, id: 'synthetic_revision' };
-      db.data.messages.push(revision);
+      appendFixtureMessages(db.data, revision);
       db.data.files.push({ id: 'synthetic_file', group_id: groupId, owner_user_id: userId });
       await db.write();
       await source.markMessageRevisionRevoked(userId, db, revision);

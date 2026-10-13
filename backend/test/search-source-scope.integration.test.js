@@ -4,15 +4,17 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
+import { appendFixtureMessages } from './helpers/accountStoreFixtures.js';
 
 process.env.NODE_ENV = 'test';
 process.env.AUTH_MODE = 'session';
 process.env.ENCRYPTION_KEY = randomBytes(32).toString('base64');
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-search-scope-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
-const { initDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb } = await import('../src/models/authDb.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
+await initializeEmptyInstallation();
 await initDatabase(); await initAuthDb();
 const request = (await import('supertest')).default(createTestApp());
 async function account() {
@@ -126,7 +128,7 @@ test('search counts all matches before pagination and returns the newest page wi
   const owner = await account(); const target = await group(owner, 'Pagination needle');
   await group(owner, 'Other needle');
   await seed(owner, data => {
-    for (let index = 0; index < 55; index++) data.messages.push({ id: `page-${String(index).padStart(3, '0')}`, group_id: target.id,
+    for (let index = 0; index < 55; index++) appendFixtureMessages(data, { id: `page-${String(index).padStart(3, '0')}`, group_id: target.id,
       sender_type: 'user', sender_id: owner.id, content: `needle ${index}`, created_at: new Date(Date.UTC(2026, 9, 1, 0, index)).toISOString() });
   });
   const first = await request.get('/api/search').set('Cookie', owner.cookie).query({ q: 'needle', type: 'messages,groups', groupId: target.id });
@@ -145,9 +147,9 @@ test('link search matches encrypted plain text without attachments and media fil
   const owner = await account(); const target = await group(owner, 'Link search');
   const { default: encryption } = await import('../src/utils/encryption.js');
   await seed(owner, data => {
-    data.messages.push({ id: randomUUID(), group_id: target.id, sender_type: 'user', sender_id: owner.id,
+    appendFixtureMessages(data, { id: randomUUID(), group_id: target.id, sender_type: 'user', sender_id: owner.id,
       content: encryption.encryptText('needle https://example.com/source'), metadata: { encryption: { encrypted: true } }, created_at: new Date().toISOString() });
-    data.messages.push({ id: randomUUID(), group_id: target.id, sender_type: 'user', sender_id: owner.id,
+    appendFixtureMessages(data, { id: randomUUID(), group_id: target.id, sender_type: 'user', sender_id: owner.id,
       content: 'needle plain text', created_at: new Date().toISOString() });
   });
   const links = await request.get('/api/search').set('Cookie', owner.cookie).query({ q: 'needle', quickFilter: 'links' });
@@ -171,7 +173,7 @@ test('calendar boundaries accept local UTC offsets and apply to file and comment
   const file = await upload(owner, target.id, 'date-needle.txt');
   await seed(owner, data => {
     data.files.find(item => item.id === file.id).created_at = '2026-10-12T16:30:00.000Z';
-    data.messages.push({ id: randomUUID(), group_id: target.id, content: 'date-needle', sender_type: 'user', sender_id: owner.id,
+    appendFixtureMessages(data, { id: randomUUID(), group_id: target.id, content: 'date-needle', sender_type: 'user', sender_id: owner.id,
       created_at: '2026-10-12T16:30:00.000Z', comments: [
         { id: 'in-day', content: 'date-needle', created_at: '2026-10-12T16:30:00.000Z' },
         { id: 'outside-day', content: 'date-needle', created_at: '2026-10-13T16:30:00.000Z' }] });
@@ -186,7 +188,7 @@ test('comment scope is enforced before global chronological ordering, counts and
   const owner = await account(); const a = await group(owner, 'Comment scope A'); const b = await group(owner, 'Comment scope B');
   await seed(owner, data => {
     for (const [groupId, id, date] of [[a.id, 'a-old', '2026-10-01'], [b.id, 'b-new', '2026-10-03'], [a.id, 'a-new', '2026-10-02']]) {
-      data.messages.push({ id: randomUUID(), group_id: groupId, content: 'parent', sender_type: 'user', sender_id: owner.id,
+      appendFixtureMessages(data, { id: randomUUID(), group_id: groupId, content: 'parent', sender_type: 'user', sender_id: owner.id,
         created_at: date + 'T00:00:00Z', comments: [{ id, message_id: 'untrusted-parent', content: 'scoped comment needle', created_at: date + 'T00:00:00Z' }] });
     }
   });
@@ -196,4 +198,49 @@ test('comment scope is enforced before global chronological ordering, counts and
   assert.notEqual(response.body.comments[0].message_id, 'untrusted-parent'); assert.equal(response.body.pagination.hasMore, true);
   const missing = await search(owner, 'scoped comment needle', 'comments', randomUUID());
   assert.equal(missing.body.total, 0); assert.deepEqual(missing.body.comments, []);
+});
+
+test('search refuses a handle retired after its protected read completed and publishes no stale result', async () => {
+  const owner = await account(); const target = await group(owner, 'Retired search source');
+  const marker = `retired-${randomUUID()}`;
+  await seed(owner, data => appendFixtureMessages(data, { id: randomUUID(), group_id: target.id,
+    sender_type: 'user', sender_id: owner.id, content: marker, created_at: new Date().toISOString() }));
+  const db = await getUserDb(owner.id), original = db.read; let retired = false;
+  db.read = async function (options) {
+    const result = await original.call(this, options);
+    retired = true; clearUserDbCache(owner.id);
+    return result;
+  };
+  let response;
+  try { response = await search(owner, marker, 'messages', target.id); }
+  finally { db.read = original; }
+  assert.equal(retired, true);
+  assert.equal(response.status, 503);
+  assert.equal(response.body.code, 'USER_DB_REPLACED');
+  assert.equal(JSON.stringify(response.body).includes(marker), false);
+  assert.equal(response.body.messages, undefined);
+});
+
+test('search reads one published snapshot even when a late cache mutation follows the protected read', async () => {
+  const owner = await account(); const target = await group(owner, 'Published snapshot group');
+  const marker = `snapshot-${randomUUID()}`, messageId = randomUUID();
+  await seed(owner, data => appendFixtureMessages(data, { id: messageId, group_id: target.id,
+    sender_type: 'user', sender_id: owner.id, content: marker, created_at: new Date().toISOString() }));
+  const db = await getUserDb(owner.id), original = db.read; let injected = false;
+  db.read = async function (options) {
+    const result = await original.call(this, options);
+    injected = true;
+    this.data.messages.find(row => row.id === messageId).content = 'uncommitted late cache value';
+    this.data.groups.find(row => row.id === target.id).name = 'uncommitted late group name';
+    return result;
+  };
+  let response;
+  try { response = await search(owner, marker, 'messages', target.id); }
+  finally { db.read = original; }
+  assert.equal(injected, true); assert.equal(response.status, 200);
+  assert.equal(response.body.counts.messages, 1);
+  assert.equal(response.body.messages[0].content, marker);
+  assert.equal(response.body.messages[0].group_name, target.name);
+  await db.read({ force: true });
+  assert.equal(db.data.messages.find(row => row.id === messageId).content, marker);
 });

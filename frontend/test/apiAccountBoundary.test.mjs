@@ -109,3 +109,40 @@ test('explicit account guards are case-insensitive and cannot be overwritten by 
  axiosInstance.defaults.adapter=async config=>{sent=config.headers.get('x-expected-user-id');return response(config,{private:'unexpected-user'});};
  await assert.rejects(axiosInstance.get('/profile',{headers:{'x-expected-user-id':'alice'}}),error=>error.code==='STALE_ACCOUNT_RESPONSE');assert.equal(sent,'alice');
 });
+
+
+// F07: the independently budgeted read must never multiply one page into Axios retries.
+test('ordered GET has one transport attempt for network/5xx and preserves Retry-After', async () => {
+  globalThis.__apiAccount = 'alice'; confirmAuthIdentity('alice');
+  for (const scenario of ['network', '503', '429']) {
+    const origins = [];
+    axiosInstance.defaults.adapter = async config => {
+      origins.push(config.baseURL);
+      if (scenario === 'network') throw Object.assign(new Error('offline'), {config, code: 'ERR_NETWORK'});
+      throw Object.assign(new Error('read failed'), {config, response: {status: Number(scenario), data: {error: 'try later', code: 'READ_FAILED'}, headers: new axios.AxiosHeaders({'Retry-After':'120'})}});
+    };
+    await assert.rejects(api.getOrderedMessages('group'), error => scenario !== '429' || (error.status === 429 && error.retryAfter === '120'));
+    assert.deepEqual(origins, ['/api']);
+  }
+});
+test('ordered GET primitive or incomplete success pauses as schema failure, never silently accepts legacy rows', async () => {
+  globalThis.__apiAccount = 'alice'; confirmAuthIdentity('alice');
+  for (const body of ['unexpected', {messages: [], hasMore: false}]) {
+    axiosInstance.defaults.adapter = async config => response(config,body);
+    await assert.rejects(api.getOrderedMessages('group'), {code: 'INVALID_MESSAGE_ORDER_SCHEMA'});
+  }
+});
+
+test('remote offset search and legacy messages retain their own parameters and ordinary read fallback',async()=>{
+  globalThis.__apiAccount='alice';confirmAuthIdentity('alice');const requests=[];
+  axiosInstance.defaults.adapter=async config=>{
+    requests.push({url:config.url,params:{...config.params},baseURL:config.baseURL,noInternalReadRetry:config.noInternalReadRetry});
+    if(requests.length===1)throw Object.assign(new Error('network'),{config,code:'ERR_NETWORK'});
+    return response(config,{messages:[],hasMore:false});
+  };
+  await api.globalSearch('needle',{offset:20,limit:20,groupId:'group'});
+  assert.equal(requests.length,2);assert.deepEqual(requests.map(r=>r.baseURL),['/api','http://fallback.test/api']);
+  for(const request of requests){assert.deepEqual(request.params,{q:'needle',groupId:'group',limit:20,offset:20});assert.notEqual(request.noInternalReadRetry,true);}
+  await api.getMessages('group',25,'older','newer');
+  assert.deepEqual(requests[2].params,{limit:25,before:'older',after:'newer'});assert.notEqual(requests[2].noInternalReadRetry,true);
+});

@@ -1,3 +1,4 @@
+import { appendFixtureMessages } from './helpers/accountStoreFixtures.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
@@ -10,13 +11,14 @@ process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-persistent-memory-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 
-const { initDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
 const { forgetAllMemories, readableSourceMessages } = await import('../src/services/memory/persistentMemory.js');
 const { initAuthDb, getAuthDb } = await import('../src/models/authDb.js');
 const { runAsUser } = await import('../src/services/userScope.js');
 const { getRecentDebateMessages } = await import('../src/services/debate/index.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
 const supertest = (await import('supertest')).default;
+await initializeEmptyInstallation();
 await initDatabase();
 await initAuthDb();
 const request = supertest(createTestApp());
@@ -72,9 +74,12 @@ test('new accounts have a ledger before first read; unregistered old accounts ca
   const snapshot = JSON.parse(await fs.readFile(ownerJson, 'utf8'));
   const groupId = snapshot.groups[0].id;
   snapshot.memoryRecords = [];
+  delete snapshot.message_order;
   snapshot.messages.push({ id: randomUUID(), group_id: groupId, sender_id: oldId,
     sender_type: 'user', content: '未注册旧账号的私人消息', content_type: 'text',
     metadata: {}, created_at: new Date().toISOString() });
+  const { buildLegacyMessageOrder } = await import('../src/services/messageOrder.js');
+  snapshot.message_order = buildLegacyMessageOrder(snapshot, oldId, { generationForGroup: () => randomUUID() });
   await fs.writeFile(oldJson, JSON.stringify(snapshot));
 
   const read = await request.get(`/api/groups/${groupId}/messages`)
@@ -198,12 +203,12 @@ test('message quotes stay unverified and source edit or delete removes them befo
     await db.read();
     groupId = db.data.groups[0].id;
     otherGroupId = db.data.groups[1].id;
-    db.data.messages.push({
+    appendFixtureMessages(db.data, {
       id: messageId, group_id: groupId, sender_id: owner.id, sender_type: 'user',
       content: '来源仍未核实的交付日是周二', content_type: 'text',
       metadata: {}, created_at: new Date().toISOString()
     });
-    db.data.messages.push({
+    appendFixtureMessages(db.data, {
       id: otherMessageId, group_id: otherGroupId, sender_id: owner.id, sender_type: 'user',
       content: '来源仍未核实的交付日是周二', content_type: 'text',
       metadata: {}, created_at: new Date().toISOString()
@@ -293,7 +298,7 @@ test('restoring old user JSON cannot revive forgotten notes or revoked message q
   const messageId = randomUUID();
   await withWriteLock(owner.id, async () => {
     await db.read();
-    db.data.messages.push({ id: messageId, group_id: groupId, sender_id: owner.id,
+    appendFixtureMessages(db.data, { id: messageId, group_id: groupId, sender_id: owner.id,
       sender_type: 'user', content: '旧来源的私人摘录', content_type: 'text',
       metadata: {}, created_at: new Date().toISOString(),
       comments: [{ id: randomUUID(), message_id: messageId, sender_type: 'user',
@@ -398,7 +403,7 @@ test('clearing messages revokes old sources but permits later messages in the sa
   const oldId = randomUUID();
   await withWriteLock(owner.id, async () => {
     await db.read();
-    db.data.messages.push({ id: oldId, group_id: groupId, sender_id: owner.id,
+    appendFixtureMessages(db.data, { id: oldId, group_id: groupId, sender_id: owner.id,
       sender_type: 'user', content: '清空前的摘录', content_type: 'text',
       metadata: {}, created_at: new Date().toISOString() });
     await db.write();
@@ -414,7 +419,7 @@ test('clearing messages revokes old sources but permits later messages in the sa
   const newId = randomUUID();
   await withWriteLock(owner.id, async () => {
     await db.read();
-    db.data.messages.push({ id: newId, group_id: groupId, sender_id: owner.id,
+    appendFixtureMessages(db.data, { id: newId, group_id: groupId, sender_id: owner.id,
       sender_type: 'user', content: '清空后的新摘录', content_type: 'text',
       metadata: {}, created_at: new Date().toISOString() });
     await db.write();
@@ -447,7 +452,7 @@ test('all source deletion routes reject restored old quotes without crossing sur
           group.is_ai_private = true;
         }
         for (const id of ids) {
-          db.data.messages.push({ id, group_id: groupId, sender_id: owner.id,
+          appendFixtureMessages(db.data, { id, group_id: groupId, sender_id: owner.id,
             sender_type: 'user', content: `旧来源 ${id}`, content_type: 'text',
             metadata: {}, created_at: new Date().toISOString() });
         }

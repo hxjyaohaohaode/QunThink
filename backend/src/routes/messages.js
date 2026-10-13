@@ -21,6 +21,11 @@ import { revokeMessageMemories, markMessageRevisionRevoked,
   markMessageDeleted, sourceMutationUncertain, readableSourceMessages,
   readableSourceGroups, readableSourceFiles, isSourceIdentityRevoked } from '../services/memory/persistentMemory.js';
 
+import { commitUserHttpMessage } from '../services/httpMessageCommit.js';
+import { beginUserDbWriteBarrier } from '../models/readBarrier.js';
+import { orderedMessagePage, parseMessagePageQuery } from '../services/messagePagination.js';
+import { accountSnapshotSourceView } from '../services/accountSnapshotSources.js';
+
 const router = express.Router();
 
 const MESSAGE_INDEX_CACHE = new Map();
@@ -177,46 +182,66 @@ function normalizeDislikeState(message) {
 router.get('/groups/:groupId/messages', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   const { groupId } = req.params;
-  const { limit, before, after } = req.query;
-  return withWriteLock(req.userId, async () => {
-    await readUserData(db);
-    const group = (await readableSourceGroups(req.userId, db))
-      .find(item => item.id === groupId);
-    if (!group) return res.status(404).json({ error: 'Group not found' });
-    const readable = await readableSourceMessages(req.userId, db);
-
-    const { messages, hasMore } = getMessagesForGroup(readable, req.userId, groupId, parseMessageLimit(limit), before, after);
-
-  const decryptedMessages = messages.map(message => {
-    try {
-      const isEncrypted = message.metadata?.encryption?.encrypted;
-      if (isEncrypted && message.content && typeof message.content === 'string') {
-        const decryptedContent = encryptionUtils.decryptText(message.content);
-        return {
-          ...message,
-          content: decryptedContent,
-          metadata: {
-            ...message.metadata,
-            encryption: {
-              ...message.metadata.encryption,
-              decrypted: true,
-              decryption_timestamp: new Date().toISOString()
+  const releaseLease = db.holdCurrentLease?.();
+  let releaseBarrier, outcome;
+  try {
+    outcome = await withWriteLock(req.userId, async () => {
+      try {
+        let snapshot;
+        await db.read({ force: true, onPublished: published => {
+          releaseBarrier = beginUserDbWriteBarrier(db);
+          snapshot = structuredClone(published.data);
+        } });
+        if (!snapshot) throw new TypeError('Account adapter did not publish a synchronous snapshot');
+        // Keep the adapter prototype for independent source-ledger checks, but
+        // every record (including attachment cleanup) comes from this copy.
+        const sourceView = accountSnapshotSourceView(db, snapshot);
+        const group = (await readableSourceGroups(req.userId, sourceView)).find(item => item.id === groupId);
+        if (!group) return { status: 404, body: { error: 'Group not found' } };
+        const queryStart = req.originalUrl.indexOf('?');
+        const query = parseMessagePageQuery(queryStart < 0 ? '' : req.originalUrl.slice(queryStart + 1));
+        const readable = await readableSourceMessages(req.userId, sourceView);
+        const page = query.kind === 'legacy'
+          ? getMessagesForGroup(readable, req.userId, groupId, parseMessageLimit(query.rawLimit))
+          : orderedMessagePage({ snapshot, readableMessages: readable, ownerId: req.userId, groupId, query });
+        const messages = page.messages.map(message => {
+          try {
+            const isEncrypted = message.metadata?.encryption?.encrypted;
+            if (isEncrypted && message.content && typeof message.content === 'string') {
+              return {
+                ...message,
+                content: encryptionUtils.decryptText(message.content),
+                metadata: {
+                  ...message.metadata,
+                  encryption: {
+                    ...message.metadata.encryption,
+                    decrypted: true,
+                    decryption_timestamp: new Date().toISOString()
+                  }
+                }
+              };
             }
+            return message;
+          } catch (error) {
+            safeLog('warn', '解密消息内容失败', { messageId: message.id, error: error.message });
+            return message;
           }
-        };
+        });
+        return { status: 200, body: { ...page, messages } };
+      } catch (error) {
+        // Finish the outer ledger validation before exposing domain results.
+        return { error };
       }
-      return message;
-    } catch (error) {
-      safeLog('warn', '解密消息内容失败', { messageId: message.id, error: error.message });
-      return message;
-    }
-  });
-
-  res.json({
-    messages: decryptedMessages,
-    hasMore
-  });
-  });
+    });
+    db.assertCurrentLease?.();
+  } finally {
+    releaseBarrier?.();
+    releaseLease?.();
+  }
+  if (outcome.error) throw outcome.error;
+  // Never send from inside withWriteLock: PostgreSQL still checks its ledger
+  // lease after the callback has returned, and can legitimately reject it.
+  return res.status(outcome.status).json(outcome.body);
 }));
 
 router.post('/groups/:groupId/messages', validateBody(sendWithClientIdSchema), asyncHandler(async (req, res) => {
@@ -230,7 +255,6 @@ router.post('/groups/:groupId/messages', validateBody(sendWithClientIdSchema), a
   // Only the TTS service may attach audio ownership to a message.
   delete metadata.tts;
   sanitizedBody.metadata = metadata;
-  const attachments = sanitizedBody.attachments;
   const sender_type = 'user';
   const sender_id = req.userId;
   if (!sender_id) return res.status(401).json({ error: '未认证' });
@@ -244,78 +268,13 @@ router.post('/groups/:groupId/messages', validateBody(sendWithClientIdSchema), a
   const clientMessageId = req.body.clientMessageId || headerKey || null;
   const requestHash = clientMessageId ? messageRequestHash(groupId, sanitizedBody) : null;
 
-  const outcome = await withWriteLock(req.userId, async () => {
-    await readUserData(db);
-    const group = (await readableSourceGroups(req.userId, db))
-      .find(item => item.id === groupId);
-    if (!group) return { status: 404, error: 'Group not found' };
-
-    const prior = clientMessageId && (db.data.messageIdempotency || []).find(
-      entry => entry.client_message_id === clientMessageId
-    );
-    if (prior) {
-      if (prior.request_hash !== requestHash) return { status: 409, error: 'clientMessageId 已用于不同消息' };
-      const existing = (await readableSourceMessages(req.userId, db))
-        .find(message => message.id === prior.message_id && message.group_id === groupId);
-      if (!existing) return { status: 410, error: '原消息已删除，不能重复发送' };
-      return { status: 200, message: displayMessage(existing), created: false };
-    }
-
-    const filesIndex = new Map((await readableSourceFiles(req.userId, db))
-      .filter(file => (!file.owner_user_id || file.owner_user_id === req.userId) &&
-        (!file.uploader_id || file.uploader_id === req.userId))
-      .map(file => [file.id, file]));
-    if ((attachments || []).some(att => filesIndex.get(att.id)?.group_id !== groupId)) {
-      return { status: 404, error: '附件不存在或已撤销' };
-    }
-    const enrichedAttachments = (attachments || []).map(att => {
-      const fileRecord = filesIndex.get(att.id);
-      return fileRecord && fileRecord.group_id === groupId ? {
-        ...att,
-        media_description: fileRecord.media_description || att.media_description || '',
-        parsed_content: fileRecord.parsed_content || ''
-      } : att;
-    });
-
-    const encryptedContent = content_type === 'text' ? encryptionUtils.encryptText(content) : content;
-    const encryptionInfo = content_type === 'text' ? {
-      encrypted: true,
-      encryption_version: 'aes-256-gcm-v1',
-      encryption_timestamp: new Date().toISOString()
-    } : null;
-    const message = {
-      id: uuidv4(), group_id: groupId, sender_type, sender_id,
-      content: encryptedContent, content_type, reply_to,
-      attachments: enrichedAttachments,
-      client_message_id: clientMessageId,
-      metadata: { ...metadata, encryption: encryptionInfo },
-      created_at: new Date().toISOString()
-    };
-    const previousMessages = db.data.messages;
-    const previousLedger = db.data.messageIdempotency;
-    const previousActivity = { last_message_at: group.last_message_at, last_message_preview: group.last_message_preview };
-    db.data.messages = [...previousMessages, message];
-    if (clientMessageId) db.data.messageIdempotency = [...(previousLedger || []), {
-      client_message_id: clientMessageId, request_hash: requestHash,
-      message_id: message.id, group_id: groupId, created_at: message.created_at
-    }];
-    updateGroupActivity(group, { ...message, content });
-    try {
-      await db.write();
-    } catch (error) {
-      db.data.messages = previousMessages;
-      if (previousLedger === undefined) delete db.data.messageIdempotency;
-      else db.data.messageIdempotency = previousLedger;
-      Object.assign(group, previousActivity);
-      throw error;
-    }
-    invalidateMessageIndex(req.userId, groupId);
-    return { status: 201, message: displayMessage(message), created: true };
-  });
-
-  if (!outcome.message) return res.status(outcome.status).json({ error: outcome.error });
-  if (!outcome.created) return res.status(200).json(outcome.message);
-  const message = outcome.message;
+  const outcome = await commitUserHttpMessage({ userId: req.userId, db, groupId,
+    body: sanitizedBody, clientMessageId, requestHash });
+  const message = displayMessage(outcome.result.message);
+  invalidateMessageIndex(req.userId, groupId);
+  // Recovered unknown ACKs and historical receipts are already-created work.
+  // Returning their original identity must never dispatch another model request.
+  if (outcome.disposition !== 'committed') return res.status(200).json(message);
   const messageId = message.id;
   const enrichedAttachments = message.attachments;
 
@@ -332,7 +291,9 @@ router.post('/groups/:groupId/messages', validateBody(sendWithClientIdSchema), a
     content_type,
     reply_to,
     attachments: stripAttachmentFullContent(enrichedAttachments),
-    created_at: message.created_at
+    created_at: message.created_at,
+    server_order: message.server_order,
+    durable: true, persistence_status: 'confirmed'
   });
 
   if (process.env.NODE_ENV !== 'test') {
@@ -859,19 +820,29 @@ router.get('/search', asyncHandler(async (req, res) => {
   catch (error) { return res.status(400).json({ error: error.message }); }
   const { q, groupId, quickFilter, fromDate, toDate } = options;
   const db = await req.getUserDb();
-  return withWriteLock(req.userId, async () => {
-  await readUserData(db);
-  const readableMessages = newestFirst(await readableSourceMessages(req.userId, db));
-  const readableGroups = newestFirst(await readableSourceGroups(req.userId, db));
+  const releaseLease = db.holdCurrentLease?.();
+  let releaseBarrier, outcome;
+  try {
+    outcome = await withWriteLock(req.userId, async () => {
+      try {
+        let snapshot;
+        await db.read({ force: true, onPublished: published => {
+          releaseBarrier = beginUserDbWriteBarrier(db);
+          snapshot = structuredClone(published.data);
+        } });
+        if (!snapshot) throw new TypeError('Account adapter did not publish a synchronous snapshot');
+        const sourceView = accountSnapshotSourceView(db, snapshot);
+  const readableMessages = newestFirst(await readableSourceMessages(req.userId, sourceView));
+  const readableGroups = newestFirst(await readableSourceGroups(req.userId, sourceView));
   const readableGroupIds = new Set(readableGroups.map(group => group.id));
   // Keep source/owner checks and apply the requested group before previews
   // or result counts are built; missing group identities never gain access.
-  const readableFiles = newestFirst(await readableSourceFiles(req.userId, db)).filter(file =>
+  const readableFiles = newestFirst(await readableSourceFiles(req.userId, sourceView)).filter(file =>
     (!file.owner_user_id || file.owner_user_id === req.userId) &&
     (!file.uploader_id || file.uploader_id === req.userId) &&
     (!groupId || file.group_id === groupId));
 
-  const accountPersonas = buildMergedPersonas(db.data.customPersonas || {}, getCatalogData(db.data));
+  const accountPersonas = buildMergedPersonas(snapshot.customPersonas || {}, getCatalogData(snapshot));
   const searchQuery = q.toLowerCase().trim();
   const searchTypes = options.types.filter(type => quickFilter === 'all' || ['messages', 'files', 'media'].includes(type));
   const results = {
@@ -988,7 +959,7 @@ router.get('/search', asyncHandler(async (req, res) => {
         }
 
         if (contentMatch || ttsMatch || attachmentMatch) {
-          const groupObj = (db.data.groups || []).find(g => g.id === message.group_id);
+          const groupObj = (snapshot.groups || []).find(g => g.id === message.group_id);
           let resultContent = content || '';
           let attachmentMatchPreview = null;
 
@@ -1124,7 +1095,7 @@ router.get('/search', asyncHandler(async (req, res) => {
   }
 
   if (searchTypes.includes('agents')) {
-    const agents = newestFirst(db.data.agents || []).filter(agent => !groupId || readableGroups.some(group => group.id === groupId && group.ai_members?.includes(agent.id)));
+    const agents = newestFirst(snapshot.agents || []).filter(agent => !groupId || readableGroups.some(group => group.id === groupId && group.ai_members?.includes(agent.id)));
     for (const agent of agents) {
       const nameMatch = agent.name?.toLowerCase().includes(searchQuery);
       const descMatch = agent.description?.toLowerCase().includes(searchQuery);
@@ -1217,7 +1188,7 @@ router.get('/search', asyncHandler(async (req, res) => {
         }
       }
       // 搜索自定义智能体成员
-      const agents = db.data.agents || [];
+      const agents = snapshot.agents || [];
       for (const agent of agents) {
         if (!aiMembers.includes(agent.id)) continue;
         const memberKey = `agent_${agent.id}`;
@@ -1320,8 +1291,19 @@ router.get('/search', asyncHandler(async (req, res) => {
 
   collector.finish();
 
-  res.json(results);
-  });
+        return { body: results };
+      } catch (error) {
+        return { error };
+      }
+    });
+    db.assertCurrentLease?.();
+  } finally {
+    releaseBarrier?.();
+    releaseLease?.();
+  }
+  if (outcome.error) throw outcome.error;
+  // Publish only after the outer source-ledger and current-handle fences.
+  return res.json(outcome.body);
 }));
 
 router.post('/groups/:groupId/messages/:messageId/read', asyncHandler(async (req, res) => {

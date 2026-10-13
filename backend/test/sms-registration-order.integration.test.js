@@ -12,7 +12,7 @@ process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 // Synthetic SDK settings; the returned SDK method is replaced before requests.
 process.env.ALIYUN_ACCESS_KEY_ID = 'synthetic-test';
 process.env.ALIYUN_ACCESS_KEY_SECRET = 'synthetic-test';
-const { initDatabase, getUserDb } = await import('../src/models/db.js');
+const { initDatabase, initializeEmptyInstallation, getUserDb } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb } = await import('../src/models/authDb.js');
 const { initSmsClient } = await import('../src/services/sms/index.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
@@ -21,7 +21,7 @@ const express = (await import('express')).default;
 const cookieParser = (await import('cookie-parser')).default;
 const { errorHandler } = await import('../src/middleware/errorHandler.js');
 const supertest = (await import('supertest')).default;
-await initDatabase(); await initAuthDb();
+await initializeEmptyInstallation(); await initDatabase(); await initAuthDb();
 const client = initSmsClient();
 let verifyCalls = 0;
 client.checkSmsVerifyCodeWithOptions = async () => { verifyCalls++; return { body: { code: 'OK', model: { verifyResult: 'PASS' } } }; };

@@ -2,7 +2,7 @@ import express from 'express';
 import { writeSessionChanges } from '../services/sessionPersistence.js';
 import { revokeSessionConnections } from '../websocket/index.js';
 import { getAuthDb, hashPasswordAsync, verifyPasswordAsync, generateSessionToken, findSessionByToken } from '../models/authDb.js';
-import { initUserDatabase, withWriteLock } from '../models/db.js';
+import { createNewUserDatabase, withWriteLock } from '../models/db.js';
 import crypto from 'crypto';
 import { validateBody, smsRegisterSchema, phoneLoginSchema } from '../validators/index.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
@@ -108,7 +108,7 @@ if (!isProduction) {
       // Provision the independent deletion ledger before this account/session
       // becomes visible. A crash can leave an orphan UUID, never an account
       // that is readable but lacks its required ledger.
-      const userDb = await initUserDatabase(userId);
+      const userDb = await createNewUserDatabase(userId);
       await provisionNewLocalMemoryAccount(userId, userDb);
       db.data.users = [...db.data.users, user];
       db.data.sessions = [...db.data.sessions,
@@ -217,7 +217,7 @@ router.post('/auth/register-sms', validateBody(smsRegisterSchema), asyncHandler(
       raceDetected = true;
       return;
     }
-    const userDb = await initUserDatabase(userId);
+    const userDb = await createNewUserDatabase(userId);
     await provisionNewLocalMemoryAccount(userId, userDb);
     db.data.users = [...db.data.users, user];
     try { await db.write(); }

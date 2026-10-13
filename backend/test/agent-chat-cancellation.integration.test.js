@@ -46,12 +46,13 @@ const provider = createServer(async (req, res) => {
 provider.listen(0, '127.0.0.1');
 await once(provider, 'listening');
 process.env.AI_ALLOWED_LOCAL_ORIGINS = `http://127.0.0.1:${provider.address().port}`;
-const { initDatabase, getUserDb } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, getUserDb } = await import('../src/models/db.js');
 const { initAuthDb } = await import('../src/models/authDb.js');
 const { recordCapabilityProbe } = await import('../src/services/ai/catalog.js');
 const { chatWithAgent } = await import('../src/services/agent/index.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
 const supertest = (await import('supertest')).default;
+await initializeEmptyInstallation();
 await initDatabase(); await initAuthDb();
 const app = createTestApp(), request = supertest(app);
 const server = app.listen(0, '127.0.0.1');

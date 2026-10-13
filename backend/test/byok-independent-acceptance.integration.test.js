@@ -1,3 +1,4 @@
+import { appendFixtureMessages } from './helpers/accountStoreFixtures.js';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -25,7 +26,7 @@ axios.defaults.adapter = async config => {
   throw new Error('AUDIT_BLOCKED_ALL_PROVIDER_TRANSPORT');
 };
 const { getCatalogData, publicCatalog, resolveModelSnapshot, capabilityFingerprint, readCatalog, saveCatalog, resolveModel, defaultModelId } = await import('../src/services/ai/catalog.js');
-const { initDatabase, initUserDatabase, getUserDb, clearUserDbCache } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, createNewUserDatabase, getUserDb, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb, generateSessionToken } = await import('../src/models/authDb.js');
 const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
@@ -36,6 +37,7 @@ const { createTask, runTask, stopTaskScheduler } = await import('../src/services
 const loadBalancerExists = await fs.access(new URL('../src/services/ai/loadBalancer.js', import.meta.url)).then(() => true, () => false);
 const loadBalancer = loadBalancerExists ? (await import('../src/services/ai/loadBalancer.js')).default : null;
 const request = (await import('supertest')).default(createTestApp());
+await initializeEmptyInstallation();
 await initDatabase();
 await initAuthDb();
 after(() => { axios.defaults.adapter = oldAdapter; stopTaskScheduler(); loadBalancer?.cleanupTimers(); });
@@ -52,7 +54,7 @@ function explicitCatalog(apiKey = '') {
 }
 async function session() {
   const userId = crypto.randomUUID(), token = generateSessionToken();
-  const userDb = await initUserDatabase(userId);
+  const userDb = await createNewUserDatabase(userId);
   await provisionNewLocalMemoryAccount(userId, userDb);
   const auth = getAuthDb(); await auth.read();
   auth.data.users.push({ id: userId, username: userId, password: 'unused', role: 'admin', created_at: new Date().toISOString() });
@@ -187,7 +189,7 @@ test('legacy saved keys and user history survive reads without automatic model s
   s.userDb.data.aiApiConfigs = { deepseek: { apiKey: 'legacy-user-owned-test-secret', baseUrl: 'https://api.deepseek.com' } };
   s.userDb.data.agents = [{ id: 'user-agent', name: 'My agent', model_roles: [{ modelId: 'deepseek', role: '主回复' }] }];
   s.userDb.data.agent_messages = [{ id: 'historic-agent-message', agent_id: 'user-agent', role: 'assistant', content: 'Saved content' }];
-  s.userDb.data.messages = [{ id: 'historic-group-message', group_id: 'group-presidential', sender_id: 'deepseek', sender_type: 'ai', content: 'Saved content' }];
+  appendFixtureMessages(s.userDb.data, { id: 'historic-group-message', group_id: 'group-presidential', sender_id: 'deepseek', sender_type: 'ai', content: 'Saved content' });
   const preserved = structuredClone({ config: s.userDb.data.aiApiConfigs, agents: s.userDb.data.agents, agentMessages: s.userDb.data.agent_messages, messages: s.userDb.data.messages });
   await s.userDb.write(); clearUserDbCache(s.userId);
   const catalog = await readCatalog(s.userId);
@@ -253,17 +255,28 @@ test('user-key probes and chat succeed only through intercepted mock transport w
   } finally { mockSuccess = false; }
 });
 
-test('upgrade detaches auto-seeded participants reversibly and preserves explicit catalog participants', async () => {
+test('reads preserve historical participants verbatim while retired models stay unavailable and explicit catalog participants survive', async () => {
   const s = await session();
   const group = s.userDb.data.groups.find(g => g.id === 'group-presidential');
   group.ai_members = ['deepseek', 'glm_air'];
   const history = [{ id: 'old-ai-message', group_id: group.id, sender_type: 'ai', sender_id: 'deepseek', content: 'retained' }];
-  s.userDb.data.messages = history;
-  await s.userDb.write(); clearUserDbCache(s.userId);
+  appendFixtureMessages(s.userDb.data, ...history);
+  await s.userDb.write();
+  const originalBytes = await fs.readFile(path.join(process.env.DATA_DIR, 'users', `db_${s.userId}.json`), 'utf8');
+  clearUserDbCache(s.userId);
   const upgraded = await getUserDb(s.userId);
   const migrated = upgraded.data.groups.find(g => g.id === group.id);
-  assert.deepEqual(migrated.ai_members, []);
-  assert.deepEqual([...migrated.retired_ai_members].sort(), ['deepseek', 'glm_air']);
+  assert.deepEqual(migrated.ai_members, ['deepseek', 'glm_air']);
+  assert.equal(Object.hasOwn(migrated, 'retired_ai_members'), false);
+  assert.equal(await fs.readFile(path.join(process.env.DATA_DIR, 'users', `db_${s.userId}.json`), 'utf8'), originalBytes);
+  const before = outbound.length;
+  assert.deepEqual((await request.get('/api/ai/models').set('Cookie', s.cookie)).body.models, {});
+  for (const modelId of migrated.ai_members) {
+    await assert.rejects(resolveModel(s.userId, modelId, 'chat'), { status: 404 });
+    const rejected = await request.post(`/api/private-chat/${modelId}`).set('Cookie', s.cookie).send({});
+    assert.equal(rejected.status, 400);
+  }
+  assert.equal(outbound.length, before, 'historical member IDs never authorize a provider dispatch');
   assert.deepEqual(upgraded.data.messages, history);
   const first = structuredClone(upgraded.data);
   clearUserDbCache(s.userId);

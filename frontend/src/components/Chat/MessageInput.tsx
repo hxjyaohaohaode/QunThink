@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useGroupsStore } from '../../stores/groupsStore';
 import { useMessagesStore } from '../../stores/messagesStore';
 import { useUIStore } from '../../stores/uiStore';
-import { api } from '../../services/api';
+import { api, getAuthGeneration } from '../../services/api';
 import { AI_NAMES, AI_COLORS } from '../../types';
 import { useModelsStore } from '../../stores/modelsStore';
 import { usePersonasStore } from '../../stores/personasStore';
@@ -10,7 +10,7 @@ import type { MessageAttachment, UploadedFile } from '../../types';
 import { stopGeneration } from '../../services/websocket';
 import { AnimatedButton } from '../Common/AnimatedButton';
 import { AttachmentStack } from './AttachmentStack';
-import { getCacheUserId, loadCacheAsync, saveCacheAsync } from '../../utils/cacheUtils';
+import { getCacheUserId, loadCacheAsync, saveCacheWithDurability } from '../../utils/cacheUtils';
 
 interface LastMessageMeta {
   id: string;
@@ -74,10 +74,13 @@ function toMessageAttachment(uploadedFile: UploadedFile, fallbackFile: File): Me
 }
 
 export function MessageInput() {
-  const [input, setInput] = useState('');
+  const intentRevisionRef = useRef(0);
+  const [input, setInputState] = useState('');
+  const setInput = useCallback((value: string) => { intentRevisionRef.current++; setInputState(value); }, []);
   const [showMentions, setShowMentions] = useState(false);
   const [mentionFilter, setMentionFilter] = useState('');
-  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [attachments, setAttachmentsState] = useState<ComposerAttachment[]>([]);
+  const setAttachments = useCallback((value: React.SetStateAction<ComposerAttachment[]>) => { intentRevisionRef.current++; setAttachmentsState(value); }, []);
   const [uploading, setUploading] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [lastFailedContent, setLastFailedContent] = useState<string | null>(null);
@@ -86,7 +89,7 @@ export function MessageInput() {
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [showSendSuccess, setShowSendSuccess] = useState(false);
   const [draftReadyScope, setDraftReadyScope] = useState<string | null>(null);
-  const [draftSaveFailed, setDraftSaveFailed] = useState(false);
+  const [draftReceipt, setDraftReceipt] = useState<{ key: string; text: string; epoch: number; durable: boolean; reason?: string } | null>(null);
   const [replySelectionNotice, setReplySelectionNotice] = useState<string | null>(null);
   const [isClosing, setIsClosing] = useState(false);
   const successTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
@@ -137,15 +140,24 @@ export function MessageInput() {
   const currentGroupIdRef = useRef<string | null>(currentGroup?.id ?? null);
   const draftScopeRef = useRef<string | null>(null);
   const previousReplyIdRef = useRef<string | null>(null);
+  const draftEpochRef = useRef(0);
+  const draftWriteRevisionRef = useRef(0);
+  const draftDurable = Boolean(draftReceipt?.durable && draftReceipt.key === draftKey && draftReceipt.text === input && draftReceipt.epoch === draftEpochRef.current);
+  const draftSaveFailed = Boolean(draftReceipt && !draftReceipt.durable && draftReceipt.key === draftKey && draftReceipt.text === input && draftReceipt.epoch === draftEpochRef.current);
+
+  useEffect(() => useUIStore.subscribe((state, previous) => {
+    if (state.replyingTo !== previous.replyingTo) intentRevisionRef.current++;
+  }), []);
   currentGroupIdRef.current = currentGroup?.id ?? null;
 
   // 每个账号、会话分别恢复文本草稿。恢复完成前禁用输入，避免异步读取覆盖新输入。
   useEffect(() => {
     let active = true;
+    draftEpochRef.current++;
     draftScopeRef.current = null;
     setDraftReadyScope(null);
     setInput('');
-    setDraftSaveFailed(false);
+    setDraftReceipt(null);
     setAttachments([]);
     setUploading(false);
     setSendError(null);
@@ -165,14 +177,19 @@ export function MessageInput() {
     }
     return () => {
       active = false;
+      draftEpochRef.current++;
       draftScopeRef.current = null;
     };
   }, [draftKey, cacheUserId, clearReplyingTo]);
 
   useEffect(() => {
     if (!draftKey || draftReadyScope !== draftKey || draftScopeRef.current !== draftKey || composingRef.current) return;
-    void saveCacheAsync(draftKey, input).then((saved) => {
-      if (draftScopeRef.current === draftKey) setDraftSaveFailed(!saved);
+    const epoch = draftEpochRef.current;
+    const revision = ++draftWriteRevisionRef.current;
+    void saveCacheWithDurability(draftKey, input).then((receipt) => {
+      if (draftScopeRef.current === draftKey && draftEpochRef.current === epoch && draftWriteRevisionRef.current === revision) {
+        setDraftReceipt({ key: draftKey, text: input, epoch, ...receipt });
+      }
     });
   }, [draftKey, draftReadyScope, input]);
 
@@ -464,8 +481,12 @@ export function MessageInput() {
     }
     // 最后一次输入事件可能与组合结束值相同，React 不会再次触发保存 effect。
     if (draftKey && draftScopeRef.current === draftKey) {
-      void saveCacheAsync(draftKey, finalValue).then((saved) => {
-        if (draftScopeRef.current === draftKey) setDraftSaveFailed(!saved);
+      const epoch = draftEpochRef.current;
+      const revision = ++draftWriteRevisionRef.current;
+      void saveCacheWithDurability(draftKey, finalValue).then((receipt) => {
+        if (draftScopeRef.current === draftKey && draftEpochRef.current === epoch && draftWriteRevisionRef.current === revision) {
+          setDraftReceipt({ key: draftKey, text: finalValue, epoch, ...receipt });
+        }
       });
     }
   };
@@ -639,6 +660,14 @@ export function MessageInput() {
 
     const sendingGroupId = currentGroup.id;
     const sendingDraftKey = draftKey;
+    const sendingOwner = cacheUserId;
+    const sendingAuthGeneration = getAuthGeneration();
+    const sendingEpoch = draftEpochRef.current;
+    const sendingRevision = intentRevisionRef.current;
+    const sameIntent = () => currentGroupIdRef.current === sendingGroupId
+      && getCacheUserId() === sendingOwner && getAuthGeneration() === sendingAuthGeneration
+      && draftScopeRef.current === sendingDraftKey && draftEpochRef.current === sendingEpoch
+      && intentRevisionRef.current === sendingRevision;
     const contentToSend = input.trim();
     try {
       // 不再使用 Promise.race 超时：超时后原 promise 仍会完成并造成二次清空/双发风险。
@@ -650,12 +679,7 @@ export function MessageInput() {
         readyAttachments.length > 0 ? readyAttachments : undefined
       );
       if (result.success) {
-        if (sendingDraftKey) {
-          void saveCacheAsync(sendingDraftKey, '').then((saved) => {
-            if (draftScopeRef.current === sendingDraftKey) setDraftSaveFailed(!saved);
-          });
-        }
-        if (currentGroupIdRef.current === sendingGroupId) {
+        if (sameIntent()) {
           setInput('');
           setAttachments([]);
           setLastFailedContent(null);
@@ -664,14 +688,14 @@ export function MessageInput() {
           successTimeoutRef.current = setTimeout(() => setShowSendSuccess(false), 1500);
         }
       } else {
-        if (currentGroupIdRef.current === sendingGroupId) {
+        if (sameIntent()) {
           setLastFailedContent(contentToSend);
           setSendError(result.error || '发送失败，请检查网络连接');
           setJustSentMessage(false);
         }
       }
     } catch (error) {
-      if (currentGroupIdRef.current === sendingGroupId) {
+      if (sameIntent()) {
         setLastFailedContent(contentToSend);
         setSendError('发送失败，请检查网络连接');
         setJustSentMessage(false);
@@ -679,7 +703,7 @@ export function MessageInput() {
     } finally {
       sendingRef.current = false;
     }
-  }, [currentGroup, draftKey, draftReadyScope, hasPendingUploads, input, readyAttachments, replyingTo, sendMessage, isSending, clearReplyingTo, uploading]);
+  }, [currentGroup, cacheUserId, draftKey, draftReadyScope, hasPendingUploads, input, readyAttachments, replyingTo, sendMessage, isSending, clearReplyingTo, uploading, setInput, setAttachments]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
@@ -979,7 +1003,7 @@ export function MessageInput() {
             </div>
           )}
           {draftSaveFailed && (
-            <div role="alert" className="text-xs text-red-500 px-4 pb-1">此浏览器的加密草稿保存失败；刷新页面前请复制输入内容。</div>
+            <div role="alert" className="text-xs text-red-500 px-4 pb-1">尚未确认草稿已持久保存；刷新页面前请复制未保存内容。</div>
           )}
           <div className="px-4 pb-1 flex items-center justify-between">
             <div className={`text-xs transition-colors ${isOverLimit ? 'text-red-500 font-semibold' : isNearLimit ? 'text-orange-500' : 'text-text-muted'}`}>
@@ -992,7 +1016,15 @@ export function MessageInput() {
             )}
           </div>
           {currentGroup && cacheUserId && (
-            <div className="px-4 text-[10px] text-text-muted">文本草稿仅保存在此浏览器当前账号的加密缓存中，7 天后过期；附件需重新选择。</div>
+            <div className="px-4 text-[10px] text-text-muted" data-testid="composer-durability">
+              {draftDurable ? '文本草稿已加密保存，当前账号在此浏览器刷新可恢复，7 天后过期；附件需重新选择。'
+                : draftSaveFailed ? '文本草稿暂留在当前页面，刷新前请复制；附件需重新选择。'
+                : '正在确认文本草稿保存状态，刷新前请复制；附件需重新选择。'}
+              {input && !draftDurable && <button type="button" className="ml-2 underline" onClick={async () => {
+                try { await navigator.clipboard.writeText(input); setSendError('未保存内容已复制'); }
+                catch { setSendError('复制失败，请手动选择输入框内容'); }
+              }}>复制未保存内容</button>}
+            </div>
           )}
         </>
       </div>

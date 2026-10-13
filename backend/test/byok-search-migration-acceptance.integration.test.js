@@ -1,3 +1,4 @@
+import { addFixtureGroups } from './helpers/accountStoreFixtures.js';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -25,7 +26,7 @@ axios.defaults.adapter = async config => {
   throw new Error('AUDIT_BLOCKED_ALL_PROVIDER_TRANSPORT');
 };
 const { getCatalogData, publicCatalog, resolveModelSnapshot, capabilityFingerprint, readCatalog, saveCatalog, resolveModel, defaultModelId } = await import('../src/services/ai/catalog.js');
-const { initDatabase, initUserDatabase, getUserDb, clearUserDbCache } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, createNewUserDatabase, getUserDb, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb, generateSessionToken } = await import('../src/models/authDb.js');
 const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
@@ -36,6 +37,7 @@ const { createTask, runTask, stopTaskScheduler } = await import('../src/services
 const loadBalancerExists = await fs.access(new URL('../src/services/ai/loadBalancer.js', import.meta.url)).then(() => true, () => false);
 const loadBalancer = loadBalancerExists ? (await import('../src/services/ai/loadBalancer.js')).default : null;
 const request = (await import('supertest')).default(createTestApp());
+await initializeEmptyInstallation();
 await initDatabase();
 await initAuthDb();
 after(() => { axios.defaults.adapter = oldAdapter; stopTaskScheduler(); loadBalancer?.cleanupTimers(); });
@@ -52,7 +54,7 @@ function explicitCatalog(apiKey = '') {
 }
 async function session() {
   const userId = crypto.randomUUID(), token = generateSessionToken();
-  const userDb = await initUserDatabase(userId);
+  const userDb = await createNewUserDatabase(userId);
   await provisionNewLocalMemoryAccount(userId, userDb);
   const auth = getAuthDb(); await auth.read();
   auth.data.users.push({ id: userId, username: userId, password: 'unused', role: 'admin', created_at: new Date().toISOString() });
@@ -129,7 +131,7 @@ test('member search finds user catalog/persona names while preserving unavailabl
   input.defaults.chat = 'custom_member';
   await saveCatalog(s.userId, input);
   await s.userDb.read();
-  s.userDb.data.groups.push({ id: 'custom-history-group', type: 'custom', name: 'Historical user group', ai_members: ['custom_member', 'deepseek'], created_at: new Date().toISOString() });
+  addFixtureGroups(s.userDb.data, { id: 'custom-history-group', type: 'custom', name: 'Historical user group', ai_members: ['custom_member', 'deepseek'], created_at: new Date().toISOString() });
   await s.userDb.write();
   const catalogName = await request.get('/api/search').set('Cookie', s.cookie).query({ q: 'Catalog Member Unique', type: 'members' });
   assert.equal(catalogName.status, 200);

@@ -1,7 +1,7 @@
 import express from 'express';
 import { sendSmsVerifyCode, checkSmsVerifyCode, isSmsConfigured } from '../services/sms/index.js';
 import { getAuthDb, hashPasswordAsync, generateSessionToken } from '../models/authDb.js';
-import { initUserDatabase, withWriteLock } from '../models/db.js';
+import { createNewUserDatabase, withWriteLock } from '../models/db.js';
 import { validateBody, smsSendSchema, smsVerifySchema } from '../validators/index.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import crypto from 'crypto';
@@ -123,7 +123,7 @@ router.post('/sms/verify', validateBody(smsVerifySchema), asyncHandler(async (re
         id: userId, username: `user_${suffix}_${userId}`, password: passwordHash,
         nickname: `用户${suffix}`, phone, role: 'user', created_at: new Date().toISOString()
       };
-      const userDb = await initUserDatabase(userId);
+      const userDb = await createNewUserDatabase(userId);
       await provisionNewLocalMemoryAccount(userId, userDb);
       db.data.users = [...db.data.users, user];
     }

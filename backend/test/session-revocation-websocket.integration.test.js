@@ -1,3 +1,4 @@
+import { addFixtureGroups } from './helpers/accountStoreFixtures.js';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -10,12 +11,13 @@ process.env.NODE_ENV = 'test'; process.env.AUTH_MODE = 'session'; process.env.TR
 process.env.CORS_ORIGINS = 'http://localhost:3210';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-ws-revoke-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
-const { initDatabase, getUserDb } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, getUserDb } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb } = await import('../src/models/authDb.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
 const { setupWebSocket, broadcastToGroup } = await import('../src/websocket/index.js');
 const { WebSocketServer, WebSocket } = await import('ws');
 const supertest = (await import('supertest')).default;
+await initializeEmptyInstallation();
 await initDatabase(); await initAuthDb();
 const app = createTestApp(); const request = supertest(app); const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' }); setupWebSocket(wss);
@@ -42,7 +44,7 @@ async function connect(cookie, origin = 'http://localhost:3210', accepted = true
   return ws;
 }
 async function group(user, ws, id = 'identical-group-id') {
-  const db = await getUserDb(user.id); await db.read(); db.data.groups.push({ id, name: 'synthetic', ai_members: [] }); await db.write();
+  const db = await getUserDb(user.id); await db.read(); addFixtureGroups(db.data, { id, name: 'synthetic', ai_members: [] }); await db.write();
   const joined = nextMessage(ws, 'joined_group'); ws.send(JSON.stringify({ type: 'join_group', group_id: id })); await joined; return id;
 }
 async function closed(ws) { if (ws.readyState === WebSocket.CLOSED) return; await Promise.race([once(ws, 'close'), wait(3000).then(() => { throw new Error('WS not closed'); })]); }
@@ -117,7 +119,7 @@ test('default thirty-day expiry is segmented instead of overflowing Node timers'
 });
 test('expiry while join_group awaits storage cannot reinsert a stale subscription', async () => {
   const a=await account();await deadlineFor(a,1000);const ws=await connect(a.cookie);const db=await getUserDb(a.id);await db.read();
-  db.data.groups.push({id:'slow-join',name:'slow',ai_members:[]});await db.write();
+  addFixtureGroups(db.data, {id:'slow-join',name:'slow',ai_members:[]});await db.write();
   const original=db.read.bind(db);let release,entered;const started=new Promise(r=>entered=r);const gate=new Promise(r=>release=r);
   db.read=async(...args)=>{entered();await gate;return original(...args);};
   const seen=[];ws.on('message',data=>seen.push(JSON.parse(data)));

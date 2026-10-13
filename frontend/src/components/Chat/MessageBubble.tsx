@@ -148,13 +148,13 @@ const MessageBubbleComponent = ({ message, onReply, showTimeDivider, isMultiSele
   const ttsAudio = persistedTtsAudio || storedTtsAudio;
 
   useEffect(() => {
-    if (prevStatusRef.current === 'sending' && message.status === 'sent') {
+    if (prevStatusRef.current === 'sending' && message.status === 'sent' && message.confirmation !== 'preview') {
       setShowSendGlow(true);
       const timer = setTimeout(() => setShowSendGlow(false), 500);
       return () => clearTimeout(timer);
     }
     prevStatusRef.current = message.status;
-  }, [message.status]);
+  }, [message.status, message.confirmation]);
 
   const isUser = message.sender_type === 'user';
   const isSystem = message.sender_type === 'system';
@@ -277,6 +277,7 @@ const MessageBubbleComponent = ({ message, onReply, showTimeDivider, isMultiSele
           )}
           <div className={`text-xs text-center ${isRefusal ? 'text-amber-700 dark:text-amber-300' : 'text-text-muted'}`}>
             {message.content}
+            {message.confirmation === 'preview' && <span className="ml-2 text-amber-600">{message.preview_reason === 'not_saved' ? '尚未保存' : '待核验预览'}</span>}
           </div>
         </div>
       </div>
@@ -547,6 +548,10 @@ const MessageBubbleComponent = ({ message, onReply, showTimeDivider, isMultiSele
               </span>
             )}
 
+            {message.confirmation === 'preview' && <span className="text-amber-600" style={{ fontSize: 'var(--chat-timestamp-font-size)' }}>
+              {message.preview_reason === 'not_saved' ? '尚未保存' : message.preview_reason === 'streaming' ? '生成预览，尚未确认保存' : '待核验预览'}
+            </span>}
+
             {isUser && message.status === 'sending' && (
               <span className="text-text-muted flex items-center gap-1" style={{ fontSize: 'var(--chat-timestamp-font-size)' }}>
                 <svg className="animate-spin w-3 h-3" fill="none" viewBox="0 0 24 24">
@@ -600,7 +605,7 @@ const MessageBubbleComponent = ({ message, onReply, showTimeDivider, isMultiSele
               </div>
             )}
 
-            {isUser && (message.status === 'sent' || !message.status) && (
+            {isUser && message.confirmation !== 'preview' && (message.status === 'sent' || !message.status) && (
               <div className="message-status sent">
                 <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                   <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />

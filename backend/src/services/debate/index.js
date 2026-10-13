@@ -1,3 +1,4 @@
+import { commitBackgroundMessage } from '../backgroundMessageCommit.js';
 import { currentUserId, UserScopedMap } from '../userScope.js';
 import { v4 as uuidv4 } from 'uuid';
 import { getUserDb, listUserDatabases, withWriteLock } from '../../models/db.js';
@@ -6,7 +7,7 @@ import { broadcastToGroup, broadcastTypingStatus } from '../../websocket/index.j
 import { AI_PERSONAS } from '../../config/personas.js';
 import { getEffectivePersona as getSchedulerPersona, loadCustomPersonas } from '../scheduler/index.js';
 import { decryptText } from '../../utils/encryption.js';
-import { readableSourceMessages } from '../memory/persistentMemory.js';
+import { readableSourceGroups, readableSourceMessages } from '../memory/persistentMemory.js';
 
 const activeDebates = new UserScopedMap();
 const groupToUserMap = new UserScopedMap();
@@ -97,7 +98,7 @@ async function findGroupAndMessagesInAnyUserDb(groupId) {
   const db = await getUserDb(userId);
   return withWriteLock(userId, async () => {
     await db.read();
-    const group = db.data.groups.find(g => g.id === groupId);
+    const group = (await readableSourceGroups(userId, db)).find(g => g.id === groupId);
     if (!group) return null;
     const messages = (await readableSourceMessages(userId, db)).filter(m => m.group_id === groupId);
     return { db, userId, group, messages: decryptMessages(messages) };
@@ -725,28 +726,12 @@ function broadcastDebatePhaseChange(groupId, phase, phaseConfig, roles, userId =
   });
 }
 
-function broadcastDebateMessage(groupId, aiId, content, role, messageId) {
-  const roleNames = {
-    proponent: '正方',
-    opponent: '反方',
-    judge: '裁判',
-    audience: '观众'
-  };
-
-  broadcastToGroup(groupId, {
-    type: 'new_message',
-    group_id: groupId,
-    id: messageId,
-    sender_type: 'ai',
-    sender_id: aiId,
-    content,
-    content_type: 'text',
-    metadata: {
-      debate_role: role,
-      debate_role_name: roleNames[role]
-    },
-    created_at: new Date().toISOString()
-  });
+function broadcastDebateMessage(groupId, confirmedMessage) {
+  if (confirmedMessage?.group_id !== groupId || !confirmedMessage.id || !confirmedMessage.server_order) {
+    throw new TypeError('A confirmed debate message is required');
+  }
+  broadcastToGroup(groupId, { ...confirmedMessage, type: 'new_message', durable: true,
+    persistence_status: 'confirmed' });
 }
 
 export async function getRecentDebateMessages(groupId, limit = 50) {
@@ -761,7 +746,7 @@ export async function getRecentDebateMessages(groupId, limit = 50) {
   });
 }
 
-async function saveMessage(groupId, aiId, content, role) {
+async function saveMessage(groupId, aiId, content, role, context = null) {
   const result = await findGroupAndMessagesInAnyUserDb(groupId);
   if (!result) throw new Error(`找不到群组 ${groupId}`);
 
@@ -789,13 +774,7 @@ async function saveMessage(groupId, aiId, content, role) {
     created_at: new Date().toISOString()
   };
 
-  await withWriteLock(result.userId, async () => {
-    await userDb.read();
-    userDb.data.messages.push(message);
-    await userDb.write();
-  });
-
-  return messageId;
+  return commitBackgroundMessage({ userId: result.userId, db: userDb, message, context, updateActivity: false });
 }
 
 export async function startFormalDebate(groupId, topic, rolePreferences = {}, debateLevel = 2, selectedParticipants = null) {
@@ -920,9 +899,12 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
           );
 
           if (result) {
-            const messageId = await saveMessage(groupId, speakerId, result.content, role);
-            broadcastDebateMessage(groupId, speakerId, result.content, role, messageId);
-            spokenThisTurn.add(speakerId);
+            const committed = await saveMessage(groupId, speakerId, result.content, role, context);
+            if (committed) {
+              broadcastDebateMessage(groupId, committed.result);
+              if (committed.disposition !== 'committed') context.cancel = true;
+              spokenThisTurn.add(speakerId);
+            } else context.cancel = true;
           }
 
           await sleep(500 + Math.random() * 1000);
@@ -976,9 +958,12 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
                 );
 
                 if (interResult) {
-                  const interMsgId = await saveMessage(groupId, responderId, interResult.content, interResult.role);
-                  broadcastDebateMessage(groupId, responderId, interResult.content, interResult.role, interMsgId);
-                  spokenThisTurn.add(responderId);
+                  const committed = await saveMessage(groupId, responderId, interResult.content, interResult.role, context);
+                  if (committed) {
+                    broadcastDebateMessage(groupId, committed.result);
+                    if (committed.disposition !== 'committed') context.cancel = true;
+                    spokenThisTurn.add(responderId);
+                  } else context.cancel = true;
                 }
 
                 await sleep(800 + Math.random() * 1200);
@@ -1037,37 +1022,51 @@ export async function startFormalDebate(groupId, topic, rolePreferences = {}, de
   }
 }
 
+export function requestFormalDebateStop(groupId) {
+  const debateKey = `debate:${groupId}`;
+  const userId = currentUserId();
+  const context = userId ? activeDebates.get(debateKey) : null;
+
+  if (context && context.userId === userId) {
+    if (!context.stopRequested) {
+      context.stopRequested = true;
+      context.cancel = true;
+      broadcastToGroup(groupId, {
+        type: 'debate_stopped',
+        group_id: groupId,
+        stopRequested: true,
+        timestamp: new Date().toISOString()
+      });
+    }
+    return { success: true, stopRequested: true, message: '辩论停止请求已登记' };
+  }
+  return { success: false, message: '没有正在进行的辩论' };
+}
+
 export async function stopFormalDebate(groupId) {
   const debateKey = `debate:${groupId}`;
-  const context = activeDebates.get(debateKey);
+  const context = currentUserId() ? activeDebates.get(debateKey) : null;
+  const result = requestFormalDebateStop(groupId);
+  if (!result.success) return result;
 
-  if (context) {
-    context.cancel = true;
+  await new Promise(resolve => {
+    let checkInterval, timeout;
+    const finish = () => {
+      clearInterval(checkInterval);
+      clearTimeout(timeout);
+      resolve();
+    };
+    checkInterval = setInterval(() => {
+      if (activeDebates.get(debateKey) !== context) finish();
+    }, 100);
+    timeout = setTimeout(() => {
+      // An old drain must never delete a replacement run with the same ID.
+      if (activeDebates.get(debateKey) === context) activeDebates.delete(debateKey);
+      finish();
+    }, 5000);
+  });
 
-    broadcastToGroup(groupId, {
-      type: 'debate_stopped',
-      group_id: groupId,
-      timestamp: new Date().toISOString()
-    });
-
-    await new Promise(resolve => {
-      const checkInterval = setInterval(() => {
-        if (!activeDebates.has(debateKey)) {
-          clearInterval(checkInterval);
-          resolve();
-        }
-      }, 100);
-      setTimeout(() => {
-        clearInterval(checkInterval);
-        activeDebates.delete(debateKey);
-        resolve();
-      }, 5000);
-    });
-
-    return { success: true, message: '辩论已停止' };
-  }
-
-  return { success: false, message: '没有正在进行的辩论' };
+  return { success: true, message: '辩论已停止' };
 }
 
 export function getDebateStatus(groupId) {
@@ -1111,6 +1110,8 @@ export async function triggerAudienceComment(groupId, audienceMembers) {
   const { db: userDb, group, messages, userId } = result;
   const recentMessages = messages.slice(-50);
   const topic = group.debate_topic || '辩论';
+  const context = { cancel: false, userId };
+  let stopped = null;
 
   await loadCustomPersonas(userId);
 
@@ -1127,10 +1128,12 @@ export async function triggerAudienceComment(groupId, audienceMembers) {
   broadcastDebatePhaseChange(groupId, DEBATE_PHASES.AUDIENCE_COMMENT, phaseConfig, roles, userId);
 
   for (const audienceId of audienceMembers) {
+    if (context.cancel) break;
     const persona = getEffectivePersona(audienceId, userId);
     if (!persona) continue;
 
     broadcastTypingStatus(groupId, audienceId, true);
+    let saving = false;
 
     try {
       const systemPrompt = buildDebateRolePrompt(
@@ -1159,16 +1162,39 @@ export async function triggerAudienceComment(groupId, audienceMembers) {
 
       if (content && content.trim().length > 0) {
         content = applyMessageLengthLimit(content, { ...persona, socialConfig: { maxMessageLength: Math.max(persona?.socialConfig?.maxMessageLength || 600, 600) } });
-        const messageId = await saveMessage(groupId, audienceId, content, 'audience');
-        broadcastDebateMessage(groupId, audienceId, content, 'audience', messageId);
+        saving = true;
+        const committed = await saveMessage(groupId, audienceId, content, 'audience', context);
+        if (!committed) {
+          stopped = { success: false, reason: context.resultUnknown ? 'outcome_unknown' : 'cancelled',
+            outcomeUnknown: context.resultUnknown === true, error: context.resultUnknown
+              ? '评论提交结果待核验，后续观众评论已停止；请刷新消息列表'
+              : '群组已不可用或评论已停止' };
+          break;
+        }
+        broadcastDebateMessage(groupId, committed.result);
+        if (committed.disposition !== 'committed') {
+          context.cancel = true;
+          stopped = { success: false, recovered: true, reason: 'recovered',
+            message: '已核验原评论，后续观众评论已停止；请刷新消息列表' };
+          break;
+        }
       }
     } catch (error) {
       console.error(`观众 ${audienceId} 评论生成失败:`, error.message);
+      if (saving) {
+        context.cancel = true;
+        stopped = { success: false, reason: error.code === 'MESSAGE_COMMIT_UNKNOWN' ? 'outcome_unknown' : 'save_failed',
+          outcomeUnknown: error.code === 'MESSAGE_COMMIT_UNKNOWN', error: error.message };
+        break;
+      }
+    } finally {
+      broadcastTypingStatus(groupId, audienceId, false);
     }
-
-    broadcastTypingStatus(groupId, audienceId, false);
     await sleep(500 + Math.random() * 1000);
   }
+
+  if (stopped) return stopped;
+  if (context.cancel) return { success: false, reason: 'cancelled', error: '观众评论已停止' };
 
   broadcastToGroup(groupId, {
     type: 'audience_comment_finished',

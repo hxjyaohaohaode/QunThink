@@ -19,6 +19,9 @@ import { revokeMessageMemories, markGroupDeleted, markFileDeleted,
   sourceMutationUncertain, readableSourceGroups, readableSourceMessages,
   readableSourceFiles } from '../services/memory/persistentMemory.js';
 
+import { commitCreatedGroup, commitGroupMemberChange } from '../services/groupCreationCommit.js';
+import { currentUserId } from '../services/userScope.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -27,6 +30,19 @@ const router = express.Router();
 // Covers group-specific reads and mutations that still look up raw groups.
 // A restored old user JSON must not make a durably deleted group addressable.
 router.param('id', asyncHandler(async (req, res, next) => {
+  // Only an authenticated owner's already-active context can acknowledge a
+  // stop without storage. No group data or new work is admitted by this path.
+  if (req.method === 'POST' && req.userId && req.userId === currentUserId()) {
+    let result;
+    if (req.route?.path === '/ai-private-chats/:id/stop') {
+      const { requestAIPrivateChatStop } = await import('../services/scheduler/index.js');
+      result = requestAIPrivateChatStop(req.params.id);
+    } else if (req.route?.path === '/groups/:id/formal-debate/stop') {
+      const { requestFormalDebateStop } = await import('../services/debate/index.js');
+      result = requestFormalDebateStop(req.params.id);
+    }
+    if (result?.success) return res.json(result);
+  }
   const db = await req.getUserDb();
   await db.read();
   if (!(await readableSourceGroups(req.userId, db, [{ id: req.params.id }])).length) {
@@ -35,7 +51,15 @@ router.param('id', asyncHandler(async (req, res, next) => {
   return next();
 }));
 router.use(asyncHandler(async (req, res, next) => {
-  if (!/^\/(groups|private-chat|ai-private-chat)(\/|$|s)/.test(req.path)) return next();
+  // Do not make unrelated message/stop controls wait for a catalog read.
+  // Only handlers below that consume modelNames/validModelIds need this data.
+  const needsCatalog = (req.method === 'POST' && (
+    /^\/groups\/?$/.test(req.path) || /^\/groups\/[^/]+\/members\/?$/.test(req.path) ||
+    /^\/private-chat\/[^/]+\/?$/.test(req.path) || /^\/ai-private-chat\/?$/.test(req.path) ||
+    /^\/groups\/[^/]+\/formal-debate\/allocate-roles\/?$/.test(req.path))) ||
+    (req.method === 'DELETE' && /^\/groups\/[^/]+\/members\/[^/]+\/?$/.test(req.path)) ||
+    (req.method === 'GET' && /^\/groups\/[^/]+\/insights\/?$/.test(req.path));
+  if (!needsCatalog) return next();
   res.locals.modelCatalog = await readCatalog(req.userId);
   res.locals.modelNames = Object.fromEntries(res.locals.modelCatalog.models.map(m => [m.id, m.name]));
   res.locals.validModelIds = new Set(res.locals.modelCatalog.models.filter(m => m.enabled && m.capabilities.includes('chat')).map(m => m.id));
@@ -265,13 +289,8 @@ router.post('/groups', validateBody(createGroupSchema), asyncHandler(async (req,
     last_message_preview: null
   };
 
-  await withWriteLock(req.userId, async () => {
-    await db.read();
-    db.data.groups.push(newGroup);
-    await db.write();
-  });
-
-  res.status(201).json(newGroup);
+  const committed = await commitCreatedGroup({ userId: req.userId, db, group: newGroup });
+  res.status(committed.disposition === 'committed' ? 201 : 200).json(committed.result.group);
 }));
 
 router.put('/groups/:id/debate', validateBody(updateDebateSchema), asyncHandler(async (req, res) => {
@@ -337,55 +356,23 @@ router.post('/groups/:id/members', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'aiId 无效或不在允许的AI列表中' });
   }
 
-  let result = null;
-  await withWriteLock(req.userId, async () => {
-    await db.read();
-    const group = db.data.groups.find(g => g.id === id);
-    if (!group) {
-      const notFound = new Error('Group not found');
-      notFound.status = 404;
-      throw notFound;
-    }
-    if (group.is_private) {
-      const bad = new Error('不能向私聊添加成员');
-      bad.status = 400;
-      throw bad;
-    }
-    if (group.ai_members && group.ai_members.includes(aiId)) {
-      const dup = new Error('该AI已在群聊中');
-      dup.status = 400;
-      throw dup;
-    }
-    if (!group.ai_members) {
-      group.ai_members = [];
-    }
-    group.ai_members.push(aiId);
+  const committed = await commitGroupMemberChange({ userId: req.userId, db, groupId: id,
+    aiId, name: res.locals.modelNames[aiId] || aiId, remove: false });
+  const result = committed.result;
 
-    const messageId = uuidv4();
-    const systemMessage = {
-      id: messageId,
+  if (committed.disposition === 'committed') {
+    broadcastToGroup(id, {
+      type: 'system_message',
       group_id: id,
-      sender_type: 'system',
-      sender_id: 'system',
-      content: `邀请了 ${res.locals.modelNames[aiId] || aiId} 加入群聊`,
-      content_type: 'text',
-      metadata: { type: 'member_joined', newMember: aiId },
-      created_at: new Date().toISOString()
-    };
+      id: result.systemMessage.id, sender_type: 'system', sender_id: 'system', content_type: 'text',
+      created_at: result.systemMessage.created_at, server_order: result.systemMessage.server_order,
+      durable: true, persistence_status: 'confirmed',
+      content: result.systemMessage.content,
+      timestamp: result.systemMessage.created_at,
+      metadata: result.systemMessage.metadata
+    });
 
-    db.data.messages.push(systemMessage);
-    updateGroupActivity(group, systemMessage);
-    await db.write();
-    result = { group: sanitizeGroupForClient(group), systemMessage };
-  });
-
-  broadcastToGroup(id, {
-    type: 'system_message',
-    group_id: id,
-    content: result.systemMessage.content,
-    timestamp: result.systemMessage.created_at,
-    metadata: result.systemMessage.metadata
-  });
+  }
 
   res.json({
     success: true,
@@ -403,44 +390,15 @@ router.post('/private-chat/:aiId', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'aiId 无效或不在允许的AI列表中' });
   }
 
-  let privateChat = null;
-  let created = false;
-  await withWriteLock(req.userId, async () => {
-    await db.read();
-    privateChat = db.data.groups.find(g =>
-      g.is_private === true &&
-      g.ai_members &&
-      g.ai_members.length === 1 &&
-      g.ai_members[0] === aiId
-    );
-
-    if (!privateChat) {
-      const groupId = uuidv4();
-      privateChat = {
-        id: groupId,
-        name: res.locals.modelNames[aiId] || aiId,
-        description: `与 ${res.locals.modelNames[aiId] || aiId} 的私聊`,
-        type: 'private',
-        is_private: true,
-        pinned: true, // 私聊默认置顶
-        debate_mode: false,
-        debate_level: 1,
-        ai_members: [aiId],
-        created_at: new Date().toISOString(),
-        last_message_at: new Date().toISOString(),
-        last_message_preview: null
-      };
-      db.data.groups.push(privateChat);
-      await db.write();
-      created = true;
-    }
-  });
-
-  if (!privateChat) {
-    return res.status(500).json({ error: '私聊创建失败' });
-  }
-
-  res.status(created ? 201 : 200).json(sanitizeGroupForClient(privateChat));
+  const time = new Date().toISOString();
+  const group = {
+    id: uuidv4(), name: res.locals.modelNames[aiId] || aiId,
+    description: `与 ${res.locals.modelNames[aiId] || aiId} 的私聊`,
+    type: 'private', is_private: true, pinned: true, debate_mode: false, debate_level: 1,
+    ai_members: [aiId], created_at: time, last_message_at: time, last_message_preview: null
+  };
+  const committed = await commitCreatedGroup({ userId: req.userId, db, group, existingKind: 'private' });
+  res.status(committed.disposition === 'committed' ? 201 : 200).json(committed.result.group);
 }));
 
 router.delete('/groups/:id', asyncHandler(async (req, res) => {
@@ -522,65 +480,30 @@ router.delete('/groups/:id/members/:aiId', asyncHandler(async (req, res) => {
   const db = await req.getUserDb();
   const { id, aiId } = req.params;
 
-  let result = null;
-  await withWriteLock(req.userId, async () => {
-    await db.read();
-    const group = db.data.groups.find(g => g.id === id);
-    if (!group) {
-      const notFound = new Error('Group not found');
-      notFound.status = 404;
-      throw notFound;
-    }
-    if (group.is_private) {
-      const bad = new Error('不能从私聊中移除成员');
-      bad.status = 400;
-      throw bad;
-    }
-    if (!group.ai_members || !group.ai_members.includes(aiId)) {
-      const bad = new Error('该AI不在群聊中');
-      bad.status = 400;
-      throw bad;
-    }
-    if (group.ai_members.length <= 2) {
-      const bad = new Error('群聊至少需要保留2个AI成员');
-      bad.status = 400;
-      throw bad;
-    }
+  const committed = await commitGroupMemberChange({ userId: req.userId, db, groupId: id,
+    aiId, name: res.locals.modelNames[aiId] || aiId, remove: true });
+  const result = committed.result;
 
-    group.ai_members = group.ai_members.filter(member => member !== aiId);
-
-    const messageId = uuidv4();
-    const systemMessage = {
-      id: messageId,
+  if (committed.disposition === 'committed') {
+    broadcastToGroup(id, {
+      type: 'system_message',
       group_id: id,
-      sender_type: 'system',
-      sender_id: 'system',
-      content: `${res.locals.modelNames[aiId] || aiId} 已被移出群聊`,
-      content_type: 'text',
-      metadata: { type: 'member_removed', removedMember: aiId },
-      created_at: new Date().toISOString()
-    };
+      id: result.systemMessage.id, sender_type: 'system', sender_id: 'system', content_type: 'text',
+      created_at: result.systemMessage.created_at, server_order: result.systemMessage.server_order,
+      durable: true, persistence_status: 'confirmed',
+      content: result.systemMessage.content,
+      timestamp: result.systemMessage.created_at,
+      metadata: result.systemMessage.metadata
+    });
 
-    db.data.messages.push(systemMessage);
-    updateGroupActivity(group, systemMessage);
-    await db.write();
-    result = { group: sanitizeGroupForClient(group), systemMessage };
-  });
+    broadcastToGroup(id, {
+      type: 'member_removed',
+      group_id: id,
+      aiId: aiId,
+      timestamp: new Date().toISOString()
+    });
 
-  broadcastToGroup(id, {
-    type: 'system_message',
-    group_id: id,
-    content: result.systemMessage.content,
-    timestamp: result.systemMessage.created_at,
-    metadata: result.systemMessage.metadata
-  });
-
-  broadcastToGroup(id, {
-    type: 'member_removed',
-    group_id: id,
-    aiId: aiId,
-    timestamp: new Date().toISOString()
-  });
+  }
 
   res.json({
     success: true,
@@ -619,58 +542,20 @@ router.post('/ai-private-chat', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'AI成员不能重复' });
   }
 
-  let resultChat = null;
-  let created = false;
-  await withWriteLock(req.userId, async () => {
-    await db.read();
-    const sortedIds = [...uniqueMembers].sort();
-    const existingChat = db.data.groups.find(g =>
-      g.type === 'ai_private' &&
-      g.ai_members &&
-      g.ai_members.length === sortedIds.length &&
-      sortedIds.every(id => g.ai_members.includes(id))
-    );
-
-    if (existingChat) {
-      resultChat = existingChat;
-      return;
-    }
-
-    const groupId = uuidv4();
-
-    let chatName;
-    if (customName && customName.trim()) {
-      chatName = customName.trim().slice(0, 50);
-    } else {
-      const shortNames = sortedIds.map(id => res.locals.modelNames[id] || id);
-      chatName = shortNames.join(' & ');
-    }
-
-    const newChat = {
-      id: groupId,
-      name: chatName,
-      description: topic ? `话题: ${topic.trim().slice(0, 200)}` : 'AI私聊（只读）',
-      type: 'ai_private',
-      is_private: true,
-      is_ai_private: true,
-      pinned: true,
-      debate_mode: false,
-      debate_level: 1,
-      ai_members: sortedIds,
-      topic: topic ? topic.trim().slice(0, 200) : null,
-      is_active: false,
-      created_at: new Date().toISOString(),
-      last_message_at: new Date().toISOString(),
-      last_message_preview: null
-    };
-
-    db.data.groups.push(newChat);
-    await db.write();
-    resultChat = newChat;
-    created = true;
-  });
-
-  res.status(created ? 201 : 200).json(sanitizeGroupForClient(resultChat));
+  const sortedIds = [...uniqueMembers].sort();
+  const chatName = customName?.trim() ? customName.trim().slice(0, 50)
+    : sortedIds.map(id => res.locals.modelNames[id] || id).join(' & ');
+  const time = new Date().toISOString();
+  const group = {
+    id: uuidv4(), name: chatName,
+    description: topic ? `话题: ${topic.trim().slice(0, 200)}` : 'AI私聊（只读）',
+    type: 'ai_private', is_private: true, is_ai_private: true, pinned: true,
+    debate_mode: false, debate_level: 1, ai_members: sortedIds,
+    topic: topic ? topic.trim().slice(0, 200) : null, is_active: false,
+    created_at: time, last_message_at: time, last_message_preview: null
+  };
+  const committed = await commitCreatedGroup({ userId: req.userId, db, group, existingKind: 'ai_private' });
+  res.status(committed.disposition === 'committed' ? 201 : 200).json(committed.result.group);
 }));
 
 router.get('/ai-private-chats', asyncHandler(async (req, res) => {
@@ -909,7 +794,7 @@ router.post('/groups/:id/formal-debate/stop', asyncHandler(async (req, res) => {
   }
 
   const { stopFormalDebate } = await import('../services/debate/index.js');
-  const result = stopFormalDebate(id);
+  const result = await stopFormalDebate(id);
 
   if (result.success) {
     res.json(result);

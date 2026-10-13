@@ -65,11 +65,13 @@ after(async () => {
   await new Promise(resolve => provider.close(resolve));
 });
 
-const { initDatabase, initUserDatabase, getUserDb, clearUserDbCache } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, createNewUserDatabase, getUserDb, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb } = await import('../src/models/authDb.js');
 const { recordCapabilityProbe } = await import('../src/services/ai/catalog.js');
+const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
 const supertest = (await import('supertest')).default;
+await initializeEmptyInstallation();
 await initDatabase();
 await initAuthDb();
 
@@ -246,7 +248,7 @@ test('agent route streaming matches saved replies without duplicate interruption
     await t.test(`assistant write failure followed by failed reload (${committed ? 'lost acknowledgement' : 'not committed'}) never serves a guessed snapshot`, async () => {
       mode = 'success';
       await db.read({ force: true });
-      const originalWrite = db.adapter.write.bind(db.adapter), originalRead = db.adapter.read.bind(db.adapter);
+      const originalWrite = db.adapter.write.bind(db.adapter), originalRead = db._readWithMetadata.bind(db);
       let injected = false;
       db.adapter.write = async data => {
         if (!injected && data.agent_messages.at(-1)?.sender_type === 'agent') {
@@ -260,13 +262,13 @@ test('agent route streaming matches saved replies without duplicate interruption
         const response = await request.post(`/api/agents/${agentId}/chat`).set('Cookie', cookies).send({ message: `Read recovery ${committed}` });
         assert.match(response.text, /"error"/);
         db.adapter.write = originalWrite;
-        db.adapter.read = async () => { throw new Error('Synthetic unavailable durable snapshot'); };
+        db._readWithMetadata = async () => { throw new Error('Synthetic unavailable durable snapshot'); };
         for (let attempt = 0; attempt < 2; attempt++) {
           const failedRead = await request.get(`/api/agents/${agentId}/messages`).set('Cookie', cookies);
           assert.ok(failedRead.status >= 500);
           assert.ok(!Array.isArray(failedRead.body), 'unavailable storage must not return cached success');
         }
-      } finally { db.adapter.write = originalWrite; db.adapter.read = originalRead; }
+      } finally { db.adapter.write = originalWrite; db._readWithMetadata = originalRead; }
       const disk = JSON.parse(await fs.readFile(path.join(dataDir, 'users', `db_${userId}.json`), 'utf8'));
       assert.deepEqual(await readMessages(request), disk.agent_messages.filter(message => message.agent_id === agentId));
     });
@@ -275,14 +277,14 @@ test('agent route streaming matches saved replies without duplicate interruption
   await t.test('history started before a failing append never serializes a ghost across 36 microtask timings', async () => {
     const micro = n => n === 0 ? Promise.resolve() : Promise.resolve().then(() => micro(n - 1));
     const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
-    const originalRead = db.adapter.read.bind(db.adapter), originalWrite = db.adapter.write.bind(db.adapter);
+    const originalRead = db._readWithMetadata.bind(db), originalWrite = db.adapter.write.bind(db.adapter);
     const callsBefore = calls.length;
     for (let writerDelay = 0; writerDelay < 6; writerDelay++) {
       for (let readerDelay = 0; readerDelay < 6; readerDelay++) {
         await db.read({ force: true });
         const first = deferred(), both = deferred(), entered = deferred(), release = deferred();
         let reads = 0;
-        db.adapter.read = async () => {
+        db._readWithMetadata = async () => {
           const data = await originalRead(), index = reads++;
           if (index === 0) first.resolve();
           if (index < 2) {
@@ -307,7 +309,7 @@ test('agent route streaming matches saved replies without duplicate interruption
         } finally {
           release.resolve();
           await Promise.allSettled([chat, history]);
-          db.adapter.read = originalRead; db.adapter.write = originalWrite;
+          db._readWithMetadata = originalRead; db.adapter.write = originalWrite;
         }
         assert.match(responses[0].text, /"error"/);
         assert.equal(responses[1].status, 200);
@@ -323,7 +325,7 @@ test('agent route streaming matches saved replies without duplicate interruption
     await db.read({ force: true });
     db.data.agents.find(agent => agent.id === agentId).enable_suggestions = true;
     await db.write();
-    const originalRead = db.adapter.read.bind(db.adapter), originalWrite = db.adapter.write.bind(db.adapter);
+    const originalRead = db._readWithMetadata.bind(db), originalWrite = db.adapter.write.bind(db.adapter);
     const leaks = [];
     for (let writerDelay = 0; writerDelay < 6; writerDelay++) {
       for (let readerDelay = 0; readerDelay < 6; readerDelay++) {
@@ -331,7 +333,7 @@ test('agent route streaming matches saved replies without duplicate interruption
         const callsBefore = calls.length;
         const first = deferred(), both = deferred(), entered = deferred(), release = deferred();
         let reads = 0;
-        db.adapter.read = async () => {
+        db._readWithMetadata = async () => {
           const data = await originalRead(), index = reads++;
           if (index === 0) first.resolve();
           if (index < 2) {
@@ -356,7 +358,7 @@ test('agent route streaming matches saved replies without duplicate interruption
         } finally {
           release.resolve();
           await Promise.allSettled([chat, suggestions]);
-          db.adapter.read = originalRead; db.adapter.write = originalWrite;
+          db._readWithMetadata = originalRead; db.adapter.write = originalWrite;
         }
         assert.match(responses[0].text, /"error"/);
         assert.equal(responses[1].status, 200);
@@ -372,7 +374,7 @@ test('agent route streaming matches saved replies without duplicate interruption
     const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
     await db.read({ force: true });
     const baseline = structuredClone(db.data.agent_messages);
-    const originalRead = db.adapter.read.bind(db.adapter), originalWrite = db.adapter.write.bind(db.adapter);
+    const originalRead = db._readWithMetadata.bind(db), originalWrite = db.adapter.write.bind(db.adapter);
     const leaks = [];
     for (let historyDelay = 0; historyDelay < 12; historyDelay++) {
       for (let writerDelay = 0; writerDelay < 6; writerDelay++) {
@@ -384,7 +386,7 @@ test('agent route streaming matches saved replies without duplicate interruption
         const ghost = `Synthetic chat-context ghost ${historyDelay} ${writerDelay}`;
         const callsBefore = calls.length;
         let armHistory = false, reads = 0;
-        db.adapter.read = async () => {
+        db._readWithMetadata = async () => {
           const data = await originalRead();
           if (armHistory) {
             const index = reads++;
@@ -422,7 +424,7 @@ test('agent route streaming matches saved replies without duplicate interruption
         } finally {
           release.resolve();
           await Promise.allSettled([main, concurrent]);
-          db.adapter.read = originalRead; db.adapter.write = originalWrite;
+          db._readWithMetadata = originalRead; db.adapter.write = originalWrite;
         }
         assert.equal(responses[0].status, 200);
         assert.ok(!responses[0].text.includes('"error"'));
@@ -453,7 +455,7 @@ test('agent route streaming matches saved replies without duplicate interruption
         if (replacement === 'natural LRU') {
           // Existing production eviction threshold, exercised with isolated
           // synthetic accounts while the chat is awaiting its local provider.
-          for (let index = 0; index < 51; index++) await initUserDatabase(randomUUID());
+          for (let index = 0; index < 51; index++) { const id = randomUUID(); const fixtureDb = await createNewUserDatabase(id); await provisionNewLocalMemoryAccount(id, fixtureDb); }
         } else {
           clearUserDbCache(userId);
           if (replacement === 'restored source') await fs.writeFile(diskPath, JSON.stringify(baseline));
@@ -476,7 +478,7 @@ test('agent route streaming matches saved replies without duplicate interruption
         assert.deepEqual(savedAfter.agent_messages, savedBefore.agent_messages);
         if (replacement === 'natural LRU') {
           // The chat's finally releases its hold; later pressure can evict it.
-          for (let index = 0; index < 51; index++) await initUserDatabase(randomUUID());
+          for (let index = 0; index < 51; index++) { const id = randomUUID(); const fixtureDb = await createNewUserDatabase(id); await provisionNewLocalMemoryAccount(id, fixtureDb); }
         }
         await assert.rejects(active.write(), error => error.code === 'USER_DB_REPLACED');
         await assert.rejects(active.read(), error => error.code === 'USER_DB_REPLACED');

@@ -1,3 +1,4 @@
+import { appendFixtureMessages, initializeAccountStoreFixture } from './helpers/accountStoreFixtures.js';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -12,7 +13,7 @@ process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-task-lifecycle-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 process.env.ENCRYPTION_KEY = crypto.randomBytes(32).toString('base64');
-const { initDatabase, initUserDatabase, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
+const { initDatabase, createNewUserDatabase, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb, generateSessionToken } = await import('../src/models/authDb.js');
 const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
@@ -20,7 +21,7 @@ const { readCatalog, saveCatalog } = await import('../src/services/ai/catalog.js
 const { createTask, listTasks, runTask, updateTask, deleteTask, acceptTaskResult,
   resolveUnknownTaskRun, tickTasks, startTaskScheduler, stopTaskScheduler } = await import('../src/services/tasks.js');
 const request = (await import('supertest')).default(createTestApp());
-await initDatabase(); await initAuthDb();
+await initializeAccountStoreFixture(); await initDatabase(); await initAuthDb();
 
 const calls = [], held = [];
 let behavior = 'ok';
@@ -45,7 +46,7 @@ after(async () => { stopTaskScheduler(); provider.closeAllConnections(); await n
 
 async function session(withModel = false) {
   const userId = crypto.randomUUID(), token = generateSessionToken();
-  const db = await initUserDatabase(userId);
+  const db = await createNewUserDatabase(userId);
   if (!process.env.SUPABASE_DB_URL) await provisionNewLocalMemoryAccount(userId, db);
   const auth = getAuthDb(); await auth.read();
   auth.data.users.push({ id: userId, username: userId, password: 'unused' });
@@ -82,7 +83,7 @@ const head = doc => doc.versions.find(version => version.id === doc.head_version
 const saveInput = (doc, content, extra = {}) => ({ client_request_id: crypto.randomUUID(), expected_revision: doc.revision, base_version_id: doc.head_version_id, content, ...extra });
 const acceptInput = doc => ({ client_request_id: crypto.randomUUID(), expected_revision: doc.revision, version_id: doc.head_version_id, content_hash: head(doc).content_hash, source_hash: doc.source.hash });
 async function sources(s) {
-  await mutate(s, data => data.messages.push(
+  await mutate(s, data => appendFixtureMessages(data,
     { id: crypto.randomUUID(), group_id: 'group-presidential', sender_type: 'user', sender_id: s.userId, content: '活动原定10月18日', revision: 1, created_at: '2026-10-01T08:00:00.000Z' },
     { id: crypto.randomUUID(), group_id: 'group-presidential', sender_type: 'user', sender_id: s.userId, content: '明确更正为10月20日，请以此为准', revision: 1, created_at: '2026-10-01T09:00:00.000Z' }));
   return create(s, { title: '同一份邀请稿', prompt: '请用最新资料写活动邀请', group_id: 'group-presidential' });
@@ -284,7 +285,7 @@ test('legacy generated body without source identity fails closed on changed hash
   await assert.rejects(saveTaskResultVersion(s.userId, task.id, saveInput(blocked, '洗回旧内容', { reviewed_source_hash: blocked.source.hash })), e => e.code === 'RESULT_SOURCE_BLOCKED');
   const emptyTask = await create(s, { group_id: 'group-debate' });
   let doc = (await saveTaskResultVersion(s.userId, emptyTask.id, saveInput(await getTaskResult(s.userId, emptyTask.id), '先写空白会话的人工稿'))).document;
-  await mutate(s, data => data.messages.push({ id: crypto.randomUUID(), group_id: 'group-debate', sender_type: 'user', content: '后来补的资料', revision: 1 }));
+  await mutate(s, data => appendFixtureMessages(data, { id: crypto.randomUUID(), group_id: 'group-debate', sender_type: 'user', content: '后来补的资料', revision: 1 }));
   doc = await getTaskResult(s.userId, emptyTask.id);
   assert.equal(doc.source.status, 'changed'); assert.equal(head(doc).content_hidden, false);
   assert.equal((await listTasks(s.userId)).find(task => task.id === emptyTask.id).source_stale, true);
@@ -351,7 +352,7 @@ test('reviewed manual body and old generation brief expose independent source st
 
 test('revoking original message outside current40 context still hides manual body in legacy task summaries', async () => {
   const s = await session(); const origin = crypto.randomUUID();
-  await mutate(s, data => data.messages.push({ id: origin, group_id: 'group-presidential', sender_type: 'user', content: '原始来源', revision: 1 }, ...Array.from({length:40},(_,index)=>({id:crypto.randomUUID(),group_id:'group-presidential',sender_type:'user',content:`后续材料${index}`,revision:1}))));
+  await mutate(s, data => appendFixtureMessages(data, { id: origin, group_id: 'group-presidential', sender_type: 'user', content: '原始来源', revision: 1 }, ...Array.from({length:40},(_,index)=>({id:crypto.randomUUID(),group_id:'group-presidential',sender_type:'user',content:`后续材料${index}`,revision:1}))));
   const task = await create(s,{group_id:'group-presidential',source_message_id:origin,source_message_edited_at:null});
   let doc=(await saveTaskResultVersion(s.userId,task.id,saveInput(await getTaskResult(s.userId,task.id),'不能在删源后泄露的人工正文'))).document;
   await acceptTaskResultVersion(s.userId,task.id,acceptInput(doc));

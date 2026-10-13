@@ -2,10 +2,11 @@ import test, { beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { resolve, join } from 'node:path';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { Window } from 'happy-dom';
+import { BrowserWindow, Window } from 'happy-dom';
+import { createTaskPlanningLegacySample, verifyTaskPlanningLegacySources } from './fixtures/generate-task-planning-legacy.mjs';
 const root = resolve(import.meta.dirname, '..'), window = new Window({ url: 'https://qunthink.test/' });
 Object.assign(globalThis, { window, document: window.document, localStorage: window.localStorage, HTMLElement: window.HTMLElement, Node: window.Node, Element: window.Element, IS_REACT_ACT_ENVIRONMENT: true });
 Object.defineProperty(globalThis, 'navigator', { value: window.navigator, configurable: true });
@@ -315,22 +316,129 @@ test('planning historical ACK preserves newer priority and estimate projection',
 });
 
 
-test('planning candidate consumes actual public-533 legacy v1 journal/AES fixture without changing payload bytes', async () => {
- const legacy = JSON.parse(await readFile(resolve(root, 'test/fixtures/task-planning-legacy.json'), 'utf8'));
- assert.equal(legacy.sourceCommit, '533d7be3cdd47691602574ccac7c6524e7ed7ab3');
- const key = await crypto.subtle.importKey('raw', new Uint8Array(legacy.keyMaterial), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
- databases.set('qunthink-writing-key-alice', new Map([['key', key]]));
+test('planning public-533 sources are byte-pinned and static metadata contains provenance only', async () => {
+ const { manifest, sources } = await verifyTaskPlanningLegacySources();
+ assert.deepEqual(Object.keys(manifest).sort(), ['sourceCommit', 'sourceFiles']);
+ assert.equal(sources.size, 6);
+ assert.equal(manifest.sourceFiles['frontend/src/stores/tasksStore.ts'], '80236b6e96a38641349f82ff9db161c957ae2e1b6e7c938721200984de54aadc');
+ assert.equal(manifest.sourceFiles['frontend/src/stores/taskMetadataSlice.ts'], '91442b45bc92c9eda7e78dc50f32924d7743692ea41a5a8d9d54d25d382cab61');
+ assert.equal(manifest.sourceFiles['frontend/src/utils/taskMetadataRecovery.ts'], '5fcfb830c8103e0ecfe2d4e05a463f686915f873c2ba2ac5be9fe38f6de503f8');
+ assert.equal(manifest.sourceFiles['frontend/src/utils/taskRecovery.ts'], '7cd45fb8b2e6ca9c5ee9eb84b2832962181dd4f982401cfa4558477f1d6435df');
+});
+test('planning public-533 samples use fresh non-extractable keys and never share runtime UUIDs or ciphertext', async () => {
+ const previousStorage = globalThis.localStorage, previousDatabase = globalThis.indexedDB;
+ const generateKey = crypto.subtle.generateKey, getRandomValues = crypto.getRandomValues;
+ const first = await createTaskPlanningLegacySample(), second = await createTaskPlanningLegacySample();
+ assert.ok(first.owner?.startsWith('fixture-task-planning-') && second.owner?.startsWith('fixture-task-planning-') && first.owner !== second.owner, 'Each invocation needs a fresh, explicitly synthetic fixture owner');
+ assert.ok(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(first.taskId) && first.taskId !== second.taskId, 'Each invocation needs a fresh fixture task UUID');
+ assert.ok(globalThis.localStorage === previousStorage && globalThis.indexedDB === previousDatabase, 'The producer must restore the consumer storage environment');
+ assert.ok(crypto.subtle.generateKey === generateKey && crypto.getRandomValues === getRandomValues, 'The producer must not replace WebCrypto randomness');
+ assert.ok(first.key !== second.key && !first.key.extractable && !second.key.extractable, 'Each sample needs its own non-extractable key');
+ await assert.rejects(crypto.subtle.exportKey('raw', first.key), { name: 'InvalidAccessException' });
+ assert.ok(first.createReceipt.key !== second.createReceipt.key && first.metadataJournal.key !== second.metadataJournal.key, 'Each invocation needs fresh request UUIDs');
+ const ciphertexts = sample => Object.entries(sample.storage).filter(([name]) => name.startsWith('qunthink_writing_v1_')).map(([, bytes]) => bytes);
+ assert.ok(ciphertexts(first).length === 2 && ciphertexts(second).length === 2, 'Both legacy creation and metadata ciphertexts must exist');
+ assert.ok(ciphertexts(first).every(bytes => !ciphertexts(second).includes(bytes)), 'Runtime ciphertexts must not be fixed across invocations');
+ const [storageName, envelopeBytes] = Object.entries(first.storage).find(([name]) => name.startsWith('qunthink_writing_v1_'));
+ const envelope = JSON.parse(envelopeBytes);
+ await assert.rejects(crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(envelope.iv), additionalData: new TextEncoder().encode(storageName) }, second.key, new Uint8Array(envelope.data)), { name: 'OperationError' });
+ assert.throws(() => JSON.stringify(first), /memory-only/);
+ // Only boolean assertions touch keys/ciphertext, keeping failures value-free.
+});
+for (const [mode, generationFails, closeFails] of [
+ ['normal generation', false, false], ['key generation failure', true, false],
+ ['window close failure', false, true], ['key generation and window close failures', true, true],
+]) test(`planning public-533 restores exact global descriptors after ${mode}`, async () => {
+ const names = ['localStorage', 'indexedDB', '__taskPlanningLegacy'];
+ const originalTransport = Object.getOwnPropertyDescriptor(globalThis, '__taskPlanningLegacy');
+ const originalGenerateKey = Object.getOwnPropertyDescriptor(crypto.subtle, 'generateKey');
+ const originalClose = Object.getOwnPropertyDescriptor(BrowserWindow.prototype, 'close');
+ let closeCalls = 0, generationCalls = 0;
+ // Exercise restoration of a pre-existing, non-enumerable/read-only property.
+ Object.defineProperty(globalThis, '__taskPlanningLegacy', { configurable: true, writable: false, enumerable: false, value: Object.freeze({ sentinel: true }) });
+ const previous = new Map(names.map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+ try {
+  if (generationFails) Object.defineProperty(crypto.subtle, 'generateKey', { configurable: true, value: async () => { generationCalls++; throw new Error('Injected key generation failure'); } });
+  Object.defineProperty(BrowserWindow.prototype, 'close', { ...originalClose, value() { closeCalls++; if (closeFails) throw new Error('Injected close failure'); return originalClose.value.call(this); } });
+  let failure;
+  try { await createTaskPlanningLegacySample(); } catch (error) { failure = error; }
+  if (generationFails) {
+   assert.ok(generationCalls > 0, 'The real old producer must attempt key generation');
+   assert.ok(failure?.message === 'Legacy producer did not emit both old-format AES-GCM samples', 'The primary producer error must survive any cleanup error');
+  } else if (closeFails) assert.ok(failure?.message === 'Legacy producer cleanup failed', 'Cleanup-only failures must have a fixed, value-free diagnostic');
+  else assert.ok(!failure, 'Normal generation must succeed');
+  assert.ok(closeCalls === 1, 'Window cleanup must still be attempted exactly once');
+  for (const name of names) {
+   const actual = Object.getOwnPropertyDescriptor(globalThis, name), expected = previous.get(name);
+   assert.ok(!!actual && Object.keys(actual).length === Object.keys(expected).length && Object.keys(expected).every(key => actual[key] === expected[key]), 'Every original global descriptor must be restored, even after cleanup throws');
+  }
+ } finally {
+  // Restore test instrumentation even if a regression assertion fails.
+  if (originalGenerateKey) Object.defineProperty(crypto.subtle, 'generateKey', originalGenerateKey); else delete crypto.subtle.generateKey;
+  Object.defineProperty(BrowserWindow.prototype, 'close', originalClose);
+  for (const name of names) Object.defineProperty(globalThis, name, previous.get(name));
+  if (originalTransport) Object.defineProperty(globalThis, '__taskPlanningLegacy', originalTransport); else delete globalThis.__taskPlanningLegacy;
+ }
+});
+function installLegacyTaskPlanningSample(legacy) {
+ store.getState().cleanup(); globalThis.__metadata.user = legacy.owner; globalThis.__metadata.auth++;
+ tasks = [structuredClone(legacy.task)]; store.setState({ tasks });
+ databases.set(`qunthink-writing-key-${encodeURIComponent(legacy.owner)}`, new Map([['key', legacy.key]]));
  for (const [name, value] of Object.entries(legacy.storage)) localStorage.setItem(name, value);
+}
+test('planning candidate consumes fresh public-533 synthetic v1 journal/AES samples without changing same-run bytes', async () => {
+ const legacy = await createTaskPlanningLegacySample();
+ const taskId = legacy.taskId;
+ assert.equal(legacy.sourceCommit, '533d7be3cdd47691602574ccac7c6524e7ed7ab3');
+ assert.deepEqual(Object.keys(legacy.createPayload), ['title', 'prompt', 'category', 'model_id', 'group_id', 'run_at', 'repeat_minutes', 'auto_run']);
+ assert.deepEqual(Object.keys(legacy.metadataPayload), ['client_request_id', 'expected_revision', 'changes']);
+ assert.deepEqual(Object.keys(legacy.metadataPayload.changes), ['title', 'auto_run', 'run_at']);
+ installLegacyTaskPlanningSample(legacy);
  await store.getState().fetch();
- for (const [name, bytes] of Object.entries(legacy.storage)) assert.equal(localStorage.getItem(name), bytes, `Hydration must not rewrite baseline bytes: ${name}`);
- const metadata = store.getState().metadataIntents[id]; assert.ok(metadata?.payload); assert.equal(canonicalMetadata(metadata.payload), canonicalMetadata(legacy.metadataPayload));
+ for (const [name, bytes] of Object.entries(legacy.storage)) assert.ok(localStorage.getItem(name) === bytes, 'Hydration must not rewrite any same-run legacy storage bytes');
+ const metadata = store.getState().metadataIntents[taskId]; assert.ok(metadata?.payload); assert.equal(canonicalMetadata(metadata.payload), legacy.metadataCanonical);
  const creation = store.getState().pendingCreates[0]; assert.ok(creation); assert.equal(store.getState().canRetryCreate(creation.key), true);
- assert.equal(metadata.payloadHash, await textHash(canonicalMetadata(legacy.metadataPayload))); assert.equal(creation.payloadHash, await textHash(JSON.stringify(legacy.createPayload)));
+ assert.deepEqual(creation, legacy.createReceipt); assert.equal(metadata.key, legacy.metadataJournal.key); assert.equal(metadata.payload.client_request_id, legacy.metadataJournal.key);
+ assert.equal(metadata.revision, legacy.metadataJournal.revision); assert.deepEqual(metadata.fields, legacy.metadataJournal.fields); assert.equal(metadata.createdAt, legacy.metadataJournal.createdAt);
+ assert.equal(metadata.payloadHash, legacy.metadataJournal.payloadHash); assert.equal(metadata.payloadHash, await textHash(legacy.metadataCanonical)); assert.equal(creation.payloadHash, await textHash(JSON.stringify(legacy.createPayload)));
  let createSent, metadataSent;
- globalThis.__metadata.post = async (_, payload, config) => { createSent = { raw: JSON.stringify(payload), key: config.headers['Idempotency-Key'] }; return { data: makeTask({ priority: null, estimated_minutes: null, ...payload, id: other, client_request_id: createSent.key }) }; };
+ globalThis.__metadata.post = async (_, payload, config) => { createSent = { raw: JSON.stringify(payload), key: config.headers['Idempotency-Key'] }; assert.equal(config.headers['X-Expected-User-Id'], legacy.owner); return { data: { ...legacy.task, priority: null, estimated_minutes: null, ...payload, id: crypto.randomUUID(), client_request_id: createSent.key } }; };
  await store.getState().retryCreate(creation.key); assert.equal(createSent.raw, JSON.stringify(legacy.createPayload)); assert.equal(createSent.key, creation.key);
- globalThis.__metadata.put = async (_, payload) => { metadataSent = payload; tasks[0] = receipt(payload).data.task; return receipt(payload); };
- await store.getState().retryMetadata(id, metadata.key); assert.deepEqual(metadataSent, legacy.metadataPayload); assert.equal(readMetadataJournal().length, 0);
+ globalThis.__metadata.put = async (path, payload, config) => {
+  assert.equal(path, `/tasks/${taskId}/metadata`); assert.equal(config.headers['X-Expected-User-Id'], legacy.owner);
+  metadataSent = payload; tasks[0] = { ...legacy.task, ...payload.changes, metadata_revision: payload.expected_revision + 1 };
+  return { data: { receipt: { id: payload.client_request_id, task_id: taskId, operation: 'metadata', status: 'succeeded', committed_revision: payload.expected_revision + 1 }, task: tasks[0] } };
+ };
+ await store.getState().retryMetadata(taskId, metadata.key); assert.deepEqual(metadataSent, legacy.metadataPayload); assert.equal(canonicalMetadata(metadataSent), legacy.metadataCanonical); assert.equal(readMetadataJournal().length, 0);
+ assert.equal(store.getState().pendingCreates.length, 0); assert.equal(store.getState().metadataIntents[taskId], undefined);
+ assert.equal(Object.keys(localStorage).filter(name => name.startsWith('qunthink_writing_v1_')).length, 0);
+});
+test('planning public-533 synthetic samples stay isolated from another runtime fixture owner', async () => {
+ const legacy = await createTaskPlanningLegacySample(); installLegacyTaskPlanningSample(legacy);
+ store.getState().cleanup(); globalThis.__metadata.user = `fixture-isolation-${crypto.randomUUID()}`; globalThis.__metadata.auth++;
+ tasks = []; await store.getState().fetch();
+ assert.equal(store.getState().pendingCreates.length, 0); assert.equal(Object.keys(store.getState().metadataIntents).length, 0);
+ assert.equal(store.getState().canRetryCreate(legacy.createReceipt.key), false);
+ for (const [name, bytes] of Object.entries(legacy.storage)) assert.ok(localStorage.getItem(name) === bytes, 'Another owner must not read, settle, or rewrite the source sample');
+});
+for (const [kind, prefix, requiredField] of [
+ ['creation', 'qunthink_command_v1_', 'payloadHash'], ['metadata', 'qunthink_metadata_command_v1_', 'revision'],
+]) test(`planning public-533 synthetic ${kind} journal missing a required field fails closed`, async () => {
+ const legacy = await createTaskPlanningLegacySample(); installLegacyTaskPlanningSample(legacy);
+ const [name, bytes] = Object.entries(legacy.storage).find(([name]) => name.startsWith(prefix));
+ const journal = JSON.parse(bytes); delete journal[requiredField]; const malformed = JSON.stringify(journal);
+ localStorage.setItem(name, malformed);
+ let sends = 0; globalThis.__metadata.post = globalThis.__metadata.put = async () => { sends++; throw new Error('Malformed journals must not dispatch'); };
+ await store.getState().fetch();
+ if (kind === 'creation') {
+  assert.ok(store.getState().recoveryError, 'Malformed creation journals must block recovery');
+  await assert.rejects(store.getState().retryCreate(legacy.createReceipt.key));
+ } else {
+  assert.ok(store.getState().metadataRecoveryError, 'Malformed metadata journals must block recovery');
+  await assert.rejects(store.getState().retryMetadata(legacy.taskId, legacy.metadataJournal.key));
+ }
+ assert.equal(sends, 0); assert.ok(localStorage.getItem(name) === malformed, 'Malformed records must remain available for verification');
+ for (const [key, value] of Object.entries(legacy.storage).filter(([name]) => name.startsWith('qunthink_writing_v1_'))) assert.ok(localStorage.getItem(key) === value, 'Failed-closed recovery must preserve ciphertext without diagnostic disclosure');
 });
 
 for (const input of ['-1', '1.5', '1e2', '  ', 'NaN', '525601', '99999999999999999999']) test(`planning mounted estimate rejects ${JSON.stringify(input)} without erasing typed intent or clearing server value`, async () => {

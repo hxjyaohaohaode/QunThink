@@ -11,9 +11,9 @@ const result = await build({
   plugins: [{ name: 'message-io', setup(build) {
     build.onResolve({ filter: /(?:services\/api|utils\/(?:indexedDB|cacheUtils)|stores\/(?:groupsStore|audioStore)|\.\/(?:groupsStore|audioStore))$/ }, ({ path }) => ({ path, namespace: 'mock' }));
     build.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({ loader: 'js', contents:
-      path.endsWith('/api') ? `export const getAuthGeneration = () => __messagesTest.generation; export const api = new Proxy({}, {get: (_, name) => (...args) => { __messagesTest.calls.push({name, user: __messagesTest.user, args}); return __messagesTest.api[name](...args); }});` :
+      path.endsWith('/api') ? `export const getAuthGeneration = () => __messagesTest.generation; export const api = new Proxy({}, {get: (_, name) => (...args) => { __messagesTest.calls.push({name, user: __messagesTest.user, args}); return name === 'getOrderedMessages' ? Promise.resolve(__messagesTest.api.getMessages(args[0], args[1])).then(page => __messagesTest.orderedPage(page,args[1],args[0])) : __messagesTest.api[name](...args); }});` :
       path.endsWith('/cacheUtils') ? `export const getCacheUserId = () => __messagesTest.user;` :
-      path.endsWith('/indexedDB') ? ['saveMessagesToIndexedDB', 'loadMessagesFromIndexedDB', 'deleteMessageFromIndexedDB', 'clearAllMessagesFromIndexedDB', 'clearOldMessagesFromIndexedDB'].map(name => `export const ${name} = (...args) => { __messagesTest.storage.push({name:'${name}', user:__messagesTest.user, args}); return __messagesTest.db['${name}'](...args); };`).join('\n') :
+      path.endsWith('/indexedDB') ? ['saveMessagesWithDurability', 'loadMessagesFromIndexedDB', 'deleteMessageFromIndexedDB', 'clearAllMessagesFromIndexedDB', 'clearOldMessagesFromIndexedDB'].map(name => `export const ${name} = (...args) => { __messagesTest.storage.push({name:'${name}' === 'saveMessagesWithDurability' ? 'saveMessagesToIndexedDB' : '${name}', user:__messagesTest.user, args}); return '${name}' === 'saveMessagesWithDurability' ? Promise.resolve(__messagesTest.db.saveMessagesToIndexedDB(...args)).then(durable=>({durable})) : __messagesTest.db['${name}'](...args); };`).join('\n') :
       path.endsWith('/groupsStore') ? `export const useGroupsStore = {getState: () => ({currentGroup: {id: 'g'}})};` :
       `export const useAudioStore = {getState: () => ({removeTTSAudio: id => __messagesTest.audio.push(id)})};`
     }));
@@ -22,10 +22,47 @@ const result = await build({
 const { useMessagesStore: store, resetMessagesModuleState: reset } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 const message = (id, content = id, extra = {}) => ({ id, group_id: 'g', sender_type: 'user', sender_id: 'user', content, content_type: 'text', created_at: '2026-10-04T01:00:00.000Z', ...extra });
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
-const drain = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+const drain = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
+// F07 fixture migration: legacy-shaped synthetic rows are projected into the
+// strict HTTP wire contract. Product validation/store actions remain unchanged.
+const GEN = '10000000-0000-4000-8000-000000000001';
+const cursor = (kind, at, until, group = 'g') => Buffer.from(JSON.stringify({v:1,owner:io.user,group,generation:GEN,kind,at:String(at),...(until === undefined ? {} : {until:String(until)})})).toString('base64url');
+const orderedRow = (m, sequence) => ({...m, confirmation:'confirmed', server_order:{generation:GEN,sequence:String(sequence)}});
+io.orderedPage = (page, query = {}, group = 'g') => {
+  const before = query.before_cursor && JSON.parse(Buffer.from(query.before_cursor,'base64url'));
+  const after = query.after_cursor && JSON.parse(Buffer.from(query.after_cursor,'base64url'));
+  const values = page.messages || [];
+  let available = before ? Number(before.at) - values.length : Math.max(999,...io.sequences.values()) + 1;
+  const projected = values.map(m => {
+    if (!io.sequences.has(m.id)) io.sequences.set(m.id,available++);
+    return orderedRow(m,io.sequences.get(m.id));
+  }).filter(m => !before || BigInt(m.server_order.sequence) < BigInt(before.at)).sort((a,b)=>Number(a.server_order.sequence)-Number(b.server_order.sequence));
+  const H = before?.until || after?.until || '10000';
+  const hasMore = !!page.hasMore;
+  const C = after && hasMore ? projected.at(-1).server_order.sequence : H;
+  return {messages:projected,hasMore,order:'sequence_v1',generation:GEN,high_watermark:H,consumed_through:before?null:C,
+    before_cursor:!after&&hasMore?cursor('before',projected[0].server_order.sequence,H,group):null,
+    after_cursor:before?null:cursor('after',C,after&&hasMore?H:undefined,group)};
+};
+let viewIdentity;
+const ensureView = group => {
+  const identity = `${io.user}:${io.generation}:${group}`;
+  if (viewIdentity !== identity || !store.getState().ordered[group]) { store.getState().activateMessageView(group); viewIdentity = identity; }
+};
+const fetchMessages = group => { ensureView(group); return store.getState().fetchMessages(group); };
+const loadMoreMessages = group => {
+  ensureView(group);
+  const oldest = store.getState().messages[group]?.[0];
+  if (!store.getState().recovery[group]?.bootstrapComplete && oldest) {
+    const sequence = io.sequences.get(oldest.id) || 1000;
+    store.setState(state=>({ordered:{...state.ordered,[group]:{generation:GEN,beforeCursor:cursor('before',sequence,'10000',group),afterCursor:cursor('after','10000',undefined,group),consumedThrough:'10000',highWatermark:'10000',liveMax:null}},
+      recovery:{...state.recovery,[group]:{phase:'ready',bootstrapComplete:true,pending:false,failures:0,nextAllowedAt:Date.now()+30000}}}));
+  }
+  return store.getState().loadMoreMessages(group);
+};
 const switchTo = (user, { cleanup = true } = {}) => { io.generation++; io.user = user; if (cleanup) reset(); store.setState({ messages: {}, pagination: {}, loading: false, sending: {}, error: null }); };
 beforeEach(() => {
-  reset(); io.user = 'alice'; io.generation++; io.calls = []; io.storage = []; io.audio = []; io.timers.clear(); io.logError = () => {}; 
+  reset(); viewIdentity = undefined; io.sequences = new Map(); io.user = 'alice'; io.generation++; io.calls = []; io.storage = []; io.audio = []; io.timers.clear(); io.logError = () => {};
   io.setTimeout = (fn, ms) => { const id = ++io.nextTimer; io.timers.set(id, { fn, ms }); return id; };
   io.clearTimeout = id => io.timers.delete(id);
   io.api = { getMessages: async () => ({ messages: [], hasMore: false }) };
@@ -35,7 +72,7 @@ beforeEach(() => {
 
 test('a cache read from A must not start an API call or hydrate B after account switch', async () => {
   const cached = deferred(); io.db.loadMessagesFromIndexedDB = () => cached.promise;
-  const old = store.getState().fetchMessages('g'); switchTo('bob');
+  const old = fetchMessages('g'); switchTo('bob');
   cached.resolve([message('alice-secret')]); await old;
   assert.deepEqual(io.calls, []);
   assert.deepEqual(store.getState().messages, {});
@@ -47,11 +84,11 @@ const runTimers = async ms => {
   await drain();
 };
 const rows = () => store.getState().messages.g || [];
-const seed = (messages, hasMore = true) => store.setState({ messages: { g: messages }, pagination: { g: { hasMore, loadingMore: false, oldestMessageId: messages[0]?.id || null } } });
+const seed = (messages, hasMore = true) => { messages = messages.map((m,i) => {io.sequences.set(m.id,1000+i);return orderedRow(m,1000+i)}); store.setState({ messages: { g: messages }, pagination: { g: { hasMore, loadingMore: false, oldestMessageId: messages[0]?.id || null } } }); for (const m of messages) store.getState().addMessage('g',m); };
 
 test('A→B→A auth generations reject an old cache callback without relying on cleanup', async () => {
   const cached = deferred(); io.db.loadMessagesFromIndexedDB = () => cached.promise;
-  const old = store.getState().fetchMessages('g'); switchTo('bob', { cleanup: false }); switchTo('alice', { cleanup: false });
+  const old = fetchMessages('g'); switchTo('bob', { cleanup: false }); switchTo('alice', { cleanup: false });
   cached.resolve([message('old-A')]); await old;
   assert.deepEqual(io.calls, []); assert.deepEqual(rows(), []);
 });
@@ -59,11 +96,11 @@ test('A→B→A auth generations reject an old cache callback without relying on
 test('old fetch completion cannot clear B deduplication or overwrite a B response', async () => {
   const oldResponse = deferred(), newResponse = deferred();
   io.api.getMessages = () => oldResponse.promise;
-  const old = store.getState().fetchMessages('g'); await drain();
+  const old = fetchMessages('g'); await drain();
   switchTo('bob'); io.api.getMessages = () => newResponse.promise;
-  const fresh = store.getState().fetchMessages('g'); await drain();
+  const fresh = fetchMessages('g'); await drain();
   oldResponse.resolve({ messages: [message('old-A')], hasMore: false }); await old;
-  const duplicate = store.getState().fetchMessages('g'); await drain();
+  const duplicate = fetchMessages('g'); await drain();
   assert.equal(io.calls.length, 2);
   newResponse.resolve({ messages: [message('B')], hasMore: false }); await Promise.all([fresh, duplicate]);
   assert.deepEqual(rows().map(row => row.id), ['B']);
@@ -72,15 +109,15 @@ test('old fetch completion cannot clear B deduplication or overwrite a B respons
 
 test('module reset invalidates same-user in-flight work and the freshness clock', async () => {
   io.api.getMessages = async () => ({ messages: [message('first')], hasMore: false });
-  await store.getState().fetchMessages('g'); reset();
+  await fetchMessages('g'); reset();
   io.api.getMessages = async () => ({ messages: [message('second')], hasMore: false });
-  await store.getState().fetchMessages('g');
+  await fetchMessages('g');
   assert.equal(io.calls.length, 2); assert.deepEqual(rows().map(row => row.id), ['second']);
 });
 
 for (const rejects of [false, true]) test(`old pagination ${rejects ? 'failure' : 'receipt'} cannot mutate the new session`, async () => {
   seed([message('old-A')]); const page = deferred(); io.api.getMessages = () => page.promise;
-  const old = store.getState().loadMoreMessages('g'); switchTo('bob'); seed([message('B')]);
+  const old = loadMoreMessages('g'); switchTo('bob'); seed([message('B')]);
   if (rejects) page.reject(new Error('A failed')); else page.resolve({ messages: [message('oldest-A')], hasMore: false });
   await old; assert.deepEqual(rows().map(row => row.id), ['B']); assert.equal(store.getState().error, null); assert.equal(store.getState().pagination.g.hasMore, true);
 });
@@ -118,7 +155,7 @@ test('a completed old cache save cannot begin cleanup as B', async () => {
 
 test('latest read preserves optimistic sends and live edits while deduplicating exact client receipts', async () => {
   seed([message('existing', 'original')]); const response = deferred(), send = deferred(); io.api.getMessages = () => response.promise; io.api.sendMessage = () => send.promise;
-  const read = store.getState().fetchMessages('g'); await drain();
+  const read = fetchMessages('g'); await drain();
   store.getState().updateMessage('existing', 'g', { content: 'live edit' });
   const sending = store.getState().sendMessage('g', 'pending'); const tempId = rows().find(row => row.status === 'sending').tempId;
   response.resolve({ messages: [message('existing', 'stale'), message('other-tab', 'unrelated', { client_message_id: 'someone-else' }), message('server', 'pending', { client_message_id: tempId })], hasMore: false });
@@ -133,7 +170,7 @@ test('latest read preserves optimistic sends and live edits while deduplicating 
 
 test('a latest read never drops an unconfirmed optimistic send', async () => {
   const response = deferred(), send = deferred(); io.api.getMessages = () => response.promise; io.api.sendMessage = () => send.promise;
-  const read = store.getState().fetchMessages('g'); await drain();
+  const read = fetchMessages('g'); await drain();
   const sending = store.getState().sendMessage('g', 'pending');
   response.resolve({ messages: [message('other', 'other', { client_message_id: 'other-client' })], hasMore: false }); await read;
   assert.equal(rows().filter(row => row.status === 'sending').length, 1);
@@ -143,7 +180,7 @@ test('a latest read never drops an unconfirmed optimistic send', async () => {
 test('cached failed drafts survive refresh and retry reuses the original client ID', async () => {
   const draft = message('temp-retry', 'draft', { tempId: 'temp-retry', status: 'failed' });
   io.db.loadMessagesFromIndexedDB = async () => [draft]; io.api.getMessages = async () => ({ messages: [message('history')], hasMore: false });
-  await store.getState().fetchMessages('g'); assert.equal(rows().find(row => row.tempId === draft.tempId).status, 'failed');
+  await fetchMessages('g'); assert.equal(rows().find(row => row.tempId === draft.tempId).status, 'failed');
   io.api.sendMessage = async (...args) => message('delivered', args[1], { client_message_id: args[6] });
   assert.equal((await store.getState().retryMessage('g', draft.tempId)).success, true);
   assert.equal(io.calls.find(call => call.name === 'sendMessage').args[6], 'temp-retry');
@@ -163,7 +200,7 @@ test('a WebSocket delivery confirmed before a failed HTTP receipt stays sent', a
 test('latest-page refresh retains older loaded history without blanket cache deletion', async () => {
   seed([message('old', 'old', { created_at: '2026-10-01T00:00:00Z' }), message('recent')]);
   io.api.getMessages = async () => ({ messages: [message('recent')], hasMore: true });
-  await store.getState().fetchMessages('g'); await drain();
+  await fetchMessages('g'); await drain();
   assert.deepEqual(rows().map(row => row.id), ['old', 'recent']);
   assert.equal(io.storage.filter(call => call.name === 'clearAllMessagesFromIndexedDB').length, 0);
   assert.ok(io.storage.filter(call => call.name === 'deleteMessageFromIndexedDB').every(call => call.args[0] !== 'old'));
@@ -171,7 +208,7 @@ test('latest-page refresh retains older loaded history without blanket cache del
 
 test('source deletion during cache and API reads never resurfaces or gets saved later', async () => {
   const cached = deferred(), response = deferred(); io.db.loadMessagesFromIndexedDB = () => cached.promise; io.api.getMessages = () => response.promise;
-  const read = store.getState().fetchMessages('g'); store.getState().removeMessages('g', ['deleted']);
+  const read = fetchMessages('g'); store.getState().removeMessages('g', ['deleted']);
   cached.resolve([message('deleted'), message('keep')]); await drain(); assert.ok(!rows().some(row => row.id === 'deleted'));
   store.getState().updateMessage('keep', 'g', { content: 'newer' });
   response.resolve({ messages: [message('deleted'), message('keep', 'old')], hasMore: false }); await read; await runTimers(2000);
@@ -181,7 +218,7 @@ test('source deletion during cache and API reads never resurfaces or gets saved 
 
 test('source clear invalidates an older read and only clears that group', async () => {
   const response = deferred(); io.api.getMessages = () => response.promise; seed([message('existing')]);
-  const read = store.getState().fetchMessages('g'); await drain(); store.getState().clearMessages('g');
+  const read = fetchMessages('g'); await drain(); store.getState().clearMessages('g');
   response.resolve({ messages: [message('resurrected')], hasMore: true }); await read; await drain();
   assert.deepEqual(rows(), []); assert.equal(store.getState().pagination.g.hasMore, false);
   assert.deepEqual(io.storage.filter(call => call.name === 'clearAllMessagesFromIndexedDB').map(call => call.args), [['g']]);
@@ -189,7 +226,7 @@ test('source clear invalidates an older read and only clears that group', async 
 
 test('older-page response retains live edits and cannot restore a deleted source', async () => {
   seed([message('existing')]); const response = deferred(); io.api.getMessages = () => response.promise;
-  const page = store.getState().loadMoreMessages('g');
+  const page = loadMoreMessages('g');
   store.getState().updateMessage('existing', 'g', { content: 'live' }); store.getState().removeMessages('g', ['deleted']);
   response.resolve({ messages: [message('older', 'older', { created_at: '2026-10-01T00:00:00Z' }), message('deleted'), message('existing', 'stale')], hasMore: false }); await page;
   assert.deepEqual(rows().map(row => [row.id, row.content]), [['older', 'older'], ['existing', 'live']]);
@@ -250,19 +287,19 @@ test('send intent is saved with its original client ID before network IO; restor
   const saved = io.storage.find(call => call.name === 'saveMessagesToIndexedDB').args[0][0];
   assert.equal(saved.status, 'sending'); assert.equal(io.calls.find(call => call.name === 'sendMessage').args[6], saved.tempId);
   switchTo('alice'); io.db.loadMessagesFromIndexedDB = async () => [saved]; io.api.getMessages = async () => ({ messages: [], hasMore: false });
-  await store.getState().fetchMessages('g'); assert.equal(rows()[0].status, 'failed'); assert.equal(rows()[0].metadata.send_unknown, true); assert.equal(rows()[0].tempId, saved.tempId);
+  await fetchMessages('g'); assert.equal(rows()[0].status, 'failed'); assert.equal(rows()[0].metadata.send_unknown, true); assert.equal(rows()[0].tempId, saved.tempId);
   assert.equal(io.calls.filter(call => call.name === 'sendMessage').length, 1);
   send.resolve(message('late-server')); await pending;
 });
 
 test('failed clear releases invalidated initial-load and pagination spinners', async () => {
   seed([message('latest')]); const page = deferred(), clear = deferred(); io.api.getMessages = () => page.promise; io.api.clearAllMessages = () => clear.promise;
-  const loading = store.getState().loadMoreMessages('g'); const clearing = store.getState().clearAllMessages('g');
+  const loading = loadMoreMessages('g'); const clearing = store.getState().clearAllMessages('g');
   clear.reject(new Error('clear rejected')); await assert.rejects(clearing, /clear rejected/);
   page.resolve({ messages: [], hasMore: false }); await loading;
   assert.equal(store.getState().pagination.g.loadingMore, false);
   reset(); store.setState({ messages: {}, pagination: {}, loading: false });
-  const read = deferred(); io.api.getMessages = () => read.promise; const initial = store.getState().fetchMessages('g'); await drain();
+  const read = deferred(); io.api.getMessages = () => read.promise; const initial = fetchMessages('g'); await drain();
   io.api.clearAllMessages = async () => { throw new Error('clear rejected'); }; await assert.rejects(store.getState().clearAllMessages('g'));
   read.resolve({ messages: [], hasMore: false }); await initial; assert.equal(store.getState().loading, false);
 });
@@ -272,29 +309,30 @@ for (const deleteFrontier of [false, true]) test(`pagination reconciles cached i
   const stale = message('deleted-offline', 'stale', { created_at: '2026-10-02T01:00:00Z' });
   const latest = message('latest', 'latest', { created_at: '2026-10-03T01:00:00Z' });
   io.db.loadMessagesFromIndexedDB = async () => [old, stale, latest]; io.api.getMessages = async () => ({ messages: [latest], hasMore: true });
-  await store.getState().fetchMessages('g');
+  await fetchMessages('g');
   if (deleteFrontier) store.getState().removeMessages('g', ['latest']);
-  io.api.getMessages = async () => ({ messages: [old], hasMore: false }); await store.getState().loadMoreMessages('g'); await drain();
-  assert.equal(io.calls.at(-1).args[2], latest.created_at); assert.ok(!rows().some(row => row.id === stale.id));
-  assert.ok(io.storage.some(call => call.name === 'deleteMessageFromIndexedDB' && call.args[0] === stale.id));
+  io.api.getMessages = async () => ({ messages: [old], hasMore: false }); await loadMoreMessages('g'); await drain();
+  assert.equal(JSON.parse(Buffer.from(io.calls.at(-1).args[1].before_cursor,'base64url')).at, String(io.sequences.get(latest.id)));  assert.ok(!rows().some(row => row.id === stale.id));
+  assert.ok(!io.storage.some(call => call.name === 'deleteMessageFromIndexedDB' && call.args[0] === stale.id), 'unverified omitted history stays on disk');
 });
 
 test('LRU eviction never becomes a cache source deletion for a valid refreshed group', async () => {
   const messages = { h: [message('old-valid', 'valid', { group_id: 'h', created_at: '2020-01-01T00:00:00Z' })] };
   for (let i = 0; i < 15; i++) messages[`group-${i}`] = [message(`recent-${i}`)];
   store.setState({ messages }); io.api.getMessages = async () => ({ messages: messages.h, hasMore: false });
-  await store.getState().fetchMessages('h'); await runTimers(2000);
-  assert.equal(store.getState().messages.h, undefined);
+  await fetchMessages('h'); await runTimers(2000);
+  assert.ok(store.getState().messages.h?.some(row=>row.id==='old-valid'), 'actual active lease is protected from LRU');
+  assert.equal(Object.keys(store.getState().messages).length,15);
   assert.ok(!io.storage.some(call => call.name === 'deleteMessageFromIndexedDB' && call.args[0] === 'old-valid'));
   assert.ok(io.storage.some(call => call.name === 'saveMessagesToIndexedDB' && call.args[0].some(row => row.id === 'old-valid')));
 });
 
-test('authoritative removal is targeted in cache and does not revive on an offline reload', async () => {
+test('unverified cached body is excluded on offline reload without deleting original disk history', async () => {
   const cache = new Map([['gone', message('gone')]]);
   io.db.loadMessagesFromIndexedDB = async () => [...cache.values()]; io.db.saveMessagesToIndexedDB = async messages => { for (const row of messages) cache.set(row.id, row); return true; }; io.db.deleteMessageFromIndexedDB = async id => { cache.delete(id); };
-  await store.getState().fetchMessages('g'); await runTimers(2000); assert.equal(cache.size, 0);
+  await fetchMessages('g'); await runTimers(2000); assert.equal(cache.size, 1);
   reset(); store.setState({ messages: {}, pagination: {} }); io.api.getMessages = async () => { throw new Error('offline'); };
-  await store.getState().fetchMessages('g'); assert.deepEqual(rows(), []);
+  await fetchMessages('g'); assert.deepEqual(rows(), []);
   assert.equal(io.storage.filter(call => call.name === 'clearAllMessagesFromIndexedDB').length, 0);
 });
 

@@ -31,7 +31,9 @@ const bundled = await build({
       build.onResolve({ filter: /^\.\/crypto$/ }, () => ({ path: 'crypto', namespace: 'delayed-crypto' }));
       build.onLoad({ filter: /.*/, namespace: 'delayed-crypto' }, () => ({
         contents: `export const encryptData = (value) => globalThis.__cacheTest.encrypt(value);
-          export const decryptData = (value) => globalThis.__cacheTest.decrypt(value);`,
+          export const decryptData = (value) => globalThis.__cacheTest.decrypt(value);
+          export const decryptDataWithPersistedKey = async () => null;
+          export const bindCryptoCacheOwner = () => {};`,
         loader: 'js',
       }));
     },

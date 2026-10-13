@@ -30,7 +30,7 @@ export async function databaseIdentity(pool) {
   return `${rows[0].cluster}:${rows[0].database}`;
 }
 
-export function createPostgresDeletionLedger({ businessPool, ledgerPool, installationId }) {
+export function createPostgresDeletionLedger({ businessPool, ledgerPool, installationId, requireBusinessMarker = false }) {
   if (!/^[0-9a-f-]{36}$/i.test(installationId || '')) throw fail();
   let identities;
   async function validate(client) {
@@ -40,6 +40,8 @@ export function createPostgresDeletionLedger({ businessPool, ledgerPool, install
     const ledger = await databaseIdentity(client);
     if (business === ledger) throw fail();
     const bound = await businessPool.query("SELECT data FROM kv_store WHERE key='memory:deletion-installation'");
+    if (requireBusinessMarker && (bound.rowCount !== 1 || bound.rows[0].data?.version !== 1
+      || bound.rows[0].data?.installationId !== installationId)) throw fail();
     if (bound.rowCount && bound.rows[0].data?.installationId !== installationId) throw fail();
     const { rows } = await client.query(`SELECT business_identity, ledger_identity
       FROM memory_deletion_installation WHERE singleton=true AND installation_id=$1`, [installationId]);

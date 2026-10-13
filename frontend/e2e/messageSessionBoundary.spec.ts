@@ -15,11 +15,13 @@ test('native cache continuation cannot start old-account HTTP work after a sessi
     const modules = ['/src/stores/messagesStore.ts', '/src/services/api.ts', '/src/utils/cacheUtils.ts', '/src/utils/indexedDB.ts'];
     const [messages, api, cache, db] = await Promise.all(modules.map(path => import(/* @vite-ignore */ path)));
     const alice = `message-a-${crypto.randomUUID()}`, bob = `message-b-${crypto.randomUUID()}`;
-    const row = (id: string) => ({ id, group_id: 'same-group', sender_type: 'user', content: id, created_at: '2026-10-04T00:00:00Z' });
+    const generation = crypto.randomUUID();
+    const row = (id: string) => ({ id, group_id: 'same-group', sender_type: 'user', content: id, content_type:'text', created_at: '2026-10-04T00:00:00Z', server_order:{generation,sequence:'1'} });
+    const afterCursor = (owner: string) => btoa(JSON.stringify({v:1,owner,group:'same-group',generation,kind:'after',at:'1'})).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
     const requests: { account: string; path: string }[] = [];
     api.axiosInstance.defaults.adapter = async (config: { headers: { get: (name: string) => string }; url: string }) => {
       requests.push({ account: config.headers.get('X-Expected-User-Id'), path: config.url });
-      return { config, status: 200, statusText: 'OK', headers: {}, data: { messages: [row('bob-server')], hasMore: false } };
+      return { config, status: 200, statusText: 'OK', headers: {}, data: { messages: [row('bob-server')], hasMore: false, order:'sequence_v1',generation,high_watermark:'1',consumed_through:'1',before_cursor:null,after_cursor:afterCursor(config.headers.get('X-Expected-User-Id')) } };
     };
     const switchTo = (user: string) => {
       cache.setCacheUserId(user); api.confirmAuthIdentity(user); db.setIndexedDBUserId(user);
@@ -27,10 +29,15 @@ test('native cache continuation cannot start old-account HTTP work after a sessi
     };
     try {
       switchTo(alice); await db.saveMessagesToIndexedDB([row('alice-cache')]);
+      messages.useMessagesStore.getState().activateMessageView('same-group');
       const oldRead = messages.useMessagesStore.getState().fetchMessages('same-group');
+      // Let recovery begin waiting for the real cache, then switch identities.
+      // This yield does not prove readonly getAll started before the switch.
+      await Promise.resolve();
       switchTo(bob);
       await oldRead;
       const afterOld = { requests: requests.length, rows: Object.keys(messages.useMessagesStore.getState().messages).length };
+      messages.useMessagesStore.getState().activateMessageView('same-group');
       await messages.useMessagesStore.getState().fetchMessages('same-group');
       return { afterOld, requests, expected: bob, ids: messages.useMessagesStore.getState().messages['same-group'].map((item: { id: string }) => item.id) };
     } finally {
@@ -49,12 +56,13 @@ test('native recovered draft reconciles through actual socket/store/cache withou
   const result = await page.evaluate(async () => {
     const modules = ['/src/stores/messagesStore.ts', '/src/services/api.ts', '/src/utils/cacheUtils.ts', '/src/utils/indexedDB.ts', '/src/services/websocket.ts'];
     const [messages, api, cache, db, ws] = await Promise.all(modules.map(path => import(/* @vite-ignore */ path)));
-    const user = `message-ack-${crypto.randomUUID()}`, tempId = crypto.randomUUID();
-    const draft = { id: tempId, tempId, group_id: 'same-group', sender_type: 'user', sender_id: user, status: 'sending', content: 'synthetic unconfirmed draft', created_at: '2026-10-04T00:00:00Z' };
+    const user = `message-ack-${crypto.randomUUID()}`, tempId = crypto.randomUUID(), generation = crypto.randomUUID();
+    const emptyAfterCursor = btoa(JSON.stringify({v:1,owner:user,group:'same-group',generation,kind:'after',at:'0'})).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+    const draft = { id: tempId, tempId, group_id: 'same-group', sender_type: 'user', sender_id: user, status: 'sending', content_type:'text', content: 'synthetic unconfirmed draft', created_at: '2026-10-04T00:00:00Z' };
     const requests: string[] = [];
     api.axiosInstance.defaults.adapter = async (config: { method: string; url: string }) => {
       requests.push(config.method);
-      return { config, status: 200, statusText: 'OK', headers: {}, data: config.url === '/groups' ? [] : config.url === '/personas' ? { personas: {} } : { messages: [], hasMore: false } };
+      return { config, status: 200, statusText: 'OK', headers: {}, data: config.url === '/groups' ? [] : config.url === '/personas' ? { personas: {} } : { messages: [], hasMore: false,order:'sequence_v1',generation,high_watermark:'0',consumed_through:'0',before_cursor:null,after_cursor:emptyAfterCursor } };
     };
     const sockets: SyntheticSocket[] = [];
     class SyntheticSocket {
@@ -75,10 +83,11 @@ test('native recovered draft reconciles through actual socket/store/cache withou
       cache.setCacheUserId(user); api.confirmAuthIdentity(user); db.setIndexedDBUserId(user);
       messages.resetMessagesModuleState(); messages.useMessagesStore.setState({ messages: {}, pagination: {}, sending: {} });
       await db.saveMessagesToIndexedDB([draft]);
+      messages.useMessagesStore.getState().activateMessageView('same-group');
       ws.connectWebSocket('same-group'); sockets[0].open();
       await until(() => messages.useMessagesStore.getState().messages['same-group']?.[0]?.status === 'failed');
       const recovered = messages.useMessagesStore.getState().messages['same-group'][0];
-      sockets[0].message({ type: 'new_message', ...draft, id: 'server-confirmed', status: undefined, client_message_id: tempId });
+      sockets[0].message({ type: 'new_message', ...draft, id: 'server-confirmed', status: undefined, client_message_id: tempId, durable:true,persistence_status:'confirmed',server_order:{generation,sequence:'1'} });
       await until(async () => { const rows = await db.loadMessagesFromIndexedDB('same-group'); return rows.length === 1 && rows[0].id === 'server-confirmed'; });
       const rows = messages.useMessagesStore.getState().messages['same-group'];
       return { recovered: { id: recovered.id, unknown: recovered.metadata.send_unknown }, tempId, requests, ids: rows.map((row: { id: string }) => row.id), status: rows[0].status, cached: (await db.loadMessagesFromIndexedDB('same-group')).map((row: { id: string }) => row.id) };

@@ -8,9 +8,10 @@ process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'site-ai-budget-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 process.env.ENCRYPTION_KEY = Buffer.alloc(32, 7).toString('base64'); // synthetic fixture only
-const { initDatabase } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb } = await import('../src/models/authDb.js');
 const { reserveSiteAiBudget } = await import('../src/services/ai/siteBasicChat.js');
+await initializeEmptyInstallation();
 await initDatabase(); await initAuthDb();
 const reset = async () => { const db = getAuthDb(); await db.read(); delete db.data.siteAiBudget; await db.write(); };
 test('shared admission accepts exactly ten concurrent reservations per minute', async () => {

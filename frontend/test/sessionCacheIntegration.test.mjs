@@ -143,7 +143,9 @@ class Socket {
 
 test('real socket/store first-page reconciliation does not tombstone pageable cached history', async () => {
   const app = fixture(); switchTo(app, 'alice');
-  const old = row('old', '2026-10-01T00:00:00Z'), latest = row('latest');
+  const generation = '10000000-0000-4000-8000-000000000001';
+  const old = row('old', '2026-10-01T00:00:00Z', {server_order:{generation,sequence:'1'}}), latest = row('latest', undefined, {server_order:{generation,sequence:'2'}});
+  const cursor=(kind,at,until)=>Buffer.from(JSON.stringify({v:1,owner:'alice',group:'g',generation,kind,at,...(until?{until}:{})})).toString('base64url');
   assert.equal(await app.idb.saveMessagesToIndexedDB([old, latest]), true);
   const group = { id: 'g', name: 'g', members: [] };
   app.groups.setState({ groups: [group], currentGroup: null });
@@ -151,15 +153,18 @@ test('real socket/store first-page reconciliation does not tombstone pageable ca
   app.api.axiosInstance.defaults.adapter = async config => {
     requests.push(config);
     const data = config.url === '/groups/g/messages'
-      ? (config.params?.before ? { messages: [old], hasMore: false } : { messages: [latest], hasMore: true })
+      ? (config.params?.before_cursor ? { messages: [old], hasMore: false, order:'sequence_v1',generation,high_watermark:'2',consumed_through:null,before_cursor:null,after_cursor:null } : { messages: [latest], hasMore: true,order:'sequence_v1',generation,high_watermark:'2',consumed_through:'2',before_cursor:cursor('before','2','2'),after_cursor:cursor('after','2') })
       : config.url === '/groups' ? [group] : { personas: {} };
     return response(config, data);
   };
+  app.messages.getState().activateMessageView('g');
   globalThis.WebSocket = Socket; app.ws.connectWebSocket(); Socket.current.open();
   await until(() => app.messages.getState().pagination.g);
+  assert.deepEqual(app.messages.getState().messages.g.map(item => item.id), ['latest'], 'disk history is not authoritative before its ordered page');
   await app.messages.getState().loadMoreMessages('g');
   assert.deepEqual(app.messages.getState().messages.g.map(item => item.id), ['old', 'latest']);
-  assert.equal(requests.at(-1).params.before, latest.created_at);
+  assert.equal(requests.at(-1).params.before_cursor, cursor('before','2','2'));
+  assert.deepEqual((await app.idb.loadMessagesFromIndexedDB('g')).map(item=>item.id).sort(), ['latest','old']);
 });
 
 test('real Axios public invocation forms freeze ownership before the first interceptor microtask', async () => {

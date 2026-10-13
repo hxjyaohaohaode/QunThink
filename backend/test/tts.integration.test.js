@@ -16,13 +16,14 @@ process.env.QUNTHINK_SHARED_PROVIDER_KEYS = '1';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-chat-tts-data-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 
-const { initDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb } = await import('../src/models/authDb.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
 const { drainTtsPendingDeletes } = await import('../src/services/ttsDeletion.js');
 const { cleanupOldTTSFiles } = await import('../src/services/scheduler/ttsCleanup.js');
 const supertest = (await import('supertest')).default;
 
+await initializeEmptyInstallation();
 await initDatabase();
 await initAuthDb();
 

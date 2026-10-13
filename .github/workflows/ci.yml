@@ -9,6 +9,22 @@ on:
 jobs:
   backend-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      QUNTHINK_REQUIRE_STORAGE_FIXTURES: '1'
+      QUNTHINK_STORAGE_EVIDENCE_DIR: ${{ runner.temp }}/qunthink-storage-evidence
+      QUNTHINK_TEST_PG_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_ci
+      QUNTHINK_TEST_MEMORY_TLS_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_memory
+      QUNTHINK_TEST_MEMORY_LEDGER_TLS_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_ledger
+      QUNTHINK_TEST_LIFECYCLE_PG_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_lifecycle
+      QUNTHINK_TEST_LIFECYCLE_LEDGER_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_lifecycle_ledger
+      QUNTHINK_TEST_COMMIT_PG_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_wrapper
+      QUNTHINK_TEST_COMMIT_LEDGER_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_wrapper_ledger
+      QUNTHINK_TEST_PAGING_PG_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_paging
+      QUNTHINK_TEST_PAGING_LEDGER_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_paging_ledger
+      QUNTHINK_TEST_RESTORE_PG_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_restore
+      QUNTHINK_TEST_RESTORE_LEDGER_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_restore_ledger
+      QUNTHINK_TEST_MONGO_URL: mongodb://127.0.0.1:27017/qunthink_order_ci
     services:
       postgres:
         image: postgres:16-alpine
@@ -23,22 +39,48 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      mongo:
+        image: mongodb/mongodb-community-server:9.0.2-ubi8-slim@sha256:65ca4eddc5dbeae94350b4a3889f2c1194e2b940f968e0341cccc2a5c98c666c
+        ports:
+          - 127.0.0.1:27017:27017
+        options: --platform linux/amd64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '22.12.0'
           cache: 'npm'
           cache-dependency-path: ./backend/package-lock.json
       - name: Install backend dependencies
         run: npm ci
         working-directory: ./backend
+      - name: Record exact backend storage source manifest
+        run: node scripts/ci-storage-evidence.mjs
+        working-directory: ./backend
+      - name: Prepare disposable verified storage fixtures
+        env:
+          CI_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          CI_MONGO_CONTAINER: ${{ job.services.mongo.id }}
+        shell: bash
+        run: |
+          mkdir -p "$QUNTHINK_STORAGE_EVIDENCE_DIR"
+          set +e
+          raw_log=$(mktemp "$RUNNER_TEMP/qunthink-storage-setup.XXXXXX")
+          timeout 120s bash scripts/setup-ci-storage.sh > "$raw_log" 2>&1
+          status=$?
+          printf '%s\n' "$status" > "$QUNTHINK_STORAGE_EVIDENCE_DIR/setup.exit"
+          receipt_status=$?
+          node scripts/ci-storage-evidence.mjs sanitize-setup "$raw_log"
+          evidence_status=$?
+          set -e
+          echo "Storage setup exit: $status; receipt exit: $receipt_status; evidence exit: $evidence_status"
+          if [[ "$status" -ne 0 ]]; then exit "$status"; fi
+          if [[ "$receipt_status" -ne 0 || "$evidence_status" -ne 0 ]]; then exit 1; fi
+        working-directory: ./backend
       - name: Check backend syntax
         run: node --check src/index.js
         working-directory: ./backend
-      - name: Backend tests
-        env:
-          QUNTHINK_TEST_PG_URL: postgresql://postgres:ci_test_only@127.0.0.1:5432/qunthink_ci
+      - name: Backend tests with required real-storage preflight and zero-skip gate
         run: npm test
         working-directory: ./backend
       - name: Backend production dependency audit
@@ -46,6 +88,15 @@ jobs:
         working-directory: ./backend
       - name: Validate OpenAPI spec
         run: node scripts/validate-openapi.mjs
+
+      - name: Save bounded backend storage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qunthink-backend-storage-evidence
+          path: ${{ runner.temp }}/qunthink-storage-evidence/
+          if-no-files-found: error
+          retention-days: 1
 
   frontend-check:
     runs-on: ubuntu-latest

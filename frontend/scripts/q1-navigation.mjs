@@ -15,6 +15,20 @@ export function pickWorkspaceNavigationState(state, mobile) {
 // direct summary, never all nested summaries or an arbitrary first match.
 export const CONTEXT_DISCLOSURE = ':scope > summary';
 
+// Both responsive layouts expose this exact destination in their main nav.
+// Do not bind to a removed decorative glyph or the desktop logo's title.
+export function primaryWorkspaceControl(page) {
+  return page.getByRole('navigation', { name: '主导航', exact: true })
+    .getByRole('button', { name: '工作台', exact: true });
+}
+
+// Workspace and the conversation both legitimately render TaskResultEditor.
+// An exiting workspace must never stand in for the destination writing panel.
+export function conversationResultEditor(page, narrow) {
+  return page.getByRole(narrow ? 'dialog' : 'complementary', { name: '会话文稿', exact: true })
+    .getByTestId('task-result-editor');
+}
+
 // Respect the server's bounded Retry-After observation without bypassing its
 // limiter or inventing a default delay when the response did not provide one.
 export function sessionRetryAt(value, now) {

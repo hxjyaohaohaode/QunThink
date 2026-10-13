@@ -1,5 +1,5 @@
 ﻿import React, { useEffect, useRef, useMemo, useState, useCallback } from 'react';
-import { Virtuoso } from 'react-virtuoso';
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso';
 import { motion, AnimatePresence, useIsPresent } from 'framer-motion';
 import dayjs from 'dayjs';
 import { useMessagesStore } from '../../stores/messagesStore';
@@ -11,7 +11,8 @@ import { MessageBubble } from './MessageBubble';
 import { MultiTypingIndicator } from './TypingIndicator';
 import { NewMessageBadge } from './NewMessageBadge';
 import { DebateControlPanel } from './DebateControlPanel';
-import { api } from '../../services/api';
+import { api, getAuthGeneration } from '../../services/api';
+import { getCacheUserId } from '../../utils/cacheUtils';
 import { useConfirm, useToast, MessageListSkeleton, LoadingSpinner } from '../Common';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 import { appendedMessages } from '../../utils/messageArrival';
@@ -85,14 +86,25 @@ const MessageItemWrapper = React.memo(({
   );
 });
 
-export function MessageList() {
+export function MessageList({ isActive = true }: { isActive?: boolean }) {
   const isPresent = useIsPresent();
+  const viewOwner = getCacheUserId();
+  const viewAuthGeneration = getAuthGeneration();
   const currentGroup = useGroupsStore((s) => s.currentGroup);
   const currentGroupId = currentGroup?.id ?? null;
   const rawGroupMessages = useMessagesStore((s) => (currentGroupId ? s.messages[currentGroupId] : undefined));
   const loading = useMessagesStore((s) => s.loading);
   const streamUpdateCounter = useMessagesStore((s) => s.streamUpdateCounter);
   const rawPagination = useMessagesStore((s) => (currentGroupId ? s.pagination[currentGroupId] : undefined));
+  const messageActivity = useMessagesStore((s) => s.messageActivity);
+  const readVersion = useMessagesStore((s) => s.readVersion);
+  const beforeCursor = useMessagesStore((s) => currentGroupId ? s.ordered[currentGroupId]?.beforeCursor : undefined);
+  const recovery = useMessagesStore((s) => (currentGroupId ? s.recovery[currentGroupId] : undefined));
+  const durability = useMessagesStore((s) => (currentGroupId ? s.durability[currentGroupId] : undefined));
+  const activateMessageView = useMessagesStore((s) => s.activateMessageView);
+  const deactivateMessageView = useMessagesStore((s) => s.deactivateMessageView);
+  const resumeOrderedMessages = useMessagesStore((s) => s.resumeOrderedMessages);
+  const wakeOrderedMessages = useMessagesStore((s) => s.wakeOrderedMessages);
   const batchDeleteMessages = useMessagesStore((s) => s.batchDeleteMessages);
   const clearAllMessages = useMessagesStore((s) => s.clearAllMessages);
   const loadMoreMessages = useMessagesStore((s) => s.loadMoreMessages);
@@ -102,22 +114,22 @@ export function MessageList() {
   const setScrollToMessageId = useNavigationStore((s) => s.setScrollToMessageId);
   const { confirm, ConfirmModal } = useConfirm();
   const { showToast, Toast } = useToast();
-  const virtuosoRef = useRef<any>(null);
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLElement | Window | null>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [unreadCount, setUnreadCount] = useState(0);
   const [firstUnreadMessageId, setFirstUnreadMessageId] = useState<string | null>(null);
   const prevMessageCount = useRef(0);
-  const previousMessages = useRef<{ groupId: string | null; messages: Message[] }>({ groupId: null, messages: [] });
+  const viewLease = useRef<string | null>(null);
+  const previousMessages = useRef<{ scope: string; messages: Message[] }>({ scope: '', messages: [] });
   const navigationAnchor = useRef<string | null>(null);
   if (scrollToMessageId) navigationAnchor.current = currentGroupId;
   else if (navigationAnchor.current !== currentGroupId) navigationAnchor.current = null;
   const prevGroupId = useRef<string | null>(null);
-  const loadingMoreRef = useRef(false);
+  const loadingMoreRef = useRef<object | null>(null);
   const reducedMotion = useReducedMotion();
   const newMessageIdsRef = useRef<Set<string>>(new Set());
-  const scrollPositionRef = useRef<number>(0);
   const initialLoadRef = useRef(true);
   const awaitingResponseRef = useRef(false);
   const isScrollingRef = useRef(false);
@@ -131,6 +143,18 @@ export function MessageList() {
       }
     };
   }, []);
+
+  // isPresent turns false immediately when AnimatePresence retains an exiting
+  // child. The previous page must release its exact lease before delayed unmount.
+  useEffect(() => {
+    if (!isActive || !isPresent || !currentGroupId) return;
+    const lease = activateMessageView(currentGroupId);
+    viewLease.current = lease;
+    return () => {
+      if (viewLease.current === lease) viewLease.current = null;
+      deactivateMessageView(lease);
+    };
+  }, [isActive, isPresent, currentGroupId, viewOwner, viewAuthGeneration, activateMessageView, deactivateMessageView]);
 
   const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
   const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
@@ -150,19 +174,25 @@ export function MessageList() {
   const readFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const markAsRead = useCallback((messageId: string) => {
-    if (!currentGroup) return;
+    if (!currentGroup || !isActive || !isPresent) return;
     pendingReadIdsRef.current.add(messageId);
     if (readFlushTimerRef.current) return;
     readFlushTimerRef.current = setTimeout(async () => {
       readFlushTimerRef.current = null;
       const ids = [...pendingReadIdsRef.current];
       pendingReadIdsRef.current.clear();
-      if (ids.length === 0 || !currentGroup) return;
+      if (ids.length === 0 || !currentGroup || getCacheUserId() !== viewOwner || getAuthGeneration() !== viewAuthGeneration) return;
       try {
         await api.markMessagesReadBatch(currentGroup.id, ids);
       } catch { /* 已读回执失败可静默，下次可见范围变化会重试 */ }
     }, 800);
-  }, [currentGroup]);
+  }, [currentGroup, isActive, isPresent, viewOwner, viewAuthGeneration]);
+
+  useEffect(() => () => {
+    if (readFlushTimerRef.current) clearTimeout(readFlushTimerRef.current);
+    readFlushTimerRef.current = null;
+    pendingReadIdsRef.current.clear();
+  }, [currentGroupId, isActive, isPresent, viewOwner, viewAuthGeneration]);
 
   const isDebateMode = currentGroup?.debate_mode || false;
 
@@ -176,6 +206,29 @@ export function MessageList() {
   const typingAiIds = useMemo(() => Object.entries(groupTyping)
     .filter(([_, isTyping]) => isTyping)
     .map(([aiId]) => aiId), [groupTyping]);
+
+  const unsavedMessages = useMemo(() => groupMessages.filter(message =>
+    message.status === 'sending' || message.status === 'failed' || message.confirmation === 'preview'), [groupMessages]);
+  const recoveryBlocked = Boolean(recovery && ['paused', 'backoff', 'resync_required', 'auth_required'].includes(recovery.phase));
+  const recoveryText = !recovery ? ''
+    : recovery.reason === 'MESSAGE_CURSOR_REQUIRED' ? '消息分页协议已更新，请刷新客户端后继续。刷新前请确认草稿已保存，或复制未发送内容。'
+    : recovery.phase === 'idle' && !recovery.bootstrapComplete ? '已请求重新读取历史，等待可用的读取时机。'
+    : recovery.phase === 'bootstrap' ? '正在重新读取历史，已显示内容仍待核验。'
+    : recovery.phase === 'catching_up' || recovery.pending ? '仍在补齐消息，已显示内容不代表历史已完整。'
+    : recovery.phase === 'auth_required' ? '登录状态已变化，请重新登录后读取历史。'
+    : recovery.phase === 'resync_required' ? '消息变化较多，需要重新读取历史。未确认的发送内容仍暂留在页面。'
+    : recovery.phase === 'paused' ? (recovery.error || '消息历史暂不可核验，请重新读取历史。')
+    : recovery.phase === 'backoff' ? (recovery.error || '消息补齐暂时失败，稍后再试。')
+    : '';
+
+  const copyUnsavedMessages = useCallback(async () => {
+    try {
+      // Preserve the original UUID and complete reply/attachment intent alongside
+      // the text. Copying is an explicit user action and never sends a message.
+      await navigator.clipboard.writeText(JSON.stringify(unsavedMessages, null, 2));
+      showToast({ message: '未保存内容及发送标识已复制', type: 'success' });
+    } catch { showToast({ message: '复制失败，请手动选择消息内容', type: 'error' }); }
+  }, [unsavedMessages, showToast]);
 
   const hasStreamingMessages = useMemo(() => groupMessages.some(m => m.is_streaming), [groupMessages]);
 
@@ -295,30 +348,21 @@ export function MessageList() {
 
   const handleAtTopStateChange = useCallback((atTop: boolean) => {
     if (useNavigationStore.getState().scrollToMessageId) return;
-    if (atTop && currentGroup && groupPagination.hasMore && !groupPagination.loadingMore && !loadingMoreRef.current) {
-      if (virtuosoRef.current) {
-        const virtuosoState = virtuosoRef.current.getState?.();
-        if (virtuosoState?.scrollTop !== undefined) {
-          scrollPositionRef.current = virtuosoState.scrollTop;
-        }
-      }
-
-      loadingMoreRef.current = true;
-
-      loadMoreMessages(currentGroup.id).then(() => {
-        // 在加载完成后立即重置，不再使用固定100ms定时器
-        loadingMoreRef.current = false;
-      }).catch(() => {
-        loadingMoreRef.current = false;
-      });
+    if (atTop && isActive && isPresent && !recoveryBlocked && currentGroup && groupPagination.hasMore && !groupPagination.loadingMore && !loadingMoreRef.current) {
+      const request = {};
+      loadingMoreRef.current = request;
+      const finish = () => { if (loadingMoreRef.current === request) loadingMoreRef.current = null; };
+      void loadMoreMessages(currentGroup.id).then(finish, finish);
     }
-  }, [currentGroup, groupPagination.hasMore, groupPagination.loadingMore, loadMoreMessages]);
+  }, [isActive, isPresent, recoveryBlocked, currentGroup, groupPagination.hasMore, groupPagination.loadingMore, loadMoreMessages]);
 
   useEffect(() => {
     const currentCount = groupMessages.length;
-    const previous = previousMessages.current.groupId === currentGroupId ? previousMessages.current.messages : [];
-    const newMessages = appendedMessages(previous, groupMessages);
-    previousMessages.current = { groupId: currentGroupId, messages: groupMessages };
+    const scope = `${viewOwner}:${viewAuthGeneration}:${currentGroupId}:${viewLease.current}`;
+    const previous = previousMessages.current.scope === scope ? previousMessages.current.messages : [];
+    const activityIds = new Set(messageActivity?.groupId === currentGroupId && messageActivity.lease === viewLease.current && isActive && isPresent ? messageActivity.ids : []);
+    const newMessages = appendedMessages(previous, groupMessages, activityIds);
+    previousMessages.current = { scope, messages: groupMessages };
     if (newMessages.length > 0) {
       newMessages.forEach(msg => {
         newMessageIdsRef.current.add(msg.id);
@@ -365,12 +409,13 @@ export function MessageList() {
     }
 
     prevMessageCount.current = currentCount;
-  }, [currentGroupId, groupMessages, isAtBottom, listItems.length, scrollToBottom, firstUnreadMessageId]);
+  }, [currentGroupId, groupMessages, messageActivity, isActive, isPresent, viewOwner, viewAuthGeneration, isAtBottom, listItems.length, scrollToBottom, firstUnreadMessageId]);
 
   useEffect(() => {
     if (prevGroupId.current !== currentGroup?.id) {
       prevGroupId.current = currentGroup?.id || null;
       prevMessageCount.current = 0;
+      loadingMoreRef.current = null;
       setUnreadCount(0);
       setIsAtBottom(true);
       setFirstUnreadMessageId(null);
@@ -437,11 +482,13 @@ export function MessageList() {
     const timer = setTimeout(() => setHighlightedMessageId(null), 3000);
     return () => clearTimeout(timer);
   }, [highlightedMessageId]);
-  const navigationFrontier = useRef({ target: '', cursor: '' });
+  const navigationFrontier = useRef({ target: '', cursor: '', verificationAfter: 0 });
   useEffect(() => {
-    if (!isPresent || !scrollToMessageId || !currentGroupId) return;
-    const target = currentGroupId + ':' + scrollToMessageId;
-    if (navigationFrontier.current.target !== target) navigationFrontier.current = { target, cursor: '' };
+    if (!scrollToMessageId) { navigationFrontier.current = { target: '', cursor: '', verificationAfter: 0 }; return; }
+    if (!isActive || !isPresent || !currentGroupId || !viewLease.current) return;
+    const lease = viewLease.current;
+    const target = `${viewOwner}:${viewAuthGeneration}:${lease}:${currentGroupId}:${scrollToMessageId}`;
+    if (navigationFrontier.current.target !== target) navigationFrontier.current = { target, cursor: '', verificationAfter: useMessagesStore.getState().recovery[currentGroupId]?.verificationAttempt || 0 };
     const itemIndex = listItems.findIndex(item => item.type === 'message' && item.data.id === scrollToMessageId);
     if (itemIndex >= 0) {
       userScrolledUpRef.current = true;
@@ -481,21 +528,34 @@ export function MessageList() {
       let timer = setTimeout(locate, 0);
       return () => clearTimeout(timer);
     }
-    // A search result can live outside the first 50 messages. Continue from the
-    // server frontier, one page at a time, until found or a real stop condition.
-    // StrictMode replays mount effects with the same render snapshot. The
-    // first invocation may already have started this page in the live store.
-    if (loading || !rawPagination || groupPagination.loadingMore || useMessagesStore.getState().pagination[currentGroupId]?.loadingMore) return;
-    const cursor = groupPagination.oldestMessageId || 'start';
-    if (!groupPagination.hasMore || navigationFrontier.current.cursor === cursor) {
+    // A deferred/no-op read has not consumed a history frontier. Wait for the
+    // admitted reader to release its mutex (readVersion), or for recovery to
+    // establish a verified baseline. Never call the legacy reader as fallback.
+    if (loading || !rawPagination || !recovery?.bootstrapComplete || recovery.phase !== 'ready' || recovery.pending ||
+      groupPagination.loadingMore || useMessagesStore.getState().pagination[currentGroupId]?.loadingMore) return;
+    const cursor = beforeCursor;
+    // Exhausting before pages only establishes absence through the old H. The
+    // search result may have been created after that snapshot (missed WS).
+    // Require a full snapshot started after this intent, using the existing budget.
+    if (!groupPagination.hasMore && (recovery.verifiedAttempt || 0) <= navigationFrontier.current.verificationAfter) {
+      void wakeOrderedMessages();
+      return;
+    }
+    if (!groupPagination.hasMore || !cursor || navigationFrontier.current.cursor === cursor) {
       navigationAnchor.current = null;
       showToast({ message: groupPagination.hasMore ? '历史消息加载未完成，请检查连接后重新打开搜索结果' : '该消息已删除或不再可见', type: 'error' });
       setScrollToMessageId(null);
       return;
     }
-    navigationFrontier.current.cursor = cursor;
-    void loadMoreMessages(currentGroupId);
-  }, [isPresent, scrollToMessageId, currentGroupId, loading, rawPagination, groupPagination, listItems, loadMoreMessages, clearAwaitingResponse, setScrollToMessageId, showToast]);
+    void loadMoreMessages(currentGroupId).then(result => {
+      // A stale owner, lease or newer target cannot consume this target's cursor.
+      if (result === 'loaded' && navigationFrontier.current.target === target && viewLease.current === lease &&
+        getCacheUserId() === viewOwner && getAuthGeneration() === viewAuthGeneration &&
+        useNavigationStore.getState().scrollToMessageId === scrollToMessageId) {
+        navigationFrontier.current.cursor = cursor;
+      }
+    });
+  }, [isActive, isPresent, viewOwner, viewAuthGeneration, scrollToMessageId, currentGroupId, loading, rawPagination, groupPagination, recovery, beforeCursor, readVersion, listItems, loadMoreMessages, wakeOrderedMessages, clearAwaitingResponse, setScrollToMessageId, showToast]);
 
   const toggleMultiSelectMode = useCallback(() => {
     setIsMultiSelectMode(prev => {
@@ -664,6 +724,14 @@ export function MessageList() {
   return (
     <div ref={containerRef} className="flex-1 flex flex-col relative" style={{ minHeight: 0 }}>
       {scrollToMessageId && <div role="status" className="flex items-center justify-between gap-3 px-4 py-2 bg-bg-surface border-b border-border text-sm"><span>正在定位搜索结果…</span><button className="workspace-button" onClick={() => { navigationAnchor.current = null; setScrollToMessageId(null); }}>取消定位</button></div>}
+      {(recoveryText || unsavedMessages.length > 0) && <div className="border-b border-border px-4 py-2 text-xs text-text-secondary" data-testid="message-recovery">
+        {recoveryText && <p role={recoveryBlocked ? 'alert' : 'status'}>{recoveryText}</p>}
+        {recoveryBlocked && recovery?.phase !== 'auth_required' && <button type="button" className="mt-1 underline" disabled={!isActive || !isPresent} onClick={() => { void resumeOrderedMessages(currentGroup.id); }}>重新读取历史</button>}
+        {unsavedMessages.length > 0 && <div className="mt-1">
+          <span>{durability?.durable ? '未确认消息的原发送标识与内容已保存在此浏览器，当前账号刷新可恢复。' : '未确认消息尚未证明已持久保存，刷新前请复制。'}</span>
+          <button type="button" className="ml-2 underline" onClick={() => { void copyUnsavedMessages(); }}>复制未保存内容</button>
+        </div>}
+      </div>}
       {isMultiSelectMode && (
         <div className="bg-bg-surface border-b border-border px-2 md:px-4 py-2 md:py-3 flex items-center justify-between gap-2 z-10 flex-wrap">
           <div className="flex items-center gap-2 md:gap-3 min-w-0">
@@ -750,9 +818,9 @@ export function MessageList() {
                     <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" />
                   </svg>
                 </div>
-                <p className="text-text-secondary mb-2">从一条消息、一个想法开始</p>
+                <p className="text-text-secondary mb-2">{!recovery?.bootstrapComplete ? '历史尚未读取完成' : '从一条消息、一个想法开始'}</p>
                 <p className="text-text-muted text-sm">
-                  {currentGroup?.space_category === 'play' ? '聊一个故事或角色设定，也可以一起写出下一幕。' : currentGroup?.space_category === 'social' ? '放进活动材料、交流想法，再从「文稿」整理成邀请或记录。' : '讨论计划、保存材料，或打开「文稿」直接写作。'}
+                  {!recovery?.bootstrapComplete ? '请留意上方读取状态；暂未显示消息不代表历史为空。' : currentGroup?.space_category === 'play' ? '聊一个故事或角色设定，也可以一起写出下一幕。' : currentGroup?.space_category === 'social' ? '放进活动材料、交流想法，再从「文稿」整理成邀请或记录。' : '讨论计划、保存材料，或打开「文稿」直接写作。'}
                 </p>
               </div>
             </motion.div>

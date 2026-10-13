@@ -1,4 +1,4 @@
-import { useMessagesStore, recoverCachedMessage } from '../stores/messagesStore';
+import { useMessagesStore } from '../stores/messagesStore';
 import { useAudioStore } from '../stores/audioStore';
 import type { Group, Message } from '../types';
 import { useUIStore } from '../stores/uiStore';
@@ -8,10 +8,11 @@ import { axiosInstance, notifyAuthExpired, getDevUserId, getAuthGeneration } fro
 import { getWebSocketUrl } from './runtimeConfig';
 import { getCacheUserId } from '../utils/cacheUtils';
 import { saveGroupsCache, savePersonasCache } from '../utils/cacheUtils';
-import { findMatchingLocalMessage } from './messageCorrelation';
-import { loadMessagesFromIndexedDB } from '../utils/indexedDB';
 
 interface WSIncomingMessage {
+  server_order?: Message['server_order'];
+  durable?: boolean;
+  persistence_status?: string;
   type: string;
   group_id: string;
   message_id?: string;
@@ -72,13 +73,6 @@ interface ConnectionOwner {
   userId: string;
   authGeneration: number;
 }
-interface GapFillChanges {
-  touched: Set<string>;
-  deleted: Set<string>;
-  pendingEvents: WSIncomingMessage[];
-  confirmedClientIds: Set<string>;
-  cleared: boolean;
-}
 interface ConnectionContext {
   owner: ConnectionOwner;
   socket: WebSocket;
@@ -89,8 +83,6 @@ interface ConnectionContext {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
   errorTimer: ReturnType<typeof setTimeout> | null;
-  gapFills: Map<string, Promise<void>>;
-  gapFillChanges: Map<string, GapFillChanges>;
   abort: AbortController;
 }
 
@@ -100,7 +92,6 @@ let reconnectAttempts = 0;
 let currentGroupId: string | null = null;
 let pendingGroupId: string | null = null;
 const subscribedGroupIds = new Set<string>();
-let lastMessageTimestamp: Record<string, string> = {};
 let connectionError: string | null = null;
 let mobileListenersSetup = false;
 let wasHidden = false;
@@ -113,7 +104,6 @@ const HEARTBEAT_INTERVAL = 30000;
 const HEARTBEAT_TIMEOUT = 45000;
 const CONNECTION_TIMEOUT = 20000;
 const CONNECTION_STABLE_THRESHOLD_MS = 30000;
-const MAX_GAP_FILL_PAGES = 5;
 
 function currentUserId(): string | null {
   return getCacheUserId() || (import.meta.env.DEV && import.meta.env.VITE_AUTH_MODE === 'dev' ? getDevUserId() : null);
@@ -173,28 +163,6 @@ export function getReconnectProgress(): { current: number; max: number } {
   return { current: reconnectAttempts, max: MAX_RECONNECT_ATTEMPTS };
 }
 
-function getTimestampsKey(candidate: ConnectionOwner): string {
-  return `ws_last_msg_ts_${candidate.userId}`;
-}
-
-function recordMessageTimestamp(context: ConnectionContext, groupId: string, timestamp: string) {
-  if (!isOpen(context)) return;
-  lastMessageTimestamp[groupId] = timestamp;
-  try {
-    localStorage.setItem(getTimestampsKey(context.owner), JSON.stringify(lastMessageTimestamp));
-  } catch { /* Recovery still works with the in-memory cursor. */ }
-}
-
-function loadPersistedTimestamps(candidate: ConnectionOwner) {
-  lastMessageTimestamp = {};
-  try {
-    const stored = JSON.parse(localStorage.getItem(getTimestampsKey(candidate)) || '{}');
-    for (const [groupId, ts] of Object.entries(stored)) {
-      if (typeof ts === 'string' && Number.isFinite(Date.parse(ts))) lastMessageTimestamp[groupId] = ts;
-    }
-  } catch { /* Malformed/unavailable cache is not an authentication failure. */ }
-}
-
 function readForConnection<T>(context: ConnectionContext, path: string, params?: Record<string, unknown>) {
   // Stamp ownership before Axios's asynchronous request interceptor can yield to
   // logout/login. Cancellation also stops retries and stale auth errors at source.
@@ -205,118 +173,9 @@ function readForConnection<T>(context: ConnectionContext, path: string, params?:
 
 function fetchMissedMessages(context: ConnectionContext, groupId: string): Promise<void> {
   if (!isOpen(context)) return Promise.resolve();
-  const existing = context.gapFills.get(groupId);
-  if (existing) return existing;
-  const liveChanges: GapFillChanges = { touched: new Set(), deleted: new Set(), pendingEvents: [], confirmedClientIds: new Set(), cleared: false };
-  context.gapFillChanges.set(groupId, liveChanges);
-  const hasVisibleMessages = (useMessagesStore.getState().messages[groupId] || []).length > 0;
-  // A persisted cursor is not loaded history. A cold tab must fetch the first page.
-  const lastTimestamp = hasVisibleMessages ? lastMessageTimestamp[groupId] : undefined;
-  const pending = Promise.resolve().then(async () => {
-    try {
-      if (!isOpen(context)) return;
-      if (!hasVisibleMessages) {
-        const cached = (await loadMessagesFromIndexedDB(groupId)).map(recoverCachedMessage);
-        if (!isOpen(context) || liveChanges.cleared) return;
-        const current = useMessagesStore.getState().messages[groupId] || [];
-        const knownIds = new Set(current.map(item => item.id));
-        const restored = cached.filter(item => !knownIds.has(item.id) && !liveChanges.deleted.has(item.id)
-          && !(item.tempId && liveChanges.confirmedClientIds.has(item.tempId)));
-        for (const item of cached) {
-          if (item.tempId && liveChanges.confirmedClientIds.has(item.tempId)) useMessagesStore.getState().confirmClientMessage(groupId, item.tempId);
-        }
-        if (restored.length) {
-          useMessagesStore.setState(state => ({ messages: { ...state.messages, [groupId]: [...current, ...restored]
-            .sort((a, b) => a.created_at.localeCompare(b.created_at)) } }));
-          const restoredIds = new Set(restored.map(item => item.id));
-          for (const event of liveChanges.pendingEvents) {
-            if (event.message_id && restoredIds.has(event.message_id)) handleWebSocketMessage(event, context, false);
-          }
-        }
-      }
-      if (!isOpen(context)) return;
-      const beforeRead = new Map((useMessagesStore.getState().messages[groupId] || []).map(item => [item.id, item]));
-      const paginationBefore = useMessagesStore.getState().pagination[groupId];
-      const collected: Message[] = [];
-      let cursorBefore: string | undefined;
-      let hasMore = false;
-      for (let page = 0; page < (lastTimestamp ? MAX_GAP_FILL_PAGES : 1); page++) {
-        if (!isOpen(context)) return;
-        const response = await readForConnection<{ messages?: Message[]; hasMore?: boolean }>(context, `/groups/${groupId}/messages`, {
-          limit: lastTimestamp ? 100 : 50, ...(cursorBefore ? { before: cursorBefore } : {}), ...(lastTimestamp ? { after: lastTimestamp } : {})
-        });
-        if (!isOpen(context)) return;
-        const pageMessages = response.messages || [];
-        hasMore = response.hasMore || false;
-        if (pageMessages.length === 0) break;
-        collected.unshift(...pageMessages);
-        if (!hasMore) break;
-        const oldestFetched = pageMessages[0]?.created_at;
-        if (!oldestFetched || oldestFetched === cursorBefore) break;
-        cursorBefore = oldestFetched;
-      }
-      if (!isOpen(context) || liveChanges.cleared) return;
-      const messagesStore = useMessagesStore.getState();
-      if (!lastTimestamp) {
-        const confirmedIds = new Set(collected.map(item => item.id));
-        const oldestConfirmed = collected[0]?.created_at;
-        const removed = (messagesStore.messages[groupId] || []).filter(item => !confirmedIds.has(item.id)
-          && (!hasMore || (oldestConfirmed && item.created_at >= oldestConfirmed))
-          && item.status !== 'failed' && item.status !== 'sending' && !item.is_streaming
-          && !liveChanges.touched.has(item.id) && beforeRead.get(item.id) === item).map(item => item.id);
-        // A first page only proves absence inside its fetched time range.
-        // Older cached history is not a source deletion when more pages exist.
-        // Keep unsent drafts/live changes while reconciling covered cached bodies.
-        if (removed.length) messagesStore.removeMessages(groupId, removed);
-      }
-      const insertedIds = new Set<string>();
-      for (const msg of collected) {
-        if (!isOpen(context)) return;
-        if (liveChanges.deleted.has(msg.id)) continue;
-        const currentMessages = useMessagesStore.getState().messages[groupId] || [];
-        const existingMessage = currentMessages.find(item => item.id === msg.id);
-        const local = findMatchingLocalMessage(currentMessages, (msg as Message & { client_message_id?: string }).client_message_id);
-        if (local && existingMessage) {
-          if (local.id !== existingMessage.id) messagesStore.confirmClientMessage(groupId, local.tempId!);
-          else messagesStore.addMessage(groupId, { ...existingMessage, status: 'sent' });
-          if (local.id === existingMessage.id && local.tempId) messagesStore.confirmClientMessage(groupId, local.tempId);
-        }
-        if (existingMessage && (liveChanges.touched.has(msg.id) || existingMessage !== beforeRead.get(msg.id))) continue;
-        if (existingMessage?.is_streaming && !msg.is_streaming) {
-          messagesStore.finalizeStreamMessage(groupId, msg.id, msg.content || '', msg.reply_to, msg.reply_to_ids);
-        } else if (!existingMessage) {
-          insertedIds.add(msg.id);
-          messagesStore.addMessage(groupId, { ...msg, ...(local?.tempId ? { tempId: local.tempId, status: 'sent' as const } : {}) });
-        } else if (!lastTimestamp) {
-          // Cold-tab cached confirmed messages may have been edited while offline.
-          messagesStore.addMessage(groupId, msg);
-        }
-      }
-      if (!isOpen(context)) return;
-      // An edit/reaction can arrive for a message missing until this history read.
-      // Replay only for newly inserted IDs, never double-apply already visible events.
-      for (const event of liveChanges.pendingEvents) {
-        if (event.message_id && insertedIds.has(event.message_id)) handleWebSocketMessage(event, context, false);
-      }
-      if (!isOpen(context)) return;
-      useMessagesStore.setState(state => ({
-        messages: { ...state.messages, [groupId]: [...(state.messages[groupId] || [])].sort((a, b) => a.created_at.localeCompare(b.created_at)) },
-        // Only a first-page fetch knows whether older history exists.
-        ...(!lastTimestamp && state.pagination[groupId] === paginationBefore ? { pagination: { ...state.pagination, [groupId]: {
-          hasMore, loadingMore: false, oldestMessageId: collected[0]?.id || null, oldestMessageCreatedAt: collected[0]?.created_at || null
-        } } } : {})
-      }));
-    } catch {
-      if (isOpen(context)) showTransientError(context, '消息同步失败，保留已显示内容；可重新打开群聊重试');
-    } finally {
-      if (context.gapFills.get(groupId) === pending) {
-        context.gapFills.delete(groupId);
-        context.gapFillChanges.delete(groupId);
-      }
-    }
-  });
-  context.gapFills.set(groupId, pending);
-  return pending;
+  // The store's real MessageList lease is the only HTTP authority. A subscription
+  // or currentGroupId alone never authorizes background group history reads.
+  return useMessagesStore.getState().fetchMessages(groupId);
 }
 
 function mergeLiveFields<T extends object>(remote: T, current?: T, before?: T): T {
@@ -366,7 +225,7 @@ async function syncDataAfterReconnect(context: ConnectionContext) {
     if (!isOpen(context)) return;
     saveGroupsCache(groups);
     subscribeAllGroups();
-    for (const group of groups) if (!groupsBefore.has(group.id)) void fetchMissedMessages(context, group.id);
+    void useMessagesStore.getState().wakeOrderedMessages();
   }
   if (!isOpen(context)) return;
   if (personasResult.status === 'fulfilled' && validPersonas) {
@@ -445,7 +304,7 @@ function openConnection(candidate: ConnectionOwner) {
   }
   const context: ConnectionContext = { owner: candidate, socket, closed: false, openedAt: null,
     lastMessageAt: Date.now(), connectionTimer: null, reconnectTimer: null, heartbeatTimer: null,
-    errorTimer: null, gapFills: new Map(), gapFillChanges: new Map(), abort: new AbortController() };
+    errorTimer: null, abort: new AbortController() };
   connection = context;
   context.connectionTimer = setTimeout(() => {
     if (isCurrent(context) && socket.readyState === WebSocket.CONNECTING) failConnection(context, 'Connection timeout');
@@ -470,7 +329,7 @@ function openConnection(candidate: ConnectionOwner) {
     subscribedGroupIds.clear();
     subscribeAllGroups();
     if (currentGroupId) joinGroup(currentGroupId);
-    for (const group of useGroupsStore.getState().groups) void fetchMissedMessages(context, group.id);
+    void useMessagesStore.getState().wakeOrderedMessages();
     void syncDataAfterReconnect(context);
     void recoverInterruptedStreams(context);
   };
@@ -502,7 +361,6 @@ export function connectWebSocket(groupId?: string) {
     const userId = currentUserId();
     if (!userId) return;
     owner = { userId, authGeneration: getAuthGeneration() };
-    loadPersistedTimestamps(owner);
   }
   setupMobileEventListeners();
   if (groupId) { currentGroupId = groupId; pendingGroupId = groupId; }
@@ -519,26 +377,9 @@ export function connectWebSocket(groupId?: string) {
 }
 
 function handleWebSocketMessage(message: WSIncomingMessage, context: ConnectionContext, trackGapChanges = true) {
-  if (!isOpen(context)) return;
-  const liveChanges = trackGapChanges ? context.gapFillChanges.get(message.group_id) : undefined;
-  if (liveChanges) {
-    const existingMessages = useMessagesStore.getState().messages[message.group_id] || [];
-    if (message.id) liveChanges.touched.add(message.id);
-    if (message.type === 'new_message' && message.sender_type === 'user' && message.client_message_id) {
-      liveChanges.confirmedClientIds.add(message.client_message_id);
-    }
-    if (message.message_id) {
-      liveChanges.touched.add(message.message_id);
-      if (!existingMessages.some(item => item.id === message.message_id)) liveChanges.pendingEvents.push(message);
-    }
-    if (message.type === 'message_deleted' && message.message_id) liveChanges.deleted.add(message.message_id);
-    if (message.type === 'messages_batch_deleted') {
-      for (const id of message.message_ids || []) liveChanges.deleted.add(id);
-    }
-    if (message.type === 'messages_all_deleted') liveChanges.cleared = true;
-    if (message.type === 'generation_stopped') {
-      for (const item of existingMessages) if (item.is_streaming) liveChanges.touched.add(item.id);
-    }
+  if (trackGapChanges ? !isOpen(context) : !isOwnerCurrent(context.owner)) return;
+  if (trackGapChanges && message.group_id && /^(new_message|system_message|message_|messages_|generation_stopped|new_comment)/.test(message.type)) {
+    useMessagesStore.getState().bufferOrderedEvent(message.group_id, () => handleWebSocketMessage(message, context, false));
   }
   const messagesStore = useMessagesStore.getState();
   const uiStore = useUIStore.getState();
@@ -553,83 +394,19 @@ function handleWebSocketMessage(message: WSIncomingMessage, context: ConnectionC
         break;
       }
       case 'new_message':
-        if (message.group_id) {
+        if (message.group_id && message.id) {
           const senderId = message.sender_id || message.sender || '';
-          const messageTimestamp = message.created_at || message.timestamp || new Date().toISOString();
-          const msgId = message.id || `${message.sender_type}_${Date.now()}`;
-
-          const currentMessages = messagesStore.messages[message.group_id] || [];
-          const existingStreamMsg = currentMessages.find(m => m.id === msgId && m.is_streaming);
-          const existingMsgById = currentMessages.find(m => m.id === msgId);
-
-          if (existingStreamMsg) {
-            messagesStore.finalizeStreamMessage(
-              message.group_id,
-              msgId,
-              message.content || existingStreamMsg.content,
-              message.reply_to,
-              message.reply_to_ids
-            );
-          } else if (!existingMsgById) {
-            const localMsg = message.sender_type === 'user'
-              ? findMatchingLocalMessage(currentMessages, message.client_message_id)
-              : undefined;
-
-            if (localMsg) {
-              messagesStore.addMessage(message.group_id, {
-                id: msgId,
-                group_id: message.group_id,
-                sender_type: 'user',
-                sender_id: senderId,
-                content: message.content || '',
-                content_type: message.content_type || 'text',
-                reply_to: message.reply_to,
-                created_at: messageTimestamp,
-                metadata: message.metadata,
-                tempId: localMsg.tempId,
-                status: 'sent'
-              });
-            } else {
-              messagesStore.addMessage(message.group_id, {
-                id: msgId,
-                group_id: message.group_id,
-                sender_type: message.sender_type || 'system',
-                sender_id: senderId,
-                content: message.content || '',
-                content_type: message.content_type || 'text',
-                reply_to: message.reply_to,
-                created_at: messageTimestamp,
-                metadata: message.metadata
-              });
-            }
-          } else {
-            // 消息已存在（非流式）：更新可能变化的字段（metadata、attachments 等）
-            messagesStore.addMessage(message.group_id, {
-              id: msgId,
-              group_id: message.group_id,
-              sender_type: message.sender_type || 'system',
-              sender_id: senderId,
-              content: message.content || existingMsgById.content,
-              content_type: message.content_type || 'text',
-              reply_to: message.reply_to,
-              created_at: messageTimestamp,
-              metadata: message.metadata
-            });
-          }
-
-          recordMessageTimestamp(context, message.group_id, messageTimestamp);
-
-          useGroupsStore.setState(state => ({
-            groups: state.groups.map(g =>
-              g.id === message.group_id
-                ? { ...g, last_message_at: messageTimestamp, last_message_preview: (message.sender_type === 'user' ? '[我] ' : '') + (message.content || '').substring(0, 50) }
-                : g
-            )
-          }));
-
-          if (message.sender_type === 'ai') {
-            uiStore.setTyping(message.group_id, senderId, false);
-          }
+          const timestamp = message.created_at || message.timestamp;
+          const confirmed = message.durable === true && message.persistence_status === 'confirmed' && !!message.created_at;
+          messagesStore.ingestOrderedMessage(message.group_id, {
+            ...(message as unknown as Message), id: message.id, group_id: message.group_id,
+            sender_type: message.sender_type || 'system', sender_id: senderId,
+            content: message.content || '', content_type: message.content_type || 'text',
+            created_at: timestamp || new Date().toISOString(),
+          }, confirmed);
+          useGroupsStore.setState(state => ({ groups: state.groups.map(g => g.id === message.group_id
+            ? { ...g, ...(timestamp ? { last_message_at: timestamp } : {}), last_message_preview: (message.sender_type === 'user' ? '[我] ' : '') + (message.content || '').substring(0, 50) } : g) }));
+          if (message.sender_type === 'ai') uiStore.setTyping(message.group_id, senderId, false);
         }
         break;
 
@@ -654,16 +431,12 @@ function handleWebSocketMessage(message: WSIncomingMessage, context: ConnectionC
         break;
 
       case 'system_message':
-        if (message.group_id) {
-          messagesStore.addMessage(message.group_id, {
-            id: `system_${Date.now()}`,
-            group_id: message.group_id,
-            sender_type: 'system',
-            content: message.content || '',
-            content_type: 'system',
-            created_at: message.timestamp || new Date().toISOString()
-          });
-        }
+        // A system event without an original durable ID cannot become history.
+        if (message.group_id && message.id) messagesStore.ingestOrderedMessage(message.group_id, {
+          ...(message as unknown as Message), id: message.id, group_id: message.group_id, sender_type: 'system',
+          content: message.content || '', content_type: 'system',
+          created_at: message.created_at || message.timestamp || new Date().toISOString(),
+        }, message.durable === true && message.persistence_status === 'confirmed' && !!message.created_at);
         break;
 
       case 'message_liked':
@@ -788,47 +561,18 @@ function handleWebSocketMessage(message: WSIncomingMessage, context: ConnectionC
 
       case 'message_stream_end':
         if (message.group_id && message.message_id && message.content !== undefined) {
-          const messagesStore = useMessagesStore.getState();
-          const streamMsgs = messagesStore.messages[message.group_id] || [];
-          const existingMsg = streamMsgs.find(m => m.id === message.message_id);
-
-          if (existingMsg) {
-            messagesStore.finalizeStreamMessage(
-              message.group_id,
-              message.message_id,
-              message.content,
-              message.reply_to,
-                message.reply_to_ids
-              );
-              if (message.sender_type === 'system') messagesStore.updateMessage(message.message_id, message.group_id, { sender_type: 'system', metadata: message.metadata });
-            } else {
-            const finalMessage: Message = {
-              id: message.message_id,
-              group_id: message.group_id,
-              sender_type: message.sender_type || 'ai',
-              sender_id: message.sender_id || '',
-              content: message.content,
-              content_type: 'text',
-              reply_to: message.reply_to,
-              reply_to_ids: message.reply_to_ids,
-              created_at: message.created_at || message.timestamp || new Date().toISOString()
-            };
-            messagesStore.addMessage(message.group_id, finalMessage);
-          }
-
+          const existing = messagesStore.messages[message.group_id]?.find(m => m.id === message.message_id);
+          const confirmed = message.durable === true && message.persistence_status === 'confirmed' && !!message.id && message.id === message.message_id && !!message.created_at;
+          messagesStore.ingestOrderedMessage(message.group_id, {
+            ...(message as unknown as Message), id: message.id || message.message_id, group_id: message.group_id,
+            sender_type: message.sender_type || 'ai', sender_id: message.sender_id || '',
+            content: message.content || existing?.content || '', content_type: message.content_type || 'text',
+            created_at: message.created_at || existing?.created_at || message.timestamp || new Date().toISOString(),
+          }, confirmed);
           const typingAiId = message.sender_id || message.sender || message.ai_id;
-          if (typingAiId) {
-            uiStore.setTyping(message.group_id, typingAiId, false);
-          }
-
-          const streamEndTime = message.created_at || message.timestamp || new Date().toISOString();
-          useGroupsStore.setState(state => ({
-            groups: state.groups.map(g =>
-              g.id === message.group_id
-                ? { ...g, last_message_at: streamEndTime, last_message_preview: (message.sender_type === 'user' ? '[我] ' : '') + (message.content || '').substring(0, 50) }
-                : g
-            )
-          }));
+          if (typingAiId) uiStore.setTyping(message.group_id, typingAiId, false);
+          useGroupsStore.setState(state => ({ groups: state.groups.map(g => g.id === message.group_id
+            ? { ...g, last_message_preview: (message.sender_type === 'user' ? '[我] ' : '') + (message.content || '').substring(0, 50) } : g) }));
         }
         break;
 
@@ -1048,7 +792,6 @@ export function disconnectWebSocket() {
   currentGroupId = null;
   pendingGroupId = null;
   subscribedGroupIds.clear();
-  lastMessageTimestamp = {};
   wasHidden = false;
   hiddenAt = 0;
   cleanupMobileEventListeners();
@@ -1059,26 +802,9 @@ export function disconnectWebSocket() {
 export function getConnectionError(): string | null { return connectionError; }
 
 async function recoverInterruptedStreams(context: ConnectionContext) {
-  if (!isOpen(context)) return;
-  const snapshot = useMessagesStore.getState().messages;
-  for (const [groupId, messages] of Object.entries(snapshot)) {
-    for (const message of messages) {
-      if (!isOpen(context)) return;
-      if (!message.is_streaming || Date.now() - Date.parse(message.created_at) <= 10000) continue;
-      try {
-        const serverMessage = await readForConnection<{ is_streaming?: boolean; content?: string } | null>(context, `/messages/${message.id}`);
-        if (!isOpen(context)) return;
-        // A deletion/edit/new stream event supersedes this individual recovery read.
-        const current = useMessagesStore.getState().messages[groupId]?.find(item => item.id === message.id);
-        if (current !== message || !current.is_streaming) continue;
-        if (serverMessage && !serverMessage.is_streaming) {
-          useMessagesStore.getState().finalizeStreamMessage(groupId, message.id, serverMessage.content || message.content || '[消息内容不可用]');
-        }
-      } catch {
-        if (isOpen(context)) showTransientError(context, '中断消息暂时无法核验，已保留收到的内容');
-      }
-    }
-  }
+  // Final stream persistence is verified through the same bounded sequence read.
+  // Never promote a single-message legacy response, or poll inactive groups.
+  if (isOpen(context)) await useMessagesStore.getState().wakeOrderedMessages();
 }
 
 function resumeConnection() {

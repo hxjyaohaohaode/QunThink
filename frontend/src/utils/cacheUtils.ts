@@ -1,4 +1,4 @@
-import { encryptData, decryptData } from './crypto';
+import { encryptData, decryptData, decryptDataWithPersistedKey, bindCryptoCacheOwner } from './crypto';
 import type { Message, Group } from '../types';
 
 const CACHE_VERSION = '1.0';
@@ -13,6 +13,7 @@ const memoryMirrors = new Map<string, CacheData<unknown>>();
 const inFlightWrites = new Map<string, Promise<boolean>>();
 const pendingWriteData = new Map<string, unknown>();
 const keyRevisions = new Map<string, number>();
+const durabilityRevisions = new Map<string, number>();
 let cacheGeneration = 0;
 
 function isCacheExpired(cache: CacheData<unknown>): boolean {
@@ -44,6 +45,7 @@ function clearMemoryMirrors(): void {
   inFlightWrites.clear();
   pendingWriteData.clear();
   keyRevisions.clear();
+  durabilityRevisions.clear();
 }
 
 function handleQuotaPressure(failedKey: string): void {
@@ -68,7 +70,7 @@ function handleQuotaPressure(failedKey: string): void {
   }
 }
 
-async function writeEncryptedCache<T>(key: string, data: T): Promise<boolean> {
+async function writeEncryptedCache<T>(key: string, data: T, preserveExisting = false): Promise<boolean> {
   const storageKey = getFullKey(key);
   const generation = cacheGeneration;
   const revision = keyRevisions.get(storageKey) || 0;
@@ -104,7 +106,7 @@ async function writeEncryptedCache<T>(key: string, data: T): Promise<boolean> {
               result = true;
             } catch (quotaError) {
               console.warn('加密缓存写入失败（配额），清理后重试:', quotaError);
-              handleQuotaPressure(key);
+              if (!preserveExisting) handleQuotaPressure(key);
               try {
                 if (!stillCurrent()) return false;
                 localStorage.setItem(storageKey, ENCRYPTED_MARKER + encrypted);
@@ -140,7 +142,7 @@ async function writeEncryptedCache<T>(key: string, data: T): Promise<boolean> {
         const nextData = pendingWriteData.get(storageKey);
         pendingWriteData.delete(storageKey);
         if (nextData !== undefined) {
-          void writeEncryptedCache(key, nextData);
+          void writeEncryptedCache(key, nextData, preserveExisting);
         }
       }
     }
@@ -153,6 +155,7 @@ async function writeEncryptedCache<T>(key: string, data: T): Promise<boolean> {
 export function setCacheUserId(userId: string | null): void {
   const previousUserId = currentCacheUserId;
   currentCacheUserId = userId;
+  bindCryptoCacheOwner(userId);
   if (previousUserId !== userId) {
     clearMemoryMirrors();
   }
@@ -364,6 +367,49 @@ export async function saveCacheAsync<T>(key: string, data: T): Promise<boolean> 
   return writeEncryptedCache(key, data);
 }
 
+export interface CacheDurabilityReceipt { durable: boolean; reason?: string }
+
+// This narrowly scoped receipt verifies the exact requested value using a cold
+// key read, not loadCacheAsync's memory mirror or saveCacheAsync's legacy bool.
+export async function saveCacheWithDurability<T>(key: string, data: T): Promise<CacheDurabilityReceipt> {
+  const owner = getCacheUserId();
+  const generation = cacheGeneration;
+  const storageKey = getFullKey(key);
+  const revision = keyRevisions.get(storageKey) || 0;
+  const proofRevision = (durabilityRevisions.get(storageKey) || 0) + 1;
+  durabilityRevisions.set(storageKey, proofRevision);
+  writeMemoryMirror(storageKey, data);
+  const stillCurrent = () => proofRevision === durabilityRevisions.get(storageKey) && owner === getCacheUserId() && generation === cacheGeneration
+    && revision === (keyRevisions.get(storageKey) || 0);
+  try {
+    const expected = JSON.stringify(data);
+    if (!owner) return { durable: false, reason: 'account_required' };
+    const previous = localStorage.getItem(storageKey);
+    // An autosave after a failed restore must not replace unreadable ciphertext
+    // or generate replacement keys. Retain the new text only in memory instead.
+    if (previous && isEncrypted(previous)) {
+      const readable = await decryptDataWithPersistedKey(previous.slice(ENCRYPTED_MARKER.length), owner);
+      if (!stillCurrent()) return { durable: false, reason: 'superseded' };
+      if (!readable) return { durable: false, reason: 'key_unavailable' };
+    }
+    if (!stillCurrent()) return { durable: false, reason: 'superseded' };
+    const saved = await writeEncryptedCache(key, data, true);
+    if (!stillCurrent()) return { durable: false, reason: 'account_changed' };
+    if (!saved || !owner) return { durable: false, reason: 'storage_failed' };
+    const raw = localStorage.getItem(storageKey);
+    if (!raw || !isEncrypted(raw)) return { durable: false, reason: 'ciphertext_missing' };
+    const plaintext = await decryptDataWithPersistedKey(raw.slice(ENCRYPTED_MARKER.length), owner);
+    if (!stillCurrent()) return { durable: false, reason: 'account_changed' };
+    if (localStorage.getItem(storageKey) !== raw) return { durable: false, reason: 'superseded' };
+    if (!plaintext) return { durable: false, reason: 'key_unavailable' };
+    const cache = JSON.parse(plaintext) as CacheData<T>;
+    if (cache.version !== CACHE_VERSION || isCacheExpired(cache) || JSON.stringify(cache.data) !== expected) {
+      return { durable: false, reason: 'readback_mismatch' };
+    }
+    return { durable: true };
+  } catch { return { durable: false, reason: 'storage_failed' }; }
+}
+
 export async function loadCacheAsync<T>(key: string): Promise<T | null> {
   const storageKey = getFullKey(key);
   const generation = cacheGeneration;
@@ -405,7 +451,8 @@ export async function loadCacheAsync<T>(key: string): Promise<T | null> {
           return null;
         }
       }
-      localStorage.removeItem(storageKey);
+      // A missing/unavailable key is not permission to erase old ciphertext.
+      // Keep its bytes for a later successful read; the caller gets no proof.
       return null;
     }
 

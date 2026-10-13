@@ -27,17 +27,18 @@ after(async () => {
   await new Promise(resolve => provider.close(resolve));
 });
 
-const { initDatabase, initUserDatabase } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, createNewUserDatabase } = await import('../src/models/db.js');
 const { initAuthDb } = await import('../src/models/authDb.js');
 const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { readCatalog, saveCatalog, recordCapabilityProbe } = await import('../src/services/ai/catalog.js');
 const { annotateAndDescribe } = await import('../src/services/fileAnnotation/index.js');
 const { runAsUser } = await import('../src/services/userScope.js');
+await initializeEmptyInstallation();
 await initDatabase(); await initAuthDb();
 
 test('one image annotation reuses one verified vision result for search and media descriptions', async () => {
   const userId = crypto.randomUUID();
-  const userDb = await initUserDatabase(userId);
+  const userDb = await createNewUserDatabase(userId);
   await provisionNewLocalMemoryAccount(userId, userDb);
   const catalog = await readCatalog(userId);
   catalog.providers.push({

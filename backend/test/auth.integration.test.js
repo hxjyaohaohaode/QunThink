@@ -10,11 +10,12 @@ process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-chat-data-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 
-const { initDatabase } = await import('../src/models/db.js');
+const { initDatabase, initializeEmptyInstallation } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb, hashPassword, generateSessionToken } = await import('../src/models/authDb.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
 const supertest = (await import('supertest')).default;
 
+await initializeEmptyInstallation();
 await initDatabase();
 await initAuthDb();
 

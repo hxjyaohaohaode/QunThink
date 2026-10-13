@@ -515,7 +515,7 @@ initializeKeyManager().then(async () => {
     }
   });
 
-  server.listen(PORT, () => {
+  server.listen(PORT, process.env.HOST || undefined, () => {
     console.log(`Server running on http://localhost:${PORT}`);
     console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
 

@@ -1,25 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+const same = (actual, expected) => assert.ok(JSON.stringify(actual) === JSON.stringify(expected), 'Runtime legacy values match; sample diagnostics are suppressed');
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
+import { createPublic533LegacySample } from './fixtures/generate-public-533-legacy.mjs';
 
-// This fixture was produced by the real public-533 service code, before
-// planning fields existed. Its key has never authenticated any system: it is
-// fixed public synthetic encryption material used only for this fixture.
+// Unchanged public533 task services generate fresh fictional runtime data.
+// Compatibility covers the old protocol and within-run bytes, not a fixed key.
 process.env.NODE_ENV = 'test';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-planning-legacy-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
-process.env.ENCRYPTION_KEY = Buffer.alloc(32, 23).toString('base64');
-const fixture = JSON.parse(await fs.readFile(new URL('./fixtures/task-planning-public-533.json', import.meta.url), 'utf8'));
-const { initDatabase, initUserDatabase, getUserDb, clearUserDbCache, withWriteLock } = await import('../src/models/db.js');
+const sample = await createPublic533LegacySample();
+process.env.ENCRYPTION_KEY = sample.encryptionKey;
+for (const name of Object.keys(process.env)) if (/^(SUPABASE_|MONGO|MEMORY_DELETION_|SERVER_AI_|ALIYUN_)/.test(name)) delete process.env[name];
+const fixture = sample.tasks;
+test.after(() => fs.rm(process.env.DATA_DIR, { recursive: true, force: true }));
+const { initializeEmptyInstallation, initDatabase, createNewUserDatabase, getUserDb, clearUserDbCache, withWriteLock } = await import('../src/models/db.js');
 const { initAuthDb } = await import('../src/models/authDb.js');
 const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { createTask, listTasks, updateTaskMetadata, getTaskMetadataCommand, deleteTask } = await import('../src/services/tasks.js');
-await initDatabase(); await initAuthDb();
+await initializeEmptyInstallation(); await initDatabase(); await initAuthDb();
 const owner = fixture.userId;
-let db = await initUserDatabase(owner); await provisionNewLocalMemoryAccount(owner, db);
+let db = await createNewUserDatabase(owner); await provisionNewLocalMemoryAccount(owner, db);
 async function seed() {
   db = await getUserDb(owner);
   await withWriteLock(owner, async () => { await db.read({ force: true }); Object.assign(db.data, structuredClone(fixture.authority)); await db.write(); });
@@ -28,7 +32,7 @@ async function seed() {
 function authority(data) { return { tasks: data.tasks, taskCreateRequests: data.taskCreateRequests, taskMetadataCommands: data.taskMetadataCommands }; }
 const sha = data => createHash('sha256').update(JSON.stringify(data)).digest('hex');
 
-test('actual public-533 fixture provenance and hashes remain exact', () => {
+test('runtime fixture is bound to unchanged public-533 sources and its generated hashes', () => {
   assert.equal(fixture.provenance.public_commit, '533d7be3cdd47691602574ccac7c6524e7ed7ab3');
   assert.equal(fixture.provenance.tree, '9392ba1ec25863eaed1e00ece649479981d7e87a');
   assert.equal(fixture.provenance.synthetic_only, true);
@@ -38,13 +42,14 @@ test('actual public-533 fixture provenance and hashes remain exact', () => {
 });
 
 test('actual old task ciphertext and authority bytes survive candidate reads and both old command replays', async () => {
-  const task = await seed(), before = JSON.stringify(authority(db.data));
+  const task = await seed(), before = JSON.stringify(authority(db.data)), orderBefore = JSON.stringify(db.data.message_order);
   const read = (await listTasks(owner))[0];
-  assert.equal(read.prompt, fixture.createInput.prompt); assert.equal(read.priority, null); assert.equal(read.estimated_minutes, null);
+  assert.ok(read.prompt === fixture.createInput.prompt, 'legacy prompt survives current read'); assert.equal(read.priority, null); assert.equal(read.estimated_minutes, null);
   const created = await createTask(owner, fixture.createInput); assert.equal(created.id, task.id);
   const replay = await updateTaskMetadata(owner, task.id, fixture.metadataInput);
-  assert.deepEqual(replay.receipt, fixture.responseReceipt); assert.equal(replay.task.metadata_revision, 1);
-  await db.read({ force: true }); assert.equal(JSON.stringify(authority(db.data)), before);
+  same(replay.receipt, fixture.responseReceipt); assert.equal(replay.task.metadata_revision, 1);
+  await db.read({ force: true }); assert.ok(JSON.stringify(authority(db.data)) === before, 'replays preserve complete authority bytes');
+  assert.equal(JSON.stringify(db.data.message_order), orderBefore, 'old receipt replay must not alter message order');
 });
 
 test('actual old command identities still replay after new planning edit and a reopened database', async () => {
@@ -53,11 +58,11 @@ test('actual old command identities still replay after new planning edit and a r
   assert.equal(changed.task.metadata_revision, 2); clearUserDbCache(owner);
   const recreated = await createTask(owner, fixture.createInput); assert.equal(recreated.id, task.id); assert.equal(recreated.priority, 'high'); assert.equal(recreated.estimated_minutes, 0);
   const replay = await updateTaskMetadata(owner, task.id, fixture.metadataInput);
-  assert.deepEqual(replay.receipt, fixture.responseReceipt); assert.equal(replay.task.metadata_revision, 2); assert.equal(replay.task.priority, 'high');
+  same(replay.receipt, fixture.responseReceipt); assert.equal(replay.task.metadata_revision, 2); assert.equal(replay.task.priority, 'high');
   db = await getUserDb(owner); await db.read({ force: true });
-  assert.equal(db.data.tasks[0].prompt, fixture.authority.tasks[0].prompt, 'old ciphertext must not be re-encrypted');
-  assert.deepEqual(db.data.taskCreateRequests, fixture.authority.taskCreateRequests);
-  assert.deepEqual(db.data.taskMetadataCommands[0], fixture.authority.taskMetadataCommands[0]);
+  assert.ok(db.data.tasks[0].prompt === fixture.authority.tasks[0].prompt, 'old ciphertext must not be re-encrypted');
+  same(db.data.taskCreateRequests, fixture.authority.taskCreateRequests);
+  same(db.data.taskMetadataCommands[0], fixture.authority.taskMetadataCommands[0]);
 });
 
 test('same old UUID with explicit new defaults is a different intent and cannot silently upgrade an old receipt', async () => {
@@ -72,7 +77,7 @@ test('actual old receipts survive deletion without recreation in the candidate',
   const task = await seed(); await deleteTask(owner, task.id); clearUserDbCache(owner);
   await assert.rejects(createTask(owner, fixture.createInput), error => error.code === 'TASK_DELETED');
   const found = await getTaskMetadataCommand(owner, task.id, fixture.metadataInput.client_request_id);
-  assert.deepEqual(found.receipt, fixture.responseReceipt); assert.equal(found.task, null); assert.equal(found.task_deleted, true);
-  assert.deepEqual((await updateTaskMetadata(owner, task.id, fixture.metadataInput)).receipt, fixture.responseReceipt);
+  same(found.receipt, fixture.responseReceipt); assert.equal(found.task, null); assert.equal(found.task_deleted, true);
+  same((await updateTaskMetadata(owner, task.id, fixture.metadataInput)).receipt, fixture.responseReceipt);
   assert.equal((await listTasks(owner)).length, 0);
 });

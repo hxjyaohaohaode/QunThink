@@ -13,7 +13,7 @@ process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 const express = (await import('express')).default;
 const cookieParser = (await import('cookie-parser')).default;
 const supertest = (await import('supertest')).default;
-const { initDatabase, getUserDb, clearUserDbCache } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, getUserDb, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb } = await import('../src/models/authDb.js');
 const { default: authRouter } = await import('../src/routes/auth.js');
 const { default: groupsRouter } = await import('../src/routes/groups.js');
@@ -24,6 +24,7 @@ const { injectUserDb } = await import('../src/middleware/userDb.js');
 const { errorHandler } = await import('../src/middleware/errorHandler.js');
 const socialService = (await import('../src/services/social/index.js')).default;
 
+await initializeEmptyInstallation();
 await initDatabase();
 await initAuthDb();
 const app = express();

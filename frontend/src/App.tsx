@@ -947,7 +947,7 @@ function AppContent({
                 <ConversationWriting groupId={currentGroup.id}>
                   <ChatHeader showGroupInfoButton={true} />
                   <ChatModelNotice group={currentGroup} />
-                  <MessageList />
+                  <MessageList isActive={!isMobileLayout && activeDesktopView === 'chat' && !showAgents} />
                   {currentGroup.is_ai_private ? (
                     <LazyBoundary>
                       <ObserverControlPanel groupId={currentGroup.id} topic={currentGroup.topic || currentGroup.description} />
@@ -1132,7 +1132,7 @@ function AppContent({
               <ChatHeader onBack={handleMobileBack} onToggleGroupInfo={() => navigateToView('groupInfo')} showGroupInfoButton={true} />
               <ChatModelNotice group={currentGroup} />
               <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-                <MessageList />
+                <MessageList isActive={isMobileLayout && mobileRoute === 'chat'} />
               </div>
               {currentGroup.is_ai_private ? (
                 <LazyBoundary>

@@ -1,3 +1,4 @@
+import { appendFixtureMessages, initializeAccountStoreFixture } from './helpers/accountStoreFixtures.js';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, randomBytes } from 'node:crypto';
@@ -11,18 +12,18 @@ process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await mkdtemp(path.join(os.tmpdir(), 'qunthink-command-closure-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 process.env.ENCRYPTION_KEY = randomBytes(32).toString('base64');
-const { initDatabase, initUserDatabase, clearUserDbCache } = await import('../src/models/db.js');
+const { initDatabase, createNewUserDatabase, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb, generateSessionToken } = await import('../src/models/authDb.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
 const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { createTask, deleteTask, getTaskCreationReceipt, closeTaskCreationCommand } = await import('../src/services/tasks.js');
 const { getTaskResult, getTaskResultCommand, saveTaskResultVersion, acceptTaskResultVersion, closeTaskResultCommand } = await import('../src/services/taskResults.js');
 const request = (await import('supertest')).default(createTestApp());
-await initDatabase(); await initAuthDb();
+await initializeAccountStoreFixture(); await initDatabase(); await initAuthDb();
 after(async () => { if (process.env.SUPABASE_DB_URL) await (await import('../src/models/supabaseAdapter.js')).closeSupabaseConnection(); });
 const input = key => ({ client_request_id: key, title: '独立恢复测试文稿', prompt: '只写人工正文，不调用模型' });
 async function account() {
-  const user = randomUUID(), token = generateSessionToken(), db = await initUserDatabase(user);
+  const user = randomUUID(), token = generateSessionToken(), db = await createNewUserDatabase(user);
   if (!process.env.SUPABASE_DB_URL) await provisionNewLocalMemoryAccount(user, db);
   const auth = getAuthDb(); await auth.read();
   auth.data.users.push({ id: user, username: user, password: 'unused' });
@@ -117,7 +118,7 @@ for (const committed of [false, true]) for (const kind of ['create', 'result']) 
 
 test('successful result closure lookup still hides content after source withdrawal', async () => {
   const s = await account(), origin = randomUUID();
-  s.db.data.messages.push({ id: origin, group_id: 'group-presidential', sender_type: 'user', content: '只用于这份文稿的资料', revision: 1 }); await s.db.write();
+  appendFixtureMessages(s.db.data, { id: origin, group_id: 'group-presidential', sender_type: 'user', content: '只用于这份文稿的资料', revision: 1 }); await s.db.write();
   const task = await createTask(s.user, { ...input(randomUUID()), group_id: 'group-presidential', source_message_id: origin });
   const key = randomUUID(); await saveTaskResultVersion(s.user, task.id, versionInput(key, await getTaskResult(s.user, task.id), '撤回后不得重新暴露的正文'));
   await s.db.read({ force: true }); s.db.data.messages = []; await s.db.write();
@@ -176,7 +177,7 @@ function independentWriter(user, operation, payload, taskId, hold = false, delet
 if (process.env.SUPABASE_DB_URL) {
   test('ordinary catalog read cannot replace source-only create admission during an async source check', { timeout: 15000 }, async () => {
     const s = await account(), message = randomUUID();
-    s.db.data.messages.push({ id: message, group_id: 'group-presidential', sender_type: 'user', content: '独立交错来源', revision: 1 }); await s.db.write();
+    appendFixtureMessages(s.db.data, { id: message, group_id: 'group-presidential', sender_type: 'user', content: '独立交错来源', revision: 1 }); await s.db.write();
     const payload = { ...input(randomUUID()), group_id: 'group-presidential', source_message_id: message, source_message_edited_at: null };
     // Both reads below are real SQL. Delay publication of the ordinary reader
     // until create enters its source snapshot. Without the outer barrier this

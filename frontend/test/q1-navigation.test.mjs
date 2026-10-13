@@ -14,3 +14,37 @@ test('context disclosure uniquely targets its own summary even with four nested 
  const window=new Window();window.document.body.innerHTML='<details class="writing-context"><summary id="context-summary">用途与来源</summary><ol>'+Array.from({length:4},(_,i)=>`<li data-source-id="test-${i}"><details><summary>查看这条材料全文</summary><p>资料${i}</p></details></li>`).join('')+'</ol></details>';
  const context=window.document.querySelector('.writing-context');assert.equal(context.querySelectorAll('summary').length,5);const matches=context.querySelectorAll(CONTEXT_DISCLOSURE);assert.equal(matches.length,1);assert.equal(matches[0].id,'context-summary');matches[0].click();assert.equal(context.open,true);assert.equal([...context.querySelectorAll('li details')].some(item=>item.open),false);window.close();
 });
+
+// The real 9c7 CI trace resolved an exiting Workspace TaskResultEditor before
+// ConversationWriting mounted. This DOM contract keeps those scopes distinct.
+test('conversation editor locator excludes the exiting workspace editor even with the same task id', async () => {
+ const { conversationResultEditor } = await import('../scripts/q1-navigation.mjs');
+ const window = new Window(); const document = window.document;
+ document.body.innerHTML = '<section data-testid="workspace"><div data-testid="task-result-editor" data-task-id="same-task"><textarea aria-label="文稿正文">saved body</textarea></div></section>';
+ const locator = root => ({ getByRole(role, {name, exact}) { assert.equal(exact,true); return locator(root.querySelector(`[role="${role}"][aria-label="${name}"]`)); }, getByTestId(id) { return root?.querySelector(`[data-testid="${id}"]`) ?? null; } });
+ assert.ok(document.querySelector('[data-testid="task-result-editor"]'));
+ assert.equal(conversationResultEditor(locator(document), false), null);
+ document.body.insertAdjacentHTML('beforeend','<aside role="complementary" aria-label="会话文稿"><div data-testid="task-result-editor" data-task-id="same-task"><textarea aria-label="文稿正文">saved body</textarea></div></aside>');
+ const target=conversationResultEditor(locator(document), false);
+ assert.equal(target.parentElement.getAttribute('aria-label'),'会话文稿');
+ document.querySelector('[data-testid="workspace"]').remove(); assert.equal(target.isConnected,true);
+ target.parentElement.setAttribute('role','dialog');
+ assert.equal(conversationResultEditor(locator(document), true),target);
+ assert.equal(conversationResultEditor(locator(document), false),null); window.close();
+});
+test('workspace destination uses the current exact main navigation label without the old decorative glyph', async () => {
+ const { primaryWorkspaceControl } = await import('../scripts/q1-navigation.mjs');
+ const calls=[]; const page={getByRole(role, options){calls.push([role,options]);return {getByRole(nextRole,nextOptions){calls.push([nextRole,nextOptions]);return 'workspace-destination';}};}};
+ assert.equal(primaryWorkspaceControl(page),'workspace-destination');
+ assert.deepEqual(calls,[['navigation',{name:'主导航',exact:true}],['button',{name:'工作台',exact:true}]]);
+});
+test('native conversation reopen waits for the old workspace to detach before selecting the destination editor', async () => {
+ const {readFile}=await import('node:fs/promises');
+ const source=await readFile(new URL('../e2e/q1/product-results.spec.ts',import.meta.url),'utf8');
+ const start=source.indexOf('async function awaitConversationEditor(');
+ assert.ok(start>=0,'Explicit destination readiness gate required');
+ const helper=source.slice(start,source.indexOf('\n}',start)+2);
+ assert.match(helper,/await expect\(page\.getByTestId\('workspace'\)\)\.toHaveCount\(0\)/);
+ assert.ok(helper.indexOf('.toHaveCount(0)')<helper.indexOf('conversationResultEditor('));
+ assert.doesNotMatch(helper,/waitForTimeout|catch\s*\(/);
+});

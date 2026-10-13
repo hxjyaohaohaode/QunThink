@@ -1,3 +1,4 @@
+import { appendFixtureMessages } from './helpers/accountStoreFixtures.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
@@ -9,11 +10,12 @@ process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-message-idempotency-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 
-const { initDatabase, getUserDb, withWriteLock } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, getUserDb, withWriteLock } = await import('../src/models/db.js');
 const { initAuthDb } = await import('../src/models/authDb.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
 const supertest = (await import('supertest')).default;
 
+await initializeEmptyInstallation();
 await initDatabase();
 await initAuthDb();
 const request = supertest(createTestApp());
@@ -61,9 +63,9 @@ test('message index rejects an equal-length stale cache after stored IDs change'
   const db = await getUserDb(sent.body.sender_id);
   await withWriteLock(sent.body.sender_id, async () => {
     await db.read();
-    db.data.messages = db.data.messages.map(message => message.id === sent.body.id
-      ? { ...message, id: 'replacement-source-id', content: '新消息', metadata: {} }
-      : message);
+    const original = db.data.messages.find(message => message.id === sent.body.id);
+    db.data.messages = db.data.messages.filter(message => message.id !== sent.body.id);
+    appendFixtureMessages(db.data, { ...original, id: 'replacement-source-id', content: '新消息', metadata: {} });
     await db.write();
   });
   const listed = await request.get(endpoint).set('Cookie', owner.cookie);

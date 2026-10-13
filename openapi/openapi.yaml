@@ -1075,27 +1075,59 @@ paths:
     get:
       tags: [ Messages ]
       operationId: listMessages
-      summary: 分页获取群消息
+      summary: 按服务端创建序号分页获取群消息
+      description: >-
+        新客户端使用 order=sequence_v1。before_cursor 与 after_cursor 互斥，
+        游标为不透明值，只能回传同账户同群响应给出的原值，不作为访问授权。
+        查询字段不得重复或混用旧时间参数；未知字段拒绝。
+        未指定 order 且无游标时仅兼容一次有界旧式首屏，不能证明消息已完整补读。
+        旧 before/after 一律返回 428，旧页面必须保全草稿后升级；不会静默降级为漏消息的时间分页。
+        该序号只代表消息创建顺序，不是编辑、反应或删除的事件日志。
       parameters:
         - $ref: '#/components/parameters/GroupIdParam'
         - in: query
+          name: order
+          schema: { type: string, enum: [ sequence_v1 ] }
+        - in: query
           name: limit
-          schema: { type: integer, minimum: 1 }
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - in: query
+          name: before_cursor
+          schema: { type: string, minLength: 1, maxLength: 1024 }
+        - in: query
+          name: after_cursor
+          schema: { type: string, minLength: 1, maxLength: 1024 }
         - in: query
           name: before
+          deprecated: true
+          description: 旧时间参数；任何值均要求升级并返回 428 MESSAGE_CURSOR_REQUIRED。
           schema: { type: string }
         - in: query
           name: after
+          deprecated: true
+          description: 旧时间参数；任何值均要求升级并返回 428 MESSAGE_CURSOR_REQUIRED。
           schema: { type: string }
       responses:
         '200':
-          description: 消息分页结果
+          description: sequence_v1 返回完整游标对象；未指定 order 的兼容首屏仅含 messages/hasMore。
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PaginatedMessagesResponse'
+                anyOf:
+                  - $ref: '#/components/schemas/OrderedMessagesResponse'
+                  - $ref: '#/components/schemas/PaginatedMessagesResponse'
+        '400':
+          description: INVALID_MESSAGE_CURSOR，格式、范围、账户/群绑定或查询组合无效。
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: 当前账户无可读群；不会返回游标或群元数据。
+        '409':
+          description: CURSOR_RESET_REQUIRED 为历史 generation 变化；MESSAGE_ORDER_CAPACITY_EXCEEDED 为容量上限，不得当作可自动重置。
+        '428':
+          description: MESSAGE_CURSOR_REQUIRED；保全未发送意图后明确刷新升级，禁止盲重发。
+        '503':
+          description: 存储、顺序资格或最终删除账本校验不可用，不发布未确认页面。
     post:
       tags: [ Messages ]
       operationId: sendMessage
@@ -5251,6 +5283,8 @@ components:
         - content_type
         - created_at
       properties:
+        server_order:
+          $ref: '#/components/schemas/MessageOrder'
         id: { type: string }
         group_id: { type: string }
         sender_type:
@@ -5328,6 +5362,48 @@ components:
           minItems: 1
           items: { type: string }
         group_id: { type: string }
+    MessageOrder:
+      type: object
+      required: [ generation, sequence ]
+      properties:
+        generation: { type: string, format: uuid }
+        sequence:
+          type: string
+          pattern: '^[1-9][0-9]{0,18}$'
+          description: 正十进制整数串，上限 9223372036854775807；不得转为 JavaScript Number。
+    OrderedMessagesResponse:
+      type: object
+      required: [ messages, hasMore, order, generation, high_watermark, consumed_through, before_cursor, after_cursor ]
+      properties:
+        messages:
+          type: array
+          maxItems: 200
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Message'
+              - type: object
+                required: [ server_order ]
+        hasMore: { type: boolean }
+        order: { type: string, enum: [ sequence_v1 ] }
+        generation: { type: string, format: uuid }
+        high_watermark:
+          type: string
+          pattern: '^(0|[1-9][0-9]{0,18})$'
+          description: 本批固定创建序号上界 H；上限 9223372036854775807，不等于当前消息条数。
+        consumed_through:
+          type: [ string, 'null' ]
+          pattern: '^(0|[1-9][0-9]{0,18})$'
+          description: 历史 before 页为 null；after 分页仅耗尽固定批次后推进至 H。客户端仅在验证并实际消费页面后采用。
+        before_cursor:
+          type: [ string, 'null' ]
+          minLength: 1
+          maxLength: 1024
+          description: 更早历史边界；after 页或已无更早历史时为 null。
+        after_cursor:
+          type: [ string, 'null' ]
+          minLength: 1
+          maxLength: 1024
+          description: 独立补读边界；before 页为 null，不能覆盖客户端已有消费水位。
     PaginatedMessagesResponse:
       type: object
       required: [ messages, hasMore ]

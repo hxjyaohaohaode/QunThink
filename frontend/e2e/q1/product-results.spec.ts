@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { registerSyntheticAccount } from '../authFixture';
 import { observeSessionLimits, clearSessionLimit, retryVisibleRateLimitedSession } from '../sessionRecovery';
-import { pickWorkspaceNavigationState, CONTEXT_DISCLOSURE } from '../../scripts/q1-navigation.mjs';
+import { pickWorkspaceNavigationState, primaryWorkspaceControl, conversationResultEditor, CONTEXT_DISCLOSURE } from '../../scripts/q1-navigation.mjs';
 import { assertQ1CiRuntime, Q1_ORIGIN, ORIGINAL, CORRECTION, LATER_CORRECTION, PURPOSE, INVITATION, messageBubbleSelector, observeNewChatCalls } from '../../scripts/q1-fixture-protocol.mjs';
 
 if (!process.argv.includes('--list')) assertQ1CiRuntime();
@@ -95,9 +95,9 @@ async function workspace(page: Page, info: TestInfo, e: Evidence) {
     workspace: page.getByTestId('workspace'),
     sessionRetry: page.getByRole('button', { name: '重试连接', exact: true }),
     writingClose: page.getByRole('button', { name: '收起文稿，返回对话', exact: true }),
-    mobileWorkspace: page.getByRole('button', { name: '⌘ 工作台', exact: true }),
+    mobileWorkspace: primaryWorkspaceControl(page),
     mobileBack: page.getByRole('button', { name: '返回', exact: true }),
-    desktopBack: page.getByRole('button', { name: '返回工作台', exact: true })
+    desktopBack: primaryWorkspaceControl(page)
   };
   const started = Date.now(), observations: Json[] = [];
   try {
@@ -274,11 +274,19 @@ async function reloadWithEvidence(page: Page, e: Evidence) {
   page.on('dialog', handler);
   try { await page.reload(); } finally { page.off('dialog', handler); }
 }
+async function awaitConversationEditor(page: Page, info: TestInfo) {
+  // Preserve the actual AnimatePresence exit/entry. The outgoing task card
+  // has the same task id and saved text, so neither is a destination proof.
+  await expect(page.getByTestId('workspace')).toHaveCount(0);
+  const editor = conversationResultEditor(page, info.project.name === 'mobile-reduced-motion');
+  await expect(editor).toBeVisible();
+  return editor;
+}
 async function reopenInConversation(page: Page, info: TestInfo, title: string, e: Evidence) {
   await workspace(page, info, e);
   const target = await openDetails(page, title);
   await target.getByRole('button', { name: '打开来源会话 →', exact: true }).click();
-  const editor = page.getByTestId('task-result-editor'); await expect(editor).toBeVisible(); return editor;
+  return awaitConversationEditor(page, info);
 }
 const currentVersion = (document: Json) => document.versions.find((version: Json) => version.id === document.head_version_id);
 async function saveVersion(page: Page, editor: Locator, id: string) {
@@ -349,7 +357,7 @@ test('Q1 complete result protocol: same invitation, human revision, exact accept
     await e.record('accepted-manual-result-found-through-visible-filter', { task: acceptedSummary });
     await e.shot('accepted-manual-result-in-workspace-filter', card(page, title));
     const acceptedCard = await openDetails(page, title); await acceptedCard.getByRole('button', { name: '打开来源会话 →', exact: true }).click();
-    editor = page.getByTestId('task-result-editor'); await expect(editor.getByRole('textbox', { name: '文稿正文', exact: true })).toHaveValue(humanBody);
+    editor = await awaitConversationEditor(page, info); await expect(editor.getByRole('textbox', { name: '文稿正文', exact: true })).toHaveValue(humanBody);
     await page.getByRole('button', { name: '收起文稿，返回对话', exact: true }).click();
     const originalSource = messageBubble(page, state.messages[1].id); await originalSource.hover();
     await originalSource.getByLabel('更多消息操作', { exact: true }).click();
@@ -359,7 +367,7 @@ test('Q1 complete result protocol: same invitation, human revision, exact accept
     await originalSource.getByRole('button', { name: '保存', exact: true }).click(); const changed = await changing; expect(changed.status()).toBe(200);
     await page.getByRole('button', { name: '打开会话文稿', exact: true }).click();
     await page.getByRole('button', { name: new RegExp(title) }).click();
-    editor = page.getByTestId('task-result-editor'); await expect(editor).toContainText('需要复核');
+    editor = conversationResultEditor(page, info.project.name === 'mobile-reduced-motion'); await expect(editor).toContainText('需要复核');
     await expect(editor.getByRole('textbox', { name: '文稿正文', exact: true })).toHaveValue(humanBody);
     const sourceDetails = editor.locator('details.writing-context'); if (!await sourceDetails.getAttribute('open').then(value => value !== null)) await sourceDetails.locator(CONTEXT_DISCLOSURE).click();
     const changedMaterial = sourceDetails.locator(`[data-source-id="${state.messages[1].id}"]`);

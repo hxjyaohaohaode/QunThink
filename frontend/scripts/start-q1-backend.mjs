@@ -2,13 +2,15 @@ import { assertQ1CiRuntime, Q1_ORIGIN, inspectRequest, completionBody, streamBod
 // Must execute before creating any listener or importing the application.
 assertQ1CiRuntime();
 const { createServer } = await import('node:http');
-const { mkdtemp, writeFile } = await import('node:fs/promises');
+const { mkdtemp, mkdir, writeFile } = await import('node:fs/promises');
 const { randomBytes, randomUUID } = await import('node:crypto');
 const { tmpdir } = await import('node:os');
 const { join } = await import('node:path');
 const { once } = await import('node:events');
-const data = await mkdtemp(join(tmpdir(), 'qunthink-q1-ci-'));
-const emptyEnv = join(data, 'empty.env');
+const root = await mkdtemp(join(tmpdir(), 'qunthink-q1-ci-'));
+const data = join(root, 'data');
+await mkdir(data);
+const emptyEnv = join(root, 'empty.env');
 await writeFile(emptyEnv, '');
 process.env.DOTENV_CONFIG_PATH = emptyEnv;
 const calls = [], pending = new Map();
@@ -43,7 +45,6 @@ const provider = createServer(async (req, res) => {
     else reply(call, res, body, observation);
   } catch (error) { if (!res.headersSent) send(res, 400, { error: error.message }); else res.destroy(); }
 });
-provider.listen(3203, '127.0.0.1'); await once(provider, 'listening');
 Object.assign(process.env, {
   NODE_ENV: 'development', AUTH_MODE: 'session', PORT: '3202',
   DATA_DIR: data, AUTH_DB_PATH: join(data, 'auth.json'), MEMORY_DELETION_DIR: join(data, 'memory-deletions'),
@@ -54,5 +55,8 @@ Object.assign(process.env, {
 });
 // No real provider configuration or secrets are inherited by this fixture.
 for (const key of Object.keys(process.env)) if (/(?:API_KEY|ACCESS_TOKEN|SECRET_KEY)$/.test(key) || /^(?:ALIYUN_|MIMO_BASE_URL$|OPENAI_|ANTHROPIC_|AZURE_|SMS_)/.test(key)) delete process.env[key];
+const { initializeEmptyInstallation } = await import('../../backend/src/models/db.js');
+await initializeEmptyInstallation();
+provider.listen(3203, '127.0.0.1'); await once(provider, 'listening');
 console.log('Q1 isolated development-mode backend: real message scheduling enabled, local deterministic HTTP fixture only; PostgreSQL/Goal runtime disabled.');
 await import('../../backend/src/index.js');

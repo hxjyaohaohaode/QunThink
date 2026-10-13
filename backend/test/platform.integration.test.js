@@ -1,3 +1,4 @@
+import { appendFixtureMessages, addFixtureGroups } from './helpers/accountStoreFixtures.js';
 import { mockProviderDns } from './helpers/mockProviderDns.js';
 mockProviderDns(['api.deepseek.com', 'api.openai.com']);
 import test, { after } from 'node:test';
@@ -18,7 +19,7 @@ process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 process.env.ENCRYPTION_KEY = crypto.randomBytes(32).toString('base64');
 process.env.DEEPSEEK_API_KEY = 'server-owned-test-key';
 process.env.QUNTHINK_SHARED_PROVIDER_KEYS = '1';
-const { initDatabase, initUserDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, createNewUserDatabase, getUserDb, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb, generateSessionToken } = await import('../src/models/authDb.js');
 const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
@@ -34,7 +35,7 @@ const { encryptText } = await import('../src/utils/encryption.js');
 const { default: systemMonitor } = await import('../src/services/monitoring/monitor.js');
 const supertest = (await import('supertest')).default;
 const request = supertest(createTestApp());
-await initDatabase(); await initAuthDb();
+await initializeEmptyInstallation(); await initDatabase(); await initAuthDb();
 
 const calls = [];
 const slow = [];
@@ -82,7 +83,7 @@ after(async () => { stopTaskScheduler(); provider.closeAllConnections(); await n
 
 async function session() {
   const userId = crypto.randomUUID(), token = generateSessionToken();
-  const userDb = await initUserDatabase(userId);
+  const userDb = await createNewUserDatabase(userId);
   await provisionNewLocalMemoryAccount(userId, userDb);
   const db = getAuthDb(); await db.read();
   db.data.users.push({ id: userId, username: userId, password: 'unused', created_at: new Date().toISOString() });
@@ -583,7 +584,7 @@ test('stopping during a manual reply commit reports the result as unknown', { ti
   const waitCommit = new Promise(resolve => { releaseCommit = resolve; });
   let delayed = false;
   db.write = async (...args) => {
-    if (!delayed && db.data.messages.some(message =>
+    if (!delayed && (args[0]?.snapshot || db.data).messages.some(message =>
       message.group_id === group.body.id && message.sender_type === 'ai')) {
       delayed = true;
       reachedCommit();
@@ -772,7 +773,7 @@ test('tasks persist encrypted results, use only linked tenant context and honor 
   const s = await session(); await configure(s.userId);
   await probeChat(s);
   const db = await getUserDb(s.userId);
-  await withWriteLock(s.userId, async () => { await db.read(); db.data.messages.push({ id: 'ctx', group_id: 'group-presidential', sender_type: 'user', content: encryptText('所属会话上下文'), metadata: { encryption: { encrypted: true } } }, { id: 'other', group_id: 'other', sender_type: 'user', content: '未关联秘密' }); await db.write(); });
+  await withWriteLock(s.userId, async () => { await db.read(); addFixtureGroups(db.data, { id: 'other' }); appendFixtureMessages(db.data, { id: 'ctx', group_id: 'group-presidential', sender_type: 'user', content: encryptText('所属会话上下文'), metadata: { encryption: { encrypted: true } } }, { id: 'other', group_id: 'other', sender_type: 'user', content: '未关联秘密' }); await db.write(); });
   const task = await createTask(s.userId, { title: '总结', prompt: '整理行动', model_id: 'custom', group_id: 'group-presidential' });
   const done = await runTask(s.userId, task.id);
   assert.equal(done.status, 'needs_review'); assert.equal(done.result, '已完成测试任务 ✓');
@@ -786,7 +787,7 @@ test('tasks persist encrypted results, use only linked tenant context and honor 
   assert.equal(accepted.status, 200); assert.equal(accepted.body.status, 'completed');
   assert.equal(accepted.body.history.at(-1).status, 'accepted');
   assert.equal((await request.post(`/api/tasks/${task.id}/accept`).set('Cookie', s.cookie).send({ run_id: done.run_id })).status, 200);
-  await withWriteLock(s.userId, async () => { await db.read(); db.data.messages.push({ id: 'after-accept', group_id: 'group-presidential', sender_type: 'user', content: '已更正事实', created_at: new Date().toISOString() }); await db.write(); });
+  await withWriteLock(s.userId, async () => { await db.read(); appendFixtureMessages(db.data, { id: 'after-accept', group_id: 'group-presidential', sender_type: 'user', content: '已更正事实', created_at: new Date().toISOString() }); await db.write(); });
   assert.equal((await listTasks(s.userId)).find(t => t.id === task.id).source_stale, true);
   assert.equal((await request.post(`/api/tasks/${task.id}/accept`).set('Cookie', s.cookie).send({ run_id: done.run_id })).status, 409);
   const sent = JSON.stringify(calls.at(-1).body); assert.ok(sent.includes('所属会话上下文')); assert.ok(!sent.includes('未关联秘密'));
@@ -811,7 +812,7 @@ test('task acceptance rejects changed conversation evidence and another account'
   const db = await getUserDb(s.userId);
   await withWriteLock(s.userId, async () => {
     await db.read();
-    db.data.messages.push({ id: 'later-message', group_id: 'group-presidential', sender_type: 'user', content: '新修正', created_at: new Date().toISOString() });
+    appendFixtureMessages(db.data, { id: 'later-message', group_id: 'group-presidential', sender_type: 'user', content: '新修正', created_at: new Date().toISOString() });
     await db.write();
   });
   assert.equal((await request.post(`/api/tasks/${task.id}/accept`).set('Cookie', other.cookie).send({ run_id: draft.run_id })).status, 404);
@@ -830,7 +831,7 @@ test('a source deleted after task preparation is never sent to the model', async
   const db = await getUserDb(s.userId);
   await withWriteLock(s.userId, async () => {
     await db.read();
-    db.data.messages.push({ id: 'delete-before-dispatch', group_id: groupId,
+    appendFixtureMessages(db.data, { id: 'delete-before-dispatch', group_id: groupId,
       sender_type: 'user', sender_id: s.userId, content: 'delete-race-secret',
       created_at: new Date().toISOString() });
     await db.write();
@@ -882,7 +883,7 @@ test('restored deleted group cannot revive task context, draft, acceptance or sc
   await withWriteLock(s.userId, async () => {
     await db.read();
     db.data.groups.find(group => group.id === groupId).ai_members = ['custom'];
-    db.data.messages.push({ id: 'old-task-source', group_id: groupId,
+    appendFixtureMessages(db.data, { id: 'old-task-source', group_id: groupId,
       sender_type: 'user', content: '已撤销的任务来源', created_at: new Date().toISOString() });
     await db.write();
   });
@@ -940,11 +941,11 @@ test('restored single file stays absent from group listing and cannot be deleted
       owner_user_id: other.userId, uploader_id: other.userId,
       filename: '外部账号私人附件.txt', file_size: 7,
       parsed_content: '不属于本账号', created_at: new Date().toISOString() });
-    db.data.messages.push({ id: 'message-with-deleted-file', group_id: groupId,
+    appendFixtureMessages(db.data, { id: 'message-with-deleted-file', group_id: groupId,
       sender_type: 'user', content: '附件引用', created_at: new Date().toISOString(),
       attachments: [{ id: 'file-restored-alone', name: '已删附件.txt',
         type: 'text/plain', size: 4, media_description: '旧附件摘要' }] });
-    db.data.messages.push({ id: 'message-with-legacy-url', group_id: groupId,
+    appendFixtureMessages(db.data, { id: 'message-with-legacy-url', group_id: groupId,
       sender_type: 'user', content: '旧格式附件引用', created_at: new Date().toISOString(),
       attachments: [{ url: `/api/files/public/file-restored-alone?group_id=${groupId}`,
         name: '已删附件.txt', type: 'text/plain', size: 4,
@@ -1009,7 +1010,7 @@ test('linked file revisions enter task context and invalidate an older draft wit
       { id: 'doc-a', group_id: 'group-presidential', filename: '报告.txt', parsed_content: '本组确认的指标为 42', parse_status: 'success' },
       { id: 'doc-b', group_id: 'another-group', filename: '私人.txt', parsed_content: '跨组秘密 999', parse_status: 'success' }
     );
-    db.data.messages.push({ id: 'with-files', group_id: 'group-presidential', sender_type: 'user', content: '依据附件起草', attachments: [{ id: 'doc-a' }, { id: 'doc-b' }] });
+    appendFixtureMessages(db.data, { id: 'with-files', group_id: 'group-presidential', sender_type: 'user', content: '依据附件起草', attachments: [{ id: 'doc-a' }, { id: 'doc-b' }] });
     await db.write();
   });
   const task = await createTask(s.userId, { title: '文件修订', prompt: '整理指标', model_id: 'custom', group_id: 'group-presidential' });
@@ -1133,7 +1134,7 @@ test('empty debate history never falls back to another user with the same preset
   const { getRecentDebateMessages } = await import('../src/services/debate/index.js');
   const a = await session(), b = await session();
   const db = await getUserDb(a.userId); await db.read();
-  db.data.messages.push({ id: 'private-a', group_id: 'group-presidential', sender_type: 'user', content: 'A私有历史' }); await db.write();
+  appendFixtureMessages(db.data, { id: 'private-a', group_id: 'group-presidential', sender_type: 'user', content: 'A私有历史' }); await db.write();
   assert.equal((await runAsUser(a.userId, () => getRecentDebateMessages('group-presidential'))).length, 1);
   assert.deepEqual(await runAsUser(b.userId, () => getRecentDebateMessages('group-presidential')), []);
   assert.deepEqual(await getRecentDebateMessages('group-presidential'), []);

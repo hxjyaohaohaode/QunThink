@@ -1,6 +1,7 @@
+import { commitBackgroundMessage } from '../backgroundMessageCommit.js';
 import { mentionedModelIds } from '../mentions.js';
 ﻿import { v4 as uuidv4 } from 'uuid';
-import { getUserDb, listUserDatabases, updateGroupActivityById, withWriteLock } from '../../models/db.js';
+import { getUserDb, listUserDatabases, withWriteLock } from '../../models/db.js';
 import { callAI, callAIStream, cancelStream, normalizeResponse, applyMessageLengthLimit } from '../ai/index.js';
 import { broadcastToGroup, broadcastStreamChunk, broadcastStreamStart, broadcastStreamEnd, broadcastTypingStatus } from '../../websocket/index.js';
 import { AI_PERSONAS } from '../../config/personas.js';
@@ -437,14 +438,10 @@ async function triggerSpontaneousChat(groupId, aiMembers) {
           created_at: new Date().toISOString()
         };
 
-        await withWriteLock(spontaneousUserId, async () => {
-          await userDb.read();
-          userDb.data.messages.push(message);
-          updateGroupActivityById(userDb, groupId, message);
-          await userDb.write();
-        });
-
-        broadcastStreamEnd(groupId, starterAi, messageId, content, null, null);
+        const committed = await commitBackgroundMessage({ userId: spontaneousUserId, db: userDb, message, context });
+        if (!committed) return;
+        broadcastStreamEnd(groupId, starterAi, messageId, content, null, null, committed.result);
+        if (committed.disposition !== 'committed') { context.cancel = true; return; }
         context.lastSpeakerId = starterAi;
 
         console.log('[AI自发对话] 已生成消息', { modelId: starterAi, contentLength: content.length });
@@ -1132,17 +1129,14 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
         : await findGroupAndMessagesInAnyUserDb(groupId);
       let saved = false;
       if (dbResult && !context.cancel) {
-        await withWriteLock(dbResult.userId, async () => {
-          await dbResult.db.read();
-          if (context.cancel || !(await queuedSourceReadableLocked(dbResult.userId, dbResult.db, groupId, context.sourceMessageId))) return;
-          dbResult.db.data.messages.push(refusalMessage);
-          await dbResult.db.write();
-          saved = true;
-          broadcastToGroup(groupId, {
-            type: 'system_message', group_id: groupId, content: refusalMsg,
-            sender_id: aiId, metadata: { refusal: true }, timestamp: new Date().toISOString()
-          });
-        });
+        const committed = await commitBackgroundMessage({ userId: dbResult.userId, db: dbResult.db,
+          message: refusalMessage, context, updateActivity: false });
+        saved = Boolean(committed);
+        if (committed) {
+          broadcastToGroup(groupId, { ...committed.result, type: 'system_message', durable: true,
+            persistence_status: 'confirmed', timestamp: new Date().toISOString() });
+          if (committed.disposition !== 'committed') context.cancel = true;
+        }
       }
       if (!saved) context.cancel = true;
     }
@@ -1328,13 +1322,13 @@ async function generateAIResponse(aiId, groupId, userMessage, recentMessages, gr
     const content = (persona.name || aiId) + '：' + error.message;
     if (userId) {
       const db = await getUserDb(userId);
-      await withWriteLock(userId, async () => {
-        await db.read();
-        if (context.cancel || !(await queuedSourceReadableLocked(userId, db, groupId, context.sourceMessageId))) return;
-        db.data.messages.push({ id: messageId, group_id: groupId, sender_type: 'system', sender_id: aiId, content, content_type: 'system', metadata: { generation_error: true }, created_at: new Date().toISOString() });
-        await db.write();
-        broadcastToGroup(groupId, { type: 'message_stream_end', group_id: groupId, message_id: messageId, sender_type: 'system', sender_id: aiId, content, metadata: { generation_error: true }, timestamp: new Date().toISOString() });
-      });
+      const message = { id: messageId, group_id: groupId, sender_type: 'system', sender_id: aiId,
+        content, content_type: 'system', metadata: { generation_error: true }, created_at: new Date().toISOString() };
+      const committed = await commitBackgroundMessage({ userId, db, message, context, updateActivity: false });
+      if (committed) {
+        broadcastStreamEnd(groupId, aiId, messageId, content, null, null, committed.result);
+        if (committed.disposition !== 'committed') context.cancel = true;
+      }
     }
     return null;
   }
@@ -1577,20 +1571,14 @@ export async function queueAIMessages(groupId, userMessage, replyTo = null, scop
       created_at: new Date().toISOString()
     };
 
-    let saved = false;
-    await withWriteLock(userId, async () => {
-      await userDb.read();
-      if (context.cancel || !(await queuedSourceReadableLocked(userId, userDb, groupId, sourceMessageId))) return;
-      userDb.data.messages.push(message);
-      updateGroupActivityById(userDb, groupId, message);
-      await userDb.write();
-      saved = true;
-      broadcastStreamEnd(groupId, resultAiId, finalMessageId, finalContent, effectiveReplyTo, finalReplyToIds);
-    });
-    if (!saved) {
+    const committed = await commitBackgroundMessage({ userId, db: userDb, message, context, sourceMessageId });
+    if (!committed) {
       context.cancel = true;
       return null;
     }
+
+    broadcastStreamEnd(groupId, resultAiId, finalMessageId, finalContent, effectiveReplyTo, finalReplyToIds, committed.result);
+    if (committed.disposition !== 'committed') { context.cancel = true; return null; }
 
     console.log(`[AI消息] ${resultAiId} 消息已广播，messageId: ${finalMessageId}, content_len: ${cleanedContent.length}`);
 
@@ -1686,17 +1674,13 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
             metadata: { refusal: true },
             created_at: new Date().toISOString()
           };
-          await withWriteLock(dbResult.userId, async () => {
-            await dbResult.db.read();
-            if (context.cancel || !(await queuedSourceReadableLocked(dbResult.userId, dbResult.db, groupId, context.sourceMessageId))) return;
-            dbResult.db.data.messages.push(refusalMessage);
-            updateGroupActivityById(dbResult.db, groupId, refusalMessage);
-            await dbResult.db.write();
-            broadcastToGroup(groupId, {
-              type: 'system_message', group_id: groupId, content: refusalMsg,
-              sender_id: aiId, metadata: { refusal: true }, timestamp: new Date().toISOString()
-            });
-          });
+          const committed = await commitBackgroundMessage({ userId: dbResult.userId, db: dbResult.db,
+            message: refusalMessage, context });
+          if (committed) {
+            broadcastToGroup(groupId, { ...committed.result, type: 'system_message', durable: true,
+              persistence_status: 'confirmed', timestamp: new Date().toISOString() });
+            if (committed.disposition !== 'committed') context.cancel = true;
+          }
         }
       }
       return null;
@@ -1746,20 +1730,14 @@ async function continueAIConversation(groupId, context, aiMembers, userAgents = 
       created_at: new Date().toISOString()
     };
 
-    let saved = false;
-    await withWriteLock(dbResult.userId, async () => {
-      await dbResult.db.read();
-      if (context.cancel || !(await queuedSourceReadableLocked(dbResult.userId, dbResult.db, groupId, context.sourceMessageId))) return;
-      dbResult.db.data.messages.push(message);
-      updateGroupActivityById(dbResult.db, groupId, message);
-      await dbResult.db.write();
-      saved = true;
-      broadcastStreamEnd(groupId, resultAiId, finalMessageId, finalContent, effectiveReplyTo, finalReplyToIds);
-    });
-    if (!saved) {
+    const committed = await commitBackgroundMessage({ userId: dbResult.userId, db: dbResult.db, message, context });
+    if (!committed) {
       context.cancel = true;
       return null;
     }
+
+    broadcastStreamEnd(groupId, resultAiId, finalMessageId, finalContent, effectiveReplyTo, finalReplyToIds, committed.result);
+    if (committed.disposition !== 'committed') { context.cancel = true; return null; }
 
     console.log(`[AI对话] ${resultAiId} 发送了消息: ${cleanedContent.substring(0, 50)}...`);
 
@@ -1955,28 +1933,16 @@ export async function startAutonomousChat(groupId, topic = null) {
           created_at: new Date().toISOString()
         };
 
-        let saved = false;
-        await withWriteLock(autonomousUserId, async () => {
-          await userDb.read();
-          if (context.cancel || !(await queuedSourceReadableLocked(autonomousUserId, userDb, groupId, null))) return;
-          userDb.data.messages.push(message);
-          updateGroupActivityById(userDb, groupId, message);
-          await userDb.write();
-          if (context.cancel) {
-            context.resultUnknown = true;
-            return;
-          }
-          saved = true;
-          broadcastStreamEnd(groupId, starterAi, messageId, content, null, null);
-        });
-
-        if (!saved) return {
+        const committed = await commitBackgroundMessage({ userId: autonomousUserId, db: userDb, message, context });
+        if (!committed) return {
           success: false,
           outcomeUnknown: context.resultUnknown === true,
           error: context.resultUnknown
             ? '已请求停止，但正在提交的回复结果待核验；请刷新消息列表'
             : '群组已删除或对话已停止'
         };
+        broadcastStreamEnd(groupId, starterAi, messageId, content, null, null, committed.result);
+        if (committed.disposition !== 'committed') return { success: true, recovered: true, message: '已核验原回复，请刷新消息列表' };
         context.lastSpeakerId = starterAi;
 
         console.log('[AI自主对话] 已生成消息', { modelId: starterAi, contentLength: content.length });
@@ -2178,14 +2144,10 @@ export async function handleUserReaction(groupId, messageId, reactionType, userI
         created_at: new Date().toISOString()
       };
 
-      await withWriteLock(result.userId, async () => {
-        await userDb.read();
-        userDb.data.messages.push(newMessage);
-        updateGroupActivityById(userDb, groupId, newMessage);
-        await userDb.write();
-      });
-
-      broadcastStreamEnd(groupId, aiId, newMessageId, cleanedContent, replyToId, null);
+      const committed = await commitBackgroundMessage({ userId: result.userId, db: userDb, message: newMessage,
+        sourceMessageId: messageId, sourceSenderType: null });
+      if (!committed) return null;
+      broadcastStreamEnd(groupId, aiId, newMessageId, cleanedContent, replyToId, null, committed.result);
 
       return { aiId, content: cleanedContent };
 
@@ -2475,14 +2437,10 @@ export async function startAIPrivateChat(groupId, topic = null) {
           created_at: new Date().toISOString()
         };
 
-        await withWriteLock(privateChatUserId, async () => {
-          await userDb.read();
-          userDb.data.messages.push(message);
-          updateGroupActivityById(userDb, groupId, message);
-          await userDb.write();
-        });
-
-        broadcastStreamEnd(groupId, aiId, finalMessageId, cleanedContent, effectiveReplyTo, finalReplyToIds);
+        const committed = await commitBackgroundMessage({ userId: privateChatUserId, db: userDb, message, context });
+        if (!committed) { context.cancel = true; break; }
+        broadcastStreamEnd(groupId, aiId, finalMessageId, cleanedContent, effectiveReplyTo, finalReplyToIds, committed.result);
+        if (committed.disposition !== 'committed') { context.cancel = true; break; }
 
         if (socialActions && socialActions.length > 0 && effectiveReplyTo) {
           await processSocialActions(groupId, effectiveReplyTo, aiId, socialActions);
@@ -2563,29 +2521,40 @@ export function getChatStatus(groupId) {
   };
 }
 
-export function stopAIPrivateChat(groupId) {
+export function requestAIPrivateChatStop(groupId) {
   const chatKey = `ai_private:${groupId}`;
-  const context = activeGroups.get(chatKey);
+  const context = currentUserId() ? activeGroups.get(chatKey) : null;
 
   if (context) {
-    context.cancel = true;
-    context.isRunning = false;
-    for (const streamId of context.streamIds?.values() || []) cancelStream(streamId);
-    if (context.streamId) cancelStream(context.streamId);
-
-    broadcastToGroup(groupId, {
-      type: 'chat_status',
-      group_id: groupId,
-      status: 'stopped',
-      timestamp: new Date().toISOString()
-    });
-
-    activeGroups.delete(chatKey);
-
-    return { success: true, message: 'AI私聊已停止', stoppedMessages: context.messageCount };
+    if (!context.stopRequested) {
+      context.stopRequested = true;
+      context.cancel = true;
+      for (const streamId of context.streamIds?.values() || []) cancelStream(streamId);
+      if (context.streamId) cancelStream(context.streamId);
+      broadcastToGroup(groupId, {
+        type: 'chat_status',
+        group_id: groupId,
+        status: 'stopped',
+        stopRequested: true,
+        timestamp: new Date().toISOString()
+      });
+    }
+    // Keep the original context until its worker drains. A stop request cannot
+    // establish that an in-flight or unknown durable commit was withdrawn.
+    return { success: true, stopRequested: true, message: 'AI私聊停止请求已登记' };
   }
 
   return { success: false, message: '没有正在进行的AI私聊' };
+}
+
+export function stopAIPrivateChat(groupId) {
+  const chatKey = `ai_private:${groupId}`;
+  const context = currentUserId() ? activeGroups.get(chatKey) : null;
+  const result = requestAIPrivateChatStop(groupId);
+  if (!result.success) return result;
+  context.isRunning = false;
+  if (activeGroups.get(chatKey) === context) activeGroups.delete(chatKey);
+  return { success: true, message: 'AI私聊已停止', stoppedMessages: context.messageCount };
 }
 
 export async function continueAIPrivateChat(groupId) {
@@ -2614,14 +2583,10 @@ export async function parseAndSaveMessage(groupId, aiId, aiContent, userMessage,
     created_at: new Date().toISOString()
   };
 
-  await withWriteLock(result.userId, async () => {
-    await userDb.read();
-    userDb.data.messages.push(message);
-    updateGroupActivityById(userDb, groupId, message);
-    await userDb.write();
-  });
+  const committed = await commitBackgroundMessage({ userId: result.userId, db: userDb, message });
+  if (!committed) return null;
 
-  if (!saveOnly && parsed.socialActions.length > 0) {
+  if (committed.disposition === 'committed' && !saveOnly && parsed.socialActions.length > 0) {
     for (const action of parsed.socialActions) {
       if (action.type === 'like' || action.type === 'dislike') {
         await processSocialActions(groupId, finalReplyToId || message.id, aiId, [action]);
@@ -2632,5 +2597,5 @@ export async function parseAndSaveMessage(groupId, aiId, aiContent, userMessage,
     }
   }
 
-  return message;
+  return committed.result;
 }

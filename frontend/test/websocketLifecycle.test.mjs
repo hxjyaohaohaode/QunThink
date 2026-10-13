@@ -7,17 +7,17 @@ import { resolve } from 'node:path';
 // scheduling, WebSocket transport, stores/cache effects and HTTP IO are synthetic.
 const root = resolve(import.meta.dirname, '..');
 const bundled = await build({
-  stdin: { contents: `export * from './src/services/websocket'; export { axiosInstance, confirmAuthIdentity, onAuthExpired } from './src/services/api';`, resolveDir: root, loader: 'ts' },
+  stdin: { contents: `export * from './src/services/websocket'; export { axiosInstance, confirmAuthIdentity, onAuthExpired } from './src/services/api'; export { useMessagesStore, resetMessagesModuleState } from './src/stores/messagesStore';`, resolveDir: root, loader: 'ts' },
   bundle: true, format: 'esm', platform: 'browser', write: false,
   define: { 'import.meta.env.DEV': 'true', 'import.meta.env.VITE_AUTH_MODE': '"session"' },
   plugins: [{ name: 'socket-io-boundaries', setup(build) {
-    build.onResolve({ filter: /stores\/(messages|audio|ui|groups|personas)Store$/ }, ({ path }) => ({ path: path.match(/(\w+)Store$/)[1], namespace: 'fixture' }));
+    build.onResolve({ filter: /(?:stores\/|\.\/)(audio|ui|groups|personas)Store$/ }, ({ path }) => ({ path: path.match(/(\w+)Store$/)[1], namespace: 'fixture' }));
     build.onResolve({ filter: /utils\/cacheUtils$/ }, () => ({ path: 'cache', namespace: 'fixture' }));
     build.onResolve({ filter: /utils\/indexedDB$/ }, () => ({ path: 'indexedDB', namespace: 'fixture' }));
     build.onResolve({ filter: /\.\/runtimeConfig$/ }, () => ({ path: 'runtime', namespace: 'fixture' }));
     build.onLoad({ filter: /.*/, namespace: 'fixture' }, ({ path }) => ({ loader: 'js', contents:
       path === 'cache' ? `export const getCacheUserId=()=>globalThis.__socketFixture.user; export const saveGroupsCache=data=>globalThis.__socketFixture.writes.push(['groups',globalThis.__socketFixture.user,data]); export const savePersonasCache=data=>globalThis.__socketFixture.writes.push(['personas',globalThis.__socketFixture.user,data]);` :
-      path === 'indexedDB' ? `export const loadMessagesFromIndexedDB=groupId=>globalThis.__socketFixture.loadCache(groupId);` :
+      path === 'indexedDB' ? `export const loadMessagesFromIndexedDB=groupId=>globalThis.__socketFixture.loadCache(groupId); export const saveMessagesWithDurability=async values=>{globalThis.__socketFixture.writes.push(['messages',globalThis.__socketFixture.user,values]);return {durable:true}}; export const deleteMessageFromIndexedDB=async id=>{globalThis.__socketFixture.deletions.push(id)}; export const clearAllMessagesFromIndexedDB=async()=>{}; export const clearOldMessagesFromIndexedDB=async()=>{};` :
       path === 'messages' ? `export const useMessagesStore={getState:()=>globalThis.__socketFixture.stores.messages.getState(),setState:patch=>globalThis.__socketFixture.stores.messages.setState(patch)}; export const recoverCachedMessage=message=>message.status==='sending'?{...message,status:'failed',metadata:{...message.metadata,send_unknown:true}}:message;` :
       path === 'runtime' ? `export const getWebSocketUrl=()=> 'ws://synthetic.test/ws'; export const getApiBaseUrl=()=>'/api'; export const getApiBaseUrlCandidates=()=>['/api']; export const rememberBackendOrigin=()=>{};` :
       `export const use${path === 'ui' ? 'UI' : path[0].toUpperCase()+path.slice(1)}Store={getState:()=>globalThis.__socketFixture.stores.${path}.getState(),setState:patch=>globalThis.__socketFixture.stores.${path}.setState(patch)};`
@@ -36,30 +36,13 @@ function store(initial) {
   return { getState: () => state, setState: patch => { state = { ...state, ...(typeof patch === 'function' ? patch(state) : patch) }; } };
 }
 function fixture() {
-  const messages = store({ messages: {}, pagination: {}, fetchMessages: () => { throw new Error('Unguarded store fetch must not be used'); } });
-  const updateMessages = (groupId, transform) => messages.setState(state => ({ messages: { ...state.messages, [groupId]: transform(state.messages[groupId] || []) } }));
-  messages.setState({
-    confirmClientMessage: (groupId, tempId) => { globalThis.__socketFixture.deletions.push(tempId); updateMessages(groupId, values => values.filter(item => item.id !== tempId || item.tempId !== tempId)); },
-    addMessage: (groupId, message) => {
-      const clientId = message.tempId || message.client_message_id;
-      if (clientId && message.id !== clientId) globalThis.__socketFixture.deletions.push(clientId);
-      return updateMessages(groupId, values => {
-      const position = values.findIndex(item => item.id === message.id || (item.tempId && item.tempId === message.tempId));
-      return position < 0 ? [...values, message] : values.map((item, index) => index === position ? { ...item, ...message } : item);
-    }); },
-    finalizeStreamMessage: (groupId, id, content) => updateMessages(groupId, values => values.map(item => item.id === id ? { ...item, content, is_streaming: false } : item)),
-    removeMessages: (groupId, ids) => updateMessages(groupId, values => values.filter(item => !ids.includes(item.id))),
-    updateMessage: (id, groupId, fields) => updateMessages(groupId, values => values.map(item => item.id === id ? { ...item, ...fields } : item)),
-    clearMessages: groupId => updateMessages(groupId, () => []),
-    applyLikeUpdate: (id, groupId, actor) => updateMessages(groupId, values => values.map(item => item.id === id ? { ...item, likes: [...new Set([...(item.likes || []), actor])] } : item)),
-    addCommentFromRemote: (id, groupId, comment) => updateMessages(groupId, values => values.map(item => item.id === id && !(item.comments || []).some(existing => existing.id === comment.id) ? { ...item, comments: [...(item.comments || []), comment] } : item)),
-  });
+  const messages = service.useMessagesStore;
   const groups = store({ groups: [], currentGroup: null, fetchGroups: () => { throw new Error('Unguarded store fetch must not be used'); }, setTypingAI() {}, updateChatStatus() {} });
   const ui = store({ connectionStatus: 'disconnected', connectionError: null, setTyping() {}, clearAllTypingForGroup() {} });
   ui.setState({ setConnectionStatus: status => ui.setState({ connectionStatus: status }), setConnectionError: error => ui.setState({ connectionError: error }) });
   const personas = store({ personas: {}, fetchPersonas: () => { throw new Error('Unguarded store fetch must not be used'); } });
   personas.setState({ handlePersonaUpdate: (id, persona) => personas.setState(state => ({ personas: { ...state.personas, [id]: persona } })) });
-  return { user: 'alice', loadCache: async () => [], stores: { messages, groups, ui, personas, audio: store({ removeTTSAudio() {} }) }, writes: [], deletions: [] };
+  return { sequences:new Map(), user: 'alice', loadCache: async () => [], stores: { messages, groups, ui, personas, audio: store({ removeTTSAudio() {} }) }, writes: [], deletions: [] };
 }
 class FakeWebSocket {
   static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
@@ -74,7 +57,7 @@ class FakeWebSocket {
 }
 const originals = { setTimeout, clearTimeout, setInterval, clearInterval, now: Date.now, random: Math.random };
 let timers, now, nextTimer, requests, transport;
-const settle = async () => { for (let count = 0; count < 30; count++) await Promise.resolve(); };
+const settle = async () => { for (let count = 0; count < 100; count++) await Promise.resolve(); };
 const currentSocket = () => FakeWebSocket.sockets.at(-1);
 const state = name => globalThis.__socketFixture.stores[name].getState();
 const defaultData = config => config.url === '/groups' ? state('groups').groups : config.url === '/personas' ? { personas: state('personas').personas } : { messages: [], hasMore: false };
@@ -91,12 +74,17 @@ function advance(ms) {
   now = target;
 }
 function visibility(value) { document.visibilityState = value; document.dispatchEvent(new Event('visibilitychange')); }
-function switchAccount(user) { globalThis.__socketFixture.user = user; service.confirmAuthIdentity(user); }
-function open(groupId) { service.connectWebSocket(groupId); currentSocket().open(); return currentSocket(); }
-const msg = (id = 'message', content = 'synthetic-private-body') => ({ type: 'new_message', id, group_id: 'group', content, sender_type: 'user', created_at: '2026-10-04T12:00:00.000Z' });
+function switchAccount(user) { globalThis.__socketFixture.user = user; service.confirmAuthIdentity(user); service.resetMessagesModuleState(); service.useMessagesStore.setState({messages:{},pagination:{}}); }
+let viewLease;
+function open(groupId) { if (groupId) viewLease = service.useMessagesStore.getState().activateMessageView(groupId); service.connectWebSocket(groupId); currentSocket().open(); return currentSocket(); }
+function destroyView() { if(viewLease) service.useMessagesStore.getState().deactivateMessageView(viewLease); viewLease=undefined; service.destroyWebSocket(); }
+const GEN='10000000-0000-4000-8000-000000000001';
+const sequenceFor=id=>{const fixture=globalThis.__socketFixture;if(!fixture.sequences.has(id))fixture.sequences.set(id,String(1000+fixture.sequences.size));return fixture.sequences.get(id)};
+const msg = (id = 'message', content = 'synthetic-private-body') => ({ durable:true,persistence_status:'confirmed',content_type:'text',server_order:{generation:GEN,sequence:sequenceFor(id)}, type: 'new_message', id, group_id: 'group', content, sender_type: 'user', created_at: '2026-10-04T12:00:00.000Z' });
 
 beforeEach(() => {
   globalThis.__socketFixture = fixture();
+  service.resetMessagesModuleState(); service.useMessagesStore.setState({messages:{},pagination:{},ordered:{},recovery:{},durability:{},sending:{},loading:false,error:null}); viewLease=undefined;
   timers = new Map(); now = Date.parse('2026-10-04T12:01:00.000Z'); nextTimer = 0;
   globalThis.setTimeout = (callback, delay = 0) => { const id = ++nextTimer; timers.set(id, { callback, delay, at: now + delay, interval: false }); return id; };
   globalThis.setInterval = (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay, at: now + delay, interval: true }); return id; };
@@ -109,11 +97,26 @@ beforeEach(() => {
   requests = []; transport = async config => defaultData(config);
   service.axiosInstance.defaults.adapter = async config => {
     requests.push(config);
-    return { config, data: await transport(config), status: 200, statusText: 'OK', headers: {} };
+    let data = await new Promise((resolve,reject) => {
+      const abort=()=>reject(Object.assign(new Error('synthetic transport aborted'),{config,code:'ERR_CANCELED',__CANCEL__:true}));
+      if(config.signal?.aborted)return abort();
+      config.signal?.addEventListener('abort',abort,{once:true});
+      Promise.resolve(transport(config)).then(resolve,reject).finally(()=>config.signal?.removeEventListener('abort',abort));
+    });
+    if (/^\/groups\/[^/]+\/messages$/.test(config.url) && Array.isArray(data?.messages)) {
+      const group=config.url.split('/')[2], q=config.params||{}, before=q.before_cursor&&JSON.parse(Buffer.from(q.before_cursor,'base64url')), after=q.after_cursor&&JSON.parse(Buffer.from(q.after_cursor,'base64url'));
+      let H=before?.until||after?.until;
+      const cursor=(kind,at,until)=>Buffer.from(JSON.stringify({v:1,owner:config.headers['X-Expected-User-Id'],group,generation:GEN,kind,at:String(at),...(until===undefined?{}:{until:String(until)})})).toString('base64url');
+      const messages=data.messages.map(m=>({...m,group_id:group,sender_type:m.sender_type||'user',content_type:m.content_type||'text',created_at:m.created_at||'2026-10-04T12:00:00Z',server_order:{generation:GEN,sequence:sequenceFor(m.id)}})).sort((a,b)=>Number(a.server_order.sequence)-Number(b.server_order.sequence));
+      H ||= String(Math.max(0,...globalThis.__socketFixture.sequences.values()));
+      const C=after&&data.hasMore?messages.at(-1).server_order.sequence:H;
+      data={...data,messages,order:'sequence_v1',generation:GEN,high_watermark:H,consumed_through:before?null:C,before_cursor:!after&&data.hasMore?cursor('before',messages[0].server_order.sequence,H):null,after_cursor:before?null:cursor('after',C,after&&data.hasMore?H:undefined)};
+    }
+    return { config, data, status: 200, statusText: 'OK', headers: {} };
   };
 });
 afterEach(async () => {
-  service.destroyWebSocket(); await settle();
+  destroyView(); service.resetMessagesModuleState(); await settle();
   Object.assign(globalThis, { setTimeout: originals.setTimeout, clearTimeout: originals.clearTimeout, setInterval: originals.setInterval, clearInterval: originals.clearInterval });
   Date.now = originals.now; Math.random = originals.random;
 });
@@ -147,7 +150,7 @@ test('same-account replacement discards late HTTP messages, group/persona sync a
   globalThis.__socketFixture.stores.messages.setState({ messages: { group: [{ id: 'stream', group_id: 'group', content: 'partial', is_streaming: true, created_at: '2026-10-04T11:00:00Z' }] } });
   const waits = [];
   transport = config => { const wait = deferred(); waits.push({ ...wait, url: config.url }); return wait.promise; };
-  const old = open('group'); await settle(); assert.equal(waits.length, 4);
+  const old = open('group'); await settle(); assert.equal(waits.length, 3);
   old.closed(); transport = async config => defaultData(config);
   const fresh = open('group'); await settle();
   globalThis.__socketFixture.stores.messages.setState({ messages: { group: [{ id: 'stream', content: 'new-session-stream', is_streaming: true, created_at: '2026-10-04T12:00:59Z' }] } });
@@ -161,7 +164,7 @@ test('same-account replacement discards late HTTP messages, group/persona sync a
 test('destroy invalidates in-flight HTTP completion even without changing auth identity', async () => {
   const waits = [];
   transport = config => { const wait = deferred(); waits.push({ ...wait, url: config.url }); return wait.promise; };
-  open('group'); await settle(); service.destroyWebSocket();
+  open('group'); await settle(); destroyView();
   waits.forEach(wait => wait.resolve(wait.url === '/groups' ? [{ id: 'stale' }] : wait.url === '/personas' ? { personas: { stale: {} } } : { messages: [msg()], hasMore: true }));
   await settle(); assert.deepEqual(state('messages').messages, {}); assert.deepEqual(state('groups').groups, []);
   assert.deepEqual(globalThis.__socketFixture.writes, []); assert.equal(timers.size, 0);
@@ -170,7 +173,7 @@ test('destroy invalidates in-flight HTTP completion even without changing auth i
 test('logout clears retry/listeners/pending selection; queued callbacks cannot resurrect a connection', async () => {
   const old = open('old-group'); await settle(); old.closed();
   const queued = [...timers.values()].map(timer => timer.callback);
-  visibility('hidden'); service.disconnectWebSocket();
+  visibility('hidden'); service.disconnectWebSocket(); service.resetMessagesModuleState();
   queued.forEach(callback => callback()); window.dispatchEvent(new Event('online')); advance(10000); visibility('visible');
   assert.equal(FakeWebSocket.sockets.length, 1); assert.equal(timers.size, 0);
   open(); await settle(); assert.ok(!currentSocket().sent.some(item => item.group_id === 'old-group'));
@@ -180,14 +183,14 @@ test('connecting latest selection wins; old connection timeout cannot close a re
   service.connectWebSocket('first'); const oldTimeout = [...timers.values()][0].callback;
   service.connectWebSocket('last'); assert.equal(FakeWebSocket.sockets.length, 1);
   currentSocket().open(); await settle(); assert.ok(currentSocket().sent.some(item => item.group_id === 'last'));
-  service.destroyWebSocket(); const fresh = open(); await settle(); oldTimeout();
+  destroyView(); const fresh = open(); await settle(); oldTimeout();
   assert.equal(fresh.closes.length, 0); assert.equal(state('ui').connectionStatus, 'connected');
 });
 
 test('late connection error timer cannot clear the new connection or a newer external error', async () => {
   let socket = open(); await settle(); socket.message({ type: 'error', message: 'private-server-error' });
   const staleClear = [...timers.values()].find(timer => !timer.interval).callback;
-  service.destroyWebSocket(); socket = open(); await settle(); socket.onerror({}); const newError = state('ui').connectionError;
+  destroyView(); socket = open(); await settle(); socket.onerror({}); const newError = state('ui').connectionError;
   staleClear(); assert.equal(state('ui').connectionError, newError);
   socket.message({ type: 'error' }); state('ui').setConnectionError('newer-http-error'); advance(5000);
   assert.equal(state('ui').connectionError, 'newer-http-error');
@@ -220,7 +223,7 @@ test('a genuinely stable connection resets backoff, and normal/auth closure does
 test('missing identity never connects; cursors from one account are never reused by another', async () => {
   globalThis.__socketFixture.user = null; service.connectWebSocket('group'); assert.equal(FakeWebSocket.sockets.length, 0);
   switchAccount('alice'); open(); await settle(); currentSocket().message(msg());
-  service.destroyWebSocket(); switchAccount('bob'); open('group'); await settle();
+  destroyView(); switchAccount('bob'); open('group'); await settle();
   const messageRequest = requests.filter(config => config.url === '/groups/group/messages').at(-1);
   assert.equal(messageRequest.params.after, undefined); assert.equal(messageRequest.headers['X-Expected-User-Id'], 'bob');
 });
@@ -255,7 +258,7 @@ test('recovery read cannot resurrect a message deleted while the request was in 
 });
 
 test('destroy before Axios request interceptors run aborts queued reads without sending them', async () => {
-  open('old-group'); service.destroyWebSocket(); switchAccount('bob'); await settle();
+  open('old-group'); destroyView(); switchAccount('bob'); await settle();
   assert.deepEqual(requests, []); assert.deepEqual(globalThis.__socketFixture.writes, []);
 });
 
@@ -282,12 +285,13 @@ test('pagination stops at retirement and never issues another old-account page',
   globalThis.__socketFixture.stores.messages.setState({ messages: { group: [msg('existing')] } });
   localStorage.setItem('ws_last_msg_ts_alice', JSON.stringify({ group: '2026-10-04T11:00:00Z' }));
   const wait = deferred(); transport = config => config.url === '/groups/group/messages' ? wait.promise : Promise.resolve(defaultData(config));
-  open('group'); await settle(); service.destroyWebSocket();
+  open('group'); await settle(); destroyView();
   wait.resolve({ messages: [msg('old-page')], hasMore: true }); await settle();
   assert.equal(requests.filter(config => config.url === '/groups/group/messages').length, 1);
   assert.equal(state('messages').messages.group.length, 1);
   assert.equal(state('messages').messages.group[0].id, 'existing');
-  assert.equal(requests.find(config => config.url === '/groups/group/messages').params.after, '2026-10-04T11:00:00Z');
+  assert.equal(requests.find(config => config.url === '/groups/group/messages').params.after, undefined);
+  assert.equal(requests.find(config => config.url === '/groups/group/messages').params.order, 'sequence_v1');
 });
 
 test('live messages during gap fill preserve unrelated history while edits/deletes win', async () => {
@@ -335,6 +339,8 @@ test('cold-tab cached failed drafts remain retryable, and confirmed client IDs r
   assert.equal(requests.find(config => config.url === '/groups/group/messages').params.after, undefined);
   transport = async config => config.url === '/groups/group/messages' ? { messages: [{ ...msg('confirmed', 'sent-draft'), client_message_id: 'request-id' }], hasMore: false } : defaultData(config);
   service.joinGroup('group'); await settle();
+  assert.equal(state('messages').messages.group[0].status,'failed', 'reconnect may not bypass the 30-second read budget');
+  advance(30000); await settle();
   assert.equal(state('messages').messages.group.length, 1); assert.equal(state('messages').messages.group[0].id, 'confirmed');
   assert.equal(state('messages').messages.group[0].status, 'sent'); assert.deepEqual(globalThis.__socketFixture.deletions, ['request-id']);
 });
@@ -347,9 +353,9 @@ test('unavailable history keeps cached drafts; retired IndexedDB reads cannot hy
     return defaultData(config);
   };
   open('group'); await settle(); assert.equal(state('messages').messages.group[0].content, 'cached-draft');
-  service.destroyWebSocket(); globalThis.__socketFixture.stores.messages.setState({ messages: {} });
+  destroyView(); globalThis.__socketFixture.stores.messages.setState({ messages: {} });
   const wait = deferred(); globalThis.__socketFixture.loadCache = () => wait.promise;
-  open('group'); await settle(); service.destroyWebSocket(); switchAccount('bob');
+  open('group'); await settle(); destroyView(); switchAccount('bob');
   globalThis.__socketFixture.loadCache = async () => []; transport = async config => defaultData(config);
   open('group'); await settle(); wait.resolve([{ ...draft, content: 'late-alice-cache' }]); await settle();
   assert.deepEqual(state('messages').messages.group, []); assert.ok(!JSON.stringify(globalThis.__socketFixture.writes).includes('late-alice-cache'));
@@ -422,12 +428,12 @@ test('malformed sync bodies retain current records and report a fixed error with
 test('duplicate open callback cannot orphan an extra heartbeat interval', async () => {
   const socket = open(); const callback = socket.onopen; await settle(); callback({}); await settle();
   assert.equal([...timers.values()].filter(timer => timer.interval).length, 1);
-  service.destroyWebSocket(); assert.equal(timers.size, 0);
+  destroyView(); assert.equal(timers.size, 0);
 });
 
 test('a later first-page refresh updates pagination after an initially empty group grows', async () => {
   open('group'); await settle(); assert.equal(state('messages').pagination.group.hasMore, false);
-  service.destroyWebSocket();
+  destroyView(); service.resetMessagesModuleState();
   transport = async config => config.url === '/groups/group/messages' ? { messages: [msg('newer')], hasMore: true } : defaultData(config);
   open('group'); await settle();
   assert.equal(state('messages').pagination.group.hasMore, true);
@@ -450,6 +456,7 @@ test('cold first page with more history never tombstones cached rows outside its
   globalThis.__socketFixture.loadCache = async () => [old];
   transport = async config => config.url.includes('/messages') ? { messages: [msg('latest')], hasMore: true } : defaultData(config);
   open('group'); await settle();
-  assert.deepEqual(state('messages').messages.group.map(row => row.id), ['older', 'latest']);
-  assert.equal(state('messages').pagination.group.oldestMessageCreatedAt, '2026-10-04T12:00:00.000Z');
+  assert.deepEqual(state('messages').messages.group.map(row => row.id), ['latest']);
+  assert.equal(JSON.parse(Buffer.from(state('messages').ordered.group.beforeCursor,'base64url')).at, sequenceFor('latest'));
+  assert.ok(!globalThis.__socketFixture.deletions.includes('older'), 'unverified legacy history is not erased from disk');
 });

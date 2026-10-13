@@ -1,3 +1,4 @@
+import { appendFixtureMessages } from './helpers/accountStoreFixtures.js';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -12,7 +13,7 @@ process.env.AUTH_MODE = 'session';
 process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-task-lifecycle-'));
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 process.env.ENCRYPTION_KEY = crypto.randomBytes(32).toString('base64');
-const { initDatabase, initUserDatabase, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, createNewUserDatabase, withWriteLock, clearUserDbCache } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb, generateSessionToken } = await import('../src/models/authDb.js');
 const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
@@ -20,7 +21,7 @@ const { readCatalog, saveCatalog } = await import('../src/services/ai/catalog.js
 const { createTask, listTasks, runTask, updateTask, deleteTask, acceptTaskResult,
   resolveUnknownTaskRun, tickTasks, startTaskScheduler, stopTaskScheduler } = await import('../src/services/tasks.js');
 const request = (await import('supertest')).default(createTestApp());
-await initDatabase(); await initAuthDb();
+await initializeEmptyInstallation(); await initDatabase(); await initAuthDb();
 
 const calls = [], held = [];
 let behavior = 'ok';
@@ -45,7 +46,7 @@ after(async () => { stopTaskScheduler(); provider.closeAllConnections(); await n
 
 async function session(withModel = false) {
   const userId = crypto.randomUUID(), token = generateSessionToken();
-  const db = await initUserDatabase(userId);
+  const db = await createNewUserDatabase(userId);
   await provisionNewLocalMemoryAccount(userId, db);
   const auth = getAuthDb(); await auth.read();
   auth.data.users.push({ id: userId, username: userId, password: 'unused' });
@@ -201,7 +202,7 @@ test('cancellation before dispatch is known not sent with a terminal run record'
 
 test('regeneration never revives source-stale history or accepts an older run token', async () => {
   const s = await session(true);
-  await mutate(s, data => data.messages.push({ id: 'source-one', group_id: 'group-presidential', sender_type: 'user', content: '版本一', revision: 1 }));
+  await mutate(s, data => appendFixtureMessages(data, { id: 'source-one', group_id: 'group-presidential', sender_type: 'user', content: '版本一', revision: 1 }));
   const task = await create(s, { group_id: 'group-presidential' });
   const first = await runTask(s.userId, task.id);
   await acceptTaskResult(s.userId, task.id, first.run_id);
@@ -313,7 +314,7 @@ test('a transient finalization read outage leaves a recoverable unknown run, nev
 
 test('message-derived tasks bind the selected revision, suppress edited input and never resend stale copied text', async () => {
   const s = await session(true);
-  await mutate(s, data => data.messages.push({ id: 'origin-message', group_id: 'group-presidential', sender_type: 'user', content: '不能重发的原文' }));
+  await mutate(s, data => appendFixtureMessages(data, { id: 'origin-message', group_id: 'group-presidential', sender_type: 'user', content: '不能重发的原文' }));
   const task = await create(s, { prompt: '不能重发的原文', group_id: 'group-presidential', source_message_id: 'origin-message', source_message_edited_at: null });
   const draft = await runTask(s.userId, task.id), before = calls.length;
   await mutate(s, data => Object.assign(data.messages.find(message => message.id === 'origin-message'), { content: '用户的新内容', edited_at: new Date().toISOString() }));
@@ -331,7 +332,7 @@ test('message-derived tasks bind the selected revision, suppress edited input an
 
 test('message provenance cannot cross groups or survive deletion plus old JSON restore', async () => {
   const s = await session(true);
-  await mutate(s, data => data.messages.push({ id: 'revoked-origin', group_id: 'group-presidential', sender_type: 'user', sender_id: s.userId, content: '撤销源文本' }));
+  await mutate(s, data => appendFixtureMessages(data, { id: 'revoked-origin', group_id: 'group-presidential', sender_type: 'user', sender_id: s.userId, content: '撤销源文本' }));
   await assert.rejects(create(s, { group_id: 'group-debate', source_message_id: 'revoked-origin' }), error => error.status === 404);
   await assert.rejects(create(s, { source_message_id: 'revoked-origin' }), error => error.name === 'ZodError');
   const task = await create(s, { prompt: '撤销源文本', group_id: 'group-presidential', source_message_id: 'revoked-origin', source_message_edited_at: null });
@@ -373,7 +374,7 @@ test('a delayed request cannot create, run, change, accept, resolve or delete un
 
 test('pre-versioning source hashes remain readable and acceptable until the source really changes', async () => {
   const s = await session(true);
-  await mutate(s, data => data.messages.push({ id: 'legacy-source', group_id: 'group-presidential', sender_type: 'user', content: '既有草稿的有效来源' }));
+  await mutate(s, data => appendFixtureMessages(data, { id: 'legacy-source', group_id: 'group-presidential', sender_type: 'user', content: '既有草稿的有效来源' }));
   const task = await create(s, { group_id: 'group-presidential' }), generated = await runTask(s.userId, task.id);
   await mutate(s, data => {
     const existing = data.tasks.find(item => item.id === task.id), run = existing.history[0];
@@ -391,7 +392,7 @@ test('pre-versioning source hashes remain readable and acceptable until the sour
 
 test('a revoked input pauses its scheduled task without starving the next valid schedule', async () => {
   const s = await session(true), run_at = new Date(Date.now() - 1000).toISOString();
-  await mutate(s, data => data.messages.push({ id: 'scheduled-origin', group_id: 'group-presidential', sender_type: 'user', content: '过期输入' }));
+  await mutate(s, data => appendFixtureMessages(data, { id: 'scheduled-origin', group_id: 'group-presidential', sender_type: 'user', content: '过期输入' }));
   const stale = await create(s, { group_id: 'group-presidential', source_message_id: 'scheduled-origin', auto_run: true, run_at });
   const valid = await create(s, { auto_run: true, run_at });
   await mutate(s, data => { data.messages.find(message => message.id === 'scheduled-origin').content = '新输入'; });

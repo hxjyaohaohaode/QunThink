@@ -14,25 +14,28 @@ process.env.DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'ai-chat-api-conf
 process.env.AUTH_DB_PATH = path.join(process.env.DATA_DIR, 'auth.json');
 process.env.ENCRYPTION_KEY = crypto.randomBytes(32).toString('base64');
 
-const { initDatabase, initUserDatabase, getUserDb } = await import('../src/models/db.js');
+const { initializeEmptyInstallation, initDatabase, createNewUserDatabase, getUserDb } = await import('../src/models/db.js');
 const { initAuthDb, getAuthDb, generateSessionToken } = await import('../src/models/authDb.js');
+const { provisionNewLocalMemoryAccount } = await import('../src/services/memory/persistentMemory.js');
 const { createTestApp } = await import('./helpers/createTestApp.js');
 const { migrateApiConfigSecrets } = await import('../src/services/apiConfigMigration.js');
 const { decryptStoredApiKey } = await import('../src/utils/apiConfigSecurity.js');
 const supertest = (await import('supertest')).default;
 
+await initializeEmptyInstallation();
 await initDatabase();
 await initAuthDb();
 
 async function createSession() {
   const userId = crypto.randomUUID();
   const token = generateSessionToken();
+  const userDb = await createNewUserDatabase(userId);
+  await provisionNewLocalMemoryAccount(userId, userDb);
   const authDb = getAuthDb();
   await authDb.read();
   authDb.data.users.push({ id: userId, username: `config_${userId}`, password: 'unused', created_at: new Date().toISOString() });
   authDb.data.sessions.push({ token, userId, expires_at: new Date(Date.now() + 60_000).toISOString() });
   await authDb.write();
-  await initUserDatabase(userId);
   return { userId, token };
 }
 
