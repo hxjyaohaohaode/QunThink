@@ -165,7 +165,7 @@ async function setup(page: Page, context: BrowserContext, info: TestInfo, e: Evi
   await page.getByPlaceholder('请输入密码', { exact: true }).fill('Synthetic-Browser-Only-2026');
   await page.locator('form').getByRole('button', { name: '登录', exact: true }).click();
   const work = page.getByTestId('workspace'); await expect(work).toBeVisible();
-  await e.shot('first-workspace-after-login', work.getByText('连接你的第一个 AI'));
+  await e.shot('first-workspace-after-login', work.getByRole('button', { name: '＋ 新任务', exact: true }));
   const model = `q1-fixture-${randomUUID()}`;
   await work.getByRole('button', { name: '模型中心', exact: true }).click();
   const center = page.getByRole('region', { name: '模型中心', exact: true });
@@ -185,6 +185,7 @@ async function setup(page: Page, context: BrowserContext, info: TestInfo, e: Evi
   await e.record('model-protocol-probe', { model, calls: await fixtureCalls(context, model) });
   await e.shot('model-probe-after', center.getByText(/对话：测试通过/));
   await work.getByRole('button', { name: '工作台', exact: true }).click();
+  await work.locator('summary').filter({ hasText: '从模板开始' }).click();
   const scene = work.locator('article').filter({ has: page.getByRole('heading', { name: '一起聊聊', exact: true }) });
   await e.shot('visible-conversation-entry', scene.getByRole('button', { name: '创建会话', exact: true }), true);
   const createResponse = page.waitForResponse(r => r.url().endsWith('/api/groups') && r.request().method() === 'POST');

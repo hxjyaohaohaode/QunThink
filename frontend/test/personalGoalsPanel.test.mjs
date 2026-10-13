@@ -169,7 +169,7 @@ test('explicit zero-cost brief retries with one key and opens persisted content 
   await act(async () => { await new Promise(resolveWait => setTimeout(resolveWait, 0)); });
   const goalButton = [...container.querySelectorAll('button')].find(button => button.textContent?.includes('整理资料'));
   await act(async () => goalButton.click());
-  const briefButton = [...container.querySelectorAll('button')].find(button => button.textContent === '生成目标执行简报');
+  const briefButton = [...container.querySelectorAll('button')].find(button => button.textContent === '生成目标要求简报');
   await act(async () => { briefButton.click(); await new Promise(resolveWait => setTimeout(resolveWait, 0)); });
   assert.equal(writes.length, 1);
   assert.match(container.textContent, /上次请求结果未确认/);
@@ -179,7 +179,7 @@ test('explicit zero-cost brief retries with one key and opens persisted content 
   assert.deepEqual(writes[0].body, {});
   assert.equal(writes[0].config.headers['Idempotency-Key'], writes[1].config.headers['Idempotency-Key']);
   assert.match(container.textContent, /上次请求结果未确认/);
-  const retryButton = [...container.querySelectorAll('button')].find(button => button.textContent === '生成目标执行简报');
+  const retryButton = [...container.querySelectorAll('button')].find(button => button.textContent === '生成目标要求简报');
   await act(async () => { retryButton.click(); await new Promise(resolveWait => setTimeout(resolveWait, 0)); });
   assert.equal(writes.length, 3);
   assert.equal(writes[1].config.headers['Idempotency-Key'], writes[2].config.headers['Idempotency-Key']);

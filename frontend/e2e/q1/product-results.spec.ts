@@ -220,6 +220,7 @@ async function setup(page: Page, context: BrowserContext, info: TestInfo, e: Evi
   await e.shot('model-probe-after', center.getByText(/对话：测试通过/));
   await work.getByRole('button', { name: '工作台', exact: true }).click();
   }
+  await work.locator('summary').filter({ hasText: '从模板开始' }).click();
   const scene = work.locator('article').filter({ has: page.getByRole('heading', { name: '一起聊聊', exact: true }) });
   await e.shot('visible-conversation-entry', scene.getByRole('button', { name: '创建会话', exact: true }), true);
   const createResponse = page.waitForResponse(r => r.url().endsWith('/api/groups') && r.request().method() === 'POST');

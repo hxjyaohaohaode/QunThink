@@ -24,12 +24,12 @@ export function SettingsPage() {
   const { clear: handleClearData, clearing: clearingCache, ConfirmModal } = useLocalCacheClear();
   const { showToast, Toast } = useToast();
   const [expandedPersona, setExpandedPersona] = useState<string | null>(null);
-  const [isDarkMode, setIsDarkMode] = useState(theme === 'dark');
   const [isThemeChanging, setIsThemeChanging] = useState(false);
   const [prevExpandedPersona, setPrevExpandedPersona] = useState<string | null>(null);
 
   const [editingPersonaId, setEditingPersonaId] = useState<string | null>(null);
   const [showProfileEditor, setShowProfileEditor] = useState(false);
+  const [showModels, setShowModels] = useState(false);
   const { canInstall, isInstalled, isStandalone, isOnline, install, getInstallGuidance, platform } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
   const aiMembers = Array.from(new Set(groups.flatMap(g => g.ai_members || [])));
@@ -44,20 +44,6 @@ export function SettingsPage() {
   useEffect(() => {
     fetchPersonas();
   }, [fetchPersonas]);
-
-
-  useEffect(() => {
-    setIsDarkMode(theme === 'dark');
-  }, [theme]);
-
-
-  const toggleDarkMode = () => {
-    setIsThemeChanging(true);
-    setTheme(theme === 'dark' ? 'light' : 'dark');
-    setTimeout(() => {
-      setIsThemeChanging(false);
-    }, 300);
-  };
 
 
 
@@ -82,12 +68,13 @@ export function SettingsPage() {
       <div
         className="md:hidden h-full flex flex-col bg-bg-primary pb-14 settings-theme-transition settings-page-enter"
       >
-        <div className="px-4 py-3 bg-bg-surface border-b border-border-subtle settings-theme-transition">
+        <div className="px-4 py-3 flex items-center gap-2 bg-bg-surface border-b border-border-subtle settings-theme-transition">
+          {showModels && <button className="min-h-11 px-2 text-sm text-accent" onClick={() => setShowModels(false)}>返回设置</button>}
           <h1 className="text-lg font-semibold text-text-primary settings-theme-transition">设置</h1>
         </div>
 
         <div className="flex-1 overflow-y-auto pb-safe">
-          <div className="py-4 space-y-6">
+          {showModels ? <div className="p-4"><ModelCenter /></div> : <div className="py-4 space-y-6">
             <div
 
               className="px-4"
@@ -257,7 +244,7 @@ export function SettingsPage() {
               <FontSizeSelector />
             </div>
 
-            <div className="px-4"><ModelCenter /></div>
+            <div className="px-4"><button className="w-full flex items-center justify-between gap-3 p-4 text-left rounded-xl border border-border-subtle bg-bg-surface" onClick={() => setShowModels(true)}><span><span className="block text-sm font-semibold text-text-primary">模型中心</span><span className="block text-xs text-text-secondary mt-1">连接服务商、测试模型与设置默认模型</span></span><span className="text-text-muted" aria-hidden="true">›</span></button></div>
 
             <div
 
@@ -504,84 +491,25 @@ export function SettingsPage() {
                         groups: groups,
                         personas: personas,
                       };
-                      if (Object.keys(exportData).length > 10000) {
-                        showToast({ message: '数据量较大，导出可能需要一些时间...', type: 'info' });
-                      }
                       const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
                       const url = URL.createObjectURL(blob);
                       const a = document.createElement('a');
                       a.href = url;
-                      a.download = `群想-数据导出-${new Date().toISOString().slice(0, 10)}.json`;
+                      a.download = `群想-会话与角色配置-${new Date().toISOString().slice(0, 10)}.json`;
                       a.click();
                       URL.revokeObjectURL(url);
-                      showToast({ message: '数据导出成功' });
+                      showToast({ message: '已开始下载会话与角色配置' });
                     } catch (e) {
                       showToast({ message: '导出失败: ' + (e as Error).message, type: 'error' });
                     }
                   }}
                   className="flex items-center justify-between p-3 w-full active:bg-bg-surface2 settings-theme-transition"
                 >
-                  <span className="text-sm text-text-primary settings-theme-transition">导出数据</span>
+                  <span className="text-sm text-text-primary settings-theme-transition">导出会话与角色配置</span>
                   <svg className="w-4 h-4 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
                   </svg>
                 </button>
-              </div>
-            </div>
-
-            <div
-
-              className="px-4"
-            >
-              <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3 settings-theme-transition">显示</h2>
-              <div className="bg-bg-surface border border-border-subtle rounded-xl overflow-hidden settings-theme-transition settings-card">
-                <div className="flex items-center justify-between p-3 settings-theme-transition">
-                  <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-full flex items-center justify-center bg-bg-surface2 settings-theme-transition">
-                      {isDarkMode ? (
-                        <svg className={`w-5 h-5 text-indigo-400 ${isThemeChanging ? 'theme-icon-rotate' : ''}`} viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-                        </svg>
-                      ) : (
-                        <svg className={`w-5 h-5 text-yellow-500 ${isThemeChanging ? 'theme-icon-rotate' : ''}`} viewBox="0 0 24 24" fill="currentColor">
-                          <circle cx="12" cy="12" r="4" />
-                          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                        </svg>
-                      )}
-                    </div>
-                    <span className="text-sm text-text-primary settings-theme-transition">深色模式</span>
-                  </div>
-                  <button
-                    onClick={toggleDarkMode}
-                    className={`relative w-12 h-7 rounded-full transition-all duration-300 ease-out settings-theme-transition ${isDarkMode ? 'bg-accent' : 'bg-bg-surface'
-                      }`}
-                    style={{
-                      boxShadow: isDarkMode
-                        ? '0 0 0 2px rgba(23, 23, 23, 0.1), 0 2px 8px rgba(0, 0, 0, 0.15)'
-                        : '0 0 0 1px var(--border-color), 0 2px 4px rgba(0, 0, 0, 0.05)'
-                    }}
-                  >
-                    <div
-                      className={`absolute top-1 w-5 h-5 rounded-full bg-white shadow-md transition-all duration-300 ease-out ${isDarkMode ? 'toggle-switch-on' : 'toggle-switch-off'
-                        }`}
-                      style={{
-                        left: isDarkMode ? 'auto' : '4px',
-                        right: isDarkMode ? '4px' : 'auto',
-                        boxShadow: '0 2px 4px rgba(0, 0, 0, 0.2), 0 1px 2px rgba(0, 0, 0, 0.1)'
-                      }}
-                    >
-                      {isDarkMode ? (
-                        <svg className="w-full h-full p-1 text-indigo-400" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-                        </svg>
-                      ) : (
-                        <svg className="w-full h-full p-1 text-yellow-500" viewBox="0 0 24 24" fill="currentColor">
-                          <circle cx="12" cy="12" r="4" />
-                        </svg>
-                      )}
-                    </div>
-                  </button>
-                </div>
               </div>
             </div>
 
@@ -597,7 +525,7 @@ export function SettingsPage() {
                 {clearingCache ? '正在清理…' : '清理当前浏览器缓存'}
               </button>
             </div>
-          </div>
+          </div>}
         </div>
         {ConfirmModal}
         {Toast}

@@ -33,7 +33,7 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
   const fetchProfile = useProfileStore(state => state.fetchProfile);
   const { clear: handleClearData, clearing: clearingCache, ConfirmModal } = useLocalCacheClear();
   const { showToast } = useToast();
-  const [activeTab, setActiveTab] = useState<SettingsTab>('api');
+  const [activeTab, setActiveTab] = useState<SettingsTab>('appearance');
   const [editingPersonaId, setEditingPersonaId] = useState<string | null>(null);
   const [showProfileEditor, setShowProfileEditor] = useState(false);
 
@@ -357,24 +357,21 @@ export function DesktopSettingsModal({ isOpen, onClose }: DesktopSettingsModalPr
                 groups: groups,
                 personas: personas,
               };
-              if (Object.keys(exportData).length > 10000) {
-                showToast({ message: '数据量较大，导出可能需要一些时间...', type: 'info' });
-              }
               const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
               const url = URL.createObjectURL(blob);
               const a = document.createElement('a');
               a.href = url;
-              a.download = `群想-数据导出-${new Date().toISOString().slice(0, 10)}.json`;
+              a.download = `群想-会话与角色配置-${new Date().toISOString().slice(0, 10)}.json`;
               a.click();
               URL.revokeObjectURL(url);
-              showToast({ message: '数据导出成功' });
+              showToast({ message: '已开始下载会话与角色配置' });
             } catch (e) {
               showToast({ message: '导出失败: ' + (e as Error).message, type: 'error' });
             }
           }}
           className="flex-1 py-2.5 text-sm text-text-secondary border border-border-subtle rounded-xl hover:bg-bg-surface2 transition-colors"
         >
-          导出数据
+          导出会话与角色配置
         </button>
         <button
           onClick={() => void handleClearData()}

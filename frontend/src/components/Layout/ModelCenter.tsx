@@ -69,20 +69,22 @@ export function ModelCenter() {
   const unresolvedProbes = Object.entries(probes).filter(([, probe]) => probeUnresolved(probe) || !draft.models.some(m => m.id === probe.modelId));
   return <section className="space-y-6" aria-label="模型中心" data-observe="models">
     <div>
-      <p className="text-[10px] tracking-[0.2em] text-accent font-semibold mb-2">MODELS & CONNECTIONS</p>
       <h2 className="text-xl font-semibold text-text-primary">模型中心</h2>
-      <p className="text-sm text-text-secondary mt-2 leading-relaxed">个人模型由你自行配置。站点如启用基础 AI，可在下方单独选择使用。请连接你自己的服务商并添加模型；名称由你决定，实际模型 ID 与服务商一致。保存不会发起付费测试；更改连接、模型参数或音色后，需手动重新测试。</p>
+      <p className="text-sm text-text-secondary mt-2 leading-relaxed">个人模型由你自行配置：连接服务商，添加模型，保存后测试。</p>
     </div>
-    <SiteBasicChat />
-    <ol className="grid sm:grid-cols-3 gap-2 text-xs text-text-secondary" aria-label="连接步骤">
-      <li className="rounded-xl border border-border p-3">1. 填写服务地址和密钥</li>
-      <li className="rounded-xl border border-border p-3">2. 添加模型并保存配置</li>
-      <li className="rounded-xl border border-border p-3">3. 测试所需能力，再开始使用</li>
-    </ol>
-    <p className="text-xs text-text-muted">未保存草稿只保留在当前标签页内，切换页面后可继续；刷新或退出账号会清除，API Key 不写入浏览器存储。</p>
-    <div className="grid grid-cols-3 gap-2">
-      {[['服务商', draft.providers.length], ['模型', draft.models.length], ['对话已验证', (catalog?.models || []).filter(m => m.ready && m.verifiedCapabilities?.includes('chat')).length]].map(([label, count]) => <div key={label} className="rounded-xl bg-bg-surface2/60 p-3"><strong className="block text-xl text-text-primary">{count}</strong><span className="text-xs text-text-secondary">{label}</span></div>)}
-    </div>
+    <details className="rounded-xl border border-border text-sm text-text-secondary">
+      <summary className="cursor-pointer px-4 py-3 focus-visible:outline-accent">连接与保存说明</summary>
+      <div className="px-4 pb-4 space-y-3 text-xs leading-relaxed">
+        <ol className="space-y-1" aria-label="连接步骤">
+          <li>1. 填写服务地址和密钥</li>
+          <li>2. 添加模型并保存配置</li>
+          <li>3. 测试所需能力，再开始使用</li>
+        </ol>
+        <p>名称由你决定，实际模型 ID 与服务商一致。保存不会发起付费测试；更改连接、模型参数或音色后，需手动重新测试。</p>
+        <p>未保存草稿只保留在当前标签页内，切换页面后可继续；刷新或退出账号会清除，API Key 不写入浏览器存储。</p>
+      </div>
+    </details>
+    {draft.providers.length > 0 && <p className="text-xs text-text-secondary">{draft.providers.length} 个服务商 · {draft.models.length} 个模型 · {(catalog?.models || []).filter(m => m.ready && m.verifiedCapabilities?.includes('chat')).length} 个对话模型已验证</p>}
     {unresolvedProbes.length > 0 && <div className="rounded-xl border border-amber-500/40 p-3 text-xs text-text-secondary space-y-2" aria-label="待核验测试">
       <p role="status">测试请求号只保留在当前标签页，刷新前请记下。待确认结果请核验原请求，不会自动重发。</p>
       {unresolvedProbes.map(([key, probe]) => {
@@ -95,7 +97,7 @@ export function ModelCenter() {
     <fieldset disabled={saving} className="space-y-6 min-w-0" aria-label="模型配置" aria-busy={saving}>
     <div className="flex flex-wrap gap-2" role="group" aria-label="服务商列表">
       {draft.providers.map(p => <button key={p.id} aria-pressed={selected === p.id} onClick={() => setSelected(p.id)} className={`px-3 py-2 rounded-xl text-sm border ${selected === p.id ? 'border-accent text-accent bg-accent/10' : 'border-border text-text-secondary'}`}>{p.name}</button>)}
-      <button className={secondary} onClick={() => { const id = freshId('provider'); change({ ...draft, providers: [...draft.providers, { id, name: '自定义服务', protocol: 'openai', baseUrl: '', enabled: true, keyRequired: true }] }); setSelected(id); }}>＋ 服务商</button>
+      <button className={draft.providers.length ? secondary : 'rounded-xl bg-accent text-white px-4 py-3 text-sm font-medium focus-visible:outline-accent'} onClick={() => { const id = freshId('provider'); change({ ...draft, providers: [...draft.providers, { id, name: '自定义服务', protocol: 'openai', baseUrl: '', enabled: true, keyRequired: true }] }); setSelected(id); }}>＋ 服务商</button>
     </div>
     {provider ? <div className="rounded-2xl border border-border p-4 space-y-4 bg-bg-primary/40">
       <div className="flex items-center justify-between gap-3"><h3 className="font-medium text-text-primary">服务连接</h3><label className="text-xs text-text-secondary flex items-center gap-2"><input type="checkbox" checked={provider.enabled} onChange={e => updateProvider(provider.id, { enabled: e.target.checked })} />启用服务商</label></div>
@@ -124,8 +126,10 @@ export function ModelCenter() {
         <div className="p-4 pt-0 space-y-3">
           <div className="grid sm:grid-cols-2 gap-3"><label className="text-xs text-text-secondary space-y-1.5">显示名称<input className={field} value={m.name} onChange={e => updateModel(m.id, { name: e.target.value })} /></label><label className="text-xs text-text-secondary space-y-1.5">模型 ID<input className={field} value={m.model} placeholder="复制服务商提供的实际模型 ID" onChange={e => updateModel(m.id, { model: e.target.value })} /></label></div>
           <div className="flex flex-wrap gap-3">{Object.entries(capabilityLabels).map(([cap, label]) => <label className="text-xs text-text-secondary flex items-center gap-1.5" key={cap}><input type="checkbox" checked={m.capabilities.includes(cap as ModelCapability)} onChange={e => updateModel(m.id, { capabilities: e.target.checked ? [...m.capabilities, cap as ModelCapability] : m.capabilities.filter(c => c !== cap) })} />{label}</label>)}</div>
+          <details className="rounded-xl border border-border p-3"><summary className="cursor-pointer text-xs text-text-secondary">高级模型参数</summary><div className="pt-3 space-y-3">
           <div className="grid grid-cols-2 gap-3"><label className="text-xs text-text-secondary space-y-1.5">上下文窗口（tokens）<input className={field} type="number" min="1024" max="2000000" value={m.contextWindow} onChange={e => updateModel(m.id, { contextWindow: Number(e.target.value) })} /></label><label className="text-xs text-text-secondary space-y-1.5">输出上限（tokens）<input className={field} type="number" min="1" max="131072" value={m.maxTokens} onChange={e => updateModel(m.id, { maxTokens: Number(e.target.value) })} /></label></div>
           <div className="grid sm:grid-cols-2 gap-3"><label className="text-xs text-text-secondary space-y-1.5">温度（留空遵循模型默认）<input className={field} type="number" min="0" max="2" step="0.1" value={m.temperature ?? ''} onChange={e => updateModel(m.id, { temperature: e.target.value === '' ? null : Number(e.target.value) })} /></label><label className="text-xs text-text-secondary space-y-1.5">输出参数<select className={field} value={m.tokenParameter} onChange={e => updateModel(m.id, { tokenParameter: e.target.value as CatalogModel['tokenParameter'] })}><option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option></select></label></div>
+          </div></details>
           {m.capabilities.includes('tts') && <label className="block text-xs text-text-secondary space-y-1.5">语音接口<select className={field} value={m.ttsMode || 'speech'} onChange={e => updateModel(m.id, { ttsMode: e.target.value as CatalogModel['ttsMode'] })}><option value="speech">Audio Speech</option><option value="chat-audio">Chat Completions 音频输出</option></select></label>}
           {m.capabilities.includes('tts') && <label className="block text-xs text-text-secondary space-y-1.5">默认音色 ID<input className={field} value={m.ttsVoice || ''} placeholder={m.ttsMode === 'chat-audio' ? 'mimo_default' : 'alloy'} onChange={e => updateModel(m.id, { ttsVoice: e.target.value || null })} /><span>按服务商提供的音色 ID 填写；修改后需重新测试。</span></label>}
           <p className="text-xs text-text-muted">能力声明不等于验证通过。测试会向所选服务商发送短请求，可能产生费用；图片理解需要 2 次调用。</p>
@@ -146,7 +150,7 @@ export function ModelCenter() {
         </div>
       </details>)}
     </div>
-    <div className="rounded-2xl border border-border p-4 space-y-3">
+    {(draft.models.length > 0 || Object.values(draft.defaults).some(Boolean)) && <div className="rounded-2xl border border-border p-4 space-y-3">
       <h3 className="font-medium text-sm text-text-primary">默认模型</h3>
       <p className="text-xs text-text-secondary">自动选择只会使用已验证模型。明确指定的模型若未就绪或未通过对应测试，请求会停止，不会偷偷改用其他模型；可测试该模型或改回自动选择。</p>
       <div className="grid sm:grid-cols-3 gap-3">{testedCapabilities.map(cap => {
@@ -164,7 +168,7 @@ export function ModelCenter() {
           {unavailable && <p className="text-xs text-amber-700 dark:text-amber-300">指定模型未通过当前能力验证，保存后仍会阻止请求。{chosen && <button className={`${secondary} mt-2`} onClick={() => viewModel(chosen)}>查看并测试{capabilityLabels[cap]}</button>}</p>}
         </div>;
       })}</div>
-    </div>
+    </div>}
     </fieldset>
     <div className="sticky bottom-0 bg-bg-primary/95 backdrop-blur py-3 space-y-2 border-t border-border">
       {loadError && <p role="alert" className="text-sm text-red-500">目录同步失败：{loadError} <button className={secondary} disabled={loading} onClick={() => void load()}>重新读取目录</button></p>}
@@ -172,6 +176,8 @@ export function ModelCenter() {
       {conflict && <div className="text-xs text-text-secondary space-y-2"><p>请先核对最新配置。合并会保留未修改的远端字段；同一字段冲突时保留你的值，检查后再保存。仍被使用的模型需要先更换引用，或改为禁用。</p><button className={secondary} disabled={saving || loading} onClick={() => void rebaseDraft()}>合并最新配置，保留我的修改</button></div>}
       {notice && <p role="status" className="text-sm text-text-secondary">{notice}</p>}
       <div className="flex flex-wrap gap-2 items-center"><button className="rounded-xl bg-accent text-white px-5 py-2.5 text-sm font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 disabled:opacity-50" disabled={saving || !dirty || conflict} onClick={() => void persist()}>{saving ? '正在保存…' : '保存并应用'}</button>{dirty && <button className={secondary} disabled={saving} onClick={discardDraft}>放弃修改</button>}<span role="status" className="text-xs text-text-muted">{saving ? '正在保存此版本，编辑暂时锁定' : dirty ? '有未保存修改，保存后可测试' : '当前配置已保存'}</span></div>
+      {dirty && <p className="text-xs text-text-secondary">草稿尚未保存；刷新或退出账号会清除。</p>}
     </div>
+    <SiteBasicChat />
   </section>;
 }
