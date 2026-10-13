@@ -55,6 +55,7 @@ backend/server-*.err.log
 
 # Runtime logs
 .runtime-logs/
+.local-runtime/
 
 # Trae specs
 .trae/

@@ -43,7 +43,7 @@ export default {
         'sidebar-active': 'var(--sidebar-active)',
       },
       fontFamily: {
-        sans: ['Noto Sans SC', 'sans-serif'],
+        sans: ['Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', 'system-ui', 'sans-serif'],
         mono: ['JetBrains Mono', 'monospace'],
       },
       fontSize: {

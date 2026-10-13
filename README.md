@@ -18,6 +18,8 @@
 
 ## 本地启动
 
+需要一条命令启动前后端，或希望保留旧数据并使用独立验收环境时，见 [本地开发与独立验收环境](docs/local-development.md)。
+
 需要 Node.js 22.12+ 和 npm。以下示例适用于本机开发，使用 `AUTH_MODE=dev`；生产环境必须使用会话认证，且服务端会拒绝在 production 模式下启用 dev 认证。
 
 ```powershell

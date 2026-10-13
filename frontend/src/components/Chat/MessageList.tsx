@@ -1,6 +1,6 @@
 ﻿import React, { useEffect, useRef, useMemo, useState, useCallback } from 'react';
 import { Virtuoso } from 'react-virtuoso';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, useIsPresent } from 'framer-motion';
 import dayjs from 'dayjs';
 import { useMessagesStore } from '../../stores/messagesStore';
 import type { Message } from '../../types';
@@ -14,6 +14,7 @@ import { DebateControlPanel } from './DebateControlPanel';
 import { api } from '../../services/api';
 import { useConfirm, useToast, MessageListSkeleton, LoadingSpinner } from '../Common';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
+import { appendedMessages } from '../../utils/messageArrival';
 
 const TIME_GAP_MINUTES = 5;
 
@@ -85,6 +86,7 @@ const MessageItemWrapper = React.memo(({
 });
 
 export function MessageList() {
+  const isPresent = useIsPresent();
   const currentGroup = useGroupsStore((s) => s.currentGroup);
   const currentGroupId = currentGroup?.id ?? null;
   const rawGroupMessages = useMessagesStore((s) => (currentGroupId ? s.messages[currentGroupId] : undefined));
@@ -107,6 +109,10 @@ export function MessageList() {
   const [unreadCount, setUnreadCount] = useState(0);
   const [firstUnreadMessageId, setFirstUnreadMessageId] = useState<string | null>(null);
   const prevMessageCount = useRef(0);
+  const previousMessages = useRef<{ groupId: string | null; messages: Message[] }>({ groupId: null, messages: [] });
+  const navigationAnchor = useRef<string | null>(null);
+  if (scrollToMessageId) navigationAnchor.current = currentGroupId;
+  else if (navigationAnchor.current !== currentGroupId) navigationAnchor.current = null;
   const prevGroupId = useRef<string | null>(null);
   const loadingMoreRef = useRef(false);
   const reducedMotion = useReducedMotion();
@@ -193,6 +199,7 @@ export function MessageList() {
   }, [groupMessages]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    if (navigationAnchor.current) return;
     const scroller = scrollerRef.current;
     if (scroller && scroller instanceof HTMLElement) {
       scroller.scrollTo({ top: scroller.scrollHeight, behavior });
@@ -249,6 +256,7 @@ export function MessageList() {
         if (awaitingResponseRef.current) clearAwaitingResponse();
       } else if (e.deltaY > 5) {
         userScrolledUpRef.current = false;
+        navigationAnchor.current = null;
       }
     };
     let touchStartY = 0;
@@ -259,6 +267,7 @@ export function MessageList() {
         userScrolledUpRef.current = true;
         if (awaitingResponseRef.current) clearAwaitingResponse();
       }
+      if (touchStartY - y > 8) navigationAnchor.current = null;
     };
     el.addEventListener('wheel', onWheel, { passive: true });
     el.addEventListener('touchstart', onTouchStart, { passive: true });
@@ -285,6 +294,7 @@ export function MessageList() {
   }, [isAtBottom, unreadCount]);
 
   const handleAtTopStateChange = useCallback((atTop: boolean) => {
+    if (useNavigationStore.getState().scrollToMessageId) return;
     if (atTop && currentGroup && groupPagination.hasMore && !groupPagination.loadingMore && !loadingMoreRef.current) {
       if (virtuosoRef.current) {
         const virtuosoState = virtuosoRef.current.getState?.();
@@ -306,9 +316,10 @@ export function MessageList() {
 
   useEffect(() => {
     const currentCount = groupMessages.length;
-
-    if (currentCount > prevMessageCount.current) {
-      const newMessages = groupMessages.slice(prevMessageCount.current);
+    const previous = previousMessages.current.groupId === currentGroupId ? previousMessages.current.messages : [];
+    const newMessages = appendedMessages(previous, groupMessages);
+    previousMessages.current = { groupId: currentGroupId, messages: groupMessages };
+    if (newMessages.length > 0) {
       newMessages.forEach(msg => {
         newMessageIdsRef.current.add(msg.id);
         setTimeout(() => {
@@ -318,6 +329,7 @@ export function MessageList() {
 
       const hasUserMessage = newMessages.some(m => m.sender_type === 'user');
       if (hasUserMessage) {
+        navigationAnchor.current = null;
         setIsAtBottom(true);
         userScrolledUpRef.current = false;
         awaitingResponseRef.current = true;
@@ -353,7 +365,7 @@ export function MessageList() {
     }
 
     prevMessageCount.current = currentCount;
-  }, [groupMessages.length, isAtBottom, listItems.length, scrollToBottom, firstUnreadMessageId]);
+  }, [currentGroupId, groupMessages, isAtBottom, listItems.length, scrollToBottom, firstUnreadMessageId]);
 
   useEffect(() => {
     if (prevGroupId.current !== currentGroup?.id) {
@@ -419,44 +431,71 @@ export function MessageList() {
     }
   }, [typingAiIds.length, hasStreamingMessages, groupMessages, clearAwaitingResponse, scrollToBottom]);
 
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   useEffect(() => {
-    if (!scrollToMessageId) return;
-
-    // 5 秒内未能定位到目标消息则消费掉导航请求，避免永久悬挂
-    const consumeTimeoutId = setTimeout(() => {
-      setScrollToMessageId(null);
-    }, 5000);
-
-    if (groupMessages.length > 0) {
-      const itemIndex = listItems.findIndex(
-        item => item.type === 'message' && item.data.id === scrollToMessageId
-      );
-
-      if (itemIndex !== -1) {
-        setTimeout(() => {
-          virtuosoRef.current?.scrollToIndex({
-            index: itemIndex,
-            behavior: 'smooth',
-            align: 'center'
-          });
-
-          setTimeout(() => {
-            const messageElement = document.querySelector(`[data-message-id="${scrollToMessageId}"]`);
-            if (messageElement) {
-              messageElement.classList.add('search-highlight');
-              setTimeout(() => {
-                messageElement.classList.remove('search-highlight');
-              }, 3000);
-            }
-          }, 300);
-        }, 100);
-
-        setScrollToMessageId(null);
-      }
+    if (!highlightedMessageId) return;
+    const timer = setTimeout(() => setHighlightedMessageId(null), 3000);
+    return () => clearTimeout(timer);
+  }, [highlightedMessageId]);
+  const navigationFrontier = useRef({ target: '', cursor: '' });
+  useEffect(() => {
+    if (!isPresent || !scrollToMessageId || !currentGroupId) return;
+    const target = currentGroupId + ':' + scrollToMessageId;
+    if (navigationFrontier.current.target !== target) navigationFrontier.current = { target, cursor: '' };
+    const itemIndex = listItems.findIndex(item => item.type === 'message' && item.data.id === scrollToMessageId);
+    if (itemIndex >= 0) {
+      userScrolledUpRef.current = true;
+      clearAwaitingResponse();
+      setIsAtBottom(false);
+      // During the loading skeleton's exit animation Virtuoso can temporarily
+      // have no usable height. Keep the intent until the real row is visible
+      // and stable; a single timed scroll can otherwise be silently discarded.
+      let stableSince = 0;
+      const started = Date.now();
+      const locate = () => {
+        const scroller = scrollerRef.current;
+        const row = scroller instanceof HTMLElement
+          ? Array.from(scroller.querySelectorAll<HTMLElement>('[data-message-id]')).find(element => element.dataset.messageId === scrollToMessageId) : null;
+        const bounds = scroller instanceof HTMLElement ? scroller.getBoundingClientRect() : null;
+        const rect = row?.getBoundingClientRect();
+        const visible = !!bounds && bounds.height > 100 && !!rect && rect.height > 0 && rect.top < Math.min(bounds.bottom, innerHeight) && rect.bottom > Math.max(bounds.top, 0);
+        if (visible) {
+          if (!stableSince) stableSince = Date.now();
+          if (Date.now() - stableSince >= 200) {
+            setHighlightedMessageId(scrollToMessageId);
+            setScrollToMessageId(null);
+            return;
+          }
+        } else {
+          stableSince = 0;
+          virtuosoRef.current?.scrollToIndex({ index: itemIndex, behavior: 'auto', align: 'center' });
+        }
+        if (Date.now() - started > 10000) {
+          navigationAnchor.current = null;
+          showToast({ message: '消息已加载，定位未完成，请重新打开搜索结果', type: 'error' });
+          setScrollToMessageId(null);
+          return;
+        }
+        timer = setTimeout(locate, 80);
+      };
+      let timer = setTimeout(locate, 0);
+      return () => clearTimeout(timer);
     }
-
-    return () => clearTimeout(consumeTimeoutId);
-  }, [scrollToMessageId, groupMessages.length, listItems, setScrollToMessageId]);
+    // A search result can live outside the first 50 messages. Continue from the
+    // server frontier, one page at a time, until found or a real stop condition.
+    // StrictMode replays mount effects with the same render snapshot. The
+    // first invocation may already have started this page in the live store.
+    if (loading || !rawPagination || groupPagination.loadingMore || useMessagesStore.getState().pagination[currentGroupId]?.loadingMore) return;
+    const cursor = groupPagination.oldestMessageId || 'start';
+    if (!groupPagination.hasMore || navigationFrontier.current.cursor === cursor) {
+      navigationAnchor.current = null;
+      showToast({ message: groupPagination.hasMore ? '历史消息加载未完成，请检查连接后重新打开搜索结果' : '该消息已删除或不再可见', type: 'error' });
+      setScrollToMessageId(null);
+      return;
+    }
+    navigationFrontier.current.cursor = cursor;
+    void loadMoreMessages(currentGroupId);
+  }, [isPresent, scrollToMessageId, currentGroupId, loading, rawPagination, groupPagination, listItems, loadMoreMessages, clearAwaitingResponse, setScrollToMessageId, showToast]);
 
   const toggleMultiSelectMode = useCallback(() => {
     setIsMultiSelectMode(prev => {
@@ -540,6 +579,7 @@ export function MessageList() {
       }
       setFirstUnreadMessageId(null);
     } else {
+      navigationAnchor.current = null;
       scrollToBottom('smooth');
     }
     setUnreadCount(0);
@@ -566,7 +606,7 @@ export function MessageList() {
         reducedMotion={reducedMotion}
       >
         <div
-          className={`relative ${isMultiSelectMode ? 'cursor-pointer' : ''}`}
+          className={`relative ${isMultiSelectMode ? 'cursor-pointer' : ''} ${message.id === highlightedMessageId ? 'search-highlight' : ''}`}
           onClick={() => isMultiSelectMode && toggleMessageSelection(message.id)}
           data-message-id={message.id}
         >
@@ -599,7 +639,7 @@ export function MessageList() {
         </div>
       </MessageItemWrapper>
     );
-  }, [isMultiSelectMode, toggleMessageSelection, addReplyingTo, isDebateMode, reducedMotion, listItems.length]);
+  }, [isMultiSelectMode, toggleMessageSelection, addReplyingTo, isDebateMode, reducedMotion, listItems, highlightedMessageId]);
 
   // 通过 virtuoso context 下发选中集合，勾选变化时触发可见项重渲染
   const virtuosoContext = useMemo(() => ({ selectedIds: selectedMessageIds }), [selectedMessageIds]);
@@ -623,6 +663,7 @@ export function MessageList() {
 
   return (
     <div ref={containerRef} className="flex-1 flex flex-col relative" style={{ minHeight: 0 }}>
+      {scrollToMessageId && <div role="status" className="flex items-center justify-between gap-3 px-4 py-2 bg-bg-surface border-b border-border text-sm"><span>正在定位搜索结果…</span><button className="workspace-button" onClick={() => { navigationAnchor.current = null; setScrollToMessageId(null); }}>取消定位</button></div>}
       {isMultiSelectMode && (
         <div className="bg-bg-surface border-b border-border px-2 md:px-4 py-2 md:py-3 flex items-center justify-between gap-2 z-10 flex-wrap">
           <div className="flex items-center gap-2 md:gap-3 min-w-0">
@@ -737,7 +778,7 @@ export function MessageList() {
                 overscan={10}
                 style={{ flex: 1, minHeight: 0 }}
                 rangeChanged={handleRangeChanged}
-                followOutput={isAtBottom ? 'smooth' : false}
+                followOutput={isAtBottom && !navigationAnchor.current ? 'smooth' : false}
                 components={virtuosoComponents}
               />
             </motion.div>

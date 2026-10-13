@@ -8,6 +8,7 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { useReducedMotion } from '../../hooks/useReducedMotion';
 import { AI_NAMES, AI_COLORS, AI_AVATAR_LETTERS, type Group } from '../../types';
 import { Avatar, ChatListSkeleton, ErrorBoundary, useToast } from '../Common';
+import { SearchPagination } from '../Chat/SearchPagination';
 import { useGlobalSearch, type SearchFilterTab } from '../../hooks/useGlobalSearch';
 import { replaceOldModelNames } from '../../utils/modelNames';
 import dayjs from 'dayjs';
@@ -483,7 +484,8 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
       );
     }
 
-    if (!searchData || searchData.total === 0) {
+    if (globalSearch.error) return <div role="alert" className="p-4 text-sm"><p>{globalSearch.error}</p><button className="workspace-button mt-3" onClick={globalSearch.retry}>重试</button></div>;
+    if (!searchData || globalSearch.total === 0) {
       return (
         <div className="flex flex-col items-center justify-center h-64 text-text-muted animate-fade-in">
           <svg className="w-12 h-12 mb-3 opacity-40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -757,14 +759,14 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
   if (showSearch) {
     const tabs: { key: SearchFilterTab; label: string; count: number }[] = [
       { key: 'all', label: '全部', count: globalSearch.searchData?.total || 0 },
-      { key: 'groups', label: '群聊', count: globalSearch.searchData?.groups?.length || 0 },
-      { key: 'messages', label: '消息', count: globalSearch.searchData?.messages?.length || 0 },
-      { key: 'files', label: '文件', count: globalSearch.searchData?.files?.length || 0 },
-      { key: 'media', label: '媒体', count: globalSearch.searchData?.media?.length || 0 },
-      { key: 'agents', label: '智能体', count: globalSearch.searchData?.agents?.length || 0 },
-      { key: 'personas', label: 'AI角色', count: globalSearch.searchData?.personas?.length || 0 },
-      { key: 'members', label: '成员', count: globalSearch.searchData?.members?.length || 0 },
-      { key: 'comments', label: '评论', count: globalSearch.searchData?.comments?.length || 0 },
+      { key: 'groups', label: '群聊', count: (globalSearch.searchData?.counts?.groups ?? globalSearch.searchData?.groups?.length ?? 0) },
+      { key: 'messages', label: '消息', count: (globalSearch.searchData?.counts?.messages ?? globalSearch.searchData?.messages?.length ?? 0) },
+      { key: 'files', label: '文件', count: (globalSearch.searchData?.counts?.files ?? globalSearch.searchData?.files?.length ?? 0) },
+      { key: 'media', label: '媒体', count: (globalSearch.searchData?.counts?.media ?? globalSearch.searchData?.media?.length ?? 0) },
+      { key: 'agents', label: '智能体', count: (globalSearch.searchData?.counts?.agents ?? globalSearch.searchData?.agents?.length ?? 0) },
+      { key: 'personas', label: 'AI角色', count: (globalSearch.searchData?.counts?.personas ?? globalSearch.searchData?.personas?.length ?? 0) },
+      { key: 'members', label: '成员', count: (globalSearch.searchData?.counts?.members ?? globalSearch.searchData?.members?.length ?? 0) },
+      { key: 'comments', label: '评论', count: (globalSearch.searchData?.counts?.comments ?? globalSearch.searchData?.comments?.length ?? 0) },
     ];
 
     return (
@@ -775,11 +777,13 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
             ref={inputRef}
             type="text"
             inputMode="search"
+            aria-label="搜索会话内容"
             value={globalSearch.query}
             onChange={(e) => globalSearch.setQuery(e.target.value)}
             placeholder="搜索群聊、消息、文件、智能体..."
             className="flex-1 px-3 py-1.5 bg-bg-surface2 rounded-lg text-sm outline-none text-text-primary placeholder-text-muted focus:ring-2 focus:ring-accent/30 transition-all duration-150"
           />
+          <button className="workspace-button shrink-0" onClick={() => useNavigationStore.getState().setSearchPanelOpen(true, globalSearch.query)}>筛选</button>
           {globalSearch.query && (
             <button
               onClick={() => globalSearch.setQuery('')}
@@ -811,6 +815,7 @@ export function ChatList({ onNewChat, onSelectGroup }: ChatListProps) {
         <div className="flex-1 overflow-y-auto pb-safe">
           {renderSearchResults()}
         </div>
+        <SearchPagination search={globalSearch} />
         {Toast}
       </div>
     );

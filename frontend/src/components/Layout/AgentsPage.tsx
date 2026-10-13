@@ -30,136 +30,45 @@ function getAgentColor(name: string): string {
 }
 
 export function AgentsPage({ onBack, onOpenCreate, onSelectAgent }: AgentsPageProps) {
-  const agents = useAgentsStore((s) => s.agents);
-  const fetchAgents = useAgentsStore((s) => s.fetchAgents);
-  const deleteAgent = useAgentsStore((s) => s.deleteAgent);
+  const agents = useAgentsStore(s => s.agents);
+  const loading = useAgentsStore(s => s.loading);
+  const error = useAgentsStore(s => s.error);
+  const fetchAgents = useAgentsStore(s => s.fetchAgents);
+  const deleteAgent = useAgentsStore(s => s.deleteAgent);
+  const [query, setQuery] = React.useState('');
+  const [deleting, setDeleting] = React.useState<string | null>(null);
   const { confirm, ConfirmModal } = useConfirm();
   const { showToast, Toast } = useToast();
-
-  useEffect(() => {
-    fetchAgents();
-  }, [fetchAgents]);
-
-  const handleDelete = async (e: React.MouseEvent, agent: Agent) => {
-    e.stopPropagation();
-    const confirmed = await confirm({
-      title: '删除智能体',
-      description: `确定要删除「${agent.name}」吗？此操作无法恢复。`,
-      danger: true,
-    });
-    if (confirmed) {
-      try {
-        await deleteAgent(agent.id);
-        showToast({ message: '智能体已删除', type: 'success' });
-      } catch {
-        showToast({ message: '删除失败', type: 'error' });
-      }
-    }
-  };
-
-  return (
-    <div className="h-full flex flex-col bg-bg-primary">
-      <div className="flex items-center gap-3 px-4 py-3 bg-bg-surface border-b border-border-subtle">
-        {onBack && (
-          <button
-            onClick={onBack}
-            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-bg-surface2 transition-colors"
-          >
-            <svg className="w-5 h-5 text-text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <path d="m15 18-6-6 6-6" />
-            </svg>
-          </button>
-        )}
-        <h1 className="text-lg font-semibold text-text-primary flex-1">智能体</h1>
+  useEffect(() => { void fetchAgents(); }, [fetchAgents]);
+  const visible = agents.filter(agent => (agent.name + ' ' + agent.description).toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  async function remove(agent: Agent) {
+    if (deleting || !await confirm({ title: '删除智能体', description: '确定要删除「' + agent.name + '」及其会话吗？此操作无法恢复。', danger: true })) return;
+    setDeleting(agent.id);
+    try { await deleteAgent(agent.id); showToast({ message: '智能体已删除', type: 'success' }); }
+    catch { showToast({ message: '删除未完成，请检查连接后重试', type: 'error' }); }
+    finally { setDeleting(null); }
+  }
+  return <div className="agent-directory h-full flex flex-col min-h-0 bg-bg-primary" data-testid="agent-directory">
+    <header className="page-toolbar">
+      <div className="flex items-center gap-3 min-w-0">{onBack && <button className="workspace-button" aria-label="返回" onClick={onBack}>←</button>}<div><h1 className="text-xl font-semibold">智能体</h1></div></div>
+      <button className="workspace-primary shrink-0" onClick={onOpenCreate}>添加智能体</button>
+    </header>
+    <div className="flex-1 min-h-0 overflow-y-auto pb-safe"><div className="page-content">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+        <p role="status" className="text-sm text-text-secondary">{loading ? '正在更新智能体…' : '共 ' + agents.length + ' 个智能体'}</p>
+        <div className="flex items-center gap-2 min-w-0"><input aria-label="搜索智能体" placeholder="搜索名称或用途" className="workspace-input min-w-0" value={query} onChange={event => setQuery(event.target.value)} /><button className="workspace-button" disabled={loading} onClick={() => void fetchAgents()}>刷新</button></div>
       </div>
-
-      <div className="flex-1 overflow-y-auto pb-safe">
-        <div className="p-4">
-          <button
-            onClick={onOpenCreate}
-            className="w-full h-32 md:h-40 rounded-2xl border-2 border-dashed border-border-subtle bg-bg-surface hover:border-accent/50 hover:bg-bg-surface2 transition-all duration-300 flex flex-col items-center justify-center gap-3 group"
-          >
-            <div className="w-16 h-16 rounded-full bg-accent/10 flex items-center justify-center group-hover:bg-accent/20 transition-colors">
-              <svg className="w-8 h-8 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                <path d="M12 5v14M5 12h14" />
-              </svg>
-            </div>
-            <span className="text-sm text-text-secondary group-hover:text-accent transition-colors">
-              添加智能体
-            </span>
+      {error && <div role="alert" className="workspace-error mb-4">智能体未能完整加载，请检查连接后点击刷新重试。</div>}
+      {loading && !agents.length ? <div className="workspace-empty" role="status">正在加载智能体…</div> : !visible.length ? <div className="workspace-empty"><h2 className="text-base font-semibold">{query ? '没有符合条件的智能体' : error ? '暂时无法获取智能体' : '创建你的第一个智能体'}</h2><p className="text-sm text-text-secondary mt-2">{query ? '试试名称或描述中的其他关键词。' : '设定角色与任务用途，连接模型后开始对话。'}</p>{query && <button className="workspace-button mt-4" onClick={() => setQuery('')}>清除筛选</button>}</div> :
+        <div className="agent-grid">{visible.map(agent => <article key={agent.id} className="agent-card">
+          <button onClick={() => onSelectAgent(agent.id)} className="flex gap-3 items-center w-full text-left rounded-lg" aria-label={'打开智能体：' + agent.name}>
+            <span className="w-11 h-11 rounded-xl flex items-center justify-center text-white text-lg font-semibold shrink-0" style={{ backgroundColor: getAgentColor(agent.name), backgroundImage: avatarBackgroundImageStyle(agent.avatar_url), backgroundSize: 'cover', backgroundPosition: 'center' }}>{!agent.avatar_url && agent.name.charAt(0)}</span>
+            <span className="min-w-0"><span role="heading" aria-level={2} className="font-semibold text-sm break-words block">{agent.name}</span><span className="text-xs text-text-muted block mt-1">{dayjs(agent.created_at).format('YYYY-MM-DD')}</span></span>
           </button>
-        </div>
-
-        {agents.length === 0 ? (
-          <div className="flex flex-col items-center justify-center px-4 py-12">
-            <p className="text-text-muted text-sm">
-              点击上方按钮创建你的第一个智能体
-            </p>
-          </div>
-        ) : (
-          <div className="px-4 pb-4">
-            <div className="waterfall-container" style={{ columnCount: 2, columnGap: '1rem' }}>
-              {agents.map((agent) => {
-                const color = getAgentColor(agent.name);
-                return (
-                  <div
-                    key={agent.id}
-                    onClick={() => onSelectAgent(agent.id)}
-                    className="waterfall-item relative bg-bg-surface border border-border-subtle rounded-xl p-4 cursor-pointer hover:border-accent/30 hover:shadow-md hover:-translate-y-0.5 transition-all duration-200 group"
-                    style={{ breakInside: 'avoid', marginBottom: '1rem' }}
-                  >
-                    <button
-                      onClick={(e) => handleDelete(e, agent)}
-                      className="absolute top-2 right-2 w-6 h-6 rounded-full bg-bg-surface2/80 flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-red-500/20 transition-all"
-                    >
-                      <svg className="w-3.5 h-3.5 text-text-muted group-hover:text-red-500 transition-colors" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                        <path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
-                      </svg>
-                    </button>
-
-                    <div className="flex items-start gap-3">
-                      <div
-                        className="w-12 h-12 rounded-full flex items-center justify-center text-white text-lg font-semibold flex-shrink-0 shadow-sm overflow-hidden"
-                        style={{
-                          backgroundColor: agent.avatar_url ? 'transparent' : color,
-                          backgroundImage: avatarBackgroundImageStyle(agent.avatar_url),
-                          backgroundSize: 'cover',
-                          backgroundPosition: 'center',
-                        }}
-                      >
-                        {!agent.avatar_url && agent.name.charAt(0)}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <h3 className="text-sm font-semibold text-text-primary">
-                          {agent.name}
-                        </h3>
-                        <p className="text-xs text-text-muted mt-0.5">
-                          {dayjs(agent.created_at).format('YYYY-MM-DD HH:mm')}
-                        </p>
-                      </div>
-                    </div>
-
-                    <p className="text-xs text-text-secondary mt-3 line-clamp-3 leading-relaxed">
-                      {agent.description}
-                    </p>
-
-                    {agent.opening_message && (
-                      <div className="mt-3 pt-3 border-t border-border-subtle">
-                        <p className="text-xs text-text-primary line-clamp-2 italic opacity-80">
-                          "{agent.opening_message}"
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {ConfirmModal}
-      {Toast}
-    </div>
-  );
+          <p className="text-sm text-text-secondary mt-4 line-clamp-3 leading-relaxed break-words">{agent.description}</p>
+          <details className="text-xs text-text-secondary mt-3"><summary className="cursor-pointer py-2">查看完整设定</summary><p className="whitespace-pre-wrap break-words leading-relaxed">{agent.description}</p>{agent.opening_message && <p className="whitespace-pre-wrap break-words leading-relaxed mt-3">开场白：{agent.opening_message}</p>}</details>
+          <div className="flex flex-wrap justify-between items-center gap-2 mt-4 pt-3 border-t border-border-subtle"><button className="workspace-button" onClick={() => onSelectAgent(agent.id)}>开始对话</button><button className="workspace-button text-red-500" aria-label={'删除智能体：' + agent.name} disabled={!!deleting} onClick={() => void remove(agent)}>{deleting === agent.id ? '删除中…' : '删除'}</button></div>
+        </article>)}</div>}
+    </div></div>{ConfirmModal}{Toast}
+  </div>;
 }

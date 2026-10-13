@@ -121,3 +121,79 @@ test('search fails closed when the independent source ledger configuration is un
   }
   assert.equal((await search(owner, marker, 'members', target.id)).body.members.length, 1);
 });
+
+test('search counts all matches before pagination and returns the newest page with stable scope', async () => {
+  const owner = await account(); const target = await group(owner, 'Pagination needle');
+  await group(owner, 'Other needle');
+  await seed(owner, data => {
+    for (let index = 0; index < 55; index++) data.messages.push({ id: `page-${String(index).padStart(3, '0')}`, group_id: target.id,
+      sender_type: 'user', sender_id: owner.id, content: `needle ${index}`, created_at: new Date(Date.UTC(2026, 9, 1, 0, index)).toISOString() });
+  });
+  const first = await request.get('/api/search').set('Cookie', owner.cookie).query({ q: 'needle', type: 'messages,groups', groupId: target.id });
+  assert.equal(first.status, 200); assert.equal(first.body.counts.messages, 55);
+  assert.equal(first.body.groups.length, 1); assert.equal(first.body.groups[0].id, target.id);
+  assert.equal(first.body.total, 56); assert.equal(first.body.messages.length, 20);
+  assert.equal(first.body.messages[0].id, 'page-054'); assert.equal(first.body.pagination.hasMore, true);
+  const second = await request.get('/api/search').set('Cookie', owner.cookie).query({ q: 'needle', type: 'messages', groupId: target.id, offset: 20 });
+  assert.equal(second.body.messages[0].id, 'page-034');
+  assert.equal(second.body.messages.some(item => first.body.messages.some(before => before.id === item.id)), false);
+  const last = await request.get('/api/search').set('Cookie', owner.cookie).query({ q: 'needle', type: 'messages', groupId: target.id, offset: 40 });
+  assert.equal(last.body.messages.length, 15); assert.equal(last.body.pagination.hasMore, false);
+});
+
+test('link search matches encrypted plain text without attachments and media filter excludes plain text', async () => {
+  const owner = await account(); const target = await group(owner, 'Link search');
+  const { default: encryption } = await import('../src/utils/encryption.js');
+  await seed(owner, data => {
+    data.messages.push({ id: randomUUID(), group_id: target.id, sender_type: 'user', sender_id: owner.id,
+      content: encryption.encryptText('needle https://example.com/source'), metadata: { encryption: { encrypted: true } }, created_at: new Date().toISOString() });
+    data.messages.push({ id: randomUUID(), group_id: target.id, sender_type: 'user', sender_id: owner.id,
+      content: 'needle plain text', created_at: new Date().toISOString() });
+  });
+  const links = await request.get('/api/search').set('Cookie', owner.cookie).query({ q: 'needle', quickFilter: 'links' });
+  assert.equal(links.status, 200); assert.equal(links.body.messages.length, 1);
+  assert.match(links.body.messages[0].content, /https:\/\/example.com/);
+  const media = await request.get('/api/search').set('Cookie', owner.cookie).query({ q: 'needle', quickFilter: 'media' });
+  assert.equal(media.body.messages.length, 0);
+});
+
+test('search validates malformed query shapes and date ranges instead of failing with 500', async () => {
+  const owner = await account();
+  for (const params of [{ q: ['a', 'b'] }, { q: 'a', type: ['messages', 'files'] }, { q: 'a', limit: '-1' },
+    { q: 'a', limit: '5abc' }, { q: 'a', offset: '-1' }, { q: 'a', dateFrom: '2026-02-30' },
+    { q: 'a', dateFrom: '2026-10-14', dateTo: '2026-10-13' }, { q: 'a', quickFilter: 'invalid' }]) {
+    assert.equal((await request.get('/api/search').set('Cookie', owner.cookie).query(params)).status, 400, JSON.stringify(params));
+  }
+});
+
+test('calendar boundaries accept local UTC offsets and apply to file and comment results', async () => {
+  const owner = await account(); const target = await group(owner, 'Date range');
+  const file = await upload(owner, target.id, 'date-needle.txt');
+  await seed(owner, data => {
+    data.files.find(item => item.id === file.id).created_at = '2026-10-12T16:30:00.000Z';
+    data.messages.push({ id: randomUUID(), group_id: target.id, content: 'date-needle', sender_type: 'user', sender_id: owner.id,
+      created_at: '2026-10-12T16:30:00.000Z', comments: [
+        { id: 'in-day', content: 'date-needle', created_at: '2026-10-12T16:30:00.000Z' },
+        { id: 'outside-day', content: 'date-needle', created_at: '2026-10-13T16:30:00.000Z' }] });
+  });
+  const response = await request.get('/api/search').set('Cookie', owner.cookie).query({ q: 'date-needle', type: 'files,comments,messages',
+    dateFrom: '2026-10-13T00:00:00+08:00', dateTo: '2026-10-13T23:59:59.999+08:00' });
+  assert.equal(response.status, 200); assert.equal(response.body.files.length, 1); assert.equal(response.body.messages.length, 1);
+  assert.deepEqual(response.body.comments.map(item => item.id), ['in-day']);
+});
+
+test('comment scope is enforced before global chronological ordering, counts and pagination', async () => {
+  const owner = await account(); const a = await group(owner, 'Comment scope A'); const b = await group(owner, 'Comment scope B');
+  await seed(owner, data => {
+    for (const [groupId, id, date] of [[a.id, 'a-old', '2026-10-01'], [b.id, 'b-new', '2026-10-03'], [a.id, 'a-new', '2026-10-02']]) {
+      data.messages.push({ id: randomUUID(), group_id: groupId, content: 'parent', sender_type: 'user', sender_id: owner.id,
+        created_at: date + 'T00:00:00Z', comments: [{ id, message_id: 'untrusted-parent', content: 'scoped comment needle', created_at: date + 'T00:00:00Z' }] });
+    }
+  });
+  const response = await request.get('/api/search').set('Cookie', owner.cookie).query({ q: 'scoped comment needle', type: 'comments', groupId: a.id, limit: 1 });
+  assert.equal(response.status, 200); assert.equal(response.body.total, 2); assert.equal(response.body.counts.comments, 2);
+  assert.equal(response.body.comments[0].id, 'a-new'); assert.equal(response.body.comments[0].group_id, a.id);
+  assert.notEqual(response.body.comments[0].message_id, 'untrusted-parent'); assert.equal(response.body.pagination.hasMore, true);
+  const missing = await search(owner, 'scoped comment needle', 'comments', randomUUID());
+  assert.equal(missing.body.total, 0); assert.deepEqual(missing.body.comments, []);
+});

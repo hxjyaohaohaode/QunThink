@@ -11,7 +11,7 @@ import { DependencySummary } from './TaskDependencies';
 import { getAuthGeneration } from '../../services/api';
 import { getCacheUserId } from '../../utils/cacheUtils';
 
-export function TaskResultEditor({ taskId, onOpenConversation }: { taskId: string; onOpenConversation?: (groupId: string) => void }) {
+export function TaskResultEditor({ taskId, onOpenConversation, embeddedInTask = false }: { taskId: string; onOpenConversation?: (groupId: string) => void; embeddedInTask?: boolean }) {
   const document = useTaskResultsStore(state => state.documents[taskId]);
   const editor = useTaskResultsStore(state => state.editors[taskId]);
   const offline = useTaskResultsStore(state => state.offline[taskId]);
@@ -113,7 +113,7 @@ export function TaskResultEditor({ taskId, onOpenConversation }: { taskId: strin
   if (!document || !editor) return <div className="writing-loading" aria-live="polite"><p>{loading ? '正在打开同一份文稿…' : error || notice || '尚未读取到文稿'}</p>{pendingRecovery}<button className="workspace-button" onClick={() => void useTaskResultsStore.getState().select(taskId)}>重新读取</button>{ConfirmModal}</div>;
   const recoveryLabel = editor.recovery === 'saved' ? '未提交修改已加密保存在此设备' : editor.recovery === 'saving' ? '正在加密保存此设备草稿…' : editor.recovery === 'failed' ? '设备恢复保存失败，请保存版本或下载文本' : '未提交修改只在当前页面；可开启设备草稿恢复';
   return <div className="task-result-editor" data-testid="task-result-editor" data-observe="writing" data-task-id={taskId}>
-    <header className="writing-document-heading"><div><p className="writing-eyebrow">同一会话 · 持续编辑</p><h2>{document.title}</h2></div><span className={`writing-state ${stale || blocked || dependencyBlocked || dependencyStale ? 'is-warning' : accepted ? 'is-accepted' : ''}`}>{blocked ? '来源不可用' : dependencyBlocked ? '等待前置任务' : dependencyStale ? '依赖变化待复核' : stale ? '需要复核' : editor.dirty ? '有未提交修改' : accepted ? `版本 ${version?.sequence} 已验收` : version ? `版本 ${version.sequence} 待检查` : '开始写正文'}</span></header>
+    <header className="writing-document-heading"><div><h2>{embeddedInTask ? '文稿' : document.title}</h2></div><span className={`writing-state ${stale || blocked || dependencyBlocked || dependencyStale ? 'is-warning' : accepted ? 'is-accepted' : ''}`}>{blocked ? '来源不可用' : dependencyBlocked ? '等待前置任务' : dependencyStale ? '依赖变化待复核' : stale ? '需要复核' : editor.dirty ? '有未提交修改' : accepted ? `版本 ${version?.sequence} 已验收` : version ? `版本 ${version.sequence} 待检查` : '开始写正文'}</span></header>
     {recoveryError && <section className="writing-warning" aria-label="待核验记录读取失败"><p role="alert">{recoveryError}</p><button className="workspace-button" onClick={() => void useTaskResultsStore.getState().recover(taskId)}>重新读取待核验记录</button></section>}
     <DependencySummary state={dependencies} />
     {dependencies && <section className="writing-context" aria-label="前置任务复核"><p className="writing-help">前置关系与正文各自保存。前置任务正文不会自动发送给 AI；请根据最新关系自行核对当前文稿。</p>{(dependencyStale || dependencyReviewRequired) && <label className="writing-source-check"><input type="checkbox" checked={!dependencyReviewRequired} disabled={!!offline || !!pending || !!uncertain} onChange={event => useTaskResultsStore.getState().reviewDependencies(taskId, event.target.checked ? dependencies.signature : undefined)} />我已核对当前前置任务状态，保存时记录此次复核</label>}</section>}

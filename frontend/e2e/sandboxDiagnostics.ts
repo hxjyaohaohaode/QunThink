@@ -45,3 +45,29 @@ export function assertLinuxBrowserSandbox(
   if (sandbox.evaluation !== 'You are adequately sandboxed.') fail('overall sandbox status absent or inadequate');
   return { executable: version.executable, fields, evaluation: sandbox.evaluation };
 }
+
+// Windows reports a per-process policy table instead of Linux namespaces and
+// seccomp. Verify the observed renderer token policy, retaining the actual
+// service policies in evidence rather than claiming every process is isolated.
+export function assertBrowserSandbox(
+  version: ReturnType<typeof readVersionDiagnostics>,
+  sandbox: ReturnType<typeof readSandboxDiagnostics>,
+  platform: string,
+) {
+  if (platform === 'linux') return assertLinuxBrowserSandbox(version, sandbox);
+  const fail = (message: string): never => { throw new Error(`Browser sandbox unverified: ${message}`); };
+  if (platform !== 'win32') fail('unsupported diagnostic platform');
+  if (!version.executable || !/^[A-Za-z]:[\\/].+\.exe$/i.test(version.executable)) fail('missing Windows executable');
+  if (!version.commandLine?.includes(version.executable)) fail('missing/invalid command line');
+  if (/--(?:no-sandbox|disable-gpu-sandbox|disable-sandbox)(?:\s|=|$)/.test(version.commandLine)) fail('sandbox-disabling launch option');
+  const [columns, ...rows] = sandbox.rows;
+  if (!columns || new Set(columns).size !== columns.length) fail('invalid policy columns');
+  const column = (name: string) => { const index = columns.indexOf(name); if (index < 0) fail(`missing ${name} column`); return index; };
+  const type = column('Type'), policy = column('Sandbox'), lockdown = column('Lockdown'), integrity = column('Integrity'), mitigations = column('Mitigations');
+  const renderers = rows.filter(row => row[type] === 'Renderer');
+  if (!renderers.length) fail('no renderer policy observed');
+  for (const row of renderers) {
+    if (row[policy] !== 'Renderer' || row[lockdown] !== 'Lockdown' || row[integrity] !== 'S-1-16-0 Untrusted' || !/[1-9]/.test(row[mitigations] || '')) fail('renderer policy is incomplete or unrestricted');
+  }
+  return { executable: version.executable, platform, rendererCount: renderers.length, rendererPolicy: 'Renderer / Lockdown / Untrusted', observedPolicies: rows.map(row => ({ type: row[type], sandbox: row[policy] })) };
+}

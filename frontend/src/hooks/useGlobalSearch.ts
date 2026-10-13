@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
-import { api } from '../services/api';
+import { getCacheUserId } from '../utils/cacheUtils';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { api, getAuthGeneration } from '../services/api';
 import { useDebounce } from './useDebounce';
 
 export interface SearchAttachment {
@@ -127,83 +128,82 @@ export interface GlobalSearchResponse {
   media: MediaSearchResult[];
   total: number;
   query: string;
+  counts?: Partial<Record<Exclude<SearchFilterTab, 'all'>, number>>;
+  pagination?: { offset: number; limit: number; hasMore: boolean };
 }
 
 export type SearchFilterTab = 'all' | 'groups' | 'messages' | 'files' | 'agents' | 'personas' | 'comments' | 'members' | 'media';
 export type QuickFilter = 'all' | 'images' | 'files' | 'links' | 'media';
 
 export function useGlobalSearch() {
-  const [query, setQuery] = useState('');
+  const [query, queryState] = useState('');
   const [searchData, setSearchData] = useState<GlobalSearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<SearchFilterTab>('all');
-  const [groupId, setGroupId] = useState<string>('');
-  const [quickFilter, setQuickFilter] = useState<QuickFilter>('all');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
-
+  const [activeTab, tabState] = useState<SearchFilterTab>('all');
+  const [groupId, groupState] = useState('');
+  const [quickFilter, quickState] = useState<QuickFilter>('all');
+  const [dateFrom, fromState] = useState('');
+  const [dateTo, toState] = useState('');
+  const [offset, setOffset] = useState(0);
+  const [attempt, setAttempt] = useState(0);
+  const version = useRef(0);
   const debouncedQuery = useDebounce(query, 300);
-
-  const handleSearch = useCallback(async (searchQuery: string, tab: SearchFilterTab) => {
-    if (!searchQuery.trim()) {
-      setSearchData(null);
-      return;
-    }
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      const typeParam = tab === 'all' ? undefined : tab;
-      const options: Record<string, any> = { type: typeParam };
-      if (groupId) options.groupId = groupId;
-      if (quickFilter !== 'all') options.quickFilter = quickFilter;
-      if (dateFrom) options.dateFrom = dateFrom;
-      if (dateTo) options.dateTo = dateTo;
-
-      const response: GlobalSearchResponse = await api.globalSearch(searchQuery, options);
-      setSearchData(response);
-    } catch (err) {
-      setError('搜索失败');
-      console.error('搜索失败:', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [groupId, quickFilter, dateFrom, dateTo]);
+  const limit = 20;
+  const invalidate = useCallback(() => { version.current++; setOffset(0); setSearchData(null); setError(null); }, []);
+  const setQuery = useCallback((value: string) => { if (value !== query) { invalidate(); queryState(value); } }, [invalidate, query]);
+  const setActiveTab = useCallback((value: SearchFilterTab) => {
+    if (value !== activeTab) { if (offset) invalidate(); tabState(value); }
+  }, [invalidate, activeTab, offset]);
+  const setGroupId = useCallback((value: string) => { if (value !== groupId) { invalidate(); groupState(value); } }, [invalidate, groupId]);
+  const setQuickFilter = useCallback((value: QuickFilter) => { if (value !== quickFilter) { invalidate(); quickState(value); } }, [invalidate, quickFilter]);
+  const setDateFrom = useCallback((value: string) => { if (value !== dateFrom) { invalidate(); fromState(value); } }, [invalidate, dateFrom]);
+  const setDateTo = useCallback((value: string) => { if (value !== dateTo) { invalidate(); toState(value); } }, [invalidate, dateTo]);
+  const retry = useCallback(() => setAttempt(value => value + 1), []);
 
   useEffect(() => {
-    handleSearch(debouncedQuery, activeTab);
-  }, [debouncedQuery, activeTab, handleSearch]);
+    const request = ++version.current, user = getCacheUserId(), generation = getAuthGeneration();
+    const current = () => request === version.current && user === getCacheUserId() && generation === getAuthGeneration();
+    const cleanup = () => { if (version.current === request) version.current++; };
+    setError(null);
+    if (!query.trim() || query !== debouncedQuery) {
+      setSearchData(null); setLoading(!!query.trim()); return cleanup;
+    }
+    if (dateFrom && dateTo && dateFrom > dateTo) {
+      setSearchData(null); setLoading(false); setError('开始日期不能晚于结束日期'); return cleanup;
+    }
+    const from = dateFrom ? new Date(dateFrom + 'T00:00:00.000') : null;
+    const to = dateTo ? new Date(dateTo + 'T23:59:59.999') : null;
+    if ((from && !Number.isFinite(from.getTime())) || (to && !Number.isFinite(to.getTime()))) {
+      setSearchData(null); setLoading(false); setError('请输入有效的日期'); return cleanup;
+    }
+    setLoading(true);
+    // Calendar inputs are interpreted in the user's local timezone, including
+    // each boundary's daylight-saving offset, before transport as UTC instants.
+    const options = {
+      groupId: groupId || undefined, quickFilter, limit, offset,
+      dateFrom: from?.toISOString(),
+      dateTo: to?.toISOString(),
+    };
+    void api.globalSearch(debouncedQuery.trim(), options).then(response => {
+      if (current()) setSearchData(response);
+    }).catch(() => {
+      if (current()) { setError('搜索未完成，请检查连接后重试'); setSearchData(null); }
+    }).finally(() => { if (current()) setLoading(false); });
+    return cleanup;
+  }, [query, debouncedQuery, groupId, quickFilter, dateFrom, dateTo, offset, attempt]);
 
   const resetSearch = useCallback(() => {
-    setQuery('');
-    setSearchData(null);
-    setLoading(false);
-    setError(null);
-    setActiveTab('all');
-    setGroupId('');
-    setQuickFilter('all');
-    setDateFrom('');
-    setDateTo('');
-  }, []);
-
-  return {
-    query,
-    setQuery,
-    searchData,
-    loading,
-    error,
-    activeTab,
-    setActiveTab,
-    groupId,
-    setGroupId,
-    quickFilter,
-    setQuickFilter,
-    dateFrom,
-    setDateFrom,
-    dateTo,
-    setDateTo,
-    resetSearch,
-  };
+    invalidate(); queryState(''); setLoading(false); tabState('all'); groupState('');
+    quickState('all'); fromState(''); toState('');
+  }, [invalidate]);
+  const total = activeTab === 'all' ? searchData?.total || 0 : searchData?.counts?.[activeTab] ?? searchData?.[activeTab]?.length ?? 0;
+  const maxCategory = activeTab === 'all'
+    ? Math.max(0, ...Object.values(searchData?.counts || {}).map(value => value || 0)) : total;
+  const hasMore = searchData?.pagination ? offset + limit < maxCategory : false;
+  const nextPage = () => { if (!loading && hasMore) { version.current++; setLoading(true); setOffset(offset + limit); } };
+  const previousPage = () => { if (!loading && offset) { version.current++; setLoading(true); setOffset(Math.max(0, offset - limit)); } };
+  return { query, setQuery, searchData, loading, error, activeTab, setActiveTab, groupId, setGroupId,
+    quickFilter, setQuickFilter, dateFrom, setDateFrom, dateTo, setDateTo, resetSearch, retry,
+    offset, limit, total, hasMore, nextPage, previousPage };
 }

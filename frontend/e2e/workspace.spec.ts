@@ -70,7 +70,8 @@ test('fresh accounts have no platform AI and model setup remains an explicit cho
 
 test('real API saves once, preserves draft across views, and restores saved task after reload', async ({ page, context }, info) => {
   const workspace = await openWorkspace(page, context);
-  await expect(workspace.getByText('先写作，再选择 AI 助手')).toBeVisible();
+  await expect(workspace.getByRole('heading', { name: '工作台', exact: true })).toBeVisible();
+  await expect(workspace.getByText('先写作，再选择 AI 助手')).toHaveCount(0);
   await workspace.getByRole('button', { name: '＋ 新任务', exact: true }).click();
   await workspace.getByLabel('任务名称', { exact: true }).fill('中文跨页草稿测试');
   await workspace.getByLabel('希望得到什么').fill('保留这段内容，检查保存结果和来源。');

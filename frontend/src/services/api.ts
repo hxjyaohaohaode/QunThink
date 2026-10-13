@@ -844,11 +844,12 @@ export const api = {
     return response.data;
   },
 
-  globalSearch: async (query: string, options?: { type?: string; groupId?: string; limit?: number; quickFilter?: string; dateFrom?: string; dateTo?: string }) => {
+  globalSearch: async (query: string, options?: { type?: string; groupId?: string; limit?: number; offset?: number; quickFilter?: string; dateFrom?: string; dateTo?: string }) => {
     const params: Record<string, any> = { q: query };
     if (options?.type) params.type = options.type;
     if (options?.groupId) params.groupId = options.groupId;
     if (options?.limit) params.limit = options.limit;
+    if (options?.offset !== undefined) params.offset = options.offset;
     if (options?.quickFilter) params.quickFilter = options.quickFilter;
     if (options?.dateFrom) params.dateFrom = options.dateFrom;
     if (options?.dateTo) params.dateTo = options.dateTo;

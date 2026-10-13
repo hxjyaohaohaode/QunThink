@@ -144,7 +144,7 @@ test('Q2 creation: missing original content, authoritative close, lost close ACK
       return route.fulfill({ response });
     });
     // A starts at the actual zero-model primary action, not a hidden API seed.
-    await page.getByTestId('workspace').getByRole('button', { name: '现在开始写作', exact: true }).click();
+    await page.getByTestId('workspace').getByRole('button', { name: /^(＋ 新任务|继续任务草稿)$/ }).click();
     await fillComposer(page, 'Q2 原创建不会迟到复活', '原用途仅在本页面，不开启私人草稿副本');
     await composer(page).getByRole('button', { name: '保存任务', exact: true }).click(); await expect(createRecovery(page)).toBeVisible();
     await expect.poll(() => writes.length).toBe(1); const original = writes[0]; expect(original.forwarded).toBe(0);
@@ -187,7 +187,7 @@ test('Q2 same document: close pending body writes without losing new typing, acc
   const e = new Evidence(page, info); let failure: unknown;
   try {
     const user = await login(page, context, e), title = 'Q2 同稿人工修订与待确认请求';
-    await page.getByTestId('workspace').getByRole('button', { name: '现在开始写作', exact: true }).click();
+    await page.getByTestId('workspace').getByRole('button', { name: /^(＋ 新任务|继续任务草稿)$/ }).click();
     await fillComposer(page, title, '用同一份文稿检查可靠保存，不启用私人草稿恢复');
     const createdResponse = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/tasks');
     await composer(page).getByRole('button', { name: '保存任务', exact: true }).click();

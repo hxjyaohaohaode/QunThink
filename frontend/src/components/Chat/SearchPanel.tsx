@@ -1,125 +1,26 @@
+import { useReducedMotion } from '../../hooks/useReducedMotion';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import 'dayjs/locale/zh-cn';
-import { api } from '../../services/api';
+import { api, getAuthGeneration } from '../../services/api';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { usePersonasStore } from '../../stores/personasStore';
 import { useAgentsStore } from '../../stores/agentsStore';
-import { joinGroup } from '../../services/websocket';
+import { getCacheUserId } from '../../utils/cacheUtils';
+import { useFocusTrap } from '../Common/useFocusTrap';
+import { useGlobalSearch } from '../../hooks/useGlobalSearch';
+import { readSearchHistory, rememberSearch, clearSearchHistory } from '../../utils/searchHistory';
+import { motion } from 'framer-motion';
 import { AI_AVATAR_LETTERS, AI_COLORS, AI_NAMES } from '../../types';
-import { useDebounce } from '../../hooks/useDebounce';
+
 
 dayjs.extend(relativeTime);
 dayjs.locale('zh-cn');
 
 type FilterTab = 'all' | 'groups' | 'messages' | 'files' | 'agents' | 'personas' | 'comments' | 'members' | 'media';
 type QuickFilter = 'all' | 'images' | 'files' | 'links' | 'media';
-
-interface SearchResultGroup {
-  id: string;
-  name: string;
-  description?: string;
-  memberCount?: number;
-}
-
-interface SearchResultMessage {
-  id: string;
-  group_id: string;
-  group_name: string;
-  sender_type: 'user' | 'ai' | 'system';
-  sender_id?: string;
-  content: string;
-  attachment_match_preview?: string;
-  match_type?: string;
-  created_at: string;
-}
-
-interface SearchResultFile {
-  id: string;
-  group_id: string;
-  group_name: string;
-  filename: string;
-  mime_type: string;
-  file_size?: number;
-  search_description?: string;
-  search_tags?: string[];
-  media_description?: string;
-  content_preview?: string;
-  match_field?: string;
-  url?: string;
-  linked_message_id?: string | null;
-  created_at: string;
-}
-
-interface SearchResultAgent {
-  id: string;
-  name: string;
-  description?: string;
-}
-
-interface SearchResultPersona {
-  id: string;
-  name: string;
-  personality?: string;
-  style?: string;
-}
-
-interface SearchResultComment {
-  id: string;
-  message_id: string;
-  group_id: string;
-  group_name: string;
-  sender_type: string;
-  sender_id?: string;
-  content: string;
-  created_at: string;
-}
-
-interface SearchResultMember {
-  id: string;
-  name: string;
-  type: 'ai' | 'user';
-  group_id: string;
-  group_name: string;
-  personality?: string;
-  style?: string;
-  expertise?: string[];
-  color?: string | null;
-  avatar_url?: string | null;
-  match_field: string;
-}
-
-interface SearchResultMedia {
-  id: string;
-  group_id: string;
-  group_name: string;
-  filename: string;
-  mime_type: string;
-  media_type: 'image' | 'audio' | 'video';
-  file_size?: number;
-  media_description?: string;
-  search_description?: string;
-  search_tags?: string[];
-  content_preview?: string;
-  match_field?: string;
-  url?: string;
-  created_at: string;
-}
-
-interface GlobalSearchResponse {
-  groups: SearchResultGroup[];
-  messages: SearchResultMessage[];
-  files: SearchResultFile[];
-  agents: SearchResultAgent[];
-  personas: SearchResultPersona[];
-  comments: SearchResultComment[];
-  members: SearchResultMember[];
-  media: SearchResultMedia[];
-  total: number;
-  query: string;
-}
 
 function formatFileSize(bytes?: number) {
   if (!bytes || bytes <= 0) return '-';
@@ -147,133 +48,49 @@ function highlightText(text: string, query: string): React.ReactNode {
 }
 
 export function SearchPanel() {
-  const [query, setQuery] = useState('');
-  const [activeTab, setActiveTab] = useState<FilterTab>('all');
-  const [selectedGroupId, setSelectedGroupId] = useState('');
-  const [quickFilter, setQuickFilter] = useState<QuickFilter>('all');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
+  const search = useGlobalSearch();
+  const reduced = useReducedMotion();
+  const { query, setQuery, activeTab, setActiveTab, groupId: selectedGroupId, setGroupId: setSelectedGroupId,
+    quickFilter, setQuickFilter, dateFrom, setDateFrom, dateTo, setDateTo, searchData, loading, error } = search;
   const [showDateFilter, setShowDateFilter] = useState(false);
-  const [searchData, setSearchData] = useState<GlobalSearchResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [history, setHistory] = useState<string[]>(() => {
-    try {
-      const stored = localStorage.getItem('search_history');
-      return stored ? JSON.parse(stored) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  const debouncedQuery = useDebounce(query, 250);
-  const groups = useGroupsStore((s) => s.groups);
-  const selectGroup = useGroupsStore((s) => s.selectGroup);
-  const setSearchPanelOpen = useNavigationStore((s) => s.setSearchPanelOpen);
-  const setScrollToMessageId = useNavigationStore((s) => s.setScrollToMessageId);
-  const personas = usePersonasStore((s) => s.personas);
-  const selectAgent = useAgentsStore((s) => s.selectAgent);
-
+  const [history, setHistory] = useState(readSearchHistory);
+  const [opening, setOpening] = useState(false);
+  const [navigationError, setNavigationError] = useState('');
+  const groups = useGroupsStore(s => s.groups);
+  const personas = usePersonasStore(s => s.personas);
+  const setSearchPanelOpen = useNavigationStore(s => s.setSearchPanelOpen);
   const close = useCallback(() => setSearchPanelOpen(false), [setSearchPanelOpen]);
+  const trapRef = useFocusTrap<HTMLDivElement>(true, close);
+  const alive = useRef(true), navigation = useRef(0);
+  useEffect(() => { setQuery(useNavigationStore.getState().searchInitialQuery); }, []);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; navigation.current++; }; }, []);
+  useEffect(() => { if (searchData && !loading) setHistory(rememberSearch(searchData.query)); }, [searchData, loading]);
+  const counts = useMemo(() => ({ all: searchData?.total || 0, ...Object.fromEntries(
+    (['groups', 'messages', 'files', 'agents', 'personas', 'comments', 'members', 'media'] as const)
+      .map(type => [type, searchData?.counts?.[type] ?? searchData?.[type]?.length ?? 0])) }), [searchData]) as Record<FilterTab, number>;
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [close]);
-
-  const saveHistory = useCallback((value: string) => {
-    const normalized = value.trim();
-    if (!normalized) return;
-    setHistory((prev) => {
-      const next = [normalized, ...prev.filter((item) => item !== normalized)].slice(0, 10);
-      localStorage.setItem('search_history', JSON.stringify(next));
-      return next;
-    });
-  }, []);
-
-  // 请求序号，用于取消过期的搜索结果
-  const searchRequestIdRef = useRef(0);
-
-  const executeSearch = useCallback(async () => {
-    const normalized = debouncedQuery.trim();
-    if (!normalized) {
-      setSearchData(null);
-      setError(null);
-      return;
-    }
-
-    // 递增请求序号，过期的请求结果将被丢弃
-    const currentRequestId = ++searchRequestIdRef.current;
-
-    setLoading(true);
-    setError(null);
+  async function openResult(kind: 'group' | 'agent', id: string, messageId?: string) {
+    if (opening) return;
+    const intent = ++navigation.current, user = getCacheUserId(), generation = getAuthGeneration();
+    const current = () => alive.current && intent === navigation.current && user === getCacheUserId() && generation === getAuthGeneration();
+    setOpening(true); setNavigationError('');
     try {
-      const params: Record<string, any> = {
-        type: activeTab === 'all' ? undefined : activeTab,
-        groupId: selectedGroupId || undefined,
-      };
-      if (dateFrom) params.dateFrom = dateFrom;
-      if (dateTo) params.dateTo = dateTo;
-      if (quickFilter !== 'all') params.quickFilter = quickFilter;
-
-      const result = await api.globalSearch(normalized, params);
-      // 只接受最新请求的结果，避免竞态条件
-      if (currentRequestId === searchRequestIdRef.current) {
-        setSearchData(result as GlobalSearchResponse);
-        saveHistory(normalized);
+      if (kind === 'group') {
+        const group = await api.getGroup(id);
+        if (!current()) return;
+        useGroupsStore.getState().upsertGroup(group);
+      } else {
+        const agent = await api.getAgent(id);
+        if (!current()) return;
+        useAgentsStore.getState().upsertAgent(agent);
       }
-    } catch (err) {
-      if (currentRequestId === searchRequestIdRef.current) {
-        console.error('Search failed:', err);
-        setError(err instanceof Error ? err.message : '搜索失败。');
-        setSearchData(null);
-      }
-    } finally {
-      if (currentRequestId === searchRequestIdRef.current) {
-        setLoading(false);
-      }
-    }
-  }, [activeTab, debouncedQuery, saveHistory, selectedGroupId, quickFilter, dateFrom, dateTo]);
-
-  useEffect(() => {
-    executeSearch();
-  }, [executeSearch]);
-
-  const counts = useMemo(
-    () => {
-      if (loading) {
-        return { all: '-', groups: '-', messages: '-', files: '-', agents: '-', personas: '-', comments: '-', members: '-', media: '-' } as any;
-      }
-      return {
-        all: searchData?.total || 0,
-        groups: searchData?.groups?.length || 0,
-        messages: searchData?.messages?.length || 0,
-        files: searchData?.files?.length || 0,
-        agents: searchData?.agents?.length || 0,
-        personas: searchData?.personas?.length || 0,
-        comments: searchData?.comments?.length || 0,
-        members: searchData?.members?.length || 0,
-        media: searchData?.media?.length || 0,
-      };
-    },
-    [searchData, loading]
-  );
-
-  const goToGroup = (groupId: string) => {
-    selectGroup(groupId);
-    joinGroup(groupId);
-    close();
-  };
-
-  const goToMessage = (groupId: string, messageId: string) => {
-    selectGroup(groupId);
-    joinGroup(groupId);
-    setScrollToMessageId(messageId);
-    close();
-  };
+      if (current()) useNavigationStore.getState().openDestination({ kind, id, messageId });
+    } catch {
+      if (current()) setNavigationError('暂时无法打开，内容可能已删除或连接中断。请刷新搜索后重试。');
+    } finally { if (current()) setOpening(false); }
+  }
+  const goToGroup = (id: string) => void openResult('group', id);
+  const goToMessage = (id: string, messageId: string) => void openResult('group', id, messageId);
 
   const senderName = (senderType: string, senderId?: string) => {
     if (senderType === 'user') return '用户';
@@ -297,28 +114,33 @@ export function SearchPanel() {
     <button
       key={tab}
       onClick={() => setActiveTab(tab)}
-      className={`rounded-full px-3 py-1.5 text-xs font-medium ${activeTab === tab ? 'bg-accent text-white' : 'bg-bg-surface2 text-text-secondary hover:text-text-primary'}`}
+      aria-pressed={activeTab === tab}
+      className={`relative isolate min-h-10 rounded-xl px-3 py-2 text-xs font-medium whitespace-nowrap ${activeTab === tab ? 'text-accent' : 'text-text-secondary hover:text-text-primary'}`}
     >
+      {activeTab === tab && <motion.span layoutId="search-selection" className="absolute inset-0 -z-10 rounded-xl bg-accent/10 border border-accent/20" transition={{ duration: reduced ? 0 : 0.24 }} />}
       {label} ({counts[tab]})
     </button>
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 backdrop-blur-sm pt-10 modal-overlay" onClick={close}>
-      <div className="max-h-[86vh] w-full max-w-5xl overflow-hidden rounded-2xl border border-border-subtle bg-bg-surface shadow-2xl modal-content" onClick={(event) => event.stopPropagation()}>
-        <div className="flex items-center gap-3 border-b border-border-subtle px-5 py-4">
+    <div className="search-overlay" onClick={close}>
+      <div ref={trapRef} role="dialog" aria-modal="true" aria-label="全局搜索" className="search-dialog" onClick={(event) => event.stopPropagation()}>
+        <div className="search-header">
           <input
+            aria-label="搜索关键词"
+            maxLength={500}
             autoFocus
             data-search-input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="搜索群聊、消息、文件、媒体、成员、智能体和人设"
-            className="flex-1 rounded-xl border border-border-subtle bg-bg-surface2 px-4 py-3 text-sm text-text-primary outline-none focus:border-accent"
+            className="min-w-0 flex-1 rounded-xl border border-border-subtle bg-bg-surface2 px-4 py-3 text-sm text-text-primary outline-none focus:border-accent"
           />
           <select
+            aria-label="搜索范围"
             value={selectedGroupId}
             onChange={(event) => setSelectedGroupId(event.target.value)}
-            className="rounded-xl border border-border-subtle bg-bg-surface2 px-3 py-3 text-sm text-text-primary"
+            className="search-scope rounded-xl border border-border-subtle bg-bg-surface2 px-3 py-3 text-sm text-text-primary"
           >
             <option value="">全部群聊</option>
             {groups.map((group) => (
@@ -328,7 +150,7 @@ export function SearchPanel() {
           <button onClick={close} className="rounded-xl px-3 py-2 text-sm text-text-secondary hover:bg-bg-surface2 hover:text-text-primary">关闭</button>
         </div>
 
-        <div className="flex flex-wrap gap-2 border-b border-border-subtle px-5 py-3">
+        <div className="search-tabs" aria-label="搜索类型">
           {tabButton('all', '全部')}
           {tabButton('groups', '群聊')}
           {tabButton('messages', '消息')}
@@ -352,6 +174,7 @@ export function SearchPanel() {
             <button
               key={filter.key}
               onClick={() => setQuickFilter(filter.key)}
+              aria-pressed={quickFilter === filter.key}
               className={`flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-medium transition-colors ${quickFilter === filter.key
                 ? 'bg-accent text-white'
                 : 'bg-bg-surface2 text-text-secondary hover:text-text-primary'
@@ -364,6 +187,7 @@ export function SearchPanel() {
           <div className="w-px h-4 bg-border-subtle mx-1" />
           <button
             onClick={() => setShowDateFilter(!showDateFilter)}
+            aria-expanded={showDateFilter}
             className={`flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-medium transition-colors ${showDateFilter || dateFrom || dateTo
               ? 'bg-accent text-white'
               : 'bg-bg-surface2 text-text-secondary hover:text-text-primary'
@@ -375,9 +199,10 @@ export function SearchPanel() {
             日期
           </button>
           {showDateFilter && (
-            <div className="flex items-center gap-2 ml-1 animate-fade-in">
+            <div className="search-date-range flex flex-wrap items-center gap-2 ml-1 animate-fade-in">
               <input
                 type="date"
+                aria-label="开始日期"
                 value={dateFrom}
                 onChange={(e) => setDateFrom(e.target.value)}
                 className="w-[110px] rounded-lg border border-border-subtle bg-bg-surface2 px-2 py-1 text-[10px] text-text-primary outline-none focus:border-accent"
@@ -385,6 +210,7 @@ export function SearchPanel() {
               <span className="text-[10px] text-text-muted">至</span>
               <input
                 type="date"
+                aria-label="结束日期"
                 value={dateTo}
                 onChange={(e) => setDateTo(e.target.value)}
                 className="w-[110px] rounded-lg border border-border-subtle bg-bg-surface2 px-2 py-1 text-[10px] text-text-primary outline-none focus:border-accent"
@@ -401,9 +227,9 @@ export function SearchPanel() {
           )}
         </div>
 
-        <div className="grid gap-0 md:grid-cols-[240px_1fr]">
-          <aside className="border-r border-border-subtle bg-bg-surface2/50 p-4">
-            <h4 className="mb-3 text-sm font-medium text-text-primary">最近搜索</h4>
+        <div className="search-body">
+          <aside className="search-history">
+            <div className="flex items-center justify-between mb-3"><h4 className="text-sm font-medium text-text-primary">本次登录的搜索</h4>{!!history.length && <button className="text-xs text-text-muted" onClick={() => { clearSearchHistory(); setHistory([]); }}>清空</button>}</div>
             <div className="space-y-2">
               {history.length > 0 ? history.map((item) => (
                 <button
@@ -417,12 +243,12 @@ export function SearchPanel() {
             </div>
           </aside>
 
-          <main className="max-h-[68vh] overflow-y-auto p-4">
-            {!debouncedQuery.trim() && <p className="text-sm text-text-muted">输入关键词即可搜索整个系统。</p>}
-            {loading && <p className="text-sm text-text-muted">搜索中...</p>}
-            {error && <p className="text-sm text-red-500">{error}</p>}
-            {!loading && !error && debouncedQuery.trim() && searchData && searchData.total === 0 && (
-              <p className="text-sm text-text-muted">没有找到 “{debouncedQuery}” 的结果。</p>
+          <main className="search-results" aria-busy={loading || opening}>
+            {!query.trim() && <p className="text-sm text-text-muted">输入关键词即可搜索整个系统。</p>}
+            {loading && <p role="status" className="text-sm text-text-muted">搜索中…</p>}{opening && <p role="status" className="text-sm text-accent">正在打开内容…</p>}{navigationError && <p role="alert" className="text-sm text-red-500">{navigationError}</p>}
+            {error && <div role="alert"><p className="text-sm text-red-500">{error}</p><button className="workspace-button mt-3" onClick={search.retry}>重试搜索</button></div>}
+            {!loading && !error && query.trim() && searchData && search.total === 0 && (
+              <p className="text-sm text-text-muted">没有找到 “{query}” 的结果。</p>
             )}
 
             {!loading && !error && searchData && (
@@ -514,7 +340,7 @@ export function SearchPanel() {
                     <h5 className="mb-3 text-sm font-semibold text-text-primary">智能体</h5>
                     <div className="space-y-3">
                       {searchData.agents.map((result) => (
-                        <button key={result.id} onClick={() => { selectAgent(result.id); close(); }} className="block w-full rounded-xl border border-border-subtle bg-bg-surface2 p-4 text-left hover:border-accent">
+                        <button key={result.id} onClick={() => void openResult('agent', result.id)} className="block w-full rounded-xl border border-border-subtle bg-bg-surface2 p-4 text-left hover:border-accent">
                           <div className="text-sm font-medium text-text-primary">{result.name}</div>
                           <div className="mt-1 text-sm text-text-secondary">{truncate(result.description, 140)}</div>
                         </button>
@@ -530,7 +356,7 @@ export function SearchPanel() {
                       {searchData.personas.map((result) => (
                         <div key={result.id} className="rounded-xl border border-border-subtle bg-bg-surface2 p-4">
                           <div className="text-sm font-medium text-text-primary">{result.name}</div>
-                          <div className="mt-1 text-sm text-text-secondary">{truncate(result.personality || result.style, 140)}</div>
+                          <details className="mt-1 text-sm text-text-secondary"><summary>{truncate(result.personality || result.style, 140)}</summary><p className="whitespace-pre-wrap break-words mt-2">{result.personality}</p><p className="whitespace-pre-wrap break-words mt-2">{result.style}</p></details>
                         </div>
                       ))}
                     </div>
@@ -641,6 +467,10 @@ export function SearchPanel() {
             )}
           </main>
         </div>
+        <footer className="search-footer">
+          <span role="status">{query.trim() && !loading ? '共 ' + search.total + ' 条 · 第 ' + (search.offset / search.limit + 1) + ' 页' : '搜索你当前账号可访问的内容'}{activeTab === 'all' && !!searchData?.total ? '（每类每页 20 条）' : ''}</span>
+          <div className="flex gap-2"><button className="workspace-button" disabled={loading || !search.offset} onClick={search.previousPage}>上一页</button><button className="workspace-button" disabled={loading || !search.hasMore} onClick={search.nextPage}>下一页</button></div>
+        </footer>
       </div>
     </div>
   );

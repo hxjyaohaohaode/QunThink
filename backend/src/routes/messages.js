@@ -1,3 +1,4 @@
+import { parseSearchOptions, newestFirst, fileMatchesQuickFilter, createSearchCollector } from '../services/searchOptions.js';
 import express from 'express';
 import { withWriteLock, resetGroupActivity, updateGroupActivity } from '../models/db.js';
 import { invalidateInsightsCache } from '../services/insightsCache.js';
@@ -853,39 +854,26 @@ router.get('/groups/:groupId/private-chat/status', asyncHandler(async (req, res)
 }));
 
 router.get('/search', asyncHandler(async (req, res) => {
-  const { q, type, groupId, limit = 20, quickFilter, dateFrom, dateTo } = req.query;
-  const maxLimit = Math.min(parseInt(limit) || 20, 50);
-
-  if (!q || typeof q !== 'string' || q.trim().length === 0) {
-    return res.status(400).json({ error: '搜索关键词不能为空' });
-  }
-
+  let options;
+  try { options = parseSearchOptions(req.query); }
+  catch (error) { return res.status(400).json({ error: error.message }); }
+  const { q, groupId, quickFilter, fromDate, toDate } = options;
   const db = await req.getUserDb();
   return withWriteLock(req.userId, async () => {
   await readUserData(db);
-  const readableMessages = await readableSourceMessages(req.userId, db);
-  const readableGroups = await readableSourceGroups(req.userId, db);
+  const readableMessages = newestFirst(await readableSourceMessages(req.userId, db));
+  const readableGroups = newestFirst(await readableSourceGroups(req.userId, db));
   const readableGroupIds = new Set(readableGroups.map(group => group.id));
   // Keep source/owner checks and apply the requested group before previews
   // or result counts are built; missing group identities never gain access.
-  const readableFiles = (await readableSourceFiles(req.userId, db)).filter(file =>
+  const readableFiles = newestFirst(await readableSourceFiles(req.userId, db)).filter(file =>
     (!file.owner_user_id || file.owner_user_id === req.userId) &&
     (!file.uploader_id || file.uploader_id === req.userId) &&
     (!groupId || file.group_id === groupId));
 
   const accountPersonas = buildMergedPersonas(db.data.customPersonas || {}, getCatalogData(db.data));
   const searchQuery = q.toLowerCase().trim();
-  const searchTypes = type ? type.split(',') : ['groups', 'messages', 'files', 'agents', 'personas', 'comments', 'members', 'media'];
-
-  // 解析日期范围
-  const fromDate = dateFrom ? new Date(dateFrom) : null;
-  const toDate = dateTo ? new Date(dateTo + 'T23:59:59.999Z') : null;
-
-  // 快速筛选：根据 quickFilter 限定消息搜索类型
-  const quickFilterImages = quickFilter === 'images';
-  const quickFilterFiles = quickFilter === 'files';
-  const quickFilterLinks = quickFilter === 'links';
-  const quickFilterMedia = quickFilter === 'media';
+  const searchTypes = options.types.filter(type => quickFilter === 'all' || ['messages', 'files', 'media'].includes(type));
   const results = {
     groups: [],
     messages: [],
@@ -898,17 +886,17 @@ router.get('/search', asyncHandler(async (req, res) => {
     total: 0,
     query: q
   };
+  const collector = createSearchCollector(results, options);
 
   if (searchTypes.includes('groups')) {
-    const groups = readableGroups;
+    const groups = groupId ? readableGroups.filter(group => group.id === groupId) : readableGroups;
     for (const group of groups) {
-      if (results.groups.length >= maxLimit) break;
       const nameMatch = group.name?.toLowerCase().includes(searchQuery);
       const descMatch = group.description?.toLowerCase().includes(searchQuery);
       const announcementMatch = group.announcement?.toLowerCase().includes(searchQuery);
       const memberMatch = (group.ai_members || []).some(m => m.toLowerCase().includes(searchQuery));
       if (nameMatch || descMatch || announcementMatch || memberMatch) {
-        results.groups.push({
+        collector.add('groups', {
           id: group.id,
           name: group.name,
           description: group.description || '',
@@ -938,32 +926,24 @@ router.get('/search', asyncHandler(async (req, res) => {
       });
     }
 
-    // 按 quickFilter 预筛选消息附件类型
-    if (quickFilterImages || quickFilterFiles || quickFilterLinks) {
-      messages = messages.filter(m => {
-        if (!m.attachments || m.attachments.length === 0) return false;
-        return m.attachments.some(att => {
-          const mimeType = (att.type || att.mime_type || '').toLowerCase();
-          const fileName = (att.name || att.filename || '').toLowerCase();
-          if (quickFilterImages) return mimeType.startsWith('image/') || /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(fileName);
-          if (quickFilterFiles) return !mimeType.startsWith('image/') && !/\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(fileName) && !/^https?:\/\//i.test(att.url || '');
-          if (quickFilterLinks) return /^https?:\/\//i.test(att.url || '') || /^https?:\/\//i.test(att.name || '') || m.content_type === 'link' || /https?:\/\/[^\s]+/.test(m.content || '');
-          return false;
-        });
-      });
-    }
-
     const filesIndex = {};
     for (const f of readableFiles) {
       filesIndex[f.id] = f;
     }
 
     for (const message of messages) {
-      if (results.messages.length >= maxLimit) break;
       try {
         let content = message.content;
         if (message.metadata?.encryption?.encrypted && typeof content === 'string') {
           content = encryptionUtils.decryptText(content);
+        }
+
+        if (quickFilter !== 'all') {
+          const attachments = message.attachments || [];
+          const matches = quickFilter === 'links'
+            ? /https?:\/\/[^\s]+/i.test(content || '') || attachments.some(att => !att.id && /^https?:\/\//i.test(att.url || att.name || ''))
+            : attachments.some(att => fileMatchesQuickFilter(att, quickFilter));
+          if (!matches) continue;
         }
 
         const ttsTranscript = typeof message.metadata?.tts?.transcript === 'string'
@@ -1039,7 +1019,7 @@ router.get('/search', asyncHandler(async (req, res) => {
             }
           }
 
-          results.messages.push({
+          collector.add('messages', {
             id: message.id,
             group_id: message.group_id,
             group_name: groupObj?.name || '未知群组',
@@ -1068,8 +1048,9 @@ router.get('/search', asyncHandler(async (req, res) => {
 
     const messagesByAttachmentKey = new Map();
     const registerAttachmentLink = (key, msg) => {
-      if (key && !messagesByAttachmentKey.has(key)) {
-        messagesByAttachmentKey.set(key, msg);
+      const scopedKey = JSON.stringify([msg.group_id, key]);
+      if (key && !messagesByAttachmentKey.has(scopedKey)) {
+        messagesByAttachmentKey.set(scopedKey, msg);
       }
     };
     for (const msg of readableMessages) {
@@ -1086,7 +1067,7 @@ router.get('/search', asyncHandler(async (req, res) => {
     }
 
     for (const file of files) {
-      if (results.files.length >= maxLimit) break;
+      if (!fileMatchesQuickFilter(file, quickFilter)) continue;
       if (file.group_id && !readableGroupIds.has(file.group_id)) continue;
       const nameMatch = file.filename?.toLowerCase().includes(searchQuery);
       const descMatch = file.search_description?.toLowerCase().includes(searchQuery);
@@ -1115,14 +1096,14 @@ router.get('/search', asyncHandler(async (req, res) => {
         const groupObj = readableGroups.find(g => g.id === file.group_id);
         let matchField = nameMatch ? 'filename' : descMatch ? 'description' : tagsMatch ? 'tags' : mediaDescMatch ? 'media_description' : 'content';
 
-        const linkedMessage = messagesByAttachmentKey.get(file.id)
+        const linkedMessage = messagesByAttachmentKey.get(JSON.stringify([file.group_id, file.id]))
           || (file.filename ? (
-            messagesByAttachmentKey.get(file.filename)
-            || messagesByAttachmentKey.get(encodeURIComponent(file.filename))
+            messagesByAttachmentKey.get(JSON.stringify([file.group_id, file.filename]))
+            || messagesByAttachmentKey.get(JSON.stringify([file.group_id, encodeURIComponent(file.filename)]))
           ) : null)
           || null;
 
-        results.files.push({
+        collector.add('files', {
           id: file.id,
           group_id: file.group_id,
           group_name: groupObj?.name || '未知群组',
@@ -1143,15 +1124,14 @@ router.get('/search', asyncHandler(async (req, res) => {
   }
 
   if (searchTypes.includes('agents')) {
-    const agents = db.data.agents || [];
+    const agents = newestFirst(db.data.agents || []).filter(agent => !groupId || readableGroups.some(group => group.id === groupId && group.ai_members?.includes(agent.id)));
     for (const agent of agents) {
-      if (results.agents.length >= maxLimit) break;
       const nameMatch = agent.name?.toLowerCase().includes(searchQuery);
       const descMatch = agent.description?.toLowerCase().includes(searchQuery);
       const promptMatch = agent.system_prompt?.toLowerCase().includes(searchQuery);
       const openingMatch = agent.opening_message?.toLowerCase().includes(searchQuery);
       if (nameMatch || descMatch || promptMatch || openingMatch) {
-        results.agents.push({
+        collector.add('agents', {
           id: agent.id,
           name: agent.name,
           description: agent.description || '',
@@ -1166,7 +1146,7 @@ router.get('/search', asyncHandler(async (req, res) => {
 
   if (searchTypes.includes('personas')) {
     for (const [aiId, persona] of Object.entries(accountPersonas)) {
-      if (results.personas.length >= maxLimit) break;
+      if (groupId && !readableGroups.some(group => group.id === groupId && group.ai_members?.includes(aiId))) continue;
       const nameMatch = persona.name?.toLowerCase().includes(searchQuery);
       const styleMatch = persona.style?.toLowerCase().includes(searchQuery);
       const personalityMatch = persona.personality?.toLowerCase().includes(searchQuery);
@@ -1174,7 +1154,7 @@ router.get('/search', asyncHandler(async (req, res) => {
       const keywordsMatch = (persona.keywords || []).some(k => k.toLowerCase().includes(searchQuery));
       const replyStyleMatch = persona.replyStyle?.toLowerCase().includes(searchQuery);
       if (nameMatch || styleMatch || personalityMatch || expertiseMatch || keywordsMatch || replyStyleMatch) {
-        results.personas.push({
+        collector.add('personas', {
           id: aiId,
           name: persona.name,
           style: persona.style || '',
@@ -1189,30 +1169,17 @@ router.get('/search', asyncHandler(async (req, res) => {
   }
 
   if (searchTypes.includes('comments')) {
-    let messages = readableMessages;
-    if (groupId) {
-      messages = messages.filter(m => m.group_id === groupId);
-    }
-    for (const msg of messages) {
-      if (results.comments.length >= maxLimit) break;
-      if (!msg.comments || msg.comments.length === 0) continue;
-      for (const comment of msg.comments) {
-        if (results.comments.length >= maxLimit) break;
-        const contentMatch = comment.content?.toLowerCase().includes(searchQuery);
-        if (contentMatch) {
-          const groupObj = (db.data.groups || []).find(g => g.id === msg.group_id);
-          results.comments.push({
-            id: comment.id,
-            message_id: comment.message_id || msg.id,
-            group_id: msg.group_id,
-            group_name: groupObj?.name || '未知群组',
-            sender_type: comment.sender_type,
-            sender_id: comment.sender_id,
-            content: comment.content.substring(0, 150),
-            created_at: comment.created_at
-          });
-        }
-      }
+    const comments = readableMessages.filter(message => !groupId || message.group_id === groupId)
+      .flatMap(message => (message.comments || []).map(comment => ({ ...comment, message })));
+    for (const comment of newestFirst(comments)) {
+      if (!comment.content?.toLowerCase().includes(searchQuery)) continue;
+      const message = comment.message;
+      const group = readableGroups.find(item => item.id === message.group_id);
+      collector.add('comments', {
+        id: comment.id, message_id: message.id, group_id: message.group_id,
+        group_name: group?.name || '未知群组', sender_type: comment.sender_type,
+        sender_id: comment.sender_id, content: comment.content.substring(0, 150), created_at: comment.created_at
+      });
     }
   }
 
@@ -1224,7 +1191,6 @@ router.get('/search', asyncHandler(async (req, res) => {
       // 搜索 AI 成员
       const aiMembers = group.ai_members || [];
       for (const aiId of aiMembers) {
-        if (results.members.length >= maxLimit) break;
         const memberKey = `ai_${aiId}`;
         if (seenMemberIds.has(memberKey)) continue;
         const persona = accountPersonas[aiId] || AI_PERSONAS[aiId];
@@ -1236,7 +1202,7 @@ router.get('/search', asyncHandler(async (req, res) => {
         const keywordsMatch = (persona?.keywords || []).some(k => k.toLowerCase().includes(searchQuery));
         if (nameMatch || personalityMatch || styleMatch || expertiseMatch || keywordsMatch) {
           seenMemberIds.add(memberKey);
-          results.members.push({
+          collector.add('members', {
             id: aiId,
             name: aiName,
             type: 'ai',
@@ -1253,7 +1219,6 @@ router.get('/search', asyncHandler(async (req, res) => {
       // 搜索自定义智能体成员
       const agents = db.data.agents || [];
       for (const agent of agents) {
-        if (results.members.length >= maxLimit) break;
         if (!aiMembers.includes(agent.id)) continue;
         const memberKey = `agent_${agent.id}`;
         if (seenMemberIds.has(memberKey)) continue;
@@ -1261,7 +1226,7 @@ router.get('/search', asyncHandler(async (req, res) => {
         const descMatch = agent.description?.toLowerCase().includes(searchQuery);
         if (nameMatch || descMatch) {
           seenMemberIds.add(memberKey);
-          results.members.push({
+          collector.add('members', {
             id: agent.id,
             name: agent.name,
             type: 'ai',
@@ -1276,13 +1241,12 @@ router.get('/search', asyncHandler(async (req, res) => {
       // 搜索用户成员
       const userMembers = group.user_members || [];
       for (const userId of userMembers) {
-        if (results.members.length >= maxLimit) break;
         const memberKey = `user_${userId}`;
-        if (seenMemberIds.has(memberKey)) break;
+        if (seenMemberIds.has(memberKey)) continue;
         const idMatch = userId.toLowerCase().includes(searchQuery);
         if (idMatch) {
           seenMemberIds.add(memberKey);
-          results.members.push({
+          collector.add('members', {
             id: userId,
             name: userId,
             type: 'user',
@@ -1300,7 +1264,7 @@ router.get('/search', asyncHandler(async (req, res) => {
     const mediaMimeTypes = ['image/', 'audio/', 'video/'];
     const mediaExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma', '.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'];
     for (const file of files) {
-      if (results.media.length >= maxLimit) break;
+      if (!fileMatchesQuickFilter(file, quickFilter)) continue;
       if (groupId && file.group_id !== groupId) continue;
       if (file.group_id && !readableGroupIds.has(file.group_id)) continue;
 
@@ -1334,7 +1298,7 @@ router.get('/search', asyncHandler(async (req, res) => {
           : (file.mime_type || '').startsWith('audio/') || ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma'].includes(`.${ext}`) ? 'audio'
             : 'video';
 
-        results.media.push({
+        collector.add('media', {
           id: file.id,
           group_id: file.group_id,
           group_name: groupObj?.name || '未知群组',
@@ -1354,7 +1318,7 @@ router.get('/search', asyncHandler(async (req, res) => {
     }
   }
 
-  results.total = results.groups.length + results.messages.length + results.files.length + results.agents.length + results.personas.length + results.comments.length + results.members.length + results.media.length;
+  collector.finish();
 
   res.json(results);
   });

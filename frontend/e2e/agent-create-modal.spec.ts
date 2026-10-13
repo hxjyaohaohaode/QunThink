@@ -1,10 +1,12 @@
 import { test, expect, type Dialog } from '@playwright/test';
 import { registerSyntheticAccount } from './authFixture';
+import { beginSessionBootstrapRecovery, navigateWithSessionBootstrapRecovery } from './sessionBootstrapRecovery';
 
 // Real Chromium controls/focus, explicit question/create response doubles.
 // Not backend creation/provider validation. Runtime is authorized CI only.
 test.use({ trace: 'on', video: 'on' });
 test('agent wizard retains drafts and blocks dismissal while creating', async ({ page, context }, info) => {
+  beginSessionBootstrapRecovery(page, info);
   await registerSyntheticAccount(context);
   let creates = 0;
   let releaseFailure!: () => void;
@@ -21,7 +23,7 @@ test('agent wizard retains drafts and blocks dismissal while creating', async ({
     if (creates === 1) { await gate; return route.fulfill({ status: 400, json: { error: '受控创建失败' } }); }
     await route.fulfill({ status: 201, json: { id: 'ui-agent-fixture', name: body.name, description: body.description, opening_message: body.openingMessage, created_at: '2026-10-07T00:00:00Z' } });
   });
-  await page.goto('/');
+  await navigateWithSessionBootstrapRecovery(page, timeout => page.goto('/', { timeout }));
   await page.getByRole('button', { name: '智能体', exact: true }).click();
   const add = page.getByRole('button', { name: '添加智能体', exact: true });
   await add.click();

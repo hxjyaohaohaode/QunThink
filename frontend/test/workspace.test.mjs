@@ -126,10 +126,11 @@ test('confirmed document filter includes exact manual head and excludes unconfir
   const cards=[...container.querySelectorAll('[data-observe="task-card"]')];assert.equal(cards.length,1);assert.match(cards[0].textContent,/已确认的人工稿/);assert.match(cards[0].textContent,/已确认成果/);assert.doesNotMatch(cards[0].querySelector('.workspace-status').textContent,/原始消息已变化/);
 });
 
-test('zero-model workspace offers writing first and replaces the large setup card once a document exists',async()=>{
- assert.ok(button('现在开始写作'));await act(async()=>button('现在开始写作').click());assert.ok(container.querySelector('form'));await act(async()=>button('收起').click());
+test('workspace keeps tasks primary without a greeting or model setup banner and preserves direct writing access',async()=>{
+ assert.equal(container.querySelector('.workspace-setup'),null);assert.doesNotMatch(container.textContent,/让想法继续向前|先写作，再选择 AI 助手/);
+ assert.ok(button('＋ 新任务'));await act(async()=>button('＋ 新任务').click());assert.ok(container.querySelector('form'));await act(async()=>button('收起').click());
  globalThis.__workspaceTest.tasks=[{id:'writing',title:'已有人工文稿',prompt:'用途',category:'work',status:'needs_review',history:[],result:'实际正文',run_count:0,group_id:null}];await act(async()=>store.getState().fetch());
- assert.equal(container.querySelector('.workspace-setup'),null);assert.ok(button('继续最近文稿'));await act(async()=>button('继续最近文稿').click());assert.match(container.textContent,/共享正文编辑器/);
+ assert.equal(container.querySelector('.workspace-setup'),null);assert.ok(button('检查草稿'));await act(async()=>button('检查草稿').click());assert.match(container.textContent,/共享正文编辑器/);
 });
 test('minimal unresolved receipt prioritizes the original document without starting a model or new task',async()=>{
  const requestId='11111111-1111-4111-8111-111111111111';localStorage.setItem('qunthink_command_v1_alice:'+requestId,JSON.stringify({key:requestId,action:'save_revision',taskId:'pending-doc',payloadHash:'a'.repeat(64),createdAt:'2026-10-04T12:00:00Z'}));

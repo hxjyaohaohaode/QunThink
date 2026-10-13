@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { api } from '../services/api';
+import { api, getAuthGeneration } from '../services/api';
+import { getCacheUserId } from '../utils/cacheUtils';
 import { readAgentStream } from '../services/agentStream';
 import { Agent, AgentChatMessage, AgentQuestion, AgentMessageAttachment } from '../types';
 
@@ -23,6 +24,7 @@ interface AgentsState {
   creatingAgent: boolean;
   fetchAgents: () => Promise<void>;
   selectAgent: (agentId: string) => void;
+  upsertAgent: (agent: Agent) => void;
   createAgent: (data: { name: string; description: string; openingMessage: string; enableSuggestions: boolean; capabilities: { scheduled_tasks: boolean; web_search: boolean; multimodal: boolean }; avatarUrl?: string | null; modelId?: string | null }) => Promise<Agent>;
   updateAgent: (agentId: string, data: AgentUpdateData) => Promise<void>;
   deleteAgent: (agentId: string) => Promise<void>;
@@ -35,6 +37,8 @@ interface AgentsState {
 
 // 按 agentId 存储活跃的 AbortController，确保新消息发送时中断旧流
 const activeStreamControllers = new Map<string, { controller: AbortController; messageId: string; stopped?: boolean }>();
+let directoryRevision = 0;
+const accountKey = () => JSON.stringify([getCacheUserId(), getAuthGeneration()]);
 const messageReadVersions = new Map<string, number>();
 
 export const useAgentsStore = create<AgentsState>((set, get) => ({
@@ -46,9 +50,12 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
   creatingAgent: false,
 
   fetchAgents: async () => {
+    const owner = accountKey(), revision = ++directoryRevision;
+    const current = () => owner === accountKey() && revision === directoryRevision;
     set({ loading: true, error: null });
     try {
       const agents = await api.getAgents();
+      if (!current()) return;
       const currentAgentId = get().currentAgent?.id;
       const updatedCurrentAgent = currentAgentId
         ? agents.find((a: Agent) => a.id === currentAgentId) || null
@@ -59,8 +66,13 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
         loading: false
       });
     } catch (error) {
-      set({ error: (error as Error).message, loading: false });
+      if (current()) set({ error: (error as Error).message, loading: false });
     }
+  },
+
+  upsertAgent: (agent) => {
+    directoryRevision++;
+    set(state => ({ agents: [...state.agents.filter(item => item.id !== agent.id), agent], currentAgent: state.currentAgent?.id === agent.id ? agent : state.currentAgent, loading: false }));
   },
 
   selectAgent: (agentId: string) => {
@@ -78,9 +90,14 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
   },
 
   createAgent: async (data) => {
+    const owner = accountKey();
+    directoryRevision++;
+    set({ loading: false });
     set({ creatingAgent: true, error: null });
     try {
       const newAgent = await api.createAgent(data);
+      if (owner !== accountKey()) throw new Error('账号已切换，已忽略旧操作结果');
+      directoryRevision++;
       set(state => ({
         agents: [...state.agents, newAgent],
         currentAgent: newAgent,
@@ -88,27 +105,39 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       }));
       return newAgent;
     } catch (error) {
+      if (owner !== accountKey()) throw error;
       set({ error: (error as Error).message, creatingAgent: false });
       throw error;
     }
   },
 
   updateAgent: async (agentId: string, data: AgentUpdateData) => {
+    const owner = accountKey();
+    directoryRevision++;
+    set({ loading: false });
     try {
       const updated = await api.updateAgent(agentId, data);
+      if (owner !== accountKey()) throw new Error('账号已切换，已忽略旧操作结果');
+      directoryRevision++;
       set(state => ({
         agents: state.agents.map(a => a.id === agentId ? updated : a),
         currentAgent: state.currentAgent?.id === agentId ? updated : state.currentAgent
       }));
     } catch (error) {
+      if (owner !== accountKey()) throw error;
       set({ error: (error as Error).message });
       throw error;
     }
   },
 
   deleteAgent: async (agentId: string) => {
+    const owner = accountKey();
+    directoryRevision++;
+    set({ loading: false });
     try {
       await api.deleteAgent(agentId);
+      if (owner !== accountKey()) throw new Error('账号已切换，已忽略旧操作结果');
+      directoryRevision++;
       activeStreamControllers.get(agentId)?.controller.abort();
       set(state => {
         const newAgentMessages = new Map(state.agentMessages);
@@ -120,6 +149,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
         };
       });
     } catch (error) {
+      if (owner !== accountKey()) throw error;
       set({ error: (error as Error).message });
       throw error;
     }

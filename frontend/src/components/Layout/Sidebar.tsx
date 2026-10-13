@@ -14,9 +14,9 @@ import { UserProfileEditor } from './UserProfileEditor';
 import { DesktopSettingsModal } from './DesktopSettingsModal';
 import { Avatar } from '../Common/Avatar';
 import { useProfileStore } from '../../stores/profileStore';
-import { SearchPanel } from '../Chat/SearchPanel';
 import { joinGroup } from '../../services/websocket';
 import { prefersReducedMotion } from '../../utils/animations';
+import { SearchPagination } from '../Chat/SearchPagination';
 import { useGlobalSearch, type SearchFilterTab } from '../../hooks/useGlobalSearch';
 import dayjs from 'dayjs';
 import 'dayjs/locale/zh-cn';
@@ -311,6 +311,7 @@ function MemberItem({ aiId, personas, onPrivateChat, onEdit, reducedMotion }: Me
 }
 
 interface SidebarProps {
+  embedded?: boolean;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
   onOpenAgents?: () => void;
@@ -318,7 +319,7 @@ interface SidebarProps {
   onNavigateToChat?: () => void;
 }
 
-export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onOpenWorkspace, onNavigateToChat }: SidebarProps) {
+export function Sidebar({ embedded = false, collapsed = false, onToggleCollapse, onOpenAgents, onOpenWorkspace, onNavigateToChat }: SidebarProps) {
   const models = useModelsStore(s => s.catalog?.models);
   const AI_LIST = (models || []).map(m => m.id);
   const groups = useGroupsStore((s) => s.groups);
@@ -328,9 +329,8 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
   const pinGroup = useGroupsStore((s) => s.pinGroup);
   const getOrCreatePrivateChat = useGroupsStore((s) => s.getOrCreatePrivateChat);
   const personas = usePersonasStore((s) => s.personas);
-  const { setSidebarOpen, searchPanelOpen } = useNavigationStore(useShallow((s) => ({
+  const { setSidebarOpen } = useNavigationStore(useShallow((s) => ({
     setSidebarOpen: s.setSidebarOpen,
-    searchPanelOpen: s.searchPanelOpen,
   })));
   const userProfile = useProfileStore(state => state.profile);
   const [activeView, setActiveView] = useState<SidebarView>('chats');
@@ -448,6 +448,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
   };
 
   const handleSelectGroup = useCallback((groupId: string) => {
+    useNavigationStore.getState().setScrollToMessageId(null);
     selectGroup(groupId);
     joinGroup(groupId);
     if (window.innerWidth < 768) {
@@ -587,7 +588,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
         />
       )}
       {/* Top Section: Logo + App name + Actions */}
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-border-subtle flex-shrink-0">
+      {embedded ? <div className="flex items-center justify-between gap-3 px-4 py-4 border-b border-border-subtle"><h1 className="text-lg font-semibold">聊天</h1><button className="workspace-button" title="新建对话" onClick={() => setShowNewChatModal(true)}>新建</button></div> : <div className="flex items-center gap-2 px-4 py-3 border-b border-border-subtle flex-shrink-0">
         <button onClick={onOpenWorkspace} aria-label="返回工作台" title="工作台" className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 overflow-hidden">
           <svg viewBox="0 0 200 200" className="w-7 h-7">
             <defs>
@@ -644,7 +645,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
             )}
           </div>
         )}
-      </div>
+      </div>}
 
       {/* Collapsed: Action buttons only */}
       {collapsed && (
@@ -710,14 +711,14 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
             <div className="flex mt-1.5 border-b border-border-subtle overflow-x-auto">
               {([
                 { key: 'all' as SearchFilterTab, label: '全部', count: globalSearch.searchData.total },
-                { key: 'groups' as SearchFilterTab, label: '群聊', count: globalSearch.searchData.groups?.length || 0 },
-                { key: 'messages' as SearchFilterTab, label: '消息', count: globalSearch.searchData.messages?.length || 0 },
-                { key: 'files' as SearchFilterTab, label: '文件', count: globalSearch.searchData.files?.length || 0 },
-                { key: 'media' as SearchFilterTab, label: '媒体', count: globalSearch.searchData.media?.length || 0 },
-                { key: 'agents' as SearchFilterTab, label: '智能体', count: globalSearch.searchData.agents?.length || 0 },
-                { key: 'personas' as SearchFilterTab, label: 'AI角色', count: globalSearch.searchData.personas?.length || 0 },
-                { key: 'members' as SearchFilterTab, label: '成员', count: globalSearch.searchData.members?.length || 0 },
-                { key: 'comments' as SearchFilterTab, label: '评论', count: globalSearch.searchData.comments?.length || 0 },
+                { key: 'groups' as SearchFilterTab, label: '群聊', count: (globalSearch.searchData?.counts?.groups ?? globalSearch.searchData?.groups?.length ?? 0) },
+                { key: 'messages' as SearchFilterTab, label: '消息', count: (globalSearch.searchData?.counts?.messages ?? globalSearch.searchData?.messages?.length ?? 0) },
+                { key: 'files' as SearchFilterTab, label: '文件', count: (globalSearch.searchData?.counts?.files ?? globalSearch.searchData?.files?.length ?? 0) },
+                { key: 'media' as SearchFilterTab, label: '媒体', count: (globalSearch.searchData?.counts?.media ?? globalSearch.searchData?.media?.length ?? 0) },
+                { key: 'agents' as SearchFilterTab, label: '智能体', count: (globalSearch.searchData?.counts?.agents ?? globalSearch.searchData?.agents?.length ?? 0) },
+                { key: 'personas' as SearchFilterTab, label: 'AI角色', count: (globalSearch.searchData?.counts?.personas ?? globalSearch.searchData?.personas?.length ?? 0) },
+                { key: 'members' as SearchFilterTab, label: '成员', count: (globalSearch.searchData?.counts?.members ?? globalSearch.searchData?.members?.length ?? 0) },
+                { key: 'comments' as SearchFilterTab, label: '评论', count: (globalSearch.searchData?.counts?.comments ?? globalSearch.searchData?.comments?.length ?? 0) },
               ]).map(tab => (
                 <button
                   key={tab.key}
@@ -739,13 +740,13 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
       {!collapsed && !searchQuery && (
         <div className="flex px-4 gap-1 flex-shrink-0">
           <button
-            onClick={() => setActiveView('chats')}
+            onClick={() => { setActiveView('chats'); onNavigateToChat?.(); }}
             className={`flex-1 py-1.5 text-[11px] font-medium rounded-lg transition-all duration-150 ${activeView === 'chats'
               ? 'bg-sidebar-active text-accent'
               : 'text-text-muted hover:text-text-secondary hover:bg-sidebar-hover'
               }`}
           >
-            聊天
+            会话
           </button>
           <button
             onClick={() => setActiveView('members')}
@@ -768,7 +769,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
                 <div className="flex items-center justify-center h-20">
                   <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-accent"></div>
                 </div>
-              ) : !globalSearch.searchData || globalSearch.searchData.total === 0 ? (
+              ) : globalSearch.error ? (<div role="alert" className="p-4 text-sm text-text-secondary"><p>{globalSearch.error}</p><button className="workspace-button mt-3" onClick={globalSearch.retry}>重试</button></div>) : !globalSearch.searchData || globalSearch.total === 0 ? (
                 <div className="flex flex-col items-center justify-center h-40 text-text-muted">
                   <svg className="w-8 h-8 mb-2 opacity-40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                     <circle cx="11" cy="11" r="8" />
@@ -792,7 +793,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
                   {(globalSearch.activeTab === 'all' || globalSearch.activeTab === 'messages') && (globalSearch.searchData.messages || []).map(r => {
                     const senderName = r.sender_type === 'user' ? '用户' : (personas[r.sender_id || '']?.name || AI_NAMES[r.sender_id || ''] || r.sender_id || '?');
                     return (
-                      <div key={r.id} onClick={() => { selectGroup(r.group_id); joinGroup(r.group_id); setScrollToMessageId(r.id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+                      <div key={r.id} onClick={() => { handleSelectGroup(r.group_id); setScrollToMessageId(r.id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                         <div className="flex items-start gap-1.5">
                           <div className="w-4 h-4 rounded-full flex items-center justify-center text-white text-[7px] font-semibold flex-shrink-0" style={{ backgroundColor: r.sender_type === 'user' ? '#171717' : (personas[r.sender_id || '']?.color || AI_COLORS[r.sender_id || ''] || '#737373') }}>
                             {r.sender_type === 'user' ? 'U' : (AI_AVATAR_LETTERS[r.sender_id || ''] || senderName[0])}
@@ -813,7 +814,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
                     );
                   })}
                   {(globalSearch.activeTab === 'all' || globalSearch.activeTab === 'files') && (globalSearch.searchData.files || []).map(r => (
-                    <div key={r.id} onClick={() => { selectGroup(r.group_id); joinGroup(r.group_id); if (r.linked_message_id) setScrollToMessageId(r.linked_message_id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+                    <div key={r.id} onClick={() => { handleSelectGroup(r.group_id); if (r.linked_message_id) setScrollToMessageId(r.linked_message_id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                       <div className="flex items-center gap-1.5">
                         <div className="w-5 h-5 rounded bg-emerald-500/10 flex items-center justify-center flex-shrink-0">
                           <svg className="w-3 h-3 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
@@ -860,7 +861,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
                   {(globalSearch.activeTab === 'all' || globalSearch.activeTab === 'comments') && (globalSearch.searchData.comments || []).map(r => {
                     const senderName = r.sender_type === 'user' ? '用户' : (personas[r.sender_id || '']?.name || AI_NAMES[r.sender_id || ''] || r.sender_id || '?');
                     return (
-                      <div key={r.id} onClick={() => { if (r.group_id) { selectGroup(r.group_id); joinGroup(r.group_id); setScrollToMessageId(r.message_id); } setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+                      <div key={r.id} onClick={() => { if (r.group_id) { handleSelectGroup(r.group_id); setScrollToMessageId(r.message_id); } setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                         <div className="flex items-start gap-1.5">
                           <div className="w-4 h-4 rounded-full flex items-center justify-center text-white text-[7px] font-semibold flex-shrink-0" style={{ backgroundColor: r.sender_type === 'user' ? '#171717' : (personas[r.sender_id || '']?.color || AI_COLORS[r.sender_id || ''] || '#737373') }}>
                             {r.sender_type === 'user' ? 'U' : (AI_AVATAR_LETTERS[r.sender_id || ''] || senderName[0])}
@@ -877,7 +878,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
                     );
                   })}
                   {(globalSearch.activeTab === 'all' || globalSearch.activeTab === 'members') && (globalSearch.searchData.members || []).map(r => (
-                    <div key={`${r.id}_${r.group_id}`} onClick={() => { selectGroup(r.group_id); joinGroup(r.group_id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+                    <div key={`${r.id}_${r.group_id}`} onClick={() => { handleSelectGroup(r.group_id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                       <div className="flex items-center gap-1.5">
                         <div className="w-4 h-4 rounded-full flex items-center justify-center text-white text-[7px] font-semibold flex-shrink-0" style={{ backgroundColor: r.type === 'ai' ? (r.color || AI_COLORS[r.id] || '#6b7280') : '#171717' }}>
                           {r.type === 'ai' ? (r.name?.[0] || 'A') : 'U'}
@@ -907,7 +908,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
                       </svg>
                     );
                     return (
-                      <div key={r.id} onClick={() => { selectGroup(r.group_id); joinGroup(r.group_id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
+                      <div key={r.id} onClick={() => { handleSelectGroup(r.group_id); setSearchQuery(''); }} className="px-3 py-2 hover:bg-sidebar-hover transition-colors cursor-pointer border-b border-border-subtle/30">
                         <div className="flex items-center gap-1.5">
                           <span className="text-[12px] flex-shrink-0">{mediaIcon}</span>
                           <div className="flex-1 min-w-0">
@@ -923,6 +924,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
                   })}
                 </>
               )}
+              <SearchPagination search={globalSearch} />
             </div>
           ) : (
             <>
@@ -934,7 +936,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
       )}
 
       {/* Bottom Section */}
-      {!collapsed ? (
+      {!embedded && (!collapsed ? (
         <div className="border-t border-border-subtle flex-shrink-0 px-3 py-2.5 flex items-center gap-2">
           <button
             onClick={() => setShowProfileEditor(true)}
@@ -980,7 +982,7 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
             </svg>
           </button>
         </div>
-      )}
+      ))}
 
       {showDeleteConfirm && (
         <div
@@ -1046,7 +1048,6 @@ export function Sidebar({ collapsed = false, onToggleCollapse, onOpenAgents, onO
         />
       </ErrorBoundary>
 
-      {searchPanelOpen && <SearchPanel />}
 
       <ErrorBoundary fallback={null}>
         <DesktopSettingsModal

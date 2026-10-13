@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -143,7 +144,7 @@ for (const changed of ['new-me-401', 'new-token-network-failure', 'new-me-200', 
 
 test('all metadata pages in the same test retain its first deadline, including repeated begin calls', async () => {
   const { build } = await import('esbuild');
-  const result = await build({ entryPoints: [new URL('../e2e/sessionBootstrapRecovery.ts', import.meta.url).pathname], bundle: true, write: false, format: 'esm', platform: 'node', plugins: [{ name: 'playwright-deadline-fixture', setup(b) { b.onResolve({ filter: /^@playwright\/test$/ }, () => ({ path: 'playwright', namespace: 'fixture' })); b.onLoad({ filter: /.*/, namespace: 'fixture' }, () => ({ contents: 'export const expect=()=>{};', loader: 'js' })); } }] });
+  const result = await build({ entryPoints: [fileURLToPath(new URL('../e2e/sessionBootstrapRecovery.ts', import.meta.url))], bundle: true, write: false, format: 'esm', platform: 'node', plugins: [{ name: 'playwright-deadline-fixture', setup(b) { b.onResolve({ filter: /^@playwright\/test$/ }, () => ({ path: 'playwright', namespace: 'fixture' })); b.onLoad({ filter: /.*/, namespace: 'fixture' }, () => ({ contents: 'export const expect=()=>{};', loader: 'js' })); } }] });
   const { beginSessionBootstrapRecovery, navigateWithSessionBootstrapRecovery } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
   class Page extends EventEmitter { url() { return origin + '/'; } getByRole() { return {}; } getByTestId() { return {}; } }
   const originalNow = Date.now; let now = 1000, called = 0; Date.now = () => now;
@@ -157,7 +158,7 @@ test('all metadata pages in the same test retain its first deadline, including r
 
 async function bootstrapAdapter() {
   const { build } = await import('esbuild');
-  const result = await build({ entryPoints: [new URL('../e2e/sessionBootstrapRecovery.ts', import.meta.url).pathname], bundle: true, write: false, format: 'esm', platform: 'node', plugins: [{ name: 'playwright-epoch-fixture', setup(b) {
+  const result = await build({ entryPoints: [fileURLToPath(new URL('../e2e/sessionBootstrapRecovery.ts', import.meta.url))], bundle: true, write: false, format: 'esm', platform: 'node', plugins: [{ name: 'playwright-epoch-fixture', setup(b) {
     b.onResolve({ filter: /^@playwright\/test$/ }, () => ({ path: 'playwright', namespace: 'epoch' }));
     b.onLoad({ filter: /.*/, namespace: 'epoch' }, () => ({ contents: `
       export function expect(locator) { return { toBeVisible: async () => { if (!await locator.isVisible()) throw new Error('UI not visible'); } }; }

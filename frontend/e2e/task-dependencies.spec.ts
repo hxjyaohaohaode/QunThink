@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { registerSyntheticAccount } from './authFixture';
 import { beginSessionTokenRecovery, navigateWithSessionTokenRecovery } from './sessionTokenRecovery';
 import type { TaskResultDocument, WorkspaceTask } from '../../shared/tasks';
-import { assertLinuxBrowserSandbox, readSandboxDiagnostics, readVersionDiagnostics } from './sandboxDiagnostics';
+import { assertBrowserSandbox, readSandboxDiagnostics, readVersionDiagnostics } from './sandboxDiagnostics';
 
 // Use installed stable Chrome and its OS-provided AppArmor profile.
 // Keep sandboxing enabled; never weaken host policy for downloaded Chromium.
@@ -20,11 +20,15 @@ test.beforeAll(async ({ browser }) => {
     await page.goto('chrome://version');
     const version = await page.evaluate(readVersionDiagnostics);
     await page.goto('chrome://sandbox');
+    await expect.poll(async () => {
+      const diagnostic = await page.evaluate(readSandboxDiagnostics);
+      return process.platform === 'win32' ? diagnostic.rows.some(row => row.includes('Renderer')) : !!diagnostic.evaluation;
+    }, { message: 'Wait for Chrome to populate its real sandbox policy table' }).toBe(true);
     const sandbox = await page.evaluate(readSandboxDiagnostics);
     // Log observations even if incomplete, but only claim verified after every
     // required field has passed. Do not log a full command line/profile path.
     console.log('[dependency-browser-observed]', JSON.stringify({ version: browser.version(), executable: version.executable, sandbox }));
-    const verified = assertLinuxBrowserSandbox(version, sandbox);
+    const verified = assertBrowserSandbox(version, sandbox, process.platform);
     console.log('[dependency-browser-verified]', JSON.stringify({ version: browser.version(), chromiumSandbox: true, noSandboxFlag: false, ...verified }));
   } finally { await diagnostic.close(); }
 });
@@ -55,6 +59,8 @@ async function saveDocument(context: BrowserContext, taskId: string, content: st
 async function openTask(page: Page, task: WorkspaceTask) {
   const card = page.locator('[data-observe="task-card"]').filter({ has: page.getByRole('heading', { name: task.title, exact: true }) });
   await card.getByRole('button', { name: /打开详情|检查草稿/, exact: true }).click();
+  const dependencies = card.locator('details').filter({ has: page.locator('summary').filter({ hasText: /^前置任务$/ }) });
+  if (!await dependencies.evaluate(element => (element as HTMLDetailsElement).open)) await dependencies.locator('summary').click();
   await expect(card.getByTestId('task-result-editor')).toBeVisible(); return card;
 }
 async function workspace(page: Page) {
@@ -65,6 +71,7 @@ test('real dependencies block generation and acceptance, preserve writing, and r
   await registerSyntheticAccount(context); const prior = await createTask(context, '依赖浏览器前置准备'); await workspace(page);
   await page.getByRole('button', { name: '＋ 新任务', exact: true }).click();
   await page.getByLabel('任务名称', { exact: true }).fill('依赖浏览器下游文稿'); await page.getByLabel('希望得到什么').fill('只整理自己的当前输入');
+  await page.locator('summary').filter({ hasText: '更多设置' }).click();
   await page.getByRole('group', { name: '选择前置任务', exact: true }).getByRole('checkbox', { name: prior.title, exact: true }).check();
   await page.getByRole('button', { name: '保存任务', exact: true }).click();
   const editor = page.getByTestId('task-result-editor'); await expect(editor).toBeVisible(); await expect(editor.getByText('前置任务尚未就绪，暂时不能生成或验收。仍可编辑和保存正文。')).toBeVisible();
@@ -122,7 +129,7 @@ test('concurrent dependency edit requires a deliberate reselection and another a
     await registerSyntheticAccount(foreign); const foreignTask = await createTask(foreign, '其他账号自己的任务');
     const listing = await (await foreign.request.get('/api/tasks')).json(); expect(JSON.stringify(listing)).not.toContain(task.id); expect(JSON.stringify(listing)).not.toContain(first.title);
     const forbidden = await foreign.request.put(`/api/tasks/${foreignTask.id}/dependencies`, { headers: await headers(foreign), data: { client_request_id: randomUUID(), expected_revision: 0, dependency_ids: [first.id] } }); expect(forbidden.status()).toBe(404); expect(await forbidden.text()).not.toContain(first.title);
-    const foreignPage = await foreign.newPage(); await foreignPage.goto('/'); await expect(foreignPage.getByTestId('workspace')).toBeVisible(); await foreignPage.getByRole('button', { name: '＋ 新任务', exact: true }).click(); await expect(foreignPage.getByRole('group', { name: '选择前置任务', exact: true })).not.toContainText(first.title);
+    const foreignPage = await foreign.newPage(); await foreignPage.goto('/'); await expect(foreignPage.getByTestId('workspace')).toBeVisible(); await foreignPage.getByRole('button', { name: '＋ 新任务', exact: true }).click(); await foreignPage.locator('summary').filter({ hasText: '更多设置' }).click(); await expect(foreignPage.getByRole('group', { name: '选择前置任务', exact: true })).not.toContainText(first.title);
   } finally { await foreign.close(); }
 });
 

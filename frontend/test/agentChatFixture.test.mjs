@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Window } from 'happy-dom';
@@ -33,7 +34,7 @@ test('test launcher only preserves named runtime variables and replaces dotenv, 
   assert.equal(env.PATH, '/synthetic/bin'); assert.equal(env.CI, 'true'); assert.equal(env.GITHUB_RUN_ID, 'synthetic-run');
   assert.equal(env.DOTENV_CONFIG_PATH, '/tmp/synthetic-fixture/empty.env');
   assert.equal(env.ENCRYPTION_KEY, 'synthetic-new-key'); assert.equal(env.DATA_DIR, '/tmp/synthetic-fixture');
-  assert.equal(env.AUTH_DB_PATH, '/tmp/synthetic-fixture/auth.json'); assert.equal(env.MONGODB_URI, '');
+  assert.equal(env.AUTH_DB_PATH, join('/tmp/synthetic-fixture', 'auth.json')); assert.equal(env.MONGODB_URI, '');
   assert.equal(env.NODE_ENV, 'test'); assert.equal(env.AUTH_MODE, 'session'); assert.equal(env.QUNTHINK_SHARED_PROVIDER_KEYS, '0');
   for (const key of ['OPENAI_API_KEY', 'ALIYUN_SECRET_KEY', 'DATABASE_URL', 'DOTENV_CONFIG_OVERRIDE', 'NODE_OPTIONS', 'HTTP_PROXY']) assert.equal(env[key], undefined);
   assert.ok(!JSON.stringify(env).includes('must-not-inherit'));

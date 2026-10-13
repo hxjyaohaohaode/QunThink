@@ -4,6 +4,7 @@ import { build } from 'esbuild';
 import { resolve, join } from 'node:path';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { Window } from 'happy-dom';
 const root = resolve(import.meta.dirname, '..'), window = new Window({ url: 'https://qunthink.test/' });
 Object.assign(globalThis, { window, document: window.document, localStorage: window.localStorage, HTMLElement: window.HTMLElement, Node: window.Node, Element: window.Element, IS_REACT_ACT_ENVIRONMENT: true });
@@ -21,7 +22,7 @@ const built = await build({ stdin: { resolveDir: root, loader: 'tsx', contents: 
  build.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({ loader: 'js', contents: path === 'api' ? `export const getAuthGeneration=()=>globalThis.__metadata.auth;export const axiosInstance=Object.fromEntries(['get','post','put','patch','delete'].map(method=>[method,(...args)=>globalThis.__metadata[method](...args)]));` : path === 'cache' ? `export const getCacheUserId=()=>globalThis.__metadata.user;` : `export const requestError=error=>error.message;` }));
 } }] });
 const folder = await mkdtemp(join(tmpdir(), 'qunthink-metadata-react-')); await writeFile(join(folder, 'fixture.mjs'), built.outputFiles[0].text);
-const fixture = await import(join(folder, 'fixture.mjs'));
+const fixture = await import(pathToFileURL(join(folder, 'fixture.mjs')).href);
 const { act, mount, useTasksStore: store, setWritingPreferences, clearWritingContent, readMetadataJournal, persistMetadataJournal, textHash, canonicalMetadata, metadataContentKey, saveWritingContent } = fixture;
 const id = '10000000-0000-4000-8000-000000000001', other = '20000000-0000-4000-8000-000000000002';
 const makeTask = (extra = {}) => ({ id, title: '原任务', prompt: 'PRIVATE-PROMPT', status: 'pending', category: 'work', auto_run: false, run_at: null, metadata_revision: 0, dependency_ids: [], dependency_revision: 0, history: [], result: 'PRIVATE-RESULT', ...extra });
@@ -45,7 +46,7 @@ const realTransportBuilt = await build({ stdin: { resolveDir: root, loader: 'tsx
  build.onLoad({ filter: /.*/, namespace: 'mock' }, ({ path }) => ({ loader: 'js', contents: path === 'models' ? `export const requestError=error=>error.message;` : path === 'cache' ? `export const getCacheUserId=()=>globalThis.__metadata.user;` : `export const getApiBaseUrl=()=>'/api';export const getApiBaseUrlCandidates=()=>['/api'];export const rememberBackendOrigin=()=>{};` }));
 } }] });
 await writeFile(join(folder, 'real-transport.mjs'), realTransportBuilt.outputFiles[0].text);
-const realTransport = await import(join(folder, 'real-transport.mjs'));
+const realTransport = await import(pathToFileURL(join(folder, 'real-transport.mjs')).href);
 
 beforeEach(async () => {
  await close(); container?.remove(); localStorage.clear(); databases.clear(); store.getState().cleanup(); tasks = [makeTask()];
@@ -111,7 +112,7 @@ test('foreign keys remain invisible; pending metadata blocks run and acceptance'
  const item = await lost(); await assert.rejects(store.getState().run(id), /任务设置/); await assert.rejects(store.getState().accept(id, other), /任务设置/); store.getState().cleanup(); globalThis.__metadata.user = 'bob'; globalThis.__metadata.auth++; await store.getState().fetch(); assert.deepEqual(readMetadataJournal(), []); assert.deepEqual(store.getState().metadataQueues, {}); globalThis.__metadata.user = 'alice'; globalThis.__metadata.auth++; assert.equal(readMetadataJournal()[0].key, item.key);
 });
 test('two independent tab empty-read race preserves UUID queue; settling one cannot delete interleaved third key', async () => {
- await writeFile(join(folder, 'tab2.mjs'), built.outputFiles[0].text); const { useTasksStore: tab } = await import(join(folder, 'tab2.mjs')); tab.setState({ tasks }); tab.getState().editMetadata(id, { title: '第二标签私密文字' }); draft(); globalThis.__metadata.put = async () => { throw new Error('lost'); }; await Promise.all([assert.rejects(store.getState().saveMetadata(id)), assert.rejects(tab.getState().saveMetadata(id))]); assert.equal(readMetadataJournal().length, 2); store.getState().cleanup(); await store.getState().fetch(); assert.equal(store.getState().metadataQueues[id].length, 2);
+ await writeFile(join(folder, 'tab2.mjs'), built.outputFiles[0].text); const { useTasksStore: tab } = await import(pathToFileURL(join(folder, 'tab2.mjs')).href); tab.setState({ tasks }); tab.getState().editMetadata(id, { title: '第二标签私密文字' }); draft(); globalThis.__metadata.put = async () => { throw new Error('lost'); }; await Promise.all([assert.rejects(store.getState().saveMetadata(id)), assert.rejects(tab.getState().saveMetadata(id))]); assert.equal(readMetadataJournal().length, 2); store.getState().cleanup(); await store.getState().fetch(); assert.equal(store.getState().metadataQueues[id].length, 2);
  const first = store.getState().metadataIntents[id], payload = { client_request_id: crypto.randomUUID(), expected_revision: 0, changes: { title: '第三标签' } }, third = { taskId: id, key: payload.client_request_id, revision: 0, fields: ['title'], payloadHash: await textHash(canonicalMetadata(payload)), createdAt: new Date().toISOString() }; const original = globalThis.localStorage; let inserted = false;
  globalThis.localStorage = { get length() { return original.length; }, key: n => original.key(n), getItem: key => original.getItem(key), setItem: (key, value) => original.setItem(key, value), removeItem(key) { if (!inserted && key.startsWith('qunthink_metadata_command_v1')) { inserted = true; persistMetadataJournal(third); } original.removeItem(key); } }; globalThis.__metadata.post = async () => cancelled(first); try { await store.getState().closeMetadata(id, first.key); } finally { globalThis.localStorage = original; } assert.equal(readMetadataJournal().length, 2); assert.equal(store.getState().metadataQueues[id].length, 2); assert.ok(readMetadataJournal().some(value => value.key === third.key)); assert.ok(readMetadataJournal().every(value => value.key !== first.key)); tab.getState().cleanup();
 });

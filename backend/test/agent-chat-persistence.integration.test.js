@@ -10,8 +10,9 @@ import path from 'node:path';
 // Synthetic account and keyless loopback provider only. Never inherit real
 // providers, database URLs, dotenv configuration or auth/deletion-ledger paths.
 const inherited = Object.fromEntries(['PATH', 'SystemRoot', 'TEMP', 'TMP', 'HOME'].filter(key => process.env[key]).map(key => [key, process.env[key]]));
+const fixtureTempRoot = os.tmpdir();
 for (const key of Object.keys(process.env)) delete process.env[key];
-const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qunthink-agent-chat-persistence-'));
+const dataDir = await fs.mkdtemp(path.join(fixtureTempRoot, 'qunthink-agent-chat-persistence-'));
 Object.assign(process.env, inherited, {
   NODE_ENV: 'test', AUTH_MODE: 'session', DATA_DIR: dataDir,
   AUTH_DB_PATH: path.join(dataDir, 'auth.json'),

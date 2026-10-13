@@ -1,5 +1,5 @@
 import { useLocalCacheClear } from '../../hooks/useLocalCacheClear';
-﻿import { useState, useEffect, useRef } from 'react';
+﻿import { useState, useEffect } from 'react';
 import { useThemeStore } from '../../stores/themeStore';
 import { useGroupsStore } from '../../stores/groupsStore';
 import { usePersonasStore } from '../../stores/personasStore';
@@ -24,12 +24,9 @@ export function SettingsPage() {
   const { clear: handleClearData, clearing: clearingCache, ConfirmModal } = useLocalCacheClear();
   const { showToast, Toast } = useToast();
   const [expandedPersona, setExpandedPersona] = useState<string | null>(null);
-  const [isPageEntered, setIsPageEntered] = useState(false);
-  const [visibleSections, setVisibleSections] = useState<number[]>([]);
   const [isDarkMode, setIsDarkMode] = useState(theme === 'dark');
   const [isThemeChanging, setIsThemeChanging] = useState(false);
   const [prevExpandedPersona, setPrevExpandedPersona] = useState<string | null>(null);
-  const sectionRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   const [editingPersonaId, setEditingPersonaId] = useState<string | null>(null);
   const [showProfileEditor, setShowProfileEditor] = useState(false);
@@ -43,30 +40,11 @@ export function SettingsPage() {
   const notInGroups = chatIds.filter(id => !aiMembers.includes(id as string) && chatIds.includes(id));
   const personaEntries = Object.entries(personas);
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setIsPageEntered(true);
-    }, 50);
-    return () => clearTimeout(timer);
-  }, []);
 
   useEffect(() => {
     fetchPersonas();
   }, [fetchPersonas]);
 
-  useEffect(() => {
-    const sectionCount = 10;
-    const timers: ReturnType<typeof setTimeout>[] = [];
-
-    Array.from({ length: sectionCount }).forEach((_, index) => {
-      const timer = setTimeout(() => {
-        setVisibleSections(prev => [...prev, index]);
-      }, 100 + index * 80);
-      timers.push(timer);
-    });
-
-    return () => timers.forEach(t => clearTimeout(t));
-  }, []);
 
   useEffect(() => {
     setIsDarkMode(theme === 'dark');
@@ -98,17 +76,11 @@ export function SettingsPage() {
     }
   };
 
-  const getSectionStyle = (index: number) => ({
-    opacity: visibleSections.includes(index) ? 1 : 0,
-    transform: visibleSections.includes(index) ? 'translateY(0)' : 'translateY(16px)',
-    transition: 'opacity 400ms cubic-bezier(0.0, 0.0, 0.2, 1), transform 400ms cubic-bezier(0.0, 0.0, 0.2, 1)',
-  });
 
   return (
     <>
       <div
-        className={`md:hidden h-full flex flex-col bg-bg-primary pb-14 settings-theme-transition ${isPageEntered ? 'settings-page-enter' : 'opacity-0'
-          }`}
+        className="md:hidden h-full flex flex-col bg-bg-primary pb-14 settings-theme-transition settings-page-enter"
       >
         <div className="px-4 py-3 bg-bg-surface border-b border-border-subtle settings-theme-transition">
           <h1 className="text-lg font-semibold text-text-primary settings-theme-transition">设置</h1>
@@ -117,8 +89,7 @@ export function SettingsPage() {
         <div className="flex-1 overflow-y-auto pb-safe">
           <div className="py-4 space-y-6">
             <div
-              ref={el => { sectionRefs.current[5] = el }}
-              style={getSectionStyle(5)}
+
               className="px-4"
             >
               <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3 settings-theme-transition">应用</h2>
@@ -215,7 +186,7 @@ export function SettingsPage() {
                   <div className="flex-1">
                     <span className="text-sm text-text-primary settings-theme-transition">网络状态</span>
                     <p className="text-xs text-text-secondary mt-0.5 settings-theme-transition">
-                      {isOnline ? '已连接 — 所有功能可用' : '已断开 — 仅可查看已缓存内容'}
+                      {isOnline ? '设备在线' : '设备离线，联网后可继续同步'}
                     </p>
                   </div>
                 </div>
@@ -223,8 +194,7 @@ export function SettingsPage() {
             </div>
 
             <div
-              ref={el => { sectionRefs.current[1] = el }}
-              style={getSectionStyle(1)}
+
               className="px-4"
             >
               <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3 settings-theme-transition">主题模式</h2>
@@ -280,8 +250,7 @@ export function SettingsPage() {
             </div>
 
             <div
-              ref={el => { sectionRefs.current[2] = el }}
-              style={getSectionStyle(2)}
+
               className="px-4"
             >
               <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3 settings-theme-transition">字体大小</h2>
@@ -291,8 +260,7 @@ export function SettingsPage() {
             <div className="px-4"><ModelCenter /></div>
 
             <div
-              ref={el => { sectionRefs.current[3] = el }}
-              style={getSectionStyle(3)}
+
               className="px-4"
             >
               <div className="flex items-center justify-between mb-3">
@@ -454,8 +422,7 @@ export function SettingsPage() {
             </div>
 
             <div
-              ref={el => { sectionRefs.current[6] = el }}
-              style={getSectionStyle(6)}
+
               className="px-4"
             >
               <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3 settings-theme-transition">用户画像</h2>
@@ -485,8 +452,7 @@ export function SettingsPage() {
             </div>
 
             <div
-              ref={el => { sectionRefs.current[4] = el }}
-              style={getSectionStyle(4)}
+
               className="px-4"
             >
               <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3 settings-theme-transition">关于</h2>
@@ -564,8 +530,7 @@ export function SettingsPage() {
             </div>
 
             <div
-              ref={el => { sectionRefs.current[9] = el }}
-              style={getSectionStyle(9)}
+
               className="px-4"
             >
               <h2 className="text-sm font-semibold text-text-primary uppercase tracking-wider mb-3 settings-theme-transition">显示</h2>
@@ -621,8 +586,7 @@ export function SettingsPage() {
             </div>
 
             <div
-              ref={el => { sectionRefs.current[7] = el }}
-              style={getSectionStyle(7)}
+
               className="px-4 pb-4"
             >
               <button

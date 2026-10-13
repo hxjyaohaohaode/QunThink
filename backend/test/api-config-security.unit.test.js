@@ -1,8 +1,13 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 
 process.env.NODE_ENV = 'test';
+process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'qunthink-api-config-security-'));
+process.env.AUTH_DB_PATH = join(process.env.DATA_DIR, 'auth.json');
 process.env.ENCRYPTION_KEY = crypto.randomBytes(32).toString('base64');
 
 const {

@@ -61,7 +61,7 @@ test('503 foundation error is visible and does not invite a submission', async (
   const root = await mount(container);
   await act(async () => { await new Promise(resolveWait => setTimeout(resolveWait, 0)); });
   assert.match(container.textContent, /目标服务未配置、未迁移或暂不可用/);
-  assert.match(container.textContent, /通用 Agent 执行仍不可用/);
+  assert.match(container.textContent, /自动执行暂未开放/);
   const createButton = [...container.querySelectorAll('button')].find(button => button.textContent?.includes('创建目标'));
   assert.equal(createButton?.disabled, true);
   await act(async () => root.unmount());
@@ -127,7 +127,7 @@ test('queued run is shown as unexecuted and pause uses the durable transition en
   const goalButton = [...container.querySelectorAll('button')].find(button => button.textContent?.includes('完成交付'));
   await act(async () => goalButton.click());
   assert.match(container.textContent, /待继续或验收/);
-  assert.match(container.textContent, /其他步骤没有自动执行者/);
+  assert.match(container.textContent, /自动执行暂未开放/);
   assert.doesNotMatch(container.textContent, /以此运行验收目标/);
   const pauseButton = [...container.querySelectorAll('button')].find(button => button.textContent === '暂停');
   await act(async () => { pauseButton.click(); await new Promise(resolveWait => setTimeout(resolveWait, 0)); });

@@ -2,7 +2,7 @@ import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
 import { registerSyntheticAccount } from './authFixture';
 import { beginSessionBootstrapRecovery as beginSessionTokenRecovery, navigateWithSessionBootstrapRecovery as navigateWithSessionTokenRecovery } from './sessionBootstrapRecovery';
-import { assertLinuxBrowserSandbox, readSandboxDiagnostics, readVersionDiagnostics } from './sandboxDiagnostics';
+import { assertBrowserSandbox, readSandboxDiagnostics, readVersionDiagnostics } from './sandboxDiagnostics';
 import type { WorkspaceTask, UpdateTaskMetadataInput } from '../../shared/tasks';
 import { createCommandReadGate, disposeCreateReadGate } from '../scripts/create-command-read-gate.mjs';
 import { settleKnownMetadataQueue } from '../scripts/metadata-command-queue-recovery.mjs';
@@ -16,9 +16,14 @@ test.beforeAll(async ({ browser }) => {
   const context = await browser.newContext();
   try {
     const page = await context.newPage(); await page.goto('chrome://version'); const version = await page.evaluate(readVersionDiagnostics);
-    await page.goto('chrome://sandbox'); const sandbox = await page.evaluate(readSandboxDiagnostics);
+    await page.goto('chrome://sandbox');
+    await expect.poll(async () => {
+      const diagnostic = await page.evaluate(readSandboxDiagnostics);
+      return process.platform === 'win32' ? diagnostic.rows.some(row => row.includes('Renderer')) : !!diagnostic.evaluation;
+    }, { message: 'Wait for Chrome to populate its real sandbox policy table' }).toBe(true);
+    const sandbox = await page.evaluate(readSandboxDiagnostics);
     console.log('[metadata-browser-observed]', JSON.stringify({ version: browser.version(), executable: version.executable, sandbox }));
-    const verified = assertLinuxBrowserSandbox(version, sandbox);
+    const verified = assertBrowserSandbox(version, sandbox, process.platform);
     console.log('[metadata-browser-verified]', JSON.stringify({ version: browser.version(), chromiumSandbox: true, noSandboxFlag: false, ...verified }));
   } finally { await context.close(); }
 });
@@ -32,6 +37,8 @@ async function workspace(page: Page) { await navigateWithSessionTokenRecovery(pa
 async function open(page: Page, title: string, id: string) {
   const card = page.locator('[data-observe="task-card"]').filter({ has: page.getByRole('heading', { name: title, exact: true }) });
   await card.getByRole('button', { name: /打开详情|检查草稿/, exact: true }).click();
+  const settings = card.locator('details').filter({ has: page.locator('summary').filter({ hasText: /^任务设置$/ }) });
+  if (!await settings.evaluate(element => (element as HTMLDetailsElement).open)) await settings.locator('summary').click();
   const panel = page.locator(`[id="task-detail-${id}"]`).getByTestId('task-metadata'); await expect(panel).toBeVisible(); return panel;
 }
 async function readTask(context: BrowserContext, id: string) { const list = await (await context.request.get('/api/tasks')).json() as WorkspaceTask[]; return list.find(task => task.id === id); }
@@ -176,12 +183,13 @@ test('planning attributes create, clear and distinguish zero without model dispa
   let modelCalls = 0; page.on('request', request => { if (/\/tasks\/[^/]+\/run$/.test(new URL(request.url()).pathname)) modelCalls++; });
   await page.getByRole('button', { name: '＋ 新任务', exact: true }).click();
   await page.getByLabel('任务名称', { exact: true }).fill('规划属性零分钟任务'); await page.getByLabel('希望得到什么').fill('只保存本人规划属性，绝不调用模型。');
+  await page.locator('summary').filter({ hasText: '更多设置' }).click();
   await page.getByLabel('新任务优先级', { exact: true }).selectOption('high'); await page.getByLabel('新任务预计分钟', { exact: true }).fill('0');
   const createdResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/tasks' && response.request().method() === 'POST');
   await page.getByRole('button', { name: '保存任务', exact: true }).click(); const created = await (await createdResponse).json() as WorkspaceTask;
   expect(created).toMatchObject({ priority: 'high', estimated_minutes: 0, auto_run: false, run_at: null });
   const card = page.locator('[data-observe="task-card"]').filter({ has: page.getByRole('heading', { name: created.title, exact: true }) });
-  await expect(card).toContainText('预计 0 分钟'); const panel = card.getByTestId('task-metadata'); await expect(panel).toBeVisible();
+  await expect(card).toContainText('预计 0 分钟'); await card.locator('summary').filter({ hasText: /^任务设置$/ }).click(); const panel = card.getByTestId('task-metadata'); await expect(panel).toBeVisible();
   await panel.getByLabel('设置优先级', { exact: true }).selectOption(''); await panel.getByLabel('设置预计分钟', { exact: true }).fill('');
   await panel.getByRole('button', { name: '保存任务设置', exact: true }).click(); await expect(panel).toContainText('任务设置已确认保存。');
   await expect(card).toContainText('优先级未设置'); await expect(card).toContainText('未估算');
@@ -264,6 +272,7 @@ test('planning native creation malformed attribute ACK keeps original request un
   try {
     await workspace(page);
     await page.getByRole('button', { name: '＋ 新任务', exact: true }).click(); await page.getByLabel('任务名称', { exact: true }).fill('创建回执核验规划'); await page.getByLabel('希望得到什么').fill('合成本地输入');
+    await page.locator('summary').filter({ hasText: '更多设置' }).click();
     await page.getByLabel('新任务优先级', { exact: true }).selectOption('high'); await page.getByLabel('新任务预计分钟', { exact: true }).fill('0');
     await page.getByRole('button', { name: '保存任务', exact: true }).click();
     const recover = page.getByRole('button', { name: '核验这次创建', exact: true }); await expect(recover).toBeEnabled();

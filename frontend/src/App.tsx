@@ -1,4 +1,6 @@
-﻿import { clearDiagnostics, observeInteractions, setDiagnosticSurface } from './observability/runtimeDiagnostics';
+import { clearDiagnostics, observeInteractions, setDiagnosticSurface } from './observability/runtimeDiagnostics';
+import { clearSearchHistory } from './utils/searchHistory';
+import { DesktopNavigation } from './components/Layout/DesktopNavigation';
 import { purgeLegacyPrivateCaches } from './utils/privateCache';
 import { useModelsStore } from './stores/modelsStore';
 import { useTasksStore } from './stores/tasksStore';
@@ -49,6 +51,9 @@ const AgentCreateModal = lazy(() => import('./components/Layout/AgentCreateModal
 const AgentChatView = lazy(() => import('./components/Layout/AgentChatView').then(({ AgentChatView }) => ({ default: AgentChatView })));
 const ObserverControlPanel = lazy(() => import('./components/Chat/ObserverControlPanel').then(({ ObserverControlPanel }) => ({ default: ObserverControlPanel })));
 const GroupInfoPage = lazy(() => import('./components/Chat/GroupInfoPage').then(({ GroupInfoPage }) => ({ default: GroupInfoPage })));
+const SearchPanel = lazy(() => import('./components/Chat/SearchPanel').then(({ SearchPanel }) => ({ default: SearchPanel })));
+const DesktopSettingsModal = lazy(() => import('./components/Layout/DesktopSettingsModal').then(({ DesktopSettingsModal }) => ({ default: DesktopSettingsModal })));
+const UserProfileEditor = lazy(() => import('./components/Layout/UserProfileEditor').then(({ UserProfileEditor }) => ({ default: UserProfileEditor })));
 
 type MobileTab = 'workspace' | 'chats' | 'agents' | 'settings';
 type MobileView = 'main' | 'groupInfo' | 'chat' | 'agents' | 'agentChat';
@@ -269,6 +274,8 @@ async function initializeUserData(userId: string) {
 }
 
 async function handleLogout() {
+  clearSearchHistory();
+  useNavigationStore.setState({ searchPanelOpen: false, searchInitialQuery: '', commandPaletteOpen: false, pendingDestination: null, scrollToMessageId: null });
   // Fence older requests before asynchronous cache deletion or remote logout.
   confirmAuthIdentity(null);
   const logoutGeneration = getAuthGeneration();
@@ -533,6 +540,7 @@ function App() {
   }, []);
 
   const handleMobileSelectGroup = useCallback((groupId: string) => {
+    useNavigationStore.getState().setScrollToMessageId(null);
     useNavigationStore.getState().setActiveMobileTab('chats');
     useNavigationStore.getState().setActiveDesktopView('chat');
     const { selectGroup } = useGroupsStore.getState();
@@ -746,7 +754,32 @@ function AppContent({
   const setShowAgents = (show: boolean) => setActiveDesktopView(show ? 'agents' : 'chat');
   const [showAgentCreate, setShowAgentCreate] = useState(false);
   const [showNewChatModal, setShowNewChatModal] = useState(false);
+  const [showDesktopSettings, setShowDesktopSettings] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const searchPanelOpen = useNavigationStore(s => s.searchPanelOpen);
+  const setMobileTab = useNavigationStore(s => s.setActiveMobileTab);
+  const pendingDestination = useNavigationStore(s => s.pendingDestination);
+  useEffect(() => {
+    if (!pendingDestination) return;
+    useNavigationStore.setState({ pendingDestination: null });
+    if (pendingDestination.kind === 'section') {
+      setActiveDesktopView(pendingDestination.id);
+      if (pendingDestination.id === 'agents') setSelectedAgentId(null);
+      if (pendingDestination.id === 'chat') useTaskResultsStore.getState().closePanel();
+      navigateToView('main');
+      return;
+    }
+    if (pendingDestination.kind === 'agent') {
+      setSelectedAgentId(pendingDestination.id);
+      setActiveDesktopView('agents'); setMobileTab('agents'); navigateToView('agentChat');
+    } else {
+      useTaskResultsStore.getState().closePanel();
+      useGroupsStore.getState().selectGroup(pendingDestination.id);
+      setActiveDesktopView('chat'); setMobileTab('chats'); navigateToView('chat');
+      useNavigationStore.getState().setScrollToMessageId(pendingDestination.messageId || null);
+    }
+  }, [pendingDestination, setActiveDesktopView, setMobileTab, navigateToView]);
 
   const mobileRoute = resolveMobileRoute(mobileTab, mobileView, !!currentGroup, !!selectedAgentId);
   const mobileViewKey = mobileRouteKey(mobileRoute, currentGroup?.id);
@@ -759,10 +792,11 @@ function AppContent({
   const mobileTransitionDirRef = useRef<1 | -1>(1);
 
   const deriveDesktopViewKey = useCallback(() => {
+    if (activeDesktopView === 'workspace' || activeDesktopView === 'settings') return activeDesktopView;
     if (showAgents) return selectedAgentId ? 'agent-chat' : 'agents-page';
     if (currentGroup) return `chat-${currentGroup.id}`;
     return 'welcome';
-  }, [showAgents, selectedAgentId, currentGroup]);
+  }, [activeDesktopView, showAgents, selectedAgentId, currentGroup]);
 
   const deriveMobileViewKey = useCallback(() => mobileViewKey, [mobileViewKey]);
 
@@ -850,19 +884,31 @@ function AppContent({
 
       {/* 桌面端布局 */}
       {!isMobileLayout && <div className="flex h-dvh">
-        <Sidebar
-          collapsed={sidebarCollapsed}
+        <DesktopNavigation active={showDesktopSettings ? 'settings' : activeDesktopView} onProfile={() => setShowProfile(true)} onNavigate={view => {
+          if (view === 'settings') { setShowDesktopSettings(true); return; }
+          if (view === 'agents') setSelectedAgentId(null);
+          setActiveDesktopView(view);
+          setMobileTab(view === 'chat' ? 'chats' : view);
+          navigateToView('main');
+          useNavigationStore.getState().setScrollToMessageId(null);
+          if (view === 'chat') useTaskResultsStore.getState().closePanel();
+        }} />
+        {activeDesktopView === 'chat' && <Sidebar
+          embedded
+          collapsed={false}
           onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
           onOpenWorkspace={() => setActiveDesktopView('workspace')}
           onOpenAgents={() => { setActiveDesktopView('agents'); setShowAgents(true); }}
-          onNavigateToChat={() => { setShowAgents(false); setActiveDesktopView('chat'); }}
-        />
+          onNavigateToChat={() => { useTaskResultsStore.getState().closePanel(); setShowAgents(false); setActiveDesktopView('chat'); }}
+        />}
         <div className="flex-1 flex flex-col min-w-0 min-h-0 content-area bg-bg-surface">
           <AnimatePresence mode="wait">
             {activeDesktopView === 'workspace' ? (
               <motion.div key="workspace" className="h-full min-h-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
                 <LazyBoundary><WorkspacePage onOpenConversation={id => { setActiveDesktopView('chat'); handleMobileSelectGroup(id); }} /></LazyBoundary>
               </motion.div>
+            ) : activeDesktopView === 'settings' ? (
+              <motion.div key="settings" className="h-full min-h-0 overflow-y-auto"><LazyBoundary><SettingsPage /></LazyBoundary></motion.div>
             ) : showAgents ? (
               <motion.div
                 key={selectedAgentId ? 'agent-chat' : 'agents-page'}
@@ -881,7 +927,6 @@ function AppContent({
                 ) : (
                   <LazyBoundary>
                     <AgentsPage
-                      onBack={() => { setShowAgents(false); setActiveDesktopView('chat'); }}
                       onOpenCreate={() => setShowAgentCreate(true)}
                       onSelectAgent={(agentId: string) => { setSelectedAgentId(agentId); setActiveDesktopView('agents'); }}
                     />
@@ -1007,7 +1052,7 @@ function AppContent({
               custom={mobileTransitionDirRef.current}
               transition={reducedMotion ? reducedMotionTransition : viewTransition}
             >
-              <ChatList onNewChat={() => setShowNewChatModal(true)} onBack={handleMobileBack} onSelectGroup={handleMobileSelectGroup} />
+              <ChatList onNewChat={() => setShowNewChatModal(true)} onBack={handleMobileBack} onSelectGroup={id => { useTaskResultsStore.getState().closePanel(); handleMobileSelectGroup(id); }} />
             </motion.div>
           )}
 
@@ -1137,6 +1182,9 @@ function AppContent({
       <ErrorBoundary fallback={null}>
         <CommandPalette />
       </ErrorBoundary>
+      {searchPanelOpen && <LazyBoundary><SearchPanel /></LazyBoundary>}
+      {showDesktopSettings && <LazyBoundary><DesktopSettingsModal isOpen onClose={() => setShowDesktopSettings(false)} /></LazyBoundary>}
+      {showProfile && <LazyBoundary><UserProfileEditor isOpen onClose={() => setShowProfile(false)} /></LazyBoundary>}
     </div >
   );
 }

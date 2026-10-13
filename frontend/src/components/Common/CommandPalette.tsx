@@ -3,7 +3,8 @@ import { useFocusTrap } from './useFocusTrap';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useThemeStore } from '../../stores/themeStore';
 import { useGroupsStore } from '../../stores/groupsStore';
-import { getCacheUserId, clearAllCachesForUser } from '../../utils/cacheUtils';
+import { useLocalCacheClear } from '../../hooks/useLocalCacheClear';
+import { useToast } from './useToast';
 
 interface CommandItem {
   id: string;
@@ -17,6 +18,8 @@ interface CommandItem {
 export function CommandPalette() {
   const open = useNavigationStore((s) => s.commandPaletteOpen);
   const setOpen = useNavigationStore((s) => s.setCommandPaletteOpen);
+  const { clear, clearing, ConfirmModal } = useLocalCacheClear();
+  const { showToast } = useToast();
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
@@ -51,8 +54,7 @@ export function CommandPalette() {
         keywords: '智能体 agent agents 助手',
         icon: '🤖',
         run: () => {
-          useNavigationStore.getState().setActiveDesktopView('agents');
-          useNavigationStore.getState().setActiveMobileTab('agents');
+          useNavigationStore.getState().openDestination({ kind: 'section', id: 'agents' });
         }
       },
       {
@@ -61,22 +63,22 @@ export function CommandPalette() {
         keywords: '群聊 chat 聊天 会话',
         icon: '💬',
         run: () => {
-          useNavigationStore.getState().setActiveDesktopView('chat');
-          useNavigationStore.getState().setActiveMobileTab('chats');
+          useNavigationStore.getState().openDestination({ kind: 'section', id: 'chat' });
         }
       },
       {
         id: 'pin-overview',
-        label: '查看全部置顶会话',
+        label: '打开置顶会话',
+        hint: '打开列表中的第一个置顶会话',
         keywords: '置顶 pin 收藏',
         icon: '📌',
         run: () => {
           const pinned = useGroupsStore.getState().groups.filter(g => g.pinned);
           if (pinned.length === 0) {
-            window.alert('当前没有置顶的会话');
+            showToast({ message: '当前没有置顶的会话', type: 'info' });
             return;
           }
-          useGroupsStore.getState().selectGroup(pinned[0].id);
+          useNavigationStore.getState().openDestination({ kind: 'group', id: pinned[0].id });
         }
       },
       {
@@ -85,18 +87,11 @@ export function CommandPalette() {
         hint: '清除本设备的离线缓存（不影响服务器数据）',
         keywords: '缓存 cache 清理 清除 清空',
         icon: '🧹',
-        run: () => {
-          const uid = getCacheUserId();
-          if (uid && window.confirm('确定清理本设备的离线缓存吗？\n（聊天云端数据不受影响，本地缓存将重新拉取）')) {
-            clearAllCachesForUser(uid);
-            window.alert('本地缓存已清理，页面即将刷新');
-            window.location.reload();
-          }
-        }
+        run: () => { if (!clearing) void clear(); }
       }
     ];
     return items;
-  }, []);
+  }, [clear, clearing, showToast]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -121,6 +116,7 @@ export function CommandPalette() {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
       if (e.key === 'Escape') {
         e.preventDefault();
         setOpen(false);
@@ -128,7 +124,7 @@ export function CommandPalette() {
       }
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        setActiveIndex(i => Math.min(i + 1, filtered.length - 1));
+        setActiveIndex(i => Math.max(0, Math.min(i + 1, filtered.length - 1)));
         return;
       }
       if (e.key === 'ArrowUp') {
@@ -154,7 +150,7 @@ export function CommandPalette() {
     el?.scrollIntoView({ block: 'nearest' });
   }, [activeIndex]);
 
-  if (!open) return null;
+  if (!open) return <>{ConfirmModal}</>;
 
   return (
     <div

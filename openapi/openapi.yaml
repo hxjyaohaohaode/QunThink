@@ -1317,7 +1317,7 @@ paths:
         - in: query
           name: q
           required: true
-          schema: { type: string, minLength: 1 }
+          schema: { type: string, minLength: 1, maxLength: 500 }
         - in: query
           name: type
           schema:
@@ -1328,16 +1328,22 @@ paths:
           schema: { type: string }
         - in: query
           name: limit
-          schema: { type: integer, default: 20, maximum: 50 }
+          schema: { type: integer, default: 20, minimum: 1, maximum: 50 }
+        - in: query
+          name: offset
+          description: 每个搜索域的偏移量；结果按创建时间倒序分页
+          schema: { type: integer, minimum: 0, maximum: 1000000, default: 0 }
         - in: query
           name: quickFilter
-          schema: { type: string, enum: [ images, files, links, media ] }
+          schema: { type: string, enum: [ all, images, files, links, media ] }
         - in: query
           name: dateFrom
-          schema: { type: string, format: date }
+          description: 日期或带时区的 ISO 8601 时间；裸日期按 UTC 解释，客户端应传当地日界对应的时间。无创建日期的人设和成员不应用日期条件。
+          schema: { type: string }
         - in: query
           name: dateTo
-          schema: { type: string, format: date }
+          description: 日期或带时区的 ISO 8601 时间；裸日期按 UTC 解释，客户端应传当地日界对应的时间。无创建日期的人设和成员不应用日期条件。
+          schema: { type: string }
       responses:
         '200':
           description: 搜索结果
@@ -5424,6 +5430,17 @@ components:
           items:
             type: object
             additionalProperties: true
+        counts:
+          type: object
+          description: 每个搜索域的全部匹配数量，分页前统计
+          additionalProperties: { type: integer, minimum: 0 }
+        pagination:
+          type: object
+          required: [ offset, limit, hasMore ]
+          properties:
+            offset: { type: integer, minimum: 0 }
+            limit: { type: integer, minimum: 1, maximum: 50 }
+            hasMore: { type: boolean }
         total: { type: integer }
         query: { type: string }
     UploadedFile:

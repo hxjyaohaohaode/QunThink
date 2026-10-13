@@ -3,10 +3,14 @@ import { persist } from 'zustand/middleware';
 
 export type DesktopView = 'workspace' | 'chat' | 'agents' | 'settings';
 export type MobileTab = 'workspace' | 'chats' | 'agents' | 'settings';
+export type NavigationDestination = { kind: 'group' | 'agent'; id: string; messageId?: string } | { kind: 'section'; id: DesktopView };
 
 interface NavigationState {
   sidebarOpen: boolean;
   searchPanelOpen: boolean;
+  searchInitialQuery: string;
+  pendingDestination: NavigationDestination | null;
+  openDestination: (destination: NavigationDestination) => void;
   /** 全局命令面板（Ctrl+K） */
   commandPaletteOpen: boolean;
   scrollToMessageId: string | null;
@@ -20,7 +24,7 @@ interface NavigationState {
 
   toggleSidebar: () => void;
   setSidebarOpen: (open: boolean) => void;
-  setSearchPanelOpen: (open: boolean) => void;
+  setSearchPanelOpen: (open: boolean, initialQuery?: string) => void;
   setCommandPaletteOpen: (open: boolean) => void;
   setScrollToMessageId: (id: string | null) => void;
   setTimeFormat: (format: 'relative' | 'full') => void;
@@ -49,6 +53,9 @@ export const useNavigationStore = create<NavigationState>()(
       return {
       sidebarOpen: true,
       searchPanelOpen: false,
+      searchInitialQuery: '',
+      pendingDestination: null,
+      openDestination: (pendingDestination) => set({ pendingDestination, searchPanelOpen: false, commandPaletteOpen: false, scrollToMessageId: null }),
       commandPaletteOpen: false,
       scrollToMessageId: null,
       timeFormat: 'relative',
@@ -58,27 +65,17 @@ export const useNavigationStore = create<NavigationState>()(
 
       toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
-      setSearchPanelOpen: (open) => set({ searchPanelOpen: open }),
+      setSearchPanelOpen: (open, initialQuery = '') => set({ searchPanelOpen: open, searchInitialQuery: initialQuery }),
       setCommandPaletteOpen: (open) => set({ commandPaletteOpen: open }),
-      setScrollToMessageId: (id: string | null) => {
-        set({ scrollToMessageId: id });
-        if (id) {
-          setTimeout(() => {
-            const current = get().scrollToMessageId;
-            if (current === id) {
-              set({ scrollToMessageId: null });
-            }
-          }, 15000);
-        }
-      },
+      setScrollToMessageId: (id: string | null) => set({ scrollToMessageId: id }),
       setTimeFormat: (format) => set({ timeFormat: format }),
       setActiveDesktopView: (view) => {
         if (get().activeDesktopView === view) return;
-        transitionTo('desktop', () => set({ activeDesktopView: view }));
+        transitionTo('desktop', () => set({ activeDesktopView: view, activeMobileTab: view === 'chat' ? 'chats' : view }));
       },
       setActiveMobileTab: (tab) => {
         if (get().activeMobileTab === tab) return;
-        transitionTo('mobile', () => set({ activeMobileTab: tab }));
+        transitionTo('mobile', () => set({ activeMobileTab: tab, activeDesktopView: tab === 'chats' ? 'chat' : tab }));
       },
       setIsTransitioning: (v) => set({ isTransitioning: v }),
       };

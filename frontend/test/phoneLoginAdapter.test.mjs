@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -9,7 +10,7 @@ import { Window } from 'happy-dom';
 const origin = 'http://127.0.0.1:3210', phone = '13800000001', password = 'Synthetic-Browser-Only-2026', user = 'synthetic-A';
 const events = ['request', 'response', 'requestfinished', 'requestfailed', 'framenavigated', 'close'];
 async function adapter() {
-  const result = await build({ stdin: { contents: `export * from './e2e/phoneLoginRecovery.ts'; export * from './e2e/sessionBootstrapRecovery.ts';`, resolveDir: new URL('..', import.meta.url).pathname, loader: 'ts' }, bundle: true, write: false, format: 'esm', platform: 'node', plugins: [{ name: 'controlled-playwright', setup(b) {
+  const result = await build({ stdin: { contents: `export * from './e2e/phoneLoginRecovery.ts'; export * from './e2e/sessionBootstrapRecovery.ts';`, resolveDir: fileURLToPath(new URL('..', import.meta.url)), loader: 'ts' }, bundle: true, write: false, format: 'esm', platform: 'node', plugins: [{ name: 'controlled-playwright', setup(b) {
     b.onResolve({ filter: /^@playwright\/test$/ }, () => ({ path: 'playwright', namespace: 'controlled' }));
     b.onLoad({ filter: /.*/, namespace: 'controlled' }, () => ({ contents: `
       export function expect(locator) { return { toBeVisible: async ({ timeout } = {}) => { if (!await locator.isVisible(timeout)) throw new Error('workspace not visible'); } }; }

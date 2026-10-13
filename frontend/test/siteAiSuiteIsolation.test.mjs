@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -7,8 +8,8 @@ const read = path => fs.readFileSync(new URL(path, import.meta.url), 'utf8');
 test('site suite retains real limits but isolates ports, data, credentials and provider access', () => {
   const env = buildSiteAiFixtureEnvironment({ PATH: '/fixture/bin', SERVER_AI_ENABLED: 'true', SERVER_AI_API_KEY: 'must-not-inherit', SUPABASE_DB_URL: 'must-not-inherit', DATA_DIR: 'must-not-inherit', AI_ALLOWED_LOCAL_ORIGINS: 'must-not-inherit' }, '/tmp/site-only', '/tmp/site-only/empty.env', 'synthetic-key');
   assert.equal(env.PORT, '3222'); assert.equal(env.CORS_ORIGINS, 'http://127.0.0.1:3220');
-  assert.equal(env.DATA_DIR, '/tmp/site-only'); assert.equal(env.AUTH_DB_PATH, '/tmp/site-only/auth.json');
-  assert.equal(env.MEMORY_DELETION_DIR, '/tmp/site-only/memory-deletions');
+  assert.equal(env.DATA_DIR, '/tmp/site-only'); assert.equal(env.AUTH_DB_PATH, join('/tmp/site-only', 'auth.json'));
+  assert.equal(env.MEMORY_DELETION_DIR, join('/tmp/site-only', 'memory-deletions'));
   assert.equal(env.DOTENV_CONFIG_PATH, '/tmp/site-only/empty.env');
   assert.equal(env.AUTH_MODE, 'session'); assert.equal(env.NODE_ENV, 'test');
   assert.equal(env.SERVER_AI_ENABLED, 'false'); assert.equal(env.SERVER_AI_API_KEY, undefined);

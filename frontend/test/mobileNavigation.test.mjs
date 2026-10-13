@@ -52,6 +52,7 @@ const bundled = await build({
     const useGroupsStore = create(set => ({ currentGroup: null,
       selectGroup: id => set({ currentGroup: id ? { id, ai_members: [] } : null }) }));
     const joinGroup = () => {};
+    const useTaskResultsStore = { getState: () => ({ closePanel: () => {} }) };
     const LazyBoundary = ({ children }) => children;
     const WorkspacePage = ({ onOpenConversation }) => <div data-screen="workspace"><button onClick={() => onOpenConversation('synthetic-group')}>Open conversation</button></div>;
     const ChatList = ({ onSelectGroup }) => <div data-screen="chats"><button onClick={() => onSelectGroup('synthetic-group')}>Open conversation</button></div>;
@@ -127,7 +128,7 @@ for (const reduced of [false, true]) {
     await click('Open conversation'); await settle(); assert.deepEqual(screens(), ['chat']);
     await click('Back');
     // The tab is interactive immediately, before the outgoing view has finished.
-    await click('⌘工作台');
+    await click('工作台');
     await settle(); assertSingleScreen('workspace');
   });
   test(`mobile agents and external workspace navigation remain exclusive (reduced=${reduced})`, async () => {
@@ -139,7 +140,7 @@ for (const reduced of [false, true]) {
   });
   test(`rapid mobile tab reversal preserves the latest choice (reduced=${reduced})`, async () => {
     mounted = await render(container, reduced); await settle();
-    await click('智能体'); await click('设置'); await click('⌘工作台');
+    await click('智能体'); await click('设置'); await click('工作台');
     await settle(); assertSingleScreen('workspace');
   });
   test(`group details return and external chat navigation do not retain another tab's view (reduced=${reduced})`, async () => {

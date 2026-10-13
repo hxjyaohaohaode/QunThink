@@ -1,11 +1,12 @@
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { build } from 'esbuild';
 import { Window } from 'happy-dom';
 import { runInNewContext } from 'node:vm';
-const built = await build({ entryPoints: [new URL('../e2e/sandboxDiagnostics.ts', import.meta.url).pathname], bundle: true, write: false, format: 'esm', platform: 'node' });
-const { readVersionDiagnostics, readSandboxDiagnostics, assertLinuxBrowserSandbox: verify } = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
+const built = await build({ entryPoints: [fileURLToPath(new URL('../e2e/sandboxDiagnostics.ts', import.meta.url))], bundle: true, write: false, format: 'esm', platform: 'node' });
+const { readVersionDiagnostics, readSandboxDiagnostics, assertLinuxBrowserSandbox: verify, assertBrowserSandbox } = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
 const version = () => ({ executable: '/opt/google/chrome/chrome', commandLine: '/opt/google/chrome/chrome --headless --remote-debugging-pipe' });
 const sandbox = () => ({ rows: [
   ['Layer 1 Sandbox', 'Namespace'], ['PID namespaces', 'Yes'], ['Network namespaces', 'Yes'],
@@ -56,5 +57,21 @@ test('browser fixture reads built-in pages, keeps sandbox enabled and validates 
   assert.match(spec, /page\.goto\('chrome:\/\/version'\)/); assert.match(spec, /page\.goto\('chrome:\/\/sandbox'\)/);
   assert.match(spec, /page\.evaluate\(readVersionDiagnostics\)/); assert.match(spec, /page\.evaluate\(readSandboxDiagnostics\)/);
   assert.doesNotMatch(spec, /getBrowserCommandLine|newBrowserCDPSession|args\s*:/);
-  assert.ok(spec.indexOf('assertLinuxBrowserSandbox(version, sandbox)') < spec.indexOf("console.log('[dependency-browser-verified]'"));
+  assert.ok(spec.indexOf('assertBrowserSandbox(version, sandbox, process.platform)') >= 0);
+  assert.ok(spec.indexOf('assertBrowserSandbox(version, sandbox, process.platform)') < spec.indexOf("console.log('[dependency-browser-verified]'"));
+});
+
+test('Windows validates actual renderer restrictions, not Linux-only fields', () => {
+  const version = { executable: 'C:\\Chrome\\chrome.exe', commandLine: '"C:\\Chrome\\chrome.exe" --headless' };
+  const columns = ['Process', 'Type', 'Name', 'Sandbox', 'Lockdown', 'Integrity', 'Mitigations'];
+  const renderer = ['123', 'Renderer', '', 'Renderer', 'Lockdown', 'S-1-16-0 Untrusted', '01111001'];
+  const sandbox = { rows: [columns, renderer, ['456', 'Utility', 'Network', 'Not Sandboxed', '', '', '']], evaluation: null };
+  assert.equal(assertBrowserSandbox(version, sandbox, 'win32').rendererCount, 1);
+  assert.equal(assertBrowserSandbox(version, sandbox, 'win32').observedPolicies[1].sandbox, 'Not Sandboxed');
+  for (const index of [3, 4, 5, 6]) {
+    const invalid = [...renderer]; invalid[index] = '';
+    assert.throws(() => assertBrowserSandbox(version, { ...sandbox, rows: [columns, invalid] }, 'win32'), /unverified/);
+  }
+  assert.throws(() => assertBrowserSandbox({ ...version, commandLine: version.commandLine + ' --no-sandbox' }, sandbox, 'win32'), /unverified/);
+  assert.throws(() => assertBrowserSandbox(version, { rows: [], evaluation: null }, 'win32'), /unverified/);
 });

@@ -211,7 +211,7 @@ for (const origin of ['', 'http://backend.invalid', 'https://backend.invalid/pat
 }
 test('Docker context excludes all environment variants and the backend has no host-published port', () => {
   for (const file of ['.dockerignore','backend/.dockerignore']) {
-    const rules = fs.readFileSync(path.join(root, file), 'utf8').split('\n');
+    const rules = fs.readFileSync(path.join(root, file), 'utf8').split(/\r?\n/);
     assert.ok(rules.includes('.env*')); assert.ok(rules.includes('**/.env*'));
   }
   const config = YAML.parse(fs.readFileSync(path.join(root, 'docker-compose.yml'), 'utf8'));
