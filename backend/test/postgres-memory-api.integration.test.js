@@ -55,14 +55,39 @@ test('real PostgreSQL independent ledger protects every persisted memory API and
       ['/api/memory/reference', { memoryId: quoteId, context: { content: 'synthetic', groupId } }],
       [`/api/memory/${noteId}/correct`, { content: 'synthetic corrected', expectedRevision: 0 }]
     ]) { const response = await request.post(endpoint).set('Cookie', cookie).send(body); assert.equal(response.status, 200, endpoint + JSON.stringify(response.body)); }
+    const searchGroup = await request.post('/api/groups').set('Cookie', cookie)
+      .send({ name: 'Synthetic deleted member source', ai_members: [] });
+    assert.equal(searchGroup.status, 201);
+    const searchGroupId = searchGroup.body.id;
+    const memberMarker = 'synthetic-pg-restored-member';
+    await withWriteLock(userId, async () => {
+      await db.read();
+      const group = db.data.groups.find(row => row.id === searchGroupId);
+      // Declared legacy membership fixture; group creation/deletion/search are HTTP.
+      group.ai_members = [`${memberMarker}-ai`]; group.user_members = [`${memberMarker}-user`];
+      await db.write();
+    });
+    assert.equal((await request.get('/api/search').set('Cookie', cookie)
+      .query({ q: memberMarker, type: 'members', groupId: searchGroupId })).body.members.length, 2);
     const backup = await businessPool.query('SELECT key,data,revision FROM kv_store');
     assert.equal((await request.post(`/api/memory/${noteId}/forget`).set('Cookie', cookie).send({})).status, 200);
     const deletion = await request.delete(`/api/messages/${msg.id}`).set('Cookie', cookie);
     assert.equal(deletion.status, 200, JSON.stringify(deletion.body));
+    assert.equal((await request.delete(`/api/groups/${searchGroupId}`).set('Cookie', cookie)).status, 200);
     // Entire application business store restored, ledger DB left untouched.
     await businessPool.query('TRUNCATE kv_store');
     for (const row of backup.rows) await businessPool.query('INSERT INTO kv_store(key,data,revision) VALUES($1,$2,$3)', [row.key,row.data,row.revision]);
     clearUserDbCache(userId);
+    assert.equal((await request.get(`/api/groups/${searchGroupId}`).set('Cookie', cookie)).status, 404);
+    for (const query of [
+      { q: memberMarker, type: 'members', groupId: searchGroupId },
+      { q: memberMarker, type: 'members' }, { q: memberMarker }
+    ]) {
+      const searched = await request.get('/api/search').set('Cookie', cookie).query(query);
+      assert.equal(searched.status, 200);
+      assert.deepEqual(searched.body.members, []);
+      assert.equal(JSON.stringify(searched.body).includes(searchGroup.body.name), false);
+    }
     assert.equal((await request.get(`/api/memory/${noteId}`).set('Cookie', cookie)).status, 410);
     assert.equal((await request.get(`/api/memory/${quoteId}`).set('Cookie', cookie)).status, 410);
     const messages = await request.get(`/api/groups/${groupId}/messages`).set('Cookie', cookie);

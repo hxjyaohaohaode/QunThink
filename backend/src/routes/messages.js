@@ -865,10 +865,13 @@ router.get('/search', asyncHandler(async (req, res) => {
   await readUserData(db);
   const readableMessages = await readableSourceMessages(req.userId, db);
   const readableGroups = await readableSourceGroups(req.userId, db);
+  const readableGroupIds = new Set(readableGroups.map(group => group.id));
+  // Keep source/owner checks and apply the requested group before previews
+  // or result counts are built; missing group identities never gain access.
   const readableFiles = (await readableSourceFiles(req.userId, db)).filter(file =>
     (!file.owner_user_id || file.owner_user_id === req.userId) &&
-    (!file.uploader_id || file.uploader_id === req.userId));
-  const readableGroupIds = new Set(readableGroups.map(group => group.id));
+    (!file.uploader_id || file.uploader_id === req.userId) &&
+    (!groupId || file.group_id === groupId));
 
   const accountPersonas = buildMergedPersonas(db.data.customPersonas || {}, getCatalogData(db.data));
   const searchQuery = q.toLowerCase().trim();
@@ -1214,7 +1217,7 @@ router.get('/search', asyncHandler(async (req, res) => {
   }
 
   if (searchTypes.includes('members')) {
-    const groups = db.data.groups || [];
+    const groups = readableGroups;
     const filteredGroups = groupId ? groups.filter(g => g.id === groupId) : groups;
     const seenMemberIds = new Set();
     for (const group of filteredGroups) {
