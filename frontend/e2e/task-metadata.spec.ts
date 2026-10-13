@@ -4,6 +4,7 @@ import { registerSyntheticAccount } from './authFixture';
 import { beginSessionBootstrapRecovery as beginSessionTokenRecovery, navigateWithSessionBootstrapRecovery as navigateWithSessionTokenRecovery } from './sessionBootstrapRecovery';
 import { assertLinuxBrowserSandbox, readSandboxDiagnostics, readVersionDiagnostics } from './sandboxDiagnostics';
 import type { WorkspaceTask, UpdateTaskMetadataInput } from '../../shared/tasks';
+import { createCommandReadGate, disposeCreateReadGate } from '../scripts/create-command-read-gate.mjs';
 import { settleKnownMetadataQueue } from '../scripts/metadata-command-queue-recovery.mjs';
 import { uiPhoneLogin, assertExpectedLoginUser } from './phoneLoginRecovery';
 
@@ -228,18 +229,61 @@ test('planning two native tabs preserve unsent priority and zero after another r
   await page.screenshot({ path: info.outputPath('planning-cross-tab-unsent-preserved.png'), fullPage: true, animations: 'disabled' }); await secondPage.close();
 });
 
-test('planning native creation malformed attribute ACK keeps original request until query', async ({ page, context }) => {
-  await registerSyntheticAccount(context); await workspace(page); let sentKey = '', creates = 0;
-  await page.route('**/api/tasks', async route => { if (route.request().method() !== 'POST') return route.continue(); creates++; sentKey = route.request().headers()['idempotency-key']; const response = await route.fetch(); expect(response.status()).toBe(201); const task = await response.json(); delete task.estimated_minutes; await route.fulfill({ response, json: task }); });
-  // Hold list/query reads while inspecting the malformed original ACK. An
-  // authoritative projection will then be allowed to resolve the same UUID.
-  let holdReads = false;
-  await page.route('**/api/tasks/commands/*', async route => { if (holdReads) return route.abort('connectionreset'); await route.continue(); });
-  await page.getByRole('button', { name: '＋ 新任务', exact: true }).click(); await page.getByLabel('任务名称', { exact: true }).fill('创建回执核验规划'); await page.getByLabel('希望得到什么').fill('合成本地输入');
-  await page.getByLabel('新任务优先级', { exact: true }).selectOption('high'); await page.getByLabel('新任务预计分钟', { exact: true }).fill('0');
-  await page.route('**/api/tasks', async route => { if (route.request().method() === 'GET' && holdReads) return route.fulfill({ status: 200, json: [] }); await route.fallback(); }); holdReads = true;
-  await page.getByRole('button', { name: '保存任务', exact: true }).click();
-  const recover = page.getByRole('button', { name: '核验这次创建', exact: true }); await expect(recover).toBeEnabled(); expect(sentKey).not.toBe(''); expect(creates).toBe(1);
-  holdReads = false; await recover.click(); await expect(recover).toHaveCount(0); expect(creates).toBe(1);
-  const tasks = await (await context.request.get('/api/tasks')).json() as WorkspaceTask[]; expect(tasks.find(task => task.client_request_id === sentKey)).toMatchObject({ priority: 'high', estimated_minutes: 0, metadata_revision: 0 });
+test('planning native creation malformed attribute ACK keeps original request until query', async ({ page, context }, info) => {
+  const owner = await registerSyntheticAccount(context);
+  const origins = ['http://127.0.0.1:3210', 'http://127.0.0.1:3202'];
+  const gate = createCommandReadGate({ ownerId: owner.id, origins });
+  let sentKey = '', taskId = '', creates = 0, completed = false;
+  const mutations: string[] = [];
+  page.on('request', request => { const path = new URL(request.url()).pathname; if (path.startsWith('/api/tasks') && !['GET', 'OPTIONS'].includes(request.method())) mutations.push(`${request.method()} ${path}`); });
+  const journal = () => page.evaluate(({ ownerId, key }) => localStorage.getItem(`qunthink_command_v1_${encodeURIComponent(ownerId)}:${key}`), { ownerId: owner.id, key: sentKey });
+  async function holdRealRead(route: import('@playwright/test').Route) {
+    const request = route.request();
+    const ticket = gate.begin({ method: request.method(), url: request.url(), ownerId: request.headers()['x-expected-user-id'] });
+    const response = await route.fetch({ maxRedirects: 0, maxRetries: 0 });
+    gate.verify(ticket, { status: response.status(), body: await response.json() });
+    try { await gate.wait(ticket); } catch (error) { if (gate.isCleanupError(error)) return; throw error; }
+    await route.fulfill({ response }); // The real bytes/status/headers are unchanged.
+    gate.delivered(ticket);
+  }
+  // Install before navigation. Initial StrictMode reads, create-finally and
+  // verify-finally give at most four real lists; none can retire the journal
+  // before the real button click. No abort, fake empty list, or retry is used.
+  await page.route('**/api/tasks', async route => {
+    if (route.request().method() === 'GET') return holdRealRead(route);
+    const url = new URL(route.request().url()); expect(origins).toContain(url.origin); expect(url.search).toBe(''); expect(url.hash).toBe(''); expect(route.request().headers()['x-expected-user-id']).toBe(owner.id);
+    expect(route.request().method()).toBe('POST'); expect(++creates).toBe(1);
+    sentKey = route.request().headers()['idempotency-key']; expect(sentKey).not.toBe('');
+    const response = await route.fetch({ maxRedirects: 0, maxRetries: 0 }); expect(response.status()).toBe(201); const task = await response.json();
+    taskId = task.id; expect(task).toMatchObject({ client_request_id: sentKey, priority: 'high', estimated_minutes: 0, metadata_revision: 0 });
+    gate.bind({ key: sentKey, taskId, priority: 'high', estimatedMinutes: 0 });
+    const malformed = { ...task }; delete malformed.estimated_minutes;
+    await route.fulfill({ response, json: malformed }); // Sole deliberate error injection.
+  });
+  await page.route('**/api/tasks/commands/*', holdRealRead);
+  try {
+    await workspace(page);
+    await page.getByRole('button', { name: '＋ 新任务', exact: true }).click(); await page.getByLabel('任务名称', { exact: true }).fill('创建回执核验规划'); await page.getByLabel('希望得到什么').fill('合成本地输入');
+    await page.getByLabel('新任务优先级', { exact: true }).selectOption('high'); await page.getByLabel('新任务预计分钟', { exact: true }).fill('0');
+    await page.getByRole('button', { name: '保存任务', exact: true }).click();
+    const recover = page.getByRole('button', { name: '核验这次创建', exact: true }); await expect(recover).toBeEnabled();
+    await expect(page.getByRole('alert').filter({ hasText: '创建回执缺少有效规划属性' })).toBeVisible();
+    const originalJournal = await journal(); expect(originalJournal).not.toBeNull(); expect(JSON.parse(originalJournal!)).toMatchObject({ key: sentKey, action: 'create', taskId: null });
+    expect(creates).toBe(1); expect(gate.snapshot().delivered).toBe(0);
+    await recover.click(); // Keep all authoritative reads held through actionability.
+    await expect.poll(() => gate.snapshot().verifiedQueries).toBe(1);
+    expect(await journal()).toBe(originalJournal); await expect(recover).toBeDisabled();
+    gate.releaseAfterClick();
+    await expect(recover).toHaveCount(0); await expect.poll(journal).toBeNull();
+    await expect.poll(() => gate.snapshot().postReleaseListsDelivered).toBe(1);
+    await expect.poll(() => gate.snapshot().delivered === gate.snapshot().total).toBe(true);
+    gate.assertComplete(); expect(creates).toBe(1); expect(mutations).toEqual(['POST /api/tasks']);
+    const tasks = await (await context.request.get('/api/tasks')).json() as WorkspaceTask[];
+    const sameIntent = tasks.filter(task => task.client_request_id === sentKey); expect(sameIntent).toHaveLength(1);
+    expect(sameIntent[0]).toMatchObject({ id: taskId, priority: 'high', estimated_minutes: 0, metadata_revision: 0 });
+    await info.attach('create-read-gate-proof.json', { body: JSON.stringify({ ownerId: owner.id, key: sentKey, taskId, creates, mutations, reads: gate.evidence(), finalJournal: await journal() }), contentType: 'application/json' });
+    completed = true;
+  } finally {
+    await disposeCreateReadGate(gate, (options: { behavior: 'wait' | 'ignoreErrors' }) => page.unrouteAll(options), completed);
+  }
 });

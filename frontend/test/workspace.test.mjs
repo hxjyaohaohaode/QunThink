@@ -25,7 +25,7 @@ const bundled = await build({ stdin: { contents: `import { createRoot } from 're
   build.onResolve({ filter: /^framer-motion$/ }, () => ({ path: 'motion', namespace: 'ui-mock' }));
   build.onLoad({ filter: /.*/, namespace: 'ui-mock' }, ({ path }) => {
     const source = {
-      api: `export const getAuthGeneration=()=>0; export const axiosInstance = { get: async () => ({data: globalThis.__workspaceTest.tasks}), post: (...args) => globalThis.__workspaceTest.post(...args), patch: async () => ({data:{}}), delete: async () => ({data:{}}) }; export const api = {createGroup: async () => ({id:'group'})};`,
+      api: `export const getAuthGeneration=()=>0; export const axiosInstance = { get: async (...args) => globalThis.__workspaceTest.get ? globalThis.__workspaceTest.get(...args) : ({data: globalThis.__workspaceTest.tasks}), post: (...args) => globalThis.__workspaceTest.post(...args), patch: async () => ({data:{}}), delete: async () => ({data:{}}) }; export const api = {createGroup: async () => ({id:'group'})};`,
       cache: `export const getCacheUserId = () => globalThis.__workspaceTest.user;`,
       modelsStore: `export const useModelsStore = fn => fn({ catalog: {models: [], defaults:{}} }); export const requestError = e => e.message;`,
       messagesStore: `export const useMessagesStore = fn => fn({messages:{}});`,
@@ -49,7 +49,7 @@ const button = text => [...container.querySelectorAll('button')].find(element =>
 const settle = () => new Promise(resolve => setTimeout(resolve, 0));
 const waitFor = async check => { for (let n=0;n<200&&!check();n++) await new Promise(resolve=>setTimeout(resolve,5)); assert.ok(check(), 'expected request preparation to reach the mock transport'); };
 async function type(element, value) { await act(async () => { const proto = element.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(proto, 'value').set.call(element, value); element.dispatchEvent(new window.Event('input', { bubbles: true })); }); }
-beforeEach(async () => { localStorage.clear(); if (mounted) await act(async () => mounted.unmount()); container?.remove(); store.getState().cleanup(); globalThis.__workspaceTest.tasks = []; globalThis.__workspaceTest.groups = [{id:'group-a', name:'来源会话'}]; container = document.createElement('div'); document.body.appendChild(container); mounted = await mount(container); });
+beforeEach(async () => { localStorage.clear(); if (mounted) await act(async () => mounted.unmount()); container?.remove(); store.getState().cleanup(); globalThis.__workspaceTest.tasks = []; globalThis.__workspaceTest.get = undefined; globalThis.__workspaceTest.user = 'alice'; globalThis.__workspaceTest.groups = [{id:'group-a', name:'来源会话'}]; container = document.createElement('div'); document.body.appendChild(container); mounted = await mount(container); });
 after(async () => { if (mounted) await act(async () => mounted.unmount()); });
 test('draft survives workspace navigation and remount without persistent private storage', async () => {
   await act(async () => button('＋ 新任务').click());
@@ -194,4 +194,43 @@ test('planning actual workspace and conversation surfaces keep one shared draft 
  await act(async () => mounted.unmount()); mounted = await mountConversation(container); assert.match(container.textContent, /已保留工作台规划：优先级高 · 预计 0 分钟/); assert.equal(container.querySelector('select[aria-label="新任务优先级"]'), null);
  await type(container.querySelector('textarea'), '会话中继续修改'); await act(async () => mounted.unmount()); mounted = await mount(container);
  assert.equal(container.querySelector('textarea').value, '会话中继续修改'); assert.equal(container.querySelector('select[aria-label="新任务优先级"]').value, 'high'); assert.equal(container.querySelector('input[aria-label="新任务预计分钟"]').value, '0'); assert.equal(localStorage.length, 0);
+});
+
+
+test('natural background recovery of a malformed create ACK removes the transient React recovery button without another POST', async () => {
+ const input = { title: '自然恢复原任务', prompt: '合成测试输入', category: 'work', model_id: null, group_id: null, run_at: null, repeat_minutes: null, auto_run: false, priority: 'high', estimated_minutes: 0 };
+ let key, posts = 0, journalAtDispatch;
+ globalThis.__workspaceTest.post = async (_, payload, config) => {
+  posts++; key = config.headers['Idempotency-Key']; journalAtDispatch = localStorage.getItem(`qunthink_command_v1_alice:${key}`);
+  const saved = { ...payload, id: '10000000-0000-4000-8000-000000000001', client_request_id: key, metadata_revision: 0, status: 'pending', history: [], result: '', run_count: 0 };
+  globalThis.__workspaceTest.tasks = [saved]; const malformed = { ...saved }; delete malformed.estimated_minutes; return { data: malformed };
+ };
+ // No response gate or manual verification: use the unchanged store's natural
+ // create-finally GET, and mount the actual WorkspacePage/PendingCreateRecovery.
+ await act(async () => { await assert.rejects(store.getState().create(input), /创建回执缺少有效规划属性/); await waitFor(() => store.getState().recoveredCreate?.taskId); });
+ assert.equal(JSON.parse(journalAtDispatch).key, key); assert.equal(posts, 1); assert.equal(localStorage.getItem(`qunthink_command_v1_alice:${key}`), null);
+ assert.equal(store.getState().pendingCreates.length, 0); assert.equal(button('核验这次创建'), undefined); assert.match(container.textContent, /已找到上次保存的同一份文稿/);
+ const cards = [...container.querySelectorAll('[data-observe="task-card"]')]; assert.equal(cards.length, 1); assert.match(cards[0].textContent, /自然恢复原任务/); assert.match(cards[0].textContent, /预计 0 分钟/);
+ assert.equal(store.getState().tasks[0].client_request_id, key);
+});
+for (const problem of ['wrong-key', 'missing-estimate']) test(`natural background ${problem} response cannot retire the original create journal`, async () => {
+ const input = { title: '保留原号', prompt: '合成测试输入', category: 'work', model_id: null, group_id: null, run_at: null, repeat_minutes: null, auto_run: false, priority: 'high', estimated_minutes: 0 };
+ let key, saved, posts = 0, queries = 0;
+ globalThis.__workspaceTest.post = async (_, payload, config) => { posts++; key = config.headers['Idempotency-Key']; saved = { ...payload, id: '10000000-0000-4000-8000-000000000001', client_request_id: key, metadata_revision: 0, status: 'pending', history: [], result: '', run_count: 0 }; const malformed = { ...saved }; delete malformed.estimated_minutes; return { data: malformed }; };
+ globalThis.__workspaceTest.get = async (path, config) => {
+  if (path === '/tasks') return { data: [] };
+  queries++; assert.equal(path, `/tasks/commands/${key}`); assert.equal(config.headers['X-Expected-User-Id'], 'alice');
+  const body = { operation: 'create', status: 'succeeded', client_request_id: key, task_id: saved.id, task_deleted: false, task: { ...saved } };
+  if (problem === 'wrong-key') body.client_request_id = '20000000-0000-4000-8000-000000000002'; else delete body.task.estimated_minutes;
+  return { data: body };
+ };
+ await act(async () => { await assert.rejects(store.getState().create(input), /创建回执/); await waitFor(() => queries === 1 && !store.getState().loading); });
+ assert.equal(posts, 1); assert.equal(store.getState().pendingCreates[0].key, key); assert.ok(localStorage.getItem(`qunthink_command_v1_alice:${key}`)); assert.equal(button('核验这次创建').disabled, false); assert.equal(store.getState().recoveredCreate, null);
+});
+test('account switch during malformed create cannot auto-settle or expose the former owners journal', async () => {
+ let key, posts = 0, reads = 0;
+ globalThis.__workspaceTest.get = async () => { reads++; return { data: [] }; };
+ globalThis.__workspaceTest.post = async (_, payload, config) => { posts++; key = config.headers['Idempotency-Key']; store.getState().cleanup(); globalThis.__workspaceTest.user = 'bob'; return { data: { ...payload, id: '10000000-0000-4000-8000-000000000001', client_request_id: key, metadata_revision: 0, priority: 'high', estimated_minutes: 0, history: [], result: '', status: 'pending', run_count: 0 } }; };
+ await act(async () => { await assert.rejects(store.getState().create({ title: '旧账号任务', prompt: '合成私密测试', category: 'work', model_id: null, group_id: null, run_at: null, repeat_minutes: null, auto_run: false, priority: 'high', estimated_minutes: 0 }), /账号已切换/); });
+ assert.equal(posts, 1); assert.equal(reads, 0); assert.ok(localStorage.getItem(`qunthink_command_v1_alice:${key}`)); assert.deepEqual(store.getState().pendingCreates, []); assert.doesNotMatch(container.textContent, /旧账号任务|合成私密测试/);
 });
