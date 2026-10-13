@@ -78,7 +78,7 @@ test('API200 asserts the exact expected user and API429 stays explicit failure',
 });
 test('native spec preserves held ACK, CAS, UUID, same-document and privacy assertions', async () => {
   const source = await readFile(new URL('../e2e/task-metadata.spec.ts', import.meta.url), 'utf8');
-  assert.match(source, /apiLogin\(context, phoneB, ownerB.id\)/); assert.match(source, /apiLogin\(context, phoneA, ownerA.id\)/);
+  assert.match(source, /apiLogin\(page, info, context, phoneB, ownerB.id, ownerA.id\)/); assert.match(source, /apiLogin\(page, info, context, phoneA, ownerA.id, ownerB.id\)/);
   assert.ok(source.indexOf('uiPhoneLogin(page, info, phoneA, ownerA.id)') < source.indexOf('release(); await expect.poll(() => fulfilled)'));
   for (const text of ['performance.timeOrigin)).toBe(timeOrigin)', "not.toContainText('账号A私密冻结标题-991')", 'newCommand.client_request_id).not.toBe(firstSent.client_request_id)', 'newCommand.expected_revision).toBe(1)', 'sent.expected_revision).toBe(0)']) assert.ok(source.includes(text), text);
   assert.doesNotMatch(source.slice(source.indexOf('async function apiLogin'), source.indexOf("test('same live")), /retry|429|setTimeout/);

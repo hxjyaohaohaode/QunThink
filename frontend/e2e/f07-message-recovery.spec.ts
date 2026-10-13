@@ -3,8 +3,7 @@ import { test, expect, type Page } from '@playwright/test';
 // Only native Playwright establishes actual browser IndexedDB + WebCrypto
 // cross-document durability. DOM/synthetic-storage tests are separate evidence.
 async function fixture(page: Page, group?: string) {
-  await page.route('**/__f07-recovery.html*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="root"></div><script type="module" src="/e2e/f07RecoveryHarness.tsx"></script></body></html>' }));
-  await page.goto('/__f07-recovery.html' + (group ? '?group=' + encodeURIComponent(group) : ''));
+  await page.goto('/e2e/f07-recovery.html' + (group ? '?group=' + encodeURIComponent(group) : ''));
   await expect(page.locator('textarea')).toBeEnabled();
 }
 const draft = '真实浏览器合成草稿：刷新仍使用同一账号';
