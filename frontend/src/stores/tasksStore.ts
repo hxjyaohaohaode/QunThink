@@ -7,13 +7,16 @@ import { getCacheUserId } from '../utils/cacheUtils';
 import { requestError } from './modelsStore';
 import { recordDiagnostic } from '../observability/runtimeDiagnostics';
 import { readDependencyIntents, persistDependencyIntent, removeDependencyIntent, validDependencyIds, type DependencyIntent } from '../utils/taskDependencyRecovery';
-import type { WorkspaceTask, TaskCreateInput, TaskCreateCommandReceipt, DependencyCommandResponse } from '../../../shared/tasks';
+import { validPlanningFields, validTaskPriority, validEstimatedMinutes } from '../utils/taskPlanning';
+import type { TaskPriority, WorkspaceTask, TaskCreateInput, TaskCreateCommandReceipt, DependencyCommandResponse } from '../../../shared/tasks';
 
 export interface TaskComposerDraft {
   title: string; prompt: string; category: 'work' | 'social' | 'play';
+  priority: TaskPriority | null; estimatedMinutes: string;
   dependencyIds: string[]; modelId: string; groupId: string; sourceMessageId: string; sourceMessageEditedAt: string | null; runAt: string; repeat: string; autoRun: boolean;
 }
-export const emptyTaskDraft = (): TaskComposerDraft => ({ title: '', prompt: '', category: 'work', dependencyIds: [], modelId: '', groupId: '', sourceMessageId: '', sourceMessageEditedAt: null, runAt: '', repeat: '', autoRun: false });
+export const emptyTaskDraft = (): TaskComposerDraft => ({ title: '', prompt: '', category: 'work', priority: null, estimatedMinutes: '', dependencyIds: [], modelId: '', groupId: '', sourceMessageId: '', sourceMessageEditedAt: null, runAt: '', repeat: '', autoRun: false });
+export const hasTaskComposerDraft = (draft: TaskComposerDraft) => !!(draft.title || draft.prompt || draft.priority !== null || draft.estimatedMinutes !== '');
 interface CreateIntent { key: string; payload: TaskCreateInput; composerSequence?: number; }
 export interface TaskState extends MetadataState {
   tasks: WorkspaceTask[]; loading: boolean; error: string | null; lastUpdated: string | null;
@@ -105,6 +108,15 @@ export const useTasksStore = create<TaskState>((set, get) => {
     set({ pendingCreates, uncertainCreate: pendingCreates.length > 0 });
     return pendingCreates;
   }
+  async function restoreCreateIntent(receipt: TaskCommandReceipt, origin: ReturnType<typeof context>) {
+    if (createIntents.has(receipt.key)) return;
+    const frozen = await loadWritingContent(`create-intent:${receipt.key}`);
+    if (!current(origin) || !frozen) return;
+    try {
+      const payload = JSON.parse(frozen.body) as TaskCreateInput;
+      if (validPlanningFields(payload) && await textHash(JSON.stringify(payload)) === receipt.payloadHash && current(origin) && get().pendingCreates.some(item => item.key === receipt.key) && !createIntents.has(receipt.key)) createIntents.set(receipt.key, { key: receipt.key, payload });
+    } catch { /* Unreadable private input never becomes a replay. */ }
+  }
   function releaseCreate(key: string) {
     removeTaskReceipt(key); removeWritingDraft(`create-intent:${key}`); createIntents.delete(key);
     set(state => { const pendingCreates = state.pendingCreates.filter(item => item.key !== key); return { pendingCreates, uncertainCreate: pendingCreates.length > 0 }; });
@@ -113,12 +125,17 @@ export const useTasksStore = create<TaskState>((set, get) => {
   function settleCreate(key: string, response: TaskCreateCommandReceipt, snapshotSequence = fetchSequence) {
     if (response.operation !== 'create' || response.client_request_id !== key || !['succeeded', 'cancelled'].includes(response.status)) throw new Error('回执标识不匹配，请继续核验原请求');
     if (response.status === 'cancelled' && (response.task_id !== null || response.task !== null || response.task_deleted !== false || !response.closed_at)) throw new Error('结束回执不完整，请继续核验原请求');
-    if (response.status === 'succeeded' && (!response.task_id || (!response.task && !response.task_deleted) || (response.task && (response.task.id !== response.task_id || response.task.client_request_id !== key)))) throw new Error('创建回执不完整，请继续核验原请求');
+    if (response.status === 'succeeded' && (!response.task_id || (response.task ? response.task_deleted !== false || response.task.id !== response.task_id || response.task.client_request_id !== key : response.task !== null || response.task_deleted !== true))) throw new Error('创建回执不完整，请继续核验原请求');
     if (!get().pendingCreates.some(item => item.key === key)) return;
     const intent = createIntents.get(key);
+    if (response.status === 'succeeded' && response.task) {
+      const task = response.task;
+      if (!Object.prototype.hasOwnProperty.call(task, 'priority') || !Object.prototype.hasOwnProperty.call(task, 'estimated_minutes') || !validTaskPriority(task.priority) || !validEstimatedMinutes(task.estimated_minutes) || !Number.isSafeInteger(task.metadata_revision) || task.metadata_revision! < 0) throw new Error('创建回执缺少有效规划属性，请保留原请求并更新服务后核验');
+      if (intent && task.metadata_revision === 0 && (['priority', 'estimated_minutes'] as const).some(field => Object.prototype.hasOwnProperty.call(intent.payload, field) && task[field] !== intent.payload[field])) throw new Error('创建回执规划属性与原输入不一致，请继续核验原请求');
+    }
     const clearDraft = response.status === 'succeeded' && intent?.composerSequence === composerSequence;
     releaseCreate(key);
-    set(state => ({ ...(clearDraft ? { composerDraft: emptyTaskDraft() } : {}), recoveredCreate: { taskId: response.task_id, deleted: response.task_deleted, cancelled: response.status === 'cancelled', preserveDraft: !clearDraft && !!(state.composerDraft.title || state.composerDraft.prompt) }, ...(response.task && snapshotSequence === fetchSequence ? { tasks: [response.task, ...state.tasks.filter(item => item.id !== response.task!.id)] } : {}) }));
+    set(state => ({ ...(clearDraft ? { composerDraft: emptyTaskDraft() } : {}), recoveredCreate: { taskId: response.task_id, deleted: response.task_deleted, cancelled: response.status === 'cancelled', preserveDraft: !clearDraft && hasTaskComposerDraft(state.composerDraft) }, ...(response.task && snapshotSequence === fetchSequence ? { tasks: [response.task, ...state.tasks.filter(item => item.id !== response.task!.id)] } : {}) }));
   }
   async function queryCreate(key: string, close: boolean) {
     refreshCreateReceipts();
@@ -126,6 +143,9 @@ export const useTasksStore = create<TaskState>((set, get) => {
     const origin = context();
     await mutate(`create:${key}`, close ? '核对并结束中' : '核验中', async () => {
       try {
+        const receipt = get().pendingCreates.find(item => item.key === key);
+        if (receipt) await restoreCreateIntent(receipt, origin);
+        if (!current(origin)) throw new Error('账号已切换，请重新核验原请求');
         const snapshotSequence = fetchSequence;
         const config = { headers: { 'X-Expected-User-Id': origin.user || '' } };
         const { data } = close ? await axiosInstance.post<TaskCreateCommandReceipt>(`/tasks/commands/${key}/close`, {}, config) : await axiosInstance.get<TaskCreateCommandReceipt>(`/tasks/commands/${key}`, config);
@@ -321,23 +341,16 @@ export const useTasksStore = create<TaskState>((set, get) => {
         await get().hydrateMetadata();
         if (!current(origin) || request !== fetchSequence) return;
         for (const receipt of unknownCreates) {
+          // Recover any available original intent before trusting a list/query
+          // shortcut. Loading never normalizes old bytes or dispatches a write.
+          await restoreCreateIntent(receipt, origin);
+          if (!current(origin) || request !== fetchSequence) return;
           try {
             const task = data.find(item => item.client_request_id === receipt.key);
             const response = task ? { status: 'succeeded' as const, operation: 'create' as const, client_request_id: receipt.key, task_id: task.id, task_deleted: false, task } : (await axiosInstance.get<TaskCreateCommandReceipt>(`/tasks/commands/${receipt.key}`, { headers: { 'X-Expected-User-Id': origin.user || '' } })).data;
             if (!current(origin) || request !== fetchSequence) return;
             settleCreate(receipt.key, response);
-            continue;
           } catch { if (!current(origin) || request !== fetchSequence) return; }
-          if (createIntents.has(receipt.key)) continue;
-          const frozen = await loadWritingContent(`create-intent:${receipt.key}`);
-          if (!current(origin) || request !== fetchSequence) return;
-          if (frozen) {
-            try {
-              const payload = JSON.parse(frozen.body) as TaskCreateInput;
-              if (await textHash(JSON.stringify(payload)) !== receipt.payloadHash || !current(origin) || request !== fetchSequence) continue;
-              createIntents.set(receipt.key, { key: receipt.key, payload });
-            } catch { /* Unreadable private input never becomes a replay. */ }
-          }
         }
         for (const task of data) {
           const key = runIntents.get(task.id);
@@ -347,6 +360,7 @@ export const useTasksStore = create<TaskState>((set, get) => {
       } catch (error) { if (current(origin) && request === fetchSequence) set({ loading: false, error: requestError(error) }); }
     },
     create: async data => {
+      if (!validPlanningFields(data)) throw new Error('请填写有效优先级和预计分钟');
       if (get().pending.create) throw new Error('正在保存，请稍候');
       const pending = refreshCreateReceipts();
       if (pending.length) {
@@ -410,7 +424,7 @@ export const useTasksStore = create<TaskState>((set, get) => {
       });
     },
     update: async (id, patch) => { const origin = context();
-      if (['title', 'auto_run', 'run_at'].some(key => key in patch)) throw new Error('请使用任务设置面板保存。当前草稿保留；如面板不可用，请刷新或升级应用');
+      if (['title', 'auto_run', 'run_at', 'priority', 'estimated_minutes'].some(key => key in patch)) throw new Error('请使用任务设置面板保存。当前草稿保留；如面板不可用，请刷新或升级应用');
       if (patch.status !== 'cancelled') get().requireSettledMetadata(id);
       if (patch.status === 'cancelled') patch = { ...patch, ...(runIntents.get(id) ? { cancel_request_id: runIntents.get(id) } : {}) }; await mutate(patch.status === 'cancelled' ? `${id}:cancel` : id, patch.status === 'cancelled' ? '停止请求中' : '更新中', () => axiosInstance.patch(`/tasks/${id}`, patch, { headers: { 'X-Expected-User-Id': origin.user || '' } })); },
     remove: async id => {

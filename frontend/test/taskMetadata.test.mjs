@@ -2,7 +2,7 @@ import test, { beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { resolve, join } from 'node:path';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { Window } from 'happy-dom';
 const root = resolve(import.meta.dirname, '..'), window = new Window({ url: 'https://qunthink.test/' });
@@ -54,7 +54,7 @@ beforeEach(async () => {
 });
 after(async () => { await close(); window.close(); await rm(folder, { recursive: true, force: true }); });
 test('React panel edits three values and retains draft across close/reopen without persisting text', async () => {
- await open(); await act(async () => draft()); assert.equal(container.querySelectorAll('input').length, 3); await close(); await open(); assert.equal(container.querySelector('input').value, '私密标题-NEW'); assert.equal(button('保存任务设置').disabled, false); assert.equal(localStorage.length, 0);
+ await open(); await act(async () => draft()); assert.equal(container.querySelectorAll('input').length, 4); await close(); await open(); assert.equal(container.querySelector('input').value, '私密标题-NEW'); assert.equal(button('保存任务设置').disabled, false); assert.equal(localStorage.length, 0);
 });
 test('double click sends one guarded command, freezes controls, never writes private plaintext', async () => {
  let resolve, calls = []; globalThis.__metadata.put = (...args) => { calls.push(args); return new Promise(done => { resolve = done; }); };
@@ -145,6 +145,10 @@ for (const [name, changes, savedChanges, newerChanges, unsaved] of [
  ['title whitespace only', { title: ' 原任务 ' }, {}, null, false],
  ['same normalized saved title', { title: '  另一标签已经提交  ' }, {}, null, false],
  ['untouched fields changed remotely', { title: '另一标签已经提交' }, { auto_run: true, run_at: '2030-02-03T04:05:00.000Z' }, null, false],
+ ['same saved planning priority', { priority: 'high' }, { priority: 'high' }, null, false],
+ ['different planning priority', { priority: 'high' }, { priority: 'low' }, null, true],
+ ['same saved zero estimate', { estimated_minutes: 0 }, { estimated_minutes: 0 }, null, false],
+ ['untouched estimate changed remotely', { title: '另一标签已经提交' }, { estimated_minutes: 20 }, null, false],
  ['different auto-run draft', { auto_run: true }, {}, null, true],
  ['different schedule draft', { run_at: '2030-02-03T04:05:00.000Z' }, {}, null, true],
  ['same saved schedule draft', { run_at: '2030-02-03T04:05:00.000Z' }, { run_at: '2030-02-03T04:05:00.000Z' }, null, false],
@@ -229,4 +233,130 @@ test('real metadata network failure keeps original UUID without automatic retry 
  const { axiosInstance, confirmAuthIdentity, useTasksStore: realStore } = realTransport; realStore.getState().cleanup(); confirmAuthIdentity('alice'); document.cookie = 'XSRF-TOKEN=synthetic'; realStore.setState({ tasks }); let payload, writes = 0;
  axiosInstance.defaults.adapter = config => { if (config.method !== 'put') return Promise.resolve({ config, status: 200, data: tasks, headers: {} }); writes++; payload = JSON.parse(config.data); return Promise.reject(Object.assign(new Error('TASK_METADATA_REVISION_CONFLICT is only text'), { config, code: 'ERR_NETWORK' })); };
  realStore.getState().editMetadata(id, { title: '未知必须保留' }); await assert.rejects(realStore.getState().saveMetadata(id)); assert.equal(writes, 1); assert.equal(realStore.getState().metadataIntents[id].key, payload.client_request_id); assert.equal(realStore.getState().metadataConflicts[id], false); assert.equal(readMetadataJournal()[0].key, payload.client_request_id); realStore.getState().cleanup();
+});
+
+// F14.1: these exercise mounted React and the real encrypted recovery path.
+test('planning React controls distinguish unset and zero without changing the schedule', async () => {
+ await open();
+ const priority = container.querySelector('select[aria-label="设置优先级"]');
+ const minutes = container.querySelector('input[aria-label="设置预计分钟"]');
+ assert.ok(priority, 'priority control must be mounted'); assert.ok(minutes, 'estimated-minutes control must be mounted');
+ assert.deepEqual([...priority.options].map(option => [option.value, option.textContent]), [['', '未设置'], ['low', '低'], ['medium', '中'], ['high', '高']]);
+ assert.equal(priority.value, ''); assert.equal(minutes.value, '');
+ await act(async () => { priority.value = 'high'; priority.dispatchEvent(new window.Event('change', { bubbles: true })); Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(minutes, '0'); minutes.dispatchEvent(new window.Event('input', { bubbles: true })); });
+ assert.deepEqual(store.getState().metadataDrafts[id].values, { title: '原任务', auto_run: false, run_at: null, priority: 'high', estimated_minutes: 0 });
+ let sent; globalThis.__metadata.put = async (_, payload) => { sent = payload; tasks[0] = receipt(payload).data.task; return receipt(payload); };
+ await act(async () => { button('保存任务设置').click(); await until(() => !!sent && !store.getState().pending[id]); });
+ assert.deepEqual(sent.changes, { priority: 'high', estimated_minutes: 0 }); assert.equal(tasks[0].auto_run, false); assert.equal(tasks[0].run_at, null);
+ await close(); await open(); assert.equal(container.querySelector('input[aria-label="设置预计分钟"]').value, '0');
+});
+test('planning AES recovery restores exact zero/null payload and original UUID after reload', async () => {
+ setWritingPreferences({ recoverDrafts: true, offlineCopies: false });
+ tasks[0] = makeTask({ priority: 'high', estimated_minutes: 30 }); store.setState({ tasks });
+ draft({ priority: null, estimated_minutes: 0 });
+ globalThis.__metadata.put = async () => { throw new Error('lost ACK'); }; await assert.rejects(store.getState().saveMetadata(id));
+ const item = store.getState().metadataIntents[id]; assert.ok(item, 'new planning changes must dispatch through the recoverable metadata command');
+ assert.deepEqual(item.payload.changes, { priority: null, estimated_minutes: 0 });
+ store.getState().cleanup(); await store.getState().fetch(); assert.deepEqual(store.getState().metadataIntents[id].payload, item.payload);
+ let sent; globalThis.__metadata.put = async (_, payload) => { sent = payload; tasks[0] = receipt(payload).data.task; return receipt(payload); };
+ await store.getState().retryMetadata(id, item.key); assert.deepEqual(sent, item.payload); assert.equal(readMetadataJournal().length, 0);
+});
+for (const changes of [{ priority: 'high' }, { estimated_minutes: 0 }]) test(`planning local draft remains explicitly unsaved after another tab ACK: ${Object.keys(changes)[0]}`, async () => {
+ draft(changes); const localDraft = store.getState().metadataDrafts[id];
+ const payload = { client_request_id: crypto.randomUUID(), expected_revision: 0, changes: { title: '另一标签已保存' } };
+ persistMetadataJournal({ taskId: id, key: payload.client_request_id, revision: 0, fields: ['title'], payloadHash: await textHash(canonicalMetadata(payload)), createdAt: new Date().toISOString() });
+ tasks[0] = receipt(payload).data.task; globalThis.__metadata.get = async path => path === '/tasks' ? { data: tasks } : receipt(payload, tasks[0]);
+ await store.getState().fetch(); await open(); await act(async () => store.getState().verifyMetadata(id, payload.client_request_id));
+ assert.equal(store.getState().metadataNotices[id], '原请求已确认保存，当前草稿尚未保存。'); assert.deepEqual(store.getState().metadataDrafts[id], localDraft);
+ assert.equal(button('保存任务设置').disabled, true);
+});
+
+for (const value of [null, 'low', 'medium', 'high']) test(`planning priority accepts exact supported value ${value}`, () => { assert.equal(fixture.validMetadataChanges({ priority: value }), true); });
+for (const value of [null, 0, 1, 525600]) test(`planning estimate accepts exact supported value ${value}`, () => { assert.equal(fixture.validMetadataChanges({ estimated_minutes: value }), true); });
+for (const [field, values] of Object.entries({ priority: ['', 'urgent', 0, false, [], {}, undefined], estimated_minutes: ['', '0', -1, 1.5, 525601, NaN, Infinity, false, [], {}, undefined] })) {
+ for (const [index, value] of values.entries()) test(`planning ${field} rejects invalid type/range ${index}`, () => { assert.equal(fixture.validMetadataChanges({ [field]: value }), false); });
+}
+test('planning extension leaves historic three-field canonical bytes and hash untouched', async () => {
+ const payload = { client_request_id: id, expected_revision: 0, changes: { title: '旧设置', run_at: null, auto_run: false } };
+ const frozen = '{"client_request_id":"10000000-0000-4000-8000-000000000001","expected_revision":0,"changes":{"auto_run":false,"run_at":null,"title":"旧设置"}}';
+ assert.equal(canonicalMetadata(payload), frozen); assert.equal(await textHash(canonicalMetadata(payload)), await textHash(frozen));
+ assert.equal(fixture.validMetadataChanges(payload.changes), true);
+});
+
+for (const changes of [{ priority: null }, { estimated_minutes: null }, { estimated_minutes: 0 }]) test(`planning same-revision ACK missing ${Object.keys(changes)[0]} cannot settle the original command`, async () => {
+ tasks[0] = makeTask({ priority: 'high', estimated_minutes: 30 }); store.setState({ tasks }); draft(changes);
+ let dispatched; globalThis.__metadata.put = async (_, payload) => { dispatched = payload; const reply = receipt(payload); delete reply.data.task[Object.keys(changes)[0]]; return reply; };
+ await assert.rejects(store.getState().saveMetadata(id), /回执/); assert.ok(dispatched, 'validation must reach the real command transport');
+ assert.equal(store.getState().metadataIntents[id].key, dispatched.client_request_id); assert.equal(readMetadataJournal().length, 1);
+});
+
+test('planning legacy encrypted creation replay retains byte-exact old fields without default injection', async () => {
+ setWritingPreferences({ recoverDrafts: true, offlineCopies: false });
+ const legacy = { title: '旧版加密创建', prompt: '合成私密正文', category: 'work', model_id: null, group_id: null, run_at: null, repeat_minutes: null, auto_run: false };
+ let original; globalThis.__metadata.post = async (_, payload, config) => { original = { payload: JSON.stringify(payload), key: config.headers['Idempotency-Key'] }; throw new Error('lost ACK'); };
+ await assert.rejects(store.getState().create(legacy)); store.getState().cleanup(); tasks = []; await store.getState().fetch();
+ assert.equal(store.getState().canRetryCreate(original.key), true); let replay;
+ globalThis.__metadata.post = async (_, payload, config) => { replay = { payload: JSON.stringify(payload), key: config.headers['Idempotency-Key'] }; return { data: makeTask({ priority: null, estimated_minutes: null, ...payload, client_request_id: replay.key }) }; };
+ await store.getState().retryCreate(original.key); assert.deepEqual(replay, original); assert.equal(replay.payload, JSON.stringify(legacy));
+});
+for (const [status, code] of [[403, 'OWNER_MISMATCH'], [409, 'TASK_METADATA_REVISION_CONFLICT']]) test(`planning ${status} preserves frozen null/zero intent and UUID without model calls`, async () => {
+ tasks[0] = makeTask({ priority: 'low', estimated_minutes: 8 }); store.setState({ tasks }); draft({ priority: null, estimated_minutes: 0 });
+ let sent; globalThis.__metadata.put = async (_, payload) => { sent = payload; throw failure(status, code); };
+ await assert.rejects(store.getState().saveMetadata(id)); assert.ok(sent); const item = store.getState().metadataIntents[id];
+ assert.deepEqual(item.payload.changes, { priority: null, estimated_minutes: 0 }); assert.equal(item.key, sent.client_request_id);
+ assert.equal(!!store.getState().metadataConflicts[id], status === 409); assert.equal(readMetadataJournal().length, 1);
+});
+test('planning historical ACK preserves newer priority and estimate projection', async () => {
+ let finish, payload; globalThis.__metadata.put = (_, body) => { payload = body; return new Promise(resolve => { finish = resolve; }); };
+ draft({ priority: 'high', estimated_minutes: 0 }); const work = store.getState().saveMetadata(id); const pending = work.catch(() => {}); await until(() => finish);
+ tasks[0] = makeTask({ priority: 'low', estimated_minutes: 525600, metadata_revision: 3 }); await store.getState().fetch(); finish(receipt(payload)); await work; await pending;
+ assert.equal(store.getState().tasks[0].priority, 'low'); assert.equal(store.getState().tasks[0].estimated_minutes, 525600); assert.equal(store.getState().tasks[0].metadata_revision, 3);
+});
+
+
+test('planning candidate consumes actual public-533 legacy v1 journal/AES fixture without changing payload bytes', async () => {
+ const legacy = JSON.parse(await readFile(resolve(root, 'test/fixtures/task-planning-legacy.json'), 'utf8'));
+ assert.equal(legacy.sourceCommit, '533d7be3cdd47691602574ccac7c6524e7ed7ab3');
+ const key = await crypto.subtle.importKey('raw', new Uint8Array(legacy.keyMaterial), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+ databases.set('qunthink-writing-key-alice', new Map([['key', key]]));
+ for (const [name, value] of Object.entries(legacy.storage)) localStorage.setItem(name, value);
+ await store.getState().fetch();
+ for (const [name, bytes] of Object.entries(legacy.storage)) assert.equal(localStorage.getItem(name), bytes, `Hydration must not rewrite baseline bytes: ${name}`);
+ const metadata = store.getState().metadataIntents[id]; assert.ok(metadata?.payload); assert.equal(canonicalMetadata(metadata.payload), canonicalMetadata(legacy.metadataPayload));
+ const creation = store.getState().pendingCreates[0]; assert.ok(creation); assert.equal(store.getState().canRetryCreate(creation.key), true);
+ assert.equal(metadata.payloadHash, await textHash(canonicalMetadata(legacy.metadataPayload))); assert.equal(creation.payloadHash, await textHash(JSON.stringify(legacy.createPayload)));
+ let createSent, metadataSent;
+ globalThis.__metadata.post = async (_, payload, config) => { createSent = { raw: JSON.stringify(payload), key: config.headers['Idempotency-Key'] }; return { data: makeTask({ priority: null, estimated_minutes: null, ...payload, id: other, client_request_id: createSent.key }) }; };
+ await store.getState().retryCreate(creation.key); assert.equal(createSent.raw, JSON.stringify(legacy.createPayload)); assert.equal(createSent.key, creation.key);
+ globalThis.__metadata.put = async (_, payload) => { metadataSent = payload; tasks[0] = receipt(payload).data.task; return receipt(payload); };
+ await store.getState().retryMetadata(id, metadata.key); assert.deepEqual(metadataSent, legacy.metadataPayload); assert.equal(readMetadataJournal().length, 0);
+});
+
+for (const input of ['-1', '1.5', '1e2', '  ', 'NaN', '525601', '99999999999999999999']) test(`planning mounted estimate rejects ${JSON.stringify(input)} without erasing typed intent or clearing server value`, async () => {
+ tasks[0] = makeTask({ estimated_minutes: 30 }); store.setState({ tasks }); await open(); const el = container.querySelector('input[aria-label="设置预计分钟"]'); let writes = 0; globalThis.__metadata.put = async () => { writes++; };
+ await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(el, input); el.dispatchEvent(new window.Event('input', { bubbles: true })); });
+ assert.equal(el.value, input); assert.equal(el.getAttribute('aria-invalid'), 'true'); assert.equal(button('保存任务设置').disabled, true); assert.equal(store.getState().metadataDrafts[id].values.estimated_minutes, 30);
+ await assert.rejects(store.getState().saveMetadata(id), /预计分钟/); assert.equal(writes, 0); await close(); await open(); assert.equal(container.querySelector('input[aria-label="设置预计分钟"]').value, input); assert.equal(localStorage.length, 0);
+});
+test('planning explicit empty control clears estimate to null instead of zero', async () => {
+ tasks[0] = makeTask({ priority: 'medium', estimated_minutes: 0 }); store.setState({ tasks }); await open(); const el = container.querySelector('input[aria-label="设置预计分钟"]');
+ await act(async () => { Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(el, ''); el.dispatchEvent(new window.Event('input', { bubbles: true })); });
+ let sent; globalThis.__metadata.put = async (_, body) => { sent = body; return receipt(body); }; await act(async () => store.getState().saveMetadata(id)); assert.deepEqual(sent.changes, { estimated_minutes: null });
+});
+test('planning invalid raw estimate remains unsaved after another tab receipt', async () => {
+ await open(); await act(async () => store.getState().editMetadataEstimate(id, '1e2')); const payload = { client_request_id: crypto.randomUUID(), expected_revision: 0, changes: { title: '另一标签已保存' } };
+ persistMetadataJournal({ taskId: id, key: payload.client_request_id, revision: 0, fields: ['title'], payloadHash: await textHash(canonicalMetadata(payload)), createdAt: new Date().toISOString() });
+ tasks[0] = receipt(payload).data.task; globalThis.__metadata.get = async path => path === '/tasks' ? { data: tasks } : receipt(payload, tasks[0]); await act(async () => { await store.getState().fetch(); await store.getState().verifyMetadata(id, payload.client_request_id); });
+ assert.equal(store.getState().metadataNotices[id], '原请求已确认保存，当前草稿尚未保存。'); assert.equal(store.getState().metadataDrafts[id].estimatedMinutesInput, '1e2'); assert.equal(container.querySelector('input[aria-label="设置预计分钟"]').value, '1e2'); assert.ok([...container.querySelectorAll('[role="status"]')].some(el => el.textContent === '原请求已确认保存，当前草稿尚未保存。'));
+});
+for (const field of ['priority', 'estimated_minutes']) test(`planning bare PATCH cannot bypass guarded ${field}`, async () => { await assert.rejects(store.getState().update(id, { [field]: null }), /任务设置面板/); });
+
+for (const route of ['fetch-list', 'fetch-query', 'verify', 'close']) test(`planning ${route} restores frozen create before comparing wrong initial planning values`, async () => {
+ setWritingPreferences({ recoverDrafts: true, offlineCopies: false }); const original = { title: '冻结规划创建', prompt: '合成输入', category: 'work', model_id: null, group_id: null, run_at: null, repeat_minutes: null, auto_run: false, priority: 'high', estimated_minutes: 0 };
+ let key; globalThis.__metadata.post = async (_, payload, config) => { key = config.headers['Idempotency-Key']; throw new Error('lost ACK'); }; await assert.rejects(store.getState().create(original)); await tick(); store.getState().cleanup();
+ const wrong = makeTask({ ...original, client_request_id: key, priority: 'low', estimated_minutes: 25, metadata_revision: 0 });
+ const response = { data: { status: 'succeeded', operation: 'create', client_request_id: key, task_id: id, task_deleted: false, task: wrong } };
+ globalThis.__metadata.get = async path => path === '/tasks' ? { data: route === 'fetch-list' ? [wrong] : [] } : response; globalThis.__metadata.post = async () => response;
+ if (route.startsWith('fetch-')) await store.getState().fetch(); else await assert.rejects(route === 'verify' ? store.getState().verifyCreate(key) : store.getState().closeCreate(key), /创建回执规划属性/);
+ assert.equal(store.getState().pendingCreates[0]?.key, key); assert.equal(store.getState().canRetryCreate(key), true);
 });

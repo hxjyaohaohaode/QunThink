@@ -14,7 +14,7 @@ const result = await build({ entryPoints: [resolve(root, 'src/stores/tasksStore.
 }}] });
 const { useTasksStore: store } = await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 const input = { title: '中文任务', prompt: '私密输入不应进入诊断', category: 'work', model_id: null, group_id: null, source_message_id: null, run_at: null, repeat_minutes: null, auto_run: false };
-const task = { id: 'task-a', ...input, status: 'pending', history: [], result: '', run_id: 'run-a' };
+const task = { id: 'task-a', priority: null, estimated_minutes: null, metadata_revision: 0, ...input, status: 'pending', history: [], result: '', run_id: 'run-a' };
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 beforeEach(() => { localStorage.clear(); store.getState().cleanup(); globalThis.__taskTest.user = 'alice'; for (const method of ['post', 'patch', 'delete']) globalThis.__taskTest[method] = async () => ({ data: task }); globalThis.__taskTest.get = async () => ({ data: [] }); });
 test('newer task reads win over delayed polling', async () => {
@@ -131,4 +131,35 @@ test('A-B-A auth generation rejects old close response and keeps renewed account
 
 test('older create closure cannot overwrite a newer revoked task projection',async()=>{
  createReceipt('e2e4409a-b44c-5446-b857-97af4240e7b9');globalThis.__taskTest.get=missingCreates;await store.getState().fetch();let release;globalThis.__taskTest.post=()=>new Promise(resolve=>{release=resolve});const closing=store.getState().closeCreate('e2e4409a-b44c-5446-b857-97af4240e7b9');await tick();const revoked={...task,client_request_id:'e2e4409a-b44c-5446-b857-97af4240e7b9',prompt:'',source_input_stale:true};globalThis.__taskTest.get=async()=>({data:[revoked]});await store.getState().fetch();release({data:{status:'succeeded',operation:'create',client_request_id:'e2e4409a-b44c-5446-b857-97af4240e7b9',task_id:task.id,task_deleted:false,task:{...task,client_request_id:'e2e4409a-b44c-5446-b857-97af4240e7b9'}}});await closing;await tick();assert.equal(store.getState().tasks[0].prompt,'');assert.equal(store.getState().tasks[0].source_input_stale,true);
+});
+
+for (const [name, mutate] of Object.entries({ missingPriority: value => delete value.priority, missingMinutes: value => delete value.estimated_minutes, invalidPriority: value => value.priority = 'urgent', invalidMinutes: value => value.estimated_minutes = '0', changedInitialPriority: value => value.priority = 'low', changedInitialMinutes: value => value.estimated_minutes = null })) test(`planning creation receipt ${name} preserves original UUID until valid proof`, async () => {
+ let key, writes = 0; const planned = { ...input, priority: 'high', estimated_minutes: 0 };
+ globalThis.__taskTest.get = missingCreates; globalThis.__taskTest.post = async (_, body, config) => { writes++; key = config.headers['Idempotency-Key']; const projection = { ...task, ...body, metadata_revision: 0, client_request_id: key }; mutate(projection); return { data: projection }; };
+ await assert.rejects(store.getState().create(planned), /创建回执/); assert.equal(store.getState().pendingCreates[0].key, key); assert.equal(writes, 1);
+ globalThis.__taskTest.get = async path => path === '/tasks' ? { data: [] } : { data: { status: 'succeeded', operation: 'create', client_request_id: key, task_id: task.id, task_deleted: false, task: { ...task, ...planned, metadata_revision: 0, client_request_id: key } } };
+ await store.getState().verifyCreate(key); assert.equal(store.getState().uncertainCreate, false); assert.equal(writes, 1);
+});
+test('planning reload without private create payload rejects missing-field query and list receipts', async () => {
+ let key; globalThis.__taskTest.post = async (_, body, config) => { key = config.headers['Idempotency-Key']; throw new Error('lost ACK'); }; await assert.rejects(store.getState().create(input)); store.getState().cleanup();
+ const projection = { ...task, client_request_id: key }; delete projection.priority; delete projection.estimated_minutes;
+ globalThis.__taskTest.get = async path => path === '/tasks' ? { data: [projection] } : { data: { status: 'succeeded', operation: 'create', client_request_id: key, task_id: task.id, task_deleted: false, task: projection } };
+ await store.getState().fetch(); assert.equal(store.getState().pendingCreates[0]?.key, key); assert.equal(store.getState().canRetryCreate(key), false); await assert.rejects(store.getState().verifyCreate(key), /创建回执/);
+});
+test('planning recovered creation accepts newer valid projection without comparing original planning values', async () => {
+ let key; globalThis.__taskTest.get = missingCreates; globalThis.__taskTest.post = async (_, body, config) => { key = config.headers['Idempotency-Key']; throw new Error('lost ACK'); }; await assert.rejects(store.getState().create({ ...input, priority: 'high', estimated_minutes: 0 }));
+ globalThis.__taskTest.get = async path => path === '/tasks' ? { data: [] } : { data: { status: 'succeeded', operation: 'create', client_request_id: key, task_id: task.id, task_deleted: false, task: { ...task, client_request_id: key, metadata_revision: 2, priority: 'low', estimated_minutes: 25 } } };
+ await store.getState().verifyCreate(key); assert.equal(store.getState().uncertainCreate, false);
+});
+
+for (const [index, revision] of [undefined, null, -1, 0.5, '0', NaN, Infinity].entries()) test(`planning invalid creation metadata revision ${index} cannot bypass initial value comparison`, async () => {
+ globalThis.__taskTest.get = missingCreates;
+ globalThis.__taskTest.post = async (_, body, config) => ({ data: { ...task, ...body, client_request_id: config.headers['Idempotency-Key'], priority: 'low', metadata_revision: revision } });
+ await assert.rejects(store.getState().create({ ...input, priority: 'high', estimated_minutes: 0 }), /创建回执/); assert.equal(store.getState().uncertainCreate, true);
+});
+
+for (const [name, projection, deleted] of [['contradictory task', task, true], ['truthy deletion', null, 'yes'], ['missing task', undefined, true], ['unproved deletion', null, false]]) test(`planning create ${name} does not release the original journal`, async () => {
+ const key = 'aaa0d09a-b44c-5446-b857-97af4240e7b9'; createReceipt(key); globalThis.__taskTest.get = missingCreates; await store.getState().fetch();
+ globalThis.__taskTest.get = async path => path === '/tasks' ? { data: [] } : { data: { status: 'succeeded', operation: 'create', client_request_id: key, task_id: task.id, task_deleted: deleted, task: projection && { ...projection, client_request_id: key } } };
+ await assert.rejects(store.getState().verifyCreate(key), /创建回执/); assert.equal(store.getState().pendingCreates[0].key, key);
 });

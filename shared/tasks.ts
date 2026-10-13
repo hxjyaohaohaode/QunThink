@@ -1,4 +1,5 @@
 export type TaskCategory = 'work' | 'social' | 'play';
+export type TaskPriority = 'low' | 'medium' | 'high';
 export type TaskStatus = 'pending' | 'running' | 'needs_review' | 'outcome_unknown' | 'completed' | 'failed' | 'cancelled';
 export interface DependencyState {
   blocked: boolean;
@@ -16,7 +17,7 @@ export interface DependencyCommandResponse {
   task: WorkspaceTask | null;
   task_deleted?: boolean;
 }
-export type TaskMetadataChanges = Partial<Pick<WorkspaceTask, 'title' | 'auto_run' | 'run_at'>>;
+export type TaskMetadataChanges = Partial<Pick<WorkspaceTask, 'title' | 'auto_run' | 'run_at' | 'priority' | 'estimated_minutes'>>;
 export interface UpdateTaskMetadataInput {
   client_request_id: string;
   expected_revision: number;
@@ -28,12 +29,16 @@ export interface MetadataCommandResponse {
   task_deleted?: boolean;
 }
 export interface WorkspaceTask {
-  /** Shared optimistic revision for title, auto_run and run_at. Legacy read projections start at zero. */
+  /** Shared revision for title, scheduling and private planning attributes. Legacy projections start at zero. */
   metadata_revision?: number;
   id: string;
   /** UUID identifying the original creation intent; reusable only with the same input. */
   client_request_id?: string;
   title: string;
+  /** Display-only planning preference. Missing legacy fields project to null (unset), never scheduling order. */
+  priority?: TaskPriority | null;
+  /** User-estimated integer minutes, 0..525600. null/missing means unestimated; zero is explicit. */
+  estimated_minutes?: number | null;
   /** Relationship metadata only; prerequisites are never implicit model context. Legacy tasks have no dependencies. */
   dependency_ids?: string[];
   dependency_revision?: number;
@@ -94,7 +99,7 @@ export interface WorkspaceTask {
     cost?: null;
   }>;
 }
-export type TaskCreateInput = Pick<WorkspaceTask, 'title' | 'prompt' | 'category' | 'model_id' | 'group_id' | 'run_at' | 'repeat_minutes' | 'auto_run'> & { dependency_ids?: string[]; client_request_id?: string; source_message_id?: string | null; source_message_edited_at?: string | null };
+export type TaskCreateInput = Pick<WorkspaceTask, 'title' | 'prompt' | 'category' | 'model_id' | 'group_id' | 'run_at' | 'repeat_minutes' | 'auto_run'> & { priority?: TaskPriority | null; estimated_minutes?: number | null; dependency_ids?: string[]; client_request_id?: string; source_message_id?: string | null; source_message_edited_at?: string | null };
 /** Prefer the Idempotency-Key header. A new UUID means an intentional new generation. */
 export interface TaskRunInput { client_request_id?: string }
 

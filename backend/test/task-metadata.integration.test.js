@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
-import { randomUUID, randomBytes } from 'node:crypto';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -85,7 +85,9 @@ function delayedPut(s, task, payload) {
 for (const sample of [
   { field: 'title', older: '迟到的旧标题', newer: '更新的明确标题' },
   { field: 'auto_run', older: true, newer: false },
-  { field: 'run_at', older: '2031-01-02T03:00:00.000Z', newer: '2032-01-02T03:00:00.000Z' }
+  { field: 'run_at', older: '2031-01-02T03:00:00.000Z', newer: '2032-01-02T03:00:00.000Z' },
+  { field: 'priority', older: 'high', newer: 'low' },
+  { field: 'estimated_minutes', older: 120, newer: 0 }
 ]) test(`real delayed HTTP ${sample.field} intent cannot overwrite the newer explicit decision`, async () => {
   const s = await session(), task = await create(s), old = body(task, { [sample.field]: sample.older });
   const pending = delayedPut(s, task, old);
@@ -249,7 +251,7 @@ test('running and unknown tasks reject edits; terminal tasks reject enabling aut
 
 for (const operation of ['put', 'close']) for (const committed of [false, true]) {
   test(`${operation} ${committed ? 'lost durable ACK' : 'pre-commit failure'} returns uncertainty and never exposes phantom success`, async () => {
-    const s = await session(), task = await create(s), input = body(task, { title: '持久回执目标' });
+    const s = await session(), task = await create(s), input = body(task, { title: '持久回执目标', priority: 'high', estimated_minutes: 0 });
     const original = s.db.write.bind(s.db); let injected = false;
     s.db.write = async (...args) => { if (injected) return original(...args); injected = true; if (committed) await original(...args); throw new Error('synthetic metadata acknowledgement fault'); };
     try { expectError(await (operation === 'put' ? put(s, task, input) : close(s, task, input.client_request_id)), 503, 'TASK_METADATA_STORAGE_UNCERTAIN'); }
@@ -337,7 +339,7 @@ test('restart recovery advances the same metadata revision and does not permit s
 
 
 
-test('successful repeat rescheduling advances metadata revision; metadata itself adds no loopback provider calls', async () => {
+test('planning never reorders due tasks; repeat revision and metadata add no extra loopback calls', async () => {
   const { readCatalog, saveCatalog } = await import('../src/services/ai/catalog.js');
   const s = await session(); let calls = 0, probes = 0;
   const provider = createServer(async (req, res) => {
@@ -357,13 +359,18 @@ test('successful repeat rescheduling advances metadata revision; metadata itself
     catalog.defaults.chat = 'metadata_model'; await saveCatalog(s.userId, catalog);
     expectError(await request.post('/api/user/model-catalog/test').set('Cookie', s.cookie).send({ clientRequestId: uuid(), modelId: 'metadata_model', capability: 'chat' }), 200);
     assert.equal(probes, 1); assert.equal(calls, 0);
-    const task = await create(s, { model_id: 'metadata_model', auto_run: true, repeat_minutes: 15, run_at: '2020-01-01T00:00:00.000Z' });
+    const task = await create(s, { model_id: 'metadata_model', auto_run: true, repeat_minutes: 15, run_at: '2020-01-01T00:00:00.000Z', priority: 'low', estimated_minutes: 525600 });
+    const later = await create(s, { model_id: 'metadata_model', auto_run: true, run_at: '2019-01-01T00:00:00.000Z', priority: 'high', estimated_minutes: 0 });
+    assert.equal(calls, 0);
     const old = body(task, { run_at: '2021-01-01T00:00:00.000Z' });
-    const generated = await runTask(s.userId, task.id, { scheduled: true });
+    await tickTasks();
+    const generated = await current(s, task);
+    const untouched = await current(s, later); assert.equal(untouched.run_count, 0); assert.equal(untouched.status, 'pending');
+    expectError(await put(s, later, body(untouched, { auto_run: false })), 200);
     assert.equal(calls, 1); assert.equal(generated.status, 'pending'); assert.equal(generated.auto_run, true);
     assert.ok(Date.parse(generated.run_at) > Date.now()); assert.equal(generated.metadata_revision, task.metadata_revision + 1);
     expectError(await put(s, task, old), 409, 'TASK_METADATA_REVISION_CONFLICT');
-    const input = body(generated, { title: '排期后明确修改标题' }), saved = await put(s, task, input); expectError(saved, 200);
+    const input = body(generated, { title: '排期后明确修改标题', priority: 'high', estimated_minutes: 0 }), saved = await put(s, task, input); expectError(saved, 200);
     expectError(await lookup(s, task, input.client_request_id), 200); expectError(await close(s, task, input.client_request_id), 200); expectError(await put(s, task, input), 200);
     assert.equal(calls, 1, 'PUT/query/close/replay must not dispatch an extra model call'); assert.equal(probes, 1);
     assert.equal((await current(s, task)).run_at, generated.run_at);
@@ -424,6 +431,8 @@ function worker(s, task, operation, payload, { pauseRead = false, crashAfterWrit
       if (cfg.operation === 'put') call = request.put(base + '/metadata').send(cfg.payload);
       else if (cfg.operation === 'close') call = request.post(base + '/metadata/commands/' + cfg.payload.client_request_id + '/close').send({});
       else if (cfg.operation === 'dependency') call = request.put(base + '/dependencies').send(cfg.payload);
+      else if (cfg.operation === 'delete') call = request.delete(base);
+      else if (cfg.operation === 'accept') call = request.post(base + '/result/accept').send(cfg.payload);
       else call = request.get(base + '/metadata/commands/' + cfg.payload.client_request_id);
       const result = await call.set('Cookie', cfg.cookie).set('X-Expected-User-Id', cfg.userId);
       process.send({ done: true, status: result.status, body: result.body });
@@ -452,7 +461,7 @@ async function finishedWorker(...args) {
 }
 
 test('fresh process reopens success and cancellation receipts and replays without another mutation', { timeout: 30000 }, async () => {
-  const s = await session(), task = await create(s), input = body(task, { title: '跨进程回执' }), closedId = uuid();
+  const s = await session(), task = await create(s), input = body(task, { title: '跨进程回执', priority: 'medium', estimated_minutes: 45 }), closedId = uuid();
   const saved = await put(s, task, input); expectError(saved, 200); const closed = await close(s, task, closedId); expectError(closed, 200);
   for (const operation of ['get', 'put']) { const result = await finishedWorker(s, task, operation, input); expectError(result, 200); assert.deepEqual(result.body.receipt, saved.body.receipt); }
   const recovered = await finishedWorker(s, task, 'get', { client_request_id: closedId }); expectError(recovered, 200); assert.deepEqual(recovered.body.receipt, closed.body.receipt);
@@ -461,7 +470,7 @@ test('fresh process reopens success and cancellation receipts and replays withou
 });
 
 for (const operation of ['put', 'close']) test(`abrupt writer SIGKILL after durable ${operation} commit recovers the original receipt in a new process`, { timeout: 30000 }, async () => {
-  const s = await session(), task = await create(s), input = body(task, { title: '持久后进程中断' });
+  const s = await session(), task = await create(s), input = body(task, { title: '持久后进程中断', priority: 'low', estimated_minutes: 0 });
   const child = worker(s, task, operation, input, { crashAfterWrite: true });
   try { await bounded(child.durable, 'writer never reached durable metadata commit'); child.stop(); assert.equal((await child.done).signal, 'SIGKILL'); }
   finally { if (child.child.exitCode === null && child.child.signalCode === null) child.stop(); }
@@ -483,17 +492,61 @@ if (process.env.SUPABASE_DB_URL) {
     } finally { for (const child of children) if (child.child.exitCode === null && child.child.signalCode === null) child.stop(); await Promise.allSettled(children.map(child => child.done)); }
   }
   test('real PgLow independent metadata writers sharing a revision have exactly one durable winner', { timeout: 30000 }, async () => {
-    const s = await session(), task = await create(s), inputs = [body(task, { title: '进程A标题' }), body(task, { title: '进程B标题' })];
+    const s = await session(), task = await create(s), inputs = [body(task, { title: '进程A标题', priority: 'high', estimated_minutes: 0 }), body(task, { title: '进程B标题', priority: 'low', estimated_minutes: 75 })];
     const results = await race(s, inputs.map(payload => ({ task, operation: 'put', payload })));
     assert.deepEqual(results.map(item => item.status).sort(), [200, 409], JSON.stringify(results));
     const winner = results.findIndex(item => item.status === 200), loser = 1 - winner;
     assert.equal(results[loser].body.code, 'TASK_METADATA_REVISION_CONFLICT');
-    clearUserDbCache(s.userId); const latest = await current(s, task); assert.equal(latest.metadata_revision, 1); assert.equal(latest.title, inputs[winner].changes.title);
+    clearUserDbCache(s.userId); const latest = await current(s, task); assert.equal(latest.metadata_revision, 1); assert.equal(latest.title, inputs[winner].changes.title); assert.equal(latest.priority, inputs[winner].changes.priority); assert.equal(latest.estimated_minutes, inputs[winner].changes.estimated_minutes);
     expectError(await lookup(s, task, inputs[loser].client_request_id), 404);
     assert.deepEqual((await put(s, task, inputs[winner])).body.receipt, results[winner].body.receipt); await assertNoDispatch(s);
   });
+  test('planning real PG independent priority versus estimate commands cannot merge stale metadata intents', { timeout: 30000 }, async () => {
+    const s = await session(), task = await create(s), inputs = [body(task, { priority: 'high' }), body(task, { estimated_minutes: 75 })];
+    const results = await race(s, inputs.map(payload => ({ task, operation: 'put', payload })));
+    assert.deepEqual(results.map(item => item.status).sort(), [200, 409], JSON.stringify(results));
+    const winner = results.findIndex(item => item.status === 200), loser = 1 - winner;
+    clearUserDbCache(s.userId); const latest = await current(s, task);
+    assert.equal(latest.metadata_revision, 1); assert.equal(latest.priority, winner === 0 ? 'high' : null); assert.equal(latest.estimated_minutes, winner === 1 ? 75 : null);
+    expectError(await lookup(s, task, inputs[loser].client_request_id), 404);
+    expectError(await finishedWorker(s, task, 'put', inputs[loser]), 409, 'TASK_METADATA_REVISION_CONFLICT');
+    const closed = await close(s, task, inputs[loser].client_request_id); expectError(closed, 200); assert.equal(closed.body.receipt.status, 'cancelled');
+    await assertNoDispatch(s);
+  });
+  test('planning real PG edit versus deletion never resurrects the task or invents a receipt', { timeout: 30000 }, async () => {
+    const s = await session(), task = await create(s), input = body(task, { priority: 'medium', estimated_minutes: 0 });
+    const results = await race(s, [{ task, operation: 'put', payload: input }, { task, operation: 'delete', payload: {} }]);
+    assert.ok(results.some(item => [200, 204].includes(item.status)), JSON.stringify(results));
+    assert.ok(results.every(item => [200, 204, 409].includes(item.status)), JSON.stringify(results));
+    clearUserDbCache(s.userId);
+    if (results[0].status === 200) {
+      const found = await lookup(s, task, input.client_request_id); expectError(found, 200); assert.deepEqual(found.body.receipt, results[0].body.receipt);
+      if (await current(s, task)) expectError(await finishedWorker(s, task, 'delete', {}), 204);
+      const replay = await put(s, task, input); expectError(replay, 200); assert.equal(replay.body.task, null); assert.equal(replay.body.task_deleted, true);
+    } else { expectError(await lookup(s, task, input.client_request_id), 404); expectError(await put(s, task, input), 404); }
+    assert.equal((await listTasks(s.userId)).length, 0); await assertNoDispatch(s);
+  });
+  test('planning real PG metadata versus result acceptance preserves scheduling revision and result authority', { timeout: 30000 }, async () => {
+    const s = await session(), task = await armedTask(s);
+    let doc = await getTaskResult(s.userId, task.id);
+    doc = (await saveTaskResultVersion(s.userId, task.id, { client_request_id: uuid(), expected_revision: doc.revision, base_version_id: doc.head_version_id, content: '并发验收只用人工正文' })).document;
+    const version = doc.versions.find(item => item.id === doc.head_version_id), input = body(task, { priority: 'high', estimated_minutes: 0 });
+    const accept = { client_request_id: uuid(), expected_revision: doc.revision, version_id: version.id, content_hash: version.content_hash, source_hash: doc.source.hash };
+    const results = await race(s, [{ task, operation: 'put', payload: input }, { task, operation: 'accept', payload: accept }]);
+    assert.ok(results.some(item => item.status === 200), JSON.stringify(results)); assert.ok([200, 409].includes(results[0].status), JSON.stringify(results));
+    assert.ok([200, 409, 503].includes(results[1].status), JSON.stringify(results));
+    if (results[1].status === 503) assert.equal(results[1].body.code, 'RESULT_STORAGE_UNCERTAIN');
+    clearUserDbCache(s.userId);
+    if (results[0].status === 200) {
+      if (results[1].status !== 200) expectError(await finishedWorker(s, task, 'accept', accept), 200);
+      assert.equal((await current(s, task)).priority, 'high');
+      assert.deepEqual((await put(s, task, input)).body.receipt, results[0].body.receipt);
+    } else { expectError(await put(s, task, input), 409, 'TASK_METADATA_REVISION_CONFLICT'); assert.equal((await current(s, task)).priority, null); }
+    const latest = await current(s, task); assert.equal(latest.auto_run, false); assert.equal(latest.status, 'completed');
+    assert.equal((await getTaskResult(s.userId, task.id)).accepted_version_id, version.id); await assertNoDispatch(s);
+  });
   test('real PgLow metadata and dependency CAS conflicts never erase another field or silently retry stale intent', { timeout: 30000 }, async () => {
-    const s = await session(), predecessor = await create(s), task = await create(s), metadata = body(task, { title: '保留独立标题' });
+    const s = await session(), predecessor = await create(s), task = await create(s), metadata = body(task, { title: '保留独立标题', priority: 'medium', estimated_minutes: 25 });
     const dependency = { client_request_id: uuid(), expected_revision: task.dependency_revision, dependency_ids: [predecessor.id] };
     const ops = [{ task, operation: 'put', payload: metadata }, { task, operation: 'dependency', payload: dependency }];
     const results = await race(s, ops); assert.ok(results.some(item => item.status === 200), JSON.stringify(results));
@@ -502,12 +555,12 @@ if (process.env.SUPABASE_DB_URL) {
       if (result.status === 409) expectError(await finishedWorker(s, task, ops[i].operation, ops[i].payload), 200);
     }
     clearUserDbCache(s.userId); const latest = await current(s, task);
-    assert.equal(latest.title, metadata.changes.title); assert.equal(latest.metadata_revision, 1);
+    assert.equal(latest.title, metadata.changes.title); assert.equal(latest.metadata_revision, 1); assert.equal(latest.priority, 'medium'); assert.equal(latest.estimated_minutes, 25);
     assert.deepEqual(latest.dependency_ids, [predecessor.id]); assert.equal(latest.dependency_revision, 1);
     assert.equal((await lookup(s, task, metadata.client_request_id)).body.receipt.committed_revision, 1); await assertNoDispatch(s);
   });
   test('real PgLow metadata PUT versus authoritative closure has one terminal command after independent process conflict', { timeout: 30000 }, async () => {
-    const s = await session(), task = await create(s), input = body(task, { title: '竞争封存' });
+    const s = await session(), task = await create(s), input = body(task, { title: '竞争封存', priority: 'high', estimated_minutes: 0 });
     const results = await race(s, [{ task, operation: 'put', payload: input }, { task, operation: 'close', payload: input }]);
     assert.ok(results.some(item => item.status === 200), JSON.stringify(results));
     clearUserDbCache(s.userId); const terminal = await lookup(s, task, input.client_request_id); expectError(terminal, 200);
@@ -517,3 +570,137 @@ if (process.env.SUPABASE_DB_URL) {
     assert.equal((await current(s, task)).metadata_revision, terminal.body.receipt.status === 'succeeded' ? 1 : 0); await assertNoDispatch(s);
   });
 }
+
+// F14.1 private planning attributes: optional display-only metadata. These
+// regression tests are deliberately first run on public 533d7be before code.
+test('planning legacy projection is unset without rewriting old task bytes', async () => {
+  const s = await session(), task = await create(s);
+  await mutate(s, data => { const stored = data.tasks.find(item => item.id === task.id); delete stored.priority; delete stored.estimated_minutes; });
+  const before = JSON.stringify(s.db.data), original = s.db.write.bind(s.db); let writes = 0;
+  s.db.write = async (...args) => { writes++; return original(...args); };
+  try {
+    const response = await request.get('/api/tasks').set('Cookie', s.cookie);
+    expectError(response, 200); const visible = response.body.find(item => item.id === task.id);
+    assert.equal(visible.priority, null); assert.equal(visible.estimated_minutes, null);
+    assert.equal(writes, 0); assert.equal(JSON.stringify(s.db.data), before);
+  } finally { s.db.write = original; }
+  await assertNoDispatch(s);
+});
+
+test('planning creation accepts unset and bounded attributes without dispatch', async () => {
+  const s = await session();
+  for (const priority of [null, 'low', 'medium', 'high']) {
+    const task = await create(s, { priority, estimated_minutes: priority === null ? null : 0 });
+    assert.equal(task.priority, priority); assert.equal(task.estimated_minutes, priority === null ? null : 0);
+    assert.equal(task.metadata_revision, 0);
+  }
+  await assertNoDispatch(s);
+});
+
+test('planning edit is one atomic versioned idempotent command with null distinct from zero', async () => {
+  const s = await session(), task = await create(s), input = body(task, { priority: 'high', estimated_minutes: 0 });
+  const saved = await put(s, task, input); expectError(saved, 200);
+  assert.equal(saved.body.task.priority, 'high'); assert.equal(saved.body.task.estimated_minutes, 0);
+  assert.equal(saved.body.task.metadata_revision, 1);
+  const replay = await put(s, task, input); expectError(replay, 200); assert.deepEqual(replay.body.receipt, saved.body.receipt);
+  const cleared = await put(s, task, body(saved.body.task, { priority: null, estimated_minutes: null })); expectError(cleared, 200);
+  assert.equal(cleared.body.task.priority, null); assert.equal(cleared.body.task.estimated_minutes, null); assert.equal(cleared.body.task.metadata_revision, 2);
+  await assertNoDispatch(s);
+});
+
+test('planning old creation and three-field metadata receipts preserve public-533 serialized hash bytes', async () => {
+  const s = await session(), requestId = uuid();
+  // Frozen public-533 parse order/defaults. No new optional keys may be filled
+  // into this old intent, including after its original task gains attributes.
+  const oldData = { title: '旧创建意图', prompt: '旧输入原文', category: 'work', model_id: null, group_id: null,
+    run_at: null, repeat_minutes: null, auto_run: false };
+  const task = await createTask(s.userId, { client_request_id: requestId, title: '旧创建意图', prompt: '旧输入原文' });
+  const oldHash = createHash('sha256').update(JSON.stringify(oldData)).digest('hex');
+  assert.equal(s.db.data.taskCreateRequests.find(item => item.id === requestId).input_hash, oldHash);
+  const metadataId = uuid(), oldInput = { client_request_id: metadataId, expected_revision: 0, changes: { title: '旧编辑已保存', auto_run: false, run_at: null } };
+  const oldMetadataHash = createHash('sha256').update(JSON.stringify({ userId: s.userId, taskId: task.id, operation: 'metadata', input: oldInput })).digest('hex');
+  // Seed exactly the durable old receipt shape, as if committed by public 533.
+  await mutate(s, data => {
+    Object.assign(data.tasks.find(item => item.id === task.id), oldInput.changes, { metadata_revision: 1 });
+    data.taskMetadataCommands = [{ id: metadataId, task_id: task.id, actor_id: s.userId, input_hash: oldMetadataHash,
+      committed_revision: 1, status: 'succeeded', committed_at: '2026-10-01T00:00:00.000Z' }];
+  });
+  const replay = await put(s, task, { ...oldInput, changes: { run_at: null, auto_run: false, title: '旧编辑已保存' } });
+  expectError(replay, 200); assert.equal(replay.body.receipt.committed_revision, 1);
+  const planned = await put(s, task, body(replay.body.task, { priority: 'medium', estimated_minutes: 45 })); expectError(planned, 200);
+  const createdAgain = await createTask(s.userId, { client_request_id: requestId, title: '旧创建意图', prompt: '旧输入原文' });
+  assert.equal(createdAgain.id, task.id); assert.equal(createdAgain.priority, 'medium'); assert.equal(createdAgain.metadata_revision, 2);
+  const historical = await put(s, task, oldInput); expectError(historical, 200); assert.deepEqual(historical.body.receipt, replay.body.receipt);
+  assert.equal(historical.body.task.estimated_minutes, 45); assert.equal(historical.body.task.metadata_revision, 2);
+  await assert.rejects(createTask(s.userId, { client_request_id: requestId, ...oldData, priority: null }), error => error.code === 'IDEMPOTENCY_CONFLICT');
+  await assertNoDispatch(s);
+});
+
+test('planning strict validation rejects the entire create or edit and old PATCH cannot bypass revision', async () => {
+  const s = await session(), task = await create(s);
+  const invalid = [
+    ...['normal', '', 'urgent', 1, false, [], {}].map(priority => ({ priority })),
+    ...[-1, 0.5, 525601, '0', '', false, [], {}, Infinity, NaN].map(estimated_minutes => ({ estimated_minutes }))
+  ];
+  for (const changes of invalid) {
+    await assert.rejects(create(s, changes), error => error.name === 'ZodError');
+    // Non-finite JSON normalizes to null, so service validation is the proper
+    // evidence for those unrepresentable JSON values rather than send().
+    await assert.rejects(updateTaskMetadata(s.userId, task.id, body(task, { title: '不应部分写入', ...changes })), error => error.name === 'ZodError');
+    if (Number.isFinite(changes.estimated_minutes) || !Object.hasOwn(changes, 'estimated_minutes') || typeof changes.estimated_minutes !== 'number')
+      expectError(await put(s, task, body(task, { title: '不应部分写入', ...changes })), 400);
+  }
+  for (const changes of [{ priority: undefined }, { estimated_minutes: undefined }]) {
+    await assert.rejects(create(s, changes), error => error.name === 'ZodError');
+    await assert.rejects(updateTaskMetadata(s.userId, task.id, body(task, changes)), error => error.name === 'ZodError');
+  }
+  expectError(await put(s, task, body(task, { priority: 'high', unknown: true })), 400);
+  for (const changes of [{ priority: 'high' }, { estimated_minutes: 10 }, { status: 'cancelled', cancel_request_id: uuid(), priority: null }]) {
+    expectError(await request.patch(`/api/tasks/${task.id}`).set('Cookie', s.cookie).send(changes), 428, 'TASK_METADATA_PRECONDITION_REQUIRED');
+    await assert.rejects(updateTask(s.userId, task.id, changes), error => error.status === 428);
+  }
+  const latest = await current(s, task); assert.equal(latest.title, task.title); assert.equal(latest.metadata_revision, 0);
+  assert.equal((await listTasks(s.userId)).length, 1); assert.equal(s.db.data.taskMetadataCommands?.length || 0, 0);
+  const edge = await put(s, task, body(task, { priority: null, estimated_minutes: 525600 })); expectError(edge, 200);
+  const same = await put(s, task, body(edge.body.task, { priority: null, estimated_minutes: 525600 })); expectError(same, 200); assert.equal(same.body.task.metadata_revision, 2);
+  await assertNoDispatch(s);
+});
+
+test('planning owner isolation covers values and receipts while identical UUIDs remain account-scoped', async () => {
+  const a = await session(), b = await session(), task = await create(a), own = await create(b), id = uuid();
+  const input = body(task, { priority: 'high', estimated_minutes: 371 }, { client_request_id: id });
+  expectError(await put(a, task, input), 200);
+  const foreign = await put(b, task, input), absent = await put(b, { id: uuid() }, input);
+  expectError(foreign, 404); assert.deepEqual(foreign.body, absent.body); assert.doesNotMatch(JSON.stringify(foreign.body), /371|high/);
+  expectError(await lookup(b, task, id), 404);
+  const other = await put(b, own, body(own, { priority: 'low', estimated_minutes: 0 }, { client_request_id: id })); expectError(other, 200);
+  const aNow = await current(a, task); assert.equal(aNow.priority, 'high'); assert.equal(aNow.estimated_minutes, 371);
+  expectError(await put(a, task, { ...input, changes: { priority: 'low', estimated_minutes: 371 } }), 409, 'TASK_METADATA_IDEMPOTENCY_CONFLICT');
+  assert.equal((await request.get('/api/tasks').set('Cookie', b.cookie)).body.some(item => item.id === task.id), false);
+  await assertNoDispatch(a); await assertNoDispatch(b);
+});
+
+test('planning malformed persisted fields fail closed without rewriting values or exposing them', async () => {
+  const s = await session(), task = await create(s);
+  for (const changes of [{ priority: 'PRIVATE_INVALID' }, { priority: false }, { priority: {} }, { estimated_minutes: 'PRIVATE_INVALID' }, { estimated_minutes: -1 }, { estimated_minutes: 0.5 }]) {
+    await mutate(s, data => { Object.assign(data.tasks.find(item => item.id === task.id), { priority: null, estimated_minutes: null }, changes); });
+    const before = JSON.stringify(s.db.data), response = await request.get('/api/tasks').set('Cookie', s.cookie);
+    expectError(response, 503, 'TASK_METADATA_STORAGE_UNCERTAIN'); assert.doesNotMatch(JSON.stringify(response.body), /PRIVATE_INVALID/);
+    expectError(await put(s, task, body(task, { title: '不能掩盖损坏字段' })), 503, 'TASK_METADATA_STORAGE_UNCERTAIN');
+    assert.equal(JSON.stringify(s.db.data), before);
+  }
+});
+
+test('planning updates preserve accepted manual result versions and dependency/source evidence', async () => {
+  const s = await session(), task = await create(s);
+  let doc = await getTaskResult(s.userId, task.id);
+  doc = (await saveTaskResultVersion(s.userId, task.id, { client_request_id: uuid(), expected_revision: doc.revision, base_version_id: doc.head_version_id, content: '规划属性不应作废这份人工作品' })).document;
+  const version = doc.versions.find(item => item.id === doc.head_version_id);
+  await acceptTaskResultVersion(s.userId, task.id, { client_request_id: uuid(), expected_revision: doc.revision, version_id: version.id, content_hash: version.content_hash, source_hash: doc.source.hash });
+  const before = await getTaskResult(s.userId, task.id), prior = await current(s, task);
+  const saved = await put(s, task, body(prior, { priority: 'high', estimated_minutes: 0 })); expectError(saved, 200);
+  assert.deepEqual(await getTaskResult(s.userId, task.id), before);
+  const latest = await current(s, task);
+  for (const key of ['dependency_revision', 'dependency_ids', 'dependency_state', 'source_hash', 'accepted_run_id', 'run_count', 'history', 'result_accepted_version_id']) assert.deepEqual(latest[key], prior[key], key);
+  await assertNoDispatch(s);
+});

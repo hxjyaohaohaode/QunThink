@@ -1,13 +1,15 @@
 import type { StoreApi } from 'zustand';
 import type { TaskState } from './tasksStore';
-import type { WorkspaceTask, TaskMetadataChanges, UpdateTaskMetadataInput, MetadataCommandResponse } from '../../../shared/tasks';
+import type { WorkspaceTask, TaskPriority, TaskMetadataChanges, UpdateTaskMetadataInput, MetadataCommandResponse } from '../../../shared/tasks';
 import { axiosInstance } from '../services/api';
 import { getCacheUserId } from '../utils/cacheUtils';
 import { textHash, loadWritingContent, saveWritingContent, removeWritingDraft } from '../utils/taskRecovery';
-import { beginMetadataWork, canonicalMetadata, journalValue, metadataContentKey, persistMetadataJournal, readMetadataJournal, removeMetadataJournal, validMetadataChanges, type MetadataIntent } from '../utils/taskMetadataRecovery';
+import { beginMetadataWork, metadataFields, canonicalMetadata, journalValue, metadataContentKey, persistMetadataJournal, readMetadataJournal, removeMetadataJournal, validMetadataChanges, type MetadataIntent } from '../utils/taskMetadataRecovery';
 
-type Values = Pick<WorkspaceTask, 'title' | 'auto_run' | 'run_at'>;
-interface MetadataDraft { revision: number; values: Values; base: Values; commandKey?: string }
+import { parseEstimatedMinutesInput } from '../utils/taskPlanning';
+
+type Values = Pick<WorkspaceTask, 'title' | 'auto_run' | 'run_at'> & { priority: TaskPriority | null; estimated_minutes: number | null };
+interface MetadataDraft { revision: number; values: Values; base: Values; commandKey?: string; estimatedMinutesInput?: string }
 export interface MetadataState {
   metadataDrafts: Record<string, MetadataDraft>;
   metadataIntents: Record<string, MetadataIntent>;
@@ -19,6 +21,7 @@ export interface MetadataState {
   restoreMetadata: () => void;
   hydrateMetadata: () => Promise<void>;
   editMetadata: (id: string, changes: TaskMetadataChanges) => void;
+  editMetadataEstimate: (id: string, input: string) => void;
   resetMetadata: (id: string) => Promise<void>;
   saveMetadata: (id: string) => Promise<void>;
   verifyMetadata: (id: string, key: string) => Promise<void>;
@@ -27,7 +30,7 @@ export interface MetadataState {
   requireSettledMetadata: (id: string) => void;
 }
 export const emptyMetadataState = () => ({ metadataDrafts: {}, metadataIntents: {}, metadataQueues: {}, metadataErrors: {}, metadataNotices: {}, metadataConflicts: {}, metadataRecoveryError: null });
-export const metadataValues = (task: WorkspaceTask): Values => ({ title: task.title, auto_run: task.auto_run, run_at: task.run_at });
+export const metadataValues = (task: WorkspaceTask): Values => ({ title: task.title, auto_run: task.auto_run, run_at: task.run_at, priority: task.priority === undefined ? null : task.priority, estimated_minutes: task.estimated_minutes === undefined ? null : task.estimated_minutes });
 export function metadataChanges(draft: MetadataDraft): TaskMetadataChanges {
   return Object.fromEntries(Object.entries(draft.values).filter(([key, value]) => value !== draft.base[key as keyof Values]).map(([key, value]) => [key, key === 'title' && typeof value === 'string' ? value.trim() : value]));
 }
@@ -91,6 +94,8 @@ export function createMetadataSlice<Context extends { user: string | null }>(
     const receipt = response?.receipt, id = item.taskId, task = response?.task;
     if (!receipt || receipt.id !== item.key || receipt.task_id !== id || receipt.operation !== 'metadata' || !['succeeded', 'cancelled'].includes(receipt.status) || (receipt.status === 'cancelled' ? receipt.committed_revision !== null : !Number.isSafeInteger(receipt.committed_revision) || receipt.committed_revision !== item.revision + 1) || (task ? response.task_deleted === true || task.id !== id || !Number.isSafeInteger(task.metadata_revision ?? 0) || (task.metadata_revision ?? 0) < (receipt.committed_revision ?? 0) : response.task_deleted !== true)) throw new Error('任务设置回执不匹配，请继续核验原请求');
     if (receipt.status === 'succeeded' && task?.metadata_revision === receipt.committed_revision) {
+      // A default read projection is not proof that the server applied a field.
+      if (item.fields.some(field => !Object.prototype.hasOwnProperty.call(task, field))) throw new Error('任务设置回执缺少原字段，请继续核验原请求');
       const changes = Object.fromEntries(item.fields.map(field => [field, task[field]]));
       if (await textHash(canonicalMetadata({ client_request_id: item.key, expected_revision: item.revision, changes })) !== item.payloadHash) throw new Error('任务设置回执内容不匹配，请继续核验原请求');
     }
@@ -103,13 +108,13 @@ export function createMetadataSlice<Context extends { user: string | null }>(
       // A cancellation never rebases the original draft. Explicit reread is required.
       const active = state.tasks.find(value => value.id === id);
       const saved = active && (active.metadata_revision ?? 0) > (task?.metadata_revision ?? 0) ? active : task;
-      const draft = metadataDrafts[id];
-      const unsaved = !!draft && !draft.commandKey && !!saved && (['title', 'auto_run', 'run_at'] as const).some(field => {
+      const draft = metadataDrafts[id], confirmedValues = saved ? metadataValues(saved) : undefined;
+      const unsaved = !!draft && !draft.commandKey && !!saved && (draft.estimatedMinutesInput !== undefined && parseEstimatedMinutesInput(draft.estimatedMinutesInput) === undefined || metadataFields.some(field => {
         const value = field === 'title' ? draft.values.title.trim() : draft.values[field];
         const base = field === 'title' ? draft.base.title.trim() : draft.base[field];
-        const confirmed = field === 'title' ? saved.title.trim() : saved[field];
+        const confirmed = field === 'title' ? saved.title.trim() : confirmedValues![field];
         return value !== base && value !== confirmed;
-      });
+      }));
       const canProject = snapshot === sequence() && (!task || !active || (task.metadata_revision ?? 0) >= (active.metadata_revision ?? 0));
       return { metadataDrafts, metadataErrors: { ...state.metadataErrors, [id]: '' }, metadataConflicts: { ...state.metadataConflicts, [id]: receipt.status === 'cancelled' || !!metadataDrafts[id] }, metadataNotices: { ...state.metadataNotices, [id]: response.task_deleted ? '原请求已确认；任务已删除，没有重新创建。' : receipt.status === 'cancelled' ? '原请求已结束。已保存设置保持不变，请读取最新设置后明确重新编辑。' : unsaved ? '原请求已确认保存，当前草稿尚未保存。' : '任务设置已确认保存。' }, ...(canProject ? { tasks: task ? state.tasks.map(value => value.id === id ? task : value) : state.tasks.filter(value => value.id !== id) } : {}) };
     });
@@ -153,7 +158,15 @@ export function createMetadataSlice<Context extends { user: string | null }>(
       const task = get().tasks.find(value => value.id === id); if (!task || ['running', 'outcome_unknown'].includes(task.status)) return;
       const prior = get().metadataDrafts[id];
       if (prior && prior.revision !== (task.metadata_revision ?? 0)) return;
-      set(state => ({ metadataDrafts: { ...state.metadataDrafts, [id]: { revision: prior?.revision ?? task.metadata_revision ?? 0, base: prior?.base ?? metadataValues(task), values: { ...(prior?.values ?? metadataValues(task)), ...changes } } }, metadataErrors: { ...state.metadataErrors, [id]: '' }, metadataNotices: { ...state.metadataNotices, [id]: '' } }));
+      set(state => ({ metadataDrafts: { ...state.metadataDrafts, [id]: { ...prior, revision: prior?.revision ?? task.metadata_revision ?? 0, base: prior?.base ?? metadataValues(task), values: { ...(prior?.values ?? metadataValues(task)), ...changes } } }, metadataErrors: { ...state.metadataErrors, [id]: '' }, metadataNotices: { ...state.metadataNotices, [id]: '' } }));
+    },
+    editMetadataEstimate: (id, input) => {
+      const previous = get().metadataDrafts[id];
+      get().editMetadata(id, {});
+      const draft = get().metadataDrafts[id];
+      if (!draft || draft === previous) return;
+      const minutes = parseEstimatedMinutesInput(input);
+      set(state => ({ metadataDrafts: { ...state.metadataDrafts, [id]: { ...draft, estimatedMinutesInput: input, values: minutes === undefined ? draft.values : { ...draft.values, estimated_minutes: minutes } } } }));
     },
     resetMetadata: async id => {
       restoreMetadata(); if (get().pending[id] || get().metadataIntents[id]) throw new Error('先核验或结束原请求，再重新编辑');
@@ -168,7 +181,8 @@ export function createMetadataSlice<Context extends { user: string | null }>(
       if (!task || !draft) throw new Error('请先修改任务设置');
       if (get().metadataConflicts[id] || draft.revision !== (task.metadata_revision ?? 0)) throw new Error('请读取最新设置后重新编辑');
       if (['running', 'outcome_unknown'].includes(task.status)) throw new Error('正在生成或结果待核验时，不能修改任务设置');
-      const changes = metadataChanges(draft); if (!validMetadataChanges(changes)) throw new Error('请填写有效标题和排期，并至少修改一项');
+      if (draft.estimatedMinutesInput !== undefined && parseEstimatedMinutesInput(draft.estimatedMinutesInput) === undefined) throw new Error('预计分钟只能为空或 0 至 525600 的整数');
+      const changes = metadataChanges(draft); if (!validMetadataChanges(changes)) throw new Error('请填写有效标题、排期和规划属性，并至少修改一项');
       if (draft.values.auto_run && !draft.values.run_at) throw new Error('启用定时生成需要明确的下次生成时间');
       if (draft.values.auto_run && ['completed', 'cancelled'].includes(task.status)) throw new Error('已完成或已停止的任务不能启用定时生成');
       const scope = context();

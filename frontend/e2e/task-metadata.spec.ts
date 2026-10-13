@@ -169,3 +169,77 @@ test('another tab successful metadata receipt preserves this tabs unsent draft a
   expect((await readTask(context, task.id))?.title).toBe('标签B已保存设置'); release(); await expect(second.getByRole('button', { name: '核验任务设置请求', exact: true })).toHaveCount(0);
   await page.screenshot({ path: info.outputPath('metadata-unsubmitted-cross-tab-draft-preserved.png'), fullPage: true, animations: 'disabled' }); await secondPage.close();
 });
+
+test('planning attributes create, clear and distinguish zero without model dispatch or schedule changes', async ({ page, context }, info) => {
+  await registerSyntheticAccount(context); await workspace(page);
+  let modelCalls = 0; page.on('request', request => { if (/\/tasks\/[^/]+\/run$/.test(new URL(request.url()).pathname)) modelCalls++; });
+  await page.getByRole('button', { name: '＋ 新任务', exact: true }).click();
+  await page.getByLabel('任务名称', { exact: true }).fill('规划属性零分钟任务'); await page.getByLabel('希望得到什么').fill('只保存本人规划属性，绝不调用模型。');
+  await page.getByLabel('新任务优先级', { exact: true }).selectOption('high'); await page.getByLabel('新任务预计分钟', { exact: true }).fill('0');
+  const createdResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/tasks' && response.request().method() === 'POST');
+  await page.getByRole('button', { name: '保存任务', exact: true }).click(); const created = await (await createdResponse).json() as WorkspaceTask;
+  expect(created).toMatchObject({ priority: 'high', estimated_minutes: 0, auto_run: false, run_at: null });
+  const card = page.locator('[data-observe="task-card"]').filter({ has: page.getByRole('heading', { name: created.title, exact: true }) });
+  await expect(card).toContainText('预计 0 分钟'); const panel = card.getByTestId('task-metadata'); await expect(panel).toBeVisible();
+  await panel.getByLabel('设置优先级', { exact: true }).selectOption(''); await panel.getByLabel('设置预计分钟', { exact: true }).fill('');
+  await panel.getByRole('button', { name: '保存任务设置', exact: true }).click(); await expect(panel).toContainText('任务设置已确认保存。');
+  await expect(card).toContainText('优先级未设置'); await expect(card).toContainText('未估算');
+  expect(await readTask(context, created.id)).toMatchObject({ priority: null, estimated_minutes: null, auto_run: false, run_at: null, metadata_revision: 1 }); expect(modelCalls).toBe(0);
+  await page.screenshot({ path: info.outputPath('planning-null-zero-cleared.png'), fullPage: true, animations: 'disabled' });
+});
+
+test('planning native encrypted unknown command reloads and retries exact priority and zero', async ({ page, context }) => {
+  await registerSyntheticAccount(context); const task = await createTask(context, '规划加密恢复'); await workspace(page); let panel = await open(page, task.title, task.id);
+  const detail = page.locator(`[id="task-detail-${task.id}"]`); await detail.getByText('此设备的保存选择', { exact: true }).click(); await detail.getByRole('checkbox', { name: '加密恢复未提交草稿', exact: true }).check();
+  const sent: UpdateTaskMetadataInput[] = [];
+  await page.route(`**/api/tasks/${task.id}/metadata`, async route => { if (route.request().method() !== 'PUT') return route.continue(); sent.push(route.request().postDataJSON()); if (sent.length === 1) return route.abort('connectionreset'); await route.continue(); });
+  await panel.getByLabel('设置优先级', { exact: true }).selectOption('high'); await panel.getByLabel('设置预计分钟', { exact: true }).fill('0'); await panel.getByRole('button', { name: '保存任务设置', exact: true }).click();
+  await expect(panel.getByRole('button', { name: '核验任务设置请求', exact: true })).toBeEnabled();
+  await reload(page); panel = await open(page, task.title, task.id); await expect(panel.getByRole('button', { name: '按原设置同号重试', exact: true })).toBeEnabled();
+  await expect(panel.getByLabel('设置优先级', { exact: true })).toHaveValue('high'); await expect(panel.getByLabel('设置预计分钟', { exact: true })).toHaveValue('0');
+  await panel.getByRole('button', { name: '按原设置同号重试', exact: true }).click(); await expect(panel.getByRole('button', { name: '核验任务设置请求', exact: true })).toHaveCount(0);
+  expect(sent).toHaveLength(2); expect(sent[1]).toEqual(sent[0]); expect(sent[0].changes).toEqual({ priority: 'high', estimated_minutes: 0 });
+  expect(await readTask(context, task.id)).toMatchObject({ priority: 'high', estimated_minutes: 0, auto_run: false, run_at: null, metadata_revision: 1 });
+});
+
+test('planning real missing-field ACK stays unresolved until authoritative query returns exact null', async ({ page, context }) => {
+  const owner = await registerSyntheticAccount(context); const task = await createTask(context, '规划缺字段回执');
+  const seed = await context.request.put(`/api/tasks/${task.id}/metadata`, { headers: { ...await headers(context), 'X-Expected-User-Id': owner.id }, data: { client_request_id: randomUUID(), expected_revision: 0, changes: { priority: 'high', estimated_minutes: 30 } } }); expect(seed.status()).toBe(200);
+  await workspace(page); const panel = await open(page, task.title, task.id); let sent!: UpdateTaskMetadataInput;
+  await page.route(`**/api/tasks/${task.id}/metadata`, async route => { if (route.request().method() !== 'PUT') return route.continue(); sent = route.request().postDataJSON(); const response = await route.fetch(); const body = await response.json(); delete body.task.estimated_minutes; await route.fulfill({ response, json: body }); });
+  await panel.getByLabel('设置预计分钟', { exact: true }).fill(''); await panel.getByRole('button', { name: '保存任务设置', exact: true }).click();
+  await expect(panel.getByRole('button', { name: '核验任务设置请求', exact: true })).toBeEnabled(); expect(sent.changes).toEqual({ estimated_minutes: null });
+  await panel.getByRole('button', { name: '核验任务设置请求', exact: true }).click(); await expect(panel.getByRole('button', { name: '核验任务设置请求', exact: true })).toHaveCount(0);
+  expect(await readTask(context, task.id)).toMatchObject({ priority: 'high', estimated_minutes: null, metadata_revision: 2 });
+});
+
+test('planning two native tabs preserve unsent priority and zero after another request commits', async ({ page, context }, info) => {
+  await registerSyntheticAccount(context); const task = await createTask(context, '规划双标签保留草稿'); await workspace(page); const first = await open(page, task.title, task.id);
+  await first.getByLabel('设置优先级', { exact: true }).selectOption('high'); await first.getByLabel('设置预计分钟', { exact: true }).fill('0');
+  const secondPage = await context.newPage(); beginSessionTokenRecovery(secondPage, info); await workspace(secondPage); const second = await open(secondPage, task.title, task.id);
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; }); let committed = false;
+  await secondPage.route(`**/api/tasks/${task.id}/metadata`, async route => { if (route.request().method() !== 'PUT') return route.continue(); const response = await route.fetch(); expect(response.status()).toBe(200); committed = true; await gate; await route.fulfill({ response }); });
+  await second.getByLabel('设置任务名称', { exact: true }).fill('另一个标签已保存'); await second.getByRole('button', { name: '保存任务设置', exact: true }).click(); await expect.poll(() => committed).toBe(true);
+  await page.bringToFront(); await page.getByRole('button', { name: '刷新', exact: true }).click(); await expect(first.getByRole('button', { name: '核验任务设置请求', exact: true })).toBeEnabled(); await first.getByRole('button', { name: '核验任务设置请求', exact: true }).click();
+  await expect(first.getByLabel('设置优先级', { exact: true })).toHaveValue('high'); await expect(first.getByLabel('设置预计分钟', { exact: true })).toHaveValue('0');
+  await expect(first).toContainText('原请求已确认保存，当前草稿尚未保存。'); await expect(first.getByRole('button', { name: '保存任务设置', exact: true })).toBeDisabled();
+  expect(await readTask(context, task.id)).toMatchObject({ title: '另一个标签已保存', priority: null, estimated_minutes: null, metadata_revision: 1 });
+  release(); await expect(second.getByRole('button', { name: '核验任务设置请求', exact: true })).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath('planning-cross-tab-unsent-preserved.png'), fullPage: true, animations: 'disabled' }); await secondPage.close();
+});
+
+test('planning native creation malformed attribute ACK keeps original request until query', async ({ page, context }) => {
+  await registerSyntheticAccount(context); await workspace(page); let sentKey = '', creates = 0;
+  await page.route('**/api/tasks', async route => { if (route.request().method() !== 'POST') return route.continue(); creates++; sentKey = route.request().headers()['idempotency-key']; const response = await route.fetch(); expect(response.status()).toBe(201); const task = await response.json(); delete task.estimated_minutes; await route.fulfill({ response, json: task }); });
+  // Hold list/query reads while inspecting the malformed original ACK. An
+  // authoritative projection will then be allowed to resolve the same UUID.
+  let holdReads = false;
+  await page.route('**/api/tasks/commands/*', async route => { if (holdReads) return route.abort('connectionreset'); await route.continue(); });
+  await page.getByRole('button', { name: '＋ 新任务', exact: true }).click(); await page.getByLabel('任务名称', { exact: true }).fill('创建回执核验规划'); await page.getByLabel('希望得到什么').fill('合成本地输入');
+  await page.getByLabel('新任务优先级', { exact: true }).selectOption('high'); await page.getByLabel('新任务预计分钟', { exact: true }).fill('0');
+  await page.route('**/api/tasks', async route => { if (route.request().method() === 'GET' && holdReads) return route.fulfill({ status: 200, json: [] }); await route.fallback(); }); holdReads = true;
+  await page.getByRole('button', { name: '保存任务', exact: true }).click();
+  const recover = page.getByRole('button', { name: '核验这次创建', exact: true }); await expect(recover).toBeEnabled(); expect(sentKey).not.toBe(''); expect(creates).toBe(1);
+  holdReads = false; await recover.click(); await expect(recover).toHaveCount(0); expect(creates).toBe(1);
+  const tasks = await (await context.request.get('/api/tasks')).json() as WorkspaceTask[]; expect(tasks.find(task => task.client_request_id === sentKey)).toMatchObject({ priority: 'high', estimated_minutes: 0, metadata_revision: 0 });
+});

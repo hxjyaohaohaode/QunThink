@@ -12,12 +12,13 @@ class Channel { port1 = { onmessage: null }; port2 = { postMessage: () => setTim
 Object.defineProperty(globalThis, 'MessageChannel', { value: Channel, configurable: true });
 after(() => window.close());
 globalThis.__workspaceTest = { tasks: [], writes: [], post: async () => ({ data: {} }), user: 'alice' };
-const bundled = await build({ stdin: { contents: `import { createRoot } from 'react-dom/client'; import { act } from 'react'; import { WorkspacePage } from './src/components/Layout/WorkspacePage'; import { useTasksStore } from './src/stores/tasksStore'; export { act, useTasksStore }; export async function mount(element) { const root = createRoot(element); await act(async () => root.render(<WorkspacePage onOpenConversation={() => {}} />)); return root; }`, resolveDir: root, sourcefile: 'test-workspace.tsx', loader: 'tsx' }, bundle: true, format: 'esm', platform: 'browser', jsx: 'automatic', write: false, plugins: [{ name: 'ui-boundaries', setup(build) {
+const bundled = await build({ stdin: { contents: `import { createRoot } from 'react-dom/client'; import { act } from 'react'; import { WorkspacePage } from './src/components/Layout/WorkspacePage'; import { ConversationWriting } from './src/components/Writing/ConversationWriting'; import { useTaskResultsStore } from './src/stores/taskResultsStore'; import { useTasksStore } from './src/stores/tasksStore'; export { act, useTasksStore }; export async function mountConversation(element) { useTaskResultsStore.setState({panelGroupId:'group-a',selectedTaskId:null,incomingSourceId:null}); const root=createRoot(element); await act(async()=>root.render(<ConversationWriting groupId="group-a"><div>会话</div></ConversationWriting>)); return root; } export async function mount(element) { const root = createRoot(element); await act(async () => root.render(<WorkspacePage onOpenConversation={() => {}} />)); return root; }`, resolveDir: root, sourcefile: 'test-workspace.tsx', loader: 'tsx' }, bundle: true, format: 'esm', platform: 'browser', jsx: 'automatic', write: false, plugins: [{ name: 'ui-boundaries', setup(build) {
   build.onResolve({ filter: /services\/api$/ }, () => ({ path: 'api', namespace: 'ui-mock' }));
   build.onResolve({ filter: /(?:utils\/|\.\/)cacheUtils$/ }, () => ({ path: 'cache', namespace: 'ui-mock' }));
   build.onResolve({ filter: /(?:^\.\/|stores\/)(modelsStore|groupsStore|profileStore)$/ }, args => ({ path: args.path.split('/').at(-1), namespace: 'ui-mock' }));
   build.onResolve({ filter: /^\.\/(ModelCenter|PersonalGoalsPanel|MemoryCenter)$/ }, args => ({ path: args.path.slice(2), namespace: 'ui-mock' }));
-  build.onResolve({ filter: /Writing\/TaskResultEditor$/ }, () => ({ path: 'TaskResultEditor', namespace: 'ui-mock' }));
+  build.onResolve({ filter: /(?:Writing\/|^\.\/)TaskResultEditor$/ }, () => ({ path: 'TaskResultEditor', namespace: 'ui-mock' }));
+  build.onResolve({ filter: /stores\/messagesStore$/ }, () => ({ path: 'messagesStore', namespace: 'ui-mock' }));
   build.onResolve({ filter: /Chat\/MessageContent$/ }, () => ({ path: 'MessageContent', namespace: 'ui-mock' }));
   build.onResolve({ filter: /^\.\.\/Common$/ }, () => ({ path: 'Common', namespace: 'ui-mock' }));
   build.onResolve({ filter: /hooks\/useReducedMotion$/ }, () => ({ path: 'reduced', namespace: 'ui-mock' }));
@@ -27,6 +28,7 @@ const bundled = await build({ stdin: { contents: `import { createRoot } from 're
       api: `export const getAuthGeneration=()=>0; export const axiosInstance = { get: async () => ({data: globalThis.__workspaceTest.tasks}), post: (...args) => globalThis.__workspaceTest.post(...args), patch: async () => ({data:{}}), delete: async () => ({data:{}}) }; export const api = {createGroup: async () => ({id:'group'})};`,
       cache: `export const getCacheUserId = () => globalThis.__workspaceTest.user;`,
       modelsStore: `export const useModelsStore = fn => fn({ catalog: {models: [], defaults:{}} }); export const requestError = e => e.message;`,
+      messagesStore: `export const useMessagesStore = fn => fn({messages:{}});`,
       groupsStore: `export const useGroupsStore = fn => fn({ groups: globalThis.__workspaceTest.groups });`,
       profileStore: `export const useProfileStore = fn => fn({profile:{nickname:'测试用户'}});`,
       ModelCenter: `export const ModelCenter = () => <div>模型配置测试页</div>;`,
@@ -41,7 +43,7 @@ const bundled = await build({ stdin: { contents: `import { createRoot } from 're
     return { contents: source, loader: 'tsx', resolveDir: root };
   });
 }}] });
-const { mount, act, useTasksStore: store } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
+const { mount, mountConversation, act, useTasksStore: store } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
 let container, mounted;
 const button = text => [...container.querySelectorAll('button')].find(element => element.textContent === text);
 const settle = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -69,7 +71,7 @@ test('double form submit sends once; new typing stays separate from explicit fro
   assert.equal(calls.length, 1); assert.equal(calls[0][2].headers['X-Expected-User-Id'], 'alice');
   await act(async () => { rejectFirst(new Error('连接中断')); await settle(); });
   assert.equal(container.querySelector('fieldset').disabled, false); assert.ok(button('按原内容重试')); await type(container.querySelector('textarea'),'这次新输入');
-  globalThis.__workspaceTest.post = async (...args) => { calls.push(args); const task = { ...args[1], client_request_id:args[2].headers['Idempotency-Key'], id:'created', status:'pending', history:[], result:'', run_count:0 }; globalThis.__workspaceTest.tasks = [task]; return {data:task}; };
+  globalThis.__workspaceTest.post = async (...args) => { calls.push(args); const task = { priority: null, estimated_minutes: null, metadata_revision: 0, ...args[1], client_request_id:args[2].headers['Idempotency-Key'], id:'created', status:'pending', history:[], result:'', run_count:0 }; globalThis.__workspaceTest.tasks = [task]; return {data:task}; };
   await act(async () => { button('按原内容重试').click(); await settle(); });
   assert.equal(calls[0][2].headers['Idempotency-Key'], calls[1][2].headers['Idempotency-Key']);
   assert.equal(calls[1][1].prompt,'内容'); assert.equal(container.querySelector('textarea').value,'这次新输入'); assert.match(container.textContent, /保存回执测试/);
@@ -143,4 +145,53 @@ test('new task dependency chooser sends IDs only and leaves legacy creation payl
 });
 test('dependency-blocked and stale accepted tasks are absent from current accepted filter',async()=>{
  const base={category:'work',status:'completed',history:[],result:'正文',run_count:0,result_editor_available:true,result_head_version_id:'v1',result_accepted_version_id:'v1',source_stale:false};globalThis.__workspaceTest.tasks=[{...base,id:'blocked',title:'阻塞旧验收',prompt:'用途',dependency_state:{blocked:true,result_stale:false,reasons:[],signature:null}},{...base,id:'stale',title:'失效旧验收',prompt:'用途',dependency_state:{blocked:false,result_stale:true,reasons:[],signature:'changed'}},{...base,id:'good',title:'有效旧任务',prompt:'用途'}];await act(async()=>store.getState().fetch());assert.match(container.textContent,/等待前置任务/);assert.match(container.textContent,/依赖变化待复核/);await act(async()=>button('已确认文稿').click());const cards=[...container.querySelectorAll('[data-observe="task-card"]')];assert.equal(cards.length,1);assert.match(cards[0].textContent,/有效旧任务/);
+});
+
+test('planning creation controls preserve priority and zero in the exact frozen create payload', async () => {
+ await act(async () => button('＋ 新任务').click()); await type(container.querySelector('input[maxlength="150"]'), '规划任务'); await type(container.querySelector('textarea'), '仅保存，不调用模型');
+ const priority = container.querySelector('select[aria-label="新任务优先级"]'), minutes = container.querySelector('input[aria-label="新任务预计分钟"]');
+ assert.ok(priority, 'new-task priority selector must be mounted'); assert.ok(minutes, 'new-task estimate control must be mounted');
+ await act(async () => { priority.value = 'medium'; priority.dispatchEvent(new window.Event('change', { bubbles: true })); }); await type(minutes, '0');
+ await act(async () => button('模型中心').click()); await act(async () => button('工作台').click());
+ assert.equal(container.querySelector('select[aria-label="新任务优先级"]').value, 'medium'); assert.equal(container.querySelector('input[aria-label="新任务预计分钟"]').value, '0');
+ const calls = []; globalThis.__workspaceTest.post = async (...args) => { calls.push(args); throw new Error('lost ACK'); };
+ await act(async () => { button('保存任务').click(); await waitFor(() => calls.length === 1); });
+ assert.equal(calls[0][1].priority, 'medium'); assert.equal(calls[0][1].estimated_minutes, 0); assert.equal(calls[0][1].auto_run, false); assert.equal(calls[0][1].run_at, null);
+ await type(container.querySelector('input[aria-label="新任务预计分钟"]'), '15');
+ await act(async () => { button('按原内容重试').click(); await waitFor(() => calls.length === 2); });
+ assert.deepEqual(calls[1], calls[0]); assert.equal(container.querySelector('input[aria-label="新任务预计分钟"]').value, '15');
+});
+test('planning creation omits untouched defaults so legacy create replay bytes remain unchanged', async () => {
+ await act(async () => button('＋ 新任务').click()); await type(container.querySelector('input[maxlength="150"]'), '旧式载荷'); await type(container.querySelector('textarea'), '不填规划属性');
+ const calls = []; globalThis.__workspaceTest.post = async (...args) => { calls.push(args); throw new Error('lost ACK'); };
+ await act(async () => { button('保存任务').click(); await waitFor(() => calls.length === 1); });
+ assert.equal(Object.hasOwn(calls[0][1], 'priority'), false); assert.equal(Object.hasOwn(calls[0][1], 'estimated_minutes'), false);
+});
+test('planning task summaries distinguish no estimate from zero without reordering cards', async () => {
+ const base = { prompt: '说明', category: 'work', status: 'pending', history: [], result: '', run_count: 0 };
+ globalThis.__workspaceTest.tasks = [{ ...base, id: 'legacy', title: '旧记录' }, { ...base, id: 'zero', title: '零分钟', priority: 'high', estimated_minutes: 0 }];
+ await act(async () => store.getState().fetch()); const cards = [...container.querySelectorAll('[data-observe="task-card"]')];
+ assert.match(cards[0].textContent, /旧记录/); assert.match(cards[0].textContent, /优先级未设置/); assert.match(cards[0].textContent, /未估算/);
+ assert.match(cards[1].textContent, /优先级高/); assert.match(cards[1].textContent, /预计 0 分钟/);
+});
+
+for (const input of ['-1', '1.5', '1e2', ' ', '525601']) test(`planning composer keeps invalid estimate ${JSON.stringify(input)} through remount and never sends`, async () => {
+ await act(async () => button('＋ 新任务').click()); await type(container.querySelector('input[maxlength="150"]'), '无效分钟'); await type(container.querySelector('textarea'), '不应发送'); await type(container.querySelector('input[aria-label="新任务预计分钟"]'), input);
+ let writes = 0; globalThis.__workspaceTest.post = async () => { writes++; };
+ assert.equal(button('保存任务').disabled, true); await act(async () => { container.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await settle(); }); assert.equal(writes, 0);
+ await act(async () => mounted.unmount()); mounted = await mount(container); assert.equal(container.querySelector('input[aria-label="新任务预计分钟"]').value, input); assert.equal(button('保存任务').disabled, true);
+});
+test('planning-only composer draft survives remount and incoming source without being replaced', async () => {
+ await act(async () => button('＋ 新任务').click()); await type(container.querySelector('input[aria-label="新任务预计分钟"]'), '0');
+ await act(async () => mounted.unmount()); mounted = await mount(container); assert.equal(container.querySelector('input[aria-label="新任务预计分钟"]').value, '0');
+ await act(async () => store.getState().setDraft({ prompt: '另一个输入', groupId: null })); assert.equal(container.querySelector('textarea').value, ''); assert.equal(container.querySelector('input[aria-label="新任务预计分钟"]').value, '0'); assert.match(container.textContent, /请先保存或清空当前任务草稿/);
+});
+
+
+test('planning actual workspace and conversation surfaces keep one shared draft in both directions', async () => {
+ await act(async () => button('＋ 新任务').click()); await type(container.querySelector('input[maxlength="150"]'), '工作台草稿'); await type(container.querySelector('textarea'), '原输入');
+ const priority = container.querySelector('select[aria-label="新任务优先级"]'); await act(async () => { priority.value = 'high'; priority.dispatchEvent(new window.Event('change', { bubbles: true })); }); await type(container.querySelector('input[aria-label="新任务预计分钟"]'), '0');
+ await act(async () => mounted.unmount()); mounted = await mountConversation(container); assert.match(container.textContent, /已保留工作台规划：优先级高 · 预计 0 分钟/); assert.equal(container.querySelector('select[aria-label="新任务优先级"]'), null);
+ await type(container.querySelector('textarea'), '会话中继续修改'); await act(async () => mounted.unmount()); mounted = await mount(container);
+ assert.equal(container.querySelector('textarea').value, '会话中继续修改'); assert.equal(container.querySelector('select[aria-label="新任务优先级"]').value, 'high'); assert.equal(container.querySelector('input[aria-label="新任务预计分钟"]').value, '0'); assert.equal(localStorage.length, 0);
 });

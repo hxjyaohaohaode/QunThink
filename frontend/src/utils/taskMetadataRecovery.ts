@@ -1,5 +1,6 @@
 import type { TaskMetadataChanges, UpdateTaskMetadataInput } from '../../../shared/tasks';
 import { getCacheUserId } from './cacheUtils';
+import { validPlanningFields } from './taskPlanning';
 
 /** Necessary recovery identifiers only. Never write a title or schedule here. */
 export interface MetadataJournal {
@@ -8,7 +9,8 @@ export interface MetadataJournal {
 export interface MetadataIntent extends MetadataJournal { payload?: UpdateTaskMetadataInput }
 const prefix = 'qunthink_metadata_command_v1_';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const fields = ['auto_run', 'run_at', 'title'];
+export const metadataFields = ['auto_run', 'run_at', 'title', 'priority', 'estimated_minutes'] as const;
+const fields: readonly string[] = metadataFields;
 export const metadataContentKey = (item: MetadataJournal) => `metadata-intent:${item.taskId}:${item.key}`;
 export function canonicalMetadata(payload: UpdateTaskMetadataInput) {
   return JSON.stringify({ client_request_id: payload.client_request_id, expected_revision: payload.expected_revision, changes: Object.fromEntries(Object.entries(payload.changes).sort(([a], [b]) => a.localeCompare(b))) });
@@ -16,7 +18,7 @@ export function canonicalMetadata(payload: UpdateTaskMetadataInput) {
 export function validMetadataChanges(value: unknown): value is TaskMetadataChanges {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>, keys = Object.keys(item);
-  return keys.length > 0 && keys.every(key => fields.includes(key)) && (!('title' in item) || typeof item.title === 'string' && item.title.trim().length > 0 && item.title.trim().length <= 150) && (!('auto_run' in item) || typeof item.auto_run === 'boolean') && (!('run_at' in item) || item.run_at === null || typeof item.run_at === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(item.run_at) && Number.isFinite(Date.parse(item.run_at)));
+  return keys.length > 0 && keys.every(key => fields.includes(key)) && validPlanningFields(item) && (!('title' in item) || typeof item.title === 'string' && item.title.trim().length > 0 && item.title.trim().length <= 150) && (!('auto_run' in item) || typeof item.auto_run === 'boolean') && (!('run_at' in item) || item.run_at === null || typeof item.run_at === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(item.run_at) && Number.isFinite(Date.parse(item.run_at)));
 }
 function accountPrefix() {
   const owner = getCacheUserId(); if (!owner) throw new Error('请先登录，再修改任务设置');

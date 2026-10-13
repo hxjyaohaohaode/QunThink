@@ -11,7 +11,7 @@ import { sourceMessages, linkedFile, sourceHash, sourceSnapshot, taskSourceMessa
 
 import { currentTaskResultHead, synchronizeTaskResults, taskResultState, TASK_RESULT_LIMITS } from './taskResults.js';
 import { dependencyIdsInput, editTaskDependenciesInput, dependencyIds, dependencyRevision, validateDependencyEdit, dependencyContext, currentTaskDependencies, assertDependencyReady, dependencyError, TASK_DEPENDENCY_LIMITS } from './taskDependencies.js';
-import { editTaskMetadataInput, metadataRevision, advanceTaskMetadataRevisions, metadataError, TASK_METADATA_LIMITS } from './taskMetadata.js';
+import { editTaskMetadataInput, metadataRevision, advanceTaskMetadataRevisions, metadataError, TASK_METADATA_LIMITS, taskPriorityInput, taskEstimatedMinutesInput, taskPlanningValues } from './taskMetadata.js';
 
 const requestIdInput = z.string().uuid().transform(value => value.toLowerCase());
 const CREATE_COMMAND_LIMIT = 10000;
@@ -31,8 +31,11 @@ export const taskInput = z.object({
   source_message_edited_at: z.iso.datetime().nullable().optional(),
   run_at: z.iso.datetime().nullable().default(null),
   repeat_minutes: z.number().int().min(15).max(43200).nullable().default(null),
-  auto_run: z.boolean().default(false)
-}).strict().refine(t => !t.auto_run || t.run_at, { message: '主动执行需要设置执行时间' })
+  auto_run: z.boolean().default(false),
+  priority: taskPriorityInput.optional(),
+  estimated_minutes: taskEstimatedMinutesInput.optional()
+}).strict().refine(t => ['priority', 'estimated_minutes'].every(key => !Object.hasOwn(t, key) || t[key] !== undefined), { message: '明确提供的规划字段不可为undefined' })
+  .refine(t => !t.auto_run || t.run_at, { message: '主动执行需要设置执行时间' })
   .refine(t => !t.repeat_minutes || t.auto_run, { message: '重复执行需要启用主动执行' })
   .refine(t => !t.source_message_id || t.group_id, { message: '来源消息需要关联会话' });
 const activeRuns = new Map();
@@ -114,7 +117,7 @@ export function publicTask(task, db = null, snapshot = null, dependencies = null
     !snapshot.messages.some(message => message.id === task.source_message_id && message.group_id === task.group_id));
   const sourceStale = originBlocked || (!hasEditorHead && inputStale) || (db ? isResultSourceStale(task, db, snapshot) : false);
   const { result_editor, ...visible } = task;
-  return { ...visible, metadata_revision: metadataRevision(task), dependency_ids: dependencyIds(task), dependency_revision: dependencyRevision(task), ...(dependencies ? { dependency_state: dependencies } : {}), ...(result_editor ? { result_editor_available: true, result_head_version_id: result_editor.head_version_id, result_accepted_version_id: result_editor.accepted_version_id } : {}), ...(db ? { source_stale: sourceStale, source_input_stale: inputStale } : {}),
+  return { ...visible, ...taskPlanningValues(task), metadata_revision: metadataRevision(task), dependency_ids: dependencyIds(task), dependency_revision: dependencyRevision(task), ...(dependencies ? { dependency_state: dependencies } : {}), ...(result_editor ? { result_editor_available: true, result_head_version_id: result_editor.head_version_id, result_accepted_version_id: result_editor.accepted_version_id } : {}), ...(db ? { source_stale: sourceStale, source_input_stale: inputStale } : {}),
     prompt: inputStale ? '' : unpack(task.prompt), result: sourceStale ? '' : unpack(task.result),
     history: (task.history || []).map(h => {
       const stale = inputStale || (db ? isRunSourceStale(task, h, db, snapshot) : false);
@@ -212,7 +215,7 @@ export async function createTask(userId, input) {
     }
     const before = structuredClone(db.data);
     const now = new Date().toISOString();
-    const task = { ...data, ...(sourceInputHash ? { source_input_hash: sourceInputHash } : {}), ...(requestId ? { client_request_id: requestId } : {}), id: randomUUID(), prompt: encryptText(data.prompt), status: 'pending', result: '', error: null, history: [], run_count: 0, created_at: now, updated_at: now };
+    const task = { ...data, ...taskPlanningValues(data), ...(sourceInputHash ? { source_input_hash: sourceInputHash } : {}), ...(requestId ? { client_request_id: requestId } : {}), id: randomUUID(), prompt: encryptText(data.prompt), status: 'pending', result: '', error: null, history: [], run_count: 0, created_at: now, updated_at: now };
     if (data.dependency_ids?.length) validateDependencyEdit(task, data.dependency_ids, db);
     db.data.tasks ||= [];
     db.data.tasks.push(task);
@@ -391,7 +394,7 @@ export async function updateTaskMetadata(userId, taskId, raw) {
 }
 
 export async function updateTask(userId, taskId, patch) {
-  if (patch && typeof patch === 'object' && ['title', 'auto_run', 'run_at'].some(key => Object.hasOwn(patch, key))) {
+  if (patch && typeof patch === 'object' && ['title', 'auto_run', 'run_at', 'priority', 'estimated_minutes'].some(key => Object.hasOwn(patch, key))) {
     throw metadataError('TASK_METADATA_PRECONDITION_REQUIRED', '任务设置需要带修订和原请求编号的新接口，请更新或刷新页面；未应用任何字段', 428);
   }
   const allowed = z.object({
