@@ -5,7 +5,7 @@ import { build } from 'esbuild';
 import { Window } from 'happy-dom';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, posix } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const directory = dirname(fileURLToPath(import.meta.url));
@@ -92,7 +92,8 @@ export async function createTaskPlanningLegacySample() {
         if (/services\/api$/.test(path)) return { path: 'api', namespace: 'legacy-transport' };
         if (/(?:utils\/|\.\/)cacheUtils$/.test(path)) return { path: 'cache', namespace: 'legacy-transport' };
         if (path === './modelsStore') return { path: 'models', namespace: 'legacy-transport' };
-        const resolved = resolve('/', dirname(importer), path).slice(1) + '.ts';
+        // These are virtual Git paths, not paths on the host filesystem.
+        const resolved = posix.resolve('/', posix.dirname(importer), path).slice(1) + '.ts';
         requireCondition(sources.has(resolved), 'Legacy producer attempted to import an unpinned source');
         return { path: resolved, namespace: 'legacy-source' };
       });

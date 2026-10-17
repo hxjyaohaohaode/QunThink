@@ -1,0 +1,5 @@
+# Historical compatibility producers are checked against the original Git blobs.
+# Preserve their exact bytes even when a Windows checkout uses core.autocrlf.
+frontend/test/fixtures/f07LegacyCrypto.9e8d423.ts -text
+frontend/test/fixtures/task-planning-legacy-533/** -text
+backend/test/fixtures/public-533-producer/** -text

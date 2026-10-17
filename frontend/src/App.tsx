@@ -8,6 +8,7 @@ import { useTaskResultsStore } from './stores/taskResultsStore';
 import { clearWritingContent } from './utils/taskRecovery';
 import { ConversationWriting } from './components/Writing/ConversationWriting';
 import { useMemoryStore } from './stores/memoryStore';
+import { usePersonalGoalsStore } from './stores/personalGoalsStore';
 ﻿import { lazy, Suspense, useEffect, useLayoutEffect, useState, useRef, useCallback, type ReactNode, type TouchEvent as ReactTouchEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { Group } from './types';
@@ -158,6 +159,7 @@ const defaultProfileState: UserProfile = {
 };
 
 function hydrateBootstrapData(userId: string, payload: BootstrapPayload) {
+  if (getCacheUserId() !== userId) usePersonalGoalsStore.getState().cleanup();
   if (getCacheUserId() !== userId) { useAudioStore.getState().clearAll(); useTasksStore.getState().cleanup(); useTaskResultsStore.getState().cleanup(); useMemoryStore.getState().cleanup(); useProfileStore.getState().cleanup(); useModelsStore.getState().cleanup(); usePersonasStore.getState().cleanup(); clearDiagnostics(); }
   setCacheUserId(userId);
   confirmAuthIdentity(userId);
@@ -287,6 +289,7 @@ async function handleLogout() {
   useProfileStore.getState().cleanup();
   useTasksStore.getState().cleanup(); useTaskResultsStore.getState().cleanup();
   useMemoryStore.getState().cleanup();
+  usePersonalGoalsStore.getState().cleanup();
   useModelsStore.getState().cleanup();
   usePersonasStore.getState().cleanup();
 

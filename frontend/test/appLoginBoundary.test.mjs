@@ -10,7 +10,7 @@ const browserWindow = new Window({ url: 'http://localhost/' });
 Object.assign(globalThis, { window: browserWindow, document: browserWindow.document,
   localStorage: browserWindow.localStorage });
 after(() => browserWindow.close());
-const app = await readFile(resolve(root, 'src/App.tsx'), 'utf8');
+const app = (await readFile(resolve(root, 'src/App.tsx'), 'utf8')).replace(/\r\n/g, '\n');
 function extract(startText, endText, rename) {
   const start = app.indexOf(startText), end = app.indexOf(endText, start);
   assert.ok(start >= 0 && end > start, `Production boundary found: ${startText}`);

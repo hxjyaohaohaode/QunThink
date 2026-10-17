@@ -6,7 +6,7 @@ import {build} from 'esbuild';
 import {Window} from 'happy-dom';
 const root=resolve(import.meta.dirname,'..');const window=new Window({url:'http://localhost/'});
 Object.assign(globalThis,{window,document:window.document,localStorage:window.localStorage});after(()=>window.close());
-const app=await readFile(resolve(root,'src/App.tsx'),'utf8');
+const app=(await readFile(resolve(root,'src/App.tsx'),'utf8')).replace(/\r\n/g,'\n');
 // Exercise the production logout orchestration itself; render-only App imports
 // are omitted. The HTTP interceptor is real and stores/storage are test doubles.
 const start=app.indexOf('async function handleLogout('),end=app.indexOf('\nfunction App()',start);
@@ -20,7 +20,7 @@ export {axiosInstance,confirmAuthIdentity};
 const state=()=>globalThis.__logout;
 const getCacheUserId=()=>state().user;const setCacheUserId=user=>{state().user=user;};
 const store=name=>({getState:()=>({cleanup:()=>{state().cleared.push(name);},clearAll:()=>{},clearAllTypingTimeouts:()=>{}}),setState:value=>{state().stores[name]=value;}});
-const useNavigationStore=store('navigation'),useAudioStore=store('audio'),useProfileStore=store('profile'),useTasksStore=store('tasks'),useTaskResultsStore=store('results'),useMemoryStore=store('memory'),useModelsStore=store('models'),usePersonasStore=store('personas'),useUIStore=store('ui'),useGroupsStore=store('groups'),useMessagesStore=store('messages'),useAgentsStore=store('agents');
+const useNavigationStore=store('navigation'),useAudioStore=store('audio'),useProfileStore=store('profile'),useTasksStore=store('tasks'),useTaskResultsStore=store('results'),useMemoryStore=store('memory'),usePersonalGoalsStore=store('goals'),useModelsStore=store('models'),usePersonasStore=store('personas'),useUIStore=store('ui'),useGroupsStore=store('groups'),useMessagesStore=store('messages'),useAgentsStore=store('agents');
 const clearSearchHistory=()=>{},clearWritingContent=()=>{},clearDiagnostics=()=>{},destroyWebSocket=()=>{},stopPersonasAutoRefresh=()=>{},clearMemoryApiConfigs=()=>{},clearPersistedSessionInfo=()=>{},resetMessagesModuleState=()=>{};
 const clearAllCachesForUser=user=>state().cacheUsers.push(user);const setIndexedDBUserId=user=>{state().indexedUser=user;};
 const clearAllIndexedDBForUser=user=>{state().dbUsers.push(user);return state().cleanupPromise;};const purgeLegacyPrivateCaches=()=>state().cleanupPromise;
@@ -38,7 +38,7 @@ beforeEach(()=>{globalThis.__logout={user:'alice',cleared:[],stores:{},cacheUser
 test('expiry clears local identity synchronously and never sends a cookie-clearing server logout',async()=>{
  let clean;let requests=0;globalThis.__logout.cleanupPromise=new Promise(resolve=>{clean=resolve;});
  axiosInstance.defaults.adapter=async()=>{requests++;throw new Error('expiry must not send logout');};
- const pending=handleLogout();assert.equal(globalThis.__logout.user,null);assert.equal(globalThis.__logout.indexedUser,null);assert.deepEqual(globalThis.__logout.cleared,['profile','tasks','results','memory','models','personas']);await flush();
+ const pending=handleLogout();assert.equal(globalThis.__logout.user,null);assert.equal(globalThis.__logout.indexedUser,null);assert.deepEqual(globalThis.__logout.cleared,['profile','tasks','results','memory','goals','models','personas']);await flush();
  assert.equal(requests,0);globalThis.__logout.user='bob';confirmAuthIdentity('bob');globalThis.__logout.stores.groups={newSession:true};
  clean();assert.equal(await pending,false);assert.equal(globalThis.__logout.user,'bob');assert.deepEqual(globalThis.__logout.stores.groups,{newSession:true});assert.deepEqual(globalThis.__logout.dbUsers,['alice']);
 });

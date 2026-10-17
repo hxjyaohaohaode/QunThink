@@ -40,7 +40,9 @@ node scripts/start-local.mjs --isolated
 
 启动器只接受用户明确设置的 `QUNTHINK_LOCAL_GOALS_URL`，不会继承 `QUNTHINK_FOUNDATIONS_RUNTIME_URL`。请确认地址属于专用验收数据库，再自行设置此变量。schema 固定为 `qunthink_core`，后台简报调度保持关闭。未显式设置时不会连接目标数据库。
 
-此启动器不会启动 Docker、读取 `.local-runtime/goals-runtime.json` 或执行其他本机辅助脚本。其他电脑上的容器、账号与私有配置不随源码提供。本次整合没有执行 Docker、MongoDB、浏览器或联网模型验收。通用 Agent 自动执行与工作台 Task 联动仍取决于上游接通情况，简报本身不代表目标已完成。
+此启动器不会启动 Docker、读取 `.local-runtime/goals-runtime.json` 或执行其他本机辅助脚本。其他电脑上的容器、账号与私有配置不随源码提供。单独启动服务不等同于完成 Docker、MongoDB、浏览器或联网模型验收。通用 Agent 自动执行与工作台 Task 联动仍取决于上游接通情况，简报本身不代表目标已完成。
+
+个人目标的表单、执行步骤草稿和未确认请求编号只保存在当前账号、当前标签页内存中。切换聊天或其他页面后可以继续；刷新页面或退出账号会清除。保存尚未返回时禁止重复提交；结果未确认时，保持原内容重试会使用同一请求编号。迟到的响应不会清空后来输入的草稿，也不会切回已经离开的目标。浏览器关闭或刷新前会提示未保存内容，但是否显示提示仍由浏览器决定。
 
 ## 已有加密数据启动失败
 
@@ -65,5 +67,7 @@ npm run test:e2e
 本地启动器回归位于 `backend/test/start-local-launcher.integration.test.js`：真实后端使用临时合成账号和随机测试密钥；前端生命周期使用最小 HTTP 测试子进程。它不读取原用户数据库或私有配置，也不等同于浏览器视觉验收。
 
 E2E 使用独立账号、数据库和协议测试服务，默认端口为 3202 / 3210。需要安装对应浏览器后另行执行，不应将命令存在理解为已经完成验收。
+
+Windows 的 `core.autocrlf` 不能改写历史兼容性夹具：`.gitattributes` 对字节固定的历史源码禁用换行转换，原 SHA-256 和 Git blob 校验仍然执行。源码片段测试支持 CRLF；内存中的 Git 路径按 POSIX 规则解析，与本机盘符无关。WebCrypto 的不可导出密钥测试兼容 Node 22 与较新版本的原生异常名称，仍要求导出被拒绝。
 
 后端部分文件权限、符号链接、PostgreSQL 集成用例需要相应操作系统能力和独立 PostgreSQL 测试库。完整存储门禁在 Linux + PostgreSQL 中执行；不能把平台不支持或缺少夹具的用例当作通过。

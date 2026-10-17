@@ -334,7 +334,9 @@ test('planning public-533 samples use fresh non-extractable keys and never share
  assert.ok(globalThis.localStorage === previousStorage && globalThis.indexedDB === previousDatabase, 'The producer must restore the consumer storage environment');
  assert.ok(crypto.subtle.generateKey === generateKey && crypto.getRandomValues === getRandomValues, 'The producer must not replace WebCrypto randomness');
  assert.ok(first.key !== second.key && !first.key.extractable && !second.key.extractable, 'Each sample needs its own non-extractable key');
- await assert.rejects(crypto.subtle.exportKey('raw', first.key), { name: 'InvalidAccessException' });
+ // Node 22 uses the older name; newer WebCrypto implementations use the DOM name.
+ await assert.rejects(crypto.subtle.exportKey('raw', first.key), error =>
+   error instanceof DOMException && ['InvalidAccessException', 'InvalidAccessError'].includes(error.name));
  assert.ok(first.createReceipt.key !== second.createReceipt.key && first.metadataJournal.key !== second.metadataJournal.key, 'Each invocation needs fresh request UUIDs');
  const ciphertexts = sample => Object.entries(sample.storage).filter(([name]) => name.startsWith('qunthink_writing_v1_')).map(([, bytes]) => bytes);
  assert.ok(ciphertexts(first).length === 2 && ciphertexts(second).length === 2, 'Both legacy creation and metadata ciphertexts must exist');

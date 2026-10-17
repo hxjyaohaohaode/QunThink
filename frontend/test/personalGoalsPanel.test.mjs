@@ -1,4 +1,4 @@
-import test, { after } from 'node:test';
+import test, { after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -20,12 +20,14 @@ class TestMessageChannel {
 }
 Object.defineProperty(globalThis, 'MessageChannel', { value: TestMessageChannel, configurable: true });
 globalThis.__goalPanelHttp = { get: async () => ({ data: { goals: [], executionAvailable: false } }), post: async () => ({ data: {} }) };
+globalThis.__goalPanelScope = { accountId: 'account-a', generation: 1 };
 
 const bundled = await build({
   stdin: {
     contents: `import { createRoot } from 'react-dom/client';
       import { act } from 'react';
       import { PersonalGoalsPanel } from './src/components/Layout/PersonalGoalsPanel';
+      export { usePersonalGoalsStore } from './src/stores/personalGoalsStore';
       export async function mount(element) { const root = createRoot(element); await act(async () => { root.render(<PersonalGoalsPanel />); }); return root; }
       export { act };`,
     resolveDir: frontendRoot,
@@ -41,9 +43,13 @@ const bundled = await build({
   plugins: [{
     name: 'mock-panel-boundaries',
     setup(build) {
-      build.onResolve({ filter: /^\.\/api$/ }, () => ({ path: 'api', namespace: 'mock-panel-boundaries' }));
+      build.onResolve({ filter: /^(\.\/api|\.\.\/services\/api)$/ }, () => ({ path: 'api', namespace: 'mock-panel-boundaries' }));
       build.onLoad({ filter: /^api$/, namespace: 'mock-panel-boundaries' }, () => ({
-        contents: 'export const axiosInstance = globalThis.__goalPanelHttp;', loader: 'js',
+        contents: 'export const axiosInstance = globalThis.__goalPanelHttp; export const getAuthGeneration = () => globalThis.__goalPanelScope.generation;', loader: 'js',
+      }));
+      build.onResolve({ filter: /cacheUtils$/ }, () => ({ path: 'cache', namespace: 'mock-panel-boundaries' }));
+      build.onLoad({ filter: /^cache$/, namespace: 'mock-panel-boundaries' }, () => ({
+        contents: 'export const getCacheUserId = () => globalThis.__goalPanelScope.accountId;', loader: 'js',
       }));
       build.onResolve({ filter: /^\.\.\/Common$/ }, () => ({ path: 'common', namespace: 'mock-panel-boundaries' }));
       build.onLoad({ filter: /^common$/, namespace: 'mock-panel-boundaries' }, () => ({
@@ -52,7 +58,129 @@ const bundled = await build({
     },
   }],
 });
-const { mount, act } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
+const { mount, act, usePersonalGoalsStore } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
+beforeEach(() => {
+  globalThis.__goalPanelScope = { accountId: 'account-a', generation: 1 };
+  usePersonalGoalsStore.getState().cleanup();
+  globalThis.__goalPanelHttp.get = async () => ({ data: { goals: [], executionAvailable: false } });
+  globalThis.__goalPanelHttp.post = async () => ({ data: {} });
+});
+
+const goalFixture = (id, outcome) => ({ id, outcome, constraints: [], budget_limit_micros: '0',
+  budget_reserved_micros: '0', budget_spent_micros: '0', state: 'active', revision: '0', created_at: '2026-10-18T00:00:00Z' });
+function serveGoals(goals) {
+  globalThis.__goalPanelHttp.get = async path => ({ data: path === '/goals'
+    ? { goals, executionAvailable: false }
+    : { goal: goals.find(goal => path === `/goals/${goal.id}`), checks: [], runs: [], executionAvailable: false } });
+}
+async function view(t) {
+  const container = document.createElement('div'); document.body.append(container);
+  let root = await mount(container);
+  const unmount = async () => { if (root) { await act(async () => root.unmount()); root = null; } };
+  t.after(async () => { await unmount(); container.remove(); });
+  return {
+    container, unmount, remount: async () => { await unmount(); root = await mount(container); },
+    click: async text => {
+      const button = [...container.querySelectorAll('button')].find(item => item.textContent === text);
+      assert.ok(button, `button ${text} exists`); await act(async () => button.click());
+    },
+    fill: async (index, value) => {
+      const element = container.querySelectorAll('textarea')[index]; assert.ok(element);
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(browserWindow.HTMLTextAreaElement.prototype, 'value').set.call(element, value);
+        element.dispatchEvent(new browserWindow.Event('input', { bubbles: true }));
+      });
+    },
+    submit: async () => { await act(async () => container.querySelector('form').dispatchEvent(
+      new browserWindow.Event('submit', { bubbles: true, cancelable: true }))); },
+    open: async id => {
+      const goal = [...container.querySelectorAll('button[aria-pressed]')].find(item => item.textContent.includes(id));
+      assert.ok(goal); await act(async () => goal.click());
+    },
+  };
+}
+
+test('uncertain goal save and draft survive page navigation with the original retry key', async t => {
+  const writes = [];
+  globalThis.__goalPanelHttp.post = async (path, body, config) => {
+    writes.push({ path, body, config }); throw Object.assign(new Error('connection lost'), { status: 503 });
+  };
+  const page = await view(t);
+  await page.click('＋ 创建目标'); await page.fill(0, '保留原始目标'); await page.fill(2, '逐条验收');
+  await page.submit(); await page.unmount();
+  const unload = new browserWindow.Event('beforeunload', { cancelable: true }); window.dispatchEvent(unload);
+  assert.equal(unload.defaultPrevented, true, 'warn about draft loss even while another page is open');
+  await page.remount();
+  assert.equal(page.container.querySelector('textarea').value, '保留原始目标');
+  assert.match(page.container.textContent, /上次保存结果未确认/);
+  await page.submit();
+  assert.equal(writes.length, 2);
+  assert.deepEqual(writes[0], writes[1], 'retry is the same operation, including the idempotency key');
+  await page.unmount(); usePersonalGoalsStore.getState().cleanup();
+  const cleanUnload = new browserWindow.Event('beforeunload', { cancelable: true }); window.dispatchEvent(cleanUnload);
+  assert.equal(cleanUnload.defaultPrevented, false);
+});
+
+test('navigation retains an in-flight lock and a late save cannot erase newer input', async t => {
+  let finish; let writes = 0;
+  serveGoals([goalFixture('saved', '原目标')]);
+  globalThis.__goalPanelHttp.post = () => { writes++; return new Promise(resolveWrite => { finish = resolveWrite; }); };
+  const page = await view(t);
+  await page.click('＋ 创建目标'); await page.fill(0, '原目标'); await page.fill(2, '验收原目标'); await page.submit();
+  await page.remount();
+  assert.equal([...page.container.querySelectorAll('button')].find(button => button.textContent === '保存中…').disabled, true);
+  await page.submit(); assert.equal(writes, 1);
+  await page.fill(0, '正在起草的下一个目标');
+  await act(async () => { finish({ data: { goalId: 'saved' } }); });
+  assert.equal(page.container.querySelector('textarea').value, '正在起草的下一个目标');
+  assert.equal(usePersonalGoalsStore.getState().values.selectedId, null, 'late completion does not steal selection');
+  assert.match(page.container.textContent, /目标已保存/);
+});
+
+test('account A to B to A fences old responses, private drafts and submission locks', async t => {
+  let finish;
+  globalThis.__goalPanelHttp.post = () => new Promise(resolveWrite => { finish = resolveWrite; });
+  const page = await view(t);
+  await page.click('＋ 创建目标'); await page.fill(0, 'A 私有草稿'); await page.fill(2, 'A 验收'); await page.submit();
+  await page.unmount(); globalThis.__goalPanelScope = { accountId: 'account-b', generation: 2 }; await page.remount();
+  assert.equal(page.container.querySelectorAll('textarea').length, 0);
+  assert.doesNotMatch(page.container.textContent, /A 私有草稿|保存中/);
+  await page.click('＋ 创建目标'); await page.fill(0, 'B 私有草稿');
+  await page.unmount(); globalThis.__goalPanelScope = { accountId: 'account-a', generation: 3 }; await page.remount();
+  await page.click('＋ 创建目标'); await page.fill(0, 'A 新会话草稿');
+  await act(async () => { finish({ data: { goalId: 'old-account-operation' } }); });
+  assert.equal(page.container.querySelector('textarea').value, 'A 新会话草稿');
+  assert.doesNotMatch(page.container.textContent, /B 私有草稿|目标已保存|保存中/);
+  assert.equal(usePersonalGoalsStore.getState().values.selectedId, null);
+  assert.equal(usePersonalGoalsStore.getState().references.createAttempt.current, null);
+});
+
+test('run drafts belong to their goals and a background save preserves the current selection', async t => {
+  const goals = [goalFixture('one', '第一个目标'), goalFixture('two', '第二个目标')]; serveGoals(goals);
+  let finish; const writes = [];
+  globalThis.__goalPanelHttp.post = (path, body) => { writes.push({ path, body }); return new Promise(resolveWrite => { finish = resolveWrite; }); };
+  const page = await view(t);
+  await page.open('第一个目标'); await page.click('记录执行步骤'); await page.fill(0, '第一项步骤'); await page.submit();
+  await page.open('第二个目标'); await page.click('记录执行步骤'); await page.fill(0, '第二项步骤');
+  await page.remount();
+  await act(async () => { finish({ data: { runId: 'run-one' } }); });
+  assert.equal(page.container.querySelector('textarea').value, '第二项步骤');
+  assert.equal(usePersonalGoalsStore.getState().values.selectedId, 'two');
+  assert.equal(writes[0].path, '/goals/one/runs');
+  await page.open('第一个目标'); assert.equal(page.container.querySelectorAll('textarea').length, 0);
+  await page.open('第二个目标'); assert.equal(page.container.querySelector('textarea').value, '第二项步骤');
+});
+
+test('a list response started before leaving the page cannot overwrite the newer list', async t => {
+  let finishOld; let calls = 0;
+  globalThis.__goalPanelHttp.get = () => ++calls === 1
+    ? new Promise(resolveRead => { finishOld = resolveRead; })
+    : Promise.resolve({ data: { goals: [goalFixture('new', '最新目标')], executionAvailable: false } });
+  const page = await view(t); await page.remount();
+  assert.match(page.container.textContent, /最新目标/);
+  await act(async () => { finishOld({ data: { goals: [goalFixture('old', '旧目标')], executionAvailable: false } }); });
+  assert.match(page.container.textContent, /最新目标/); assert.doesNotMatch(page.container.textContent, /旧目标/);
+});
 
 test('503 foundation error is visible and does not invite a submission', async () => {
   globalThis.__goalPanelHttp.get = async () => { throw Object.assign(new Error('目标服务未配置'), { status: 503 }); };

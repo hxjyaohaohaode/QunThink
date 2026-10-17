@@ -21,7 +21,7 @@ Object.defineProperty(browser.HTMLElement.prototype, 'getClientRects', { value()
 const output = await mkdtemp(resolve(tmpdir(), 'qunthink-phone-commit-'));
 // Replay only the exact AppContent history effect, not the full App. CDP and
 // Playwright event transport are controlled below; this is not native Chrome.
-const appSource = await readFile(resolve(frontend, 'src/App.tsx'), 'utf8');
+const appSource = (await readFile(resolve(frontend, 'src/App.tsx'), 'utf8')).replace(/\r\n/g, '\n');
 const effectStart = appSource.indexOf("  useEffect(() => {\n    window.history.replaceState({ mobileView: 'main' }, '', '');");
 const effectEndText = '  }, [handlePopStateBack]);';
 const effectEnd = appSource.indexOf(effectEndText, effectStart);

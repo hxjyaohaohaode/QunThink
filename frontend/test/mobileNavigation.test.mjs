@@ -25,7 +25,7 @@ class Channel {
   port2 = { postMessage: () => setTimeout(() => this.port1.onmessage?.(), 0) };
 }
 Object.defineProperty(globalThis, 'MessageChannel', { value: Channel, configurable: true });
-const source = await readFile(resolve(root, 'src/App.tsx'), 'utf8');
+const source = (await readFile(resolve(root, 'src/App.tsx'), 'utf8')).replace(/\r\n/g, '\n');
 function section(start, end) {
   const a = source.indexOf(start), b = source.indexOf(end, a);
   assert.ok(a >= 0 && b > a, `Production mobile boundary found: ${start}`);

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import {
   buildPersonalGoalInput, buildPersonalRunInput, personalGoalsApi, retainSubmissionKey,
-  type PersonalGoal, type PersonalGoalBrief, type PersonalGoalDetail, type PersonalGoalRun, type PersonalRunDetail,
+  type PersonalGoal, type PersonalGoalRun,
 } from '../../services/personalGoals';
 import { useConfirm } from '../Common';
+import { usePersonalGoalSession } from '../../stores/personalGoalsStore';
 
 const field = 'w-full rounded-xl border border-border bg-bg-primary px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-accent/30';
 const secondary = 'rounded-xl px-3 py-2 text-xs border border-border text-text-secondary hover:bg-bg-surface2 disabled:opacity-40';
@@ -19,60 +20,60 @@ const runNames: Record<PersonalGoalRun['state'], string> = {
 
 function displayError(error: unknown): string {
   const status = (error as { status?: number })?.status;
-  if (status === 503) return '个人目标服务未配置、未迁移或暂不可用。请联系管理员检查基础数据库，再重试；已填写的内容会保留在本页面。';
+  if (status === 503) return '个人目标服务未配置、未迁移或暂不可用。请联系管理员检查基础数据库，再重试；已填写的内容会保留在本标签页。';
   if (status === 409) return '目标状态或上次提交已发生变化。请刷新并核对已有记录，再决定下一步。';
   return error instanceof Error ? error.message : '操作失败，请刷新后重试';
 }
 
 export function PersonalGoalsPanel() {
-  const [goals, setGoals] = useState<PersonalGoal[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [listError, setListError] = useState('');
-  const [actionError, setActionError] = useState('');
-  const [notice, setNotice] = useState('');
-  const [executionAvailable, setExecutionAvailable] = useState(false);
-  const [outcome, setOutcome] = useState('');
-  const [constraintsText, setConstraintsText] = useState('');
-  const [checksText, setChecksText] = useState('');
-  const [stepsText, setStepsText] = useState('');
-  const [showCreate, setShowCreate] = useState(false);
-  const [showRunCreate, setShowRunCreate] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<PersonalGoalDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [runDetail, setRunDetail] = useState<PersonalRunDetail | null>(null);
-  const [brief, setBrief] = useState<PersonalGoalBrief | null>(null);
-  const [briefLoading, setBriefLoading] = useState(false);
-  const [busy, setBusy] = useState('');
-  const createAttempt = useRef<{ payload: string; key: string } | null>(null);
-  const runAttempts = useRef(new Map<string, { payload: string; key: string }>());
-  const transitionKeys = useRef(new Map<string, string>());
-  const briefAttempts = useRef(new Map<string, string>());
-  const busyRef = useRef(false);
+  const session = usePersonalGoalSession();
+  const [goals, setGoals] = session.field('goals');
+  const [loading, setLoading] = session.field('loading');
+  const [listError, setListError] = session.field('listError');
+  const [actionError, setActionError] = session.field('actionError');
+  const [notice, setNotice] = session.field('notice');
+  const [executionAvailable, setExecutionAvailable] = session.field('executionAvailable');
+  const [outcome, setOutcome] = session.field('outcome');
+  const [constraintsText, setConstraintsText] = session.field('constraintsText');
+  const [checksText, setChecksText] = session.field('checksText');
+  const [runDrafts, setRunDrafts] = session.field('runDrafts');
+  const [showCreate, setShowCreate] = session.field('showCreate');
+  const [showRunCreate, setShowRunCreate] = session.field('showRunCreate');
+  const [selectedId, setSelectedId] = session.field('selectedId');
+  const [detail, setDetail] = session.field('detail');
+  const [detailLoading, setDetailLoading] = session.field('detailLoading');
+  const [runDetail, setRunDetail] = session.field('runDetail');
+  const [brief, setBrief] = session.field('brief');
+  const [briefLoading, setBriefLoading] = session.field('briefLoading');
+  const [busy, setBusy] = session.field('busy');
+  const { createAttempt, runAttempts, transitionKeys, briefAttempts, busyRef, selectionEpoch, runEpoch, briefEpoch, listEpoch } = session.references;
+  const stepsText = selectedId ? runDrafts[selectedId] || '' : '';
+  const setStepsText = (text: string) => { if (selectedId) setRunDrafts(drafts => ({ ...drafts, [selectedId]: text })); };
   const detailRef = useRef<HTMLDivElement>(null);
-  const selectionEpoch = useRef(0);
-  const runEpoch = useRef(0);
-  const briefEpoch = useRef(0);
   const { confirm, ConfirmModal } = useConfirm();
 
   const refreshList = useCallback(async () => {
+    if (!session.current()) return false;
+    const epoch = ++listEpoch.current;
     setLoading(true);
     try {
       const result = await personalGoalsApi.list();
+      if (!session.current() || epoch !== listEpoch.current) return false;
       setGoals(result.goals);
       setExecutionAvailable(result.executionAvailable === true);
       setListError('');
       return true;
     } catch (error) {
+      if (!session.current() || epoch !== listEpoch.current) return false;
       setListError(displayError(error));
       setExecutionAvailable(false);
       return false;
     } finally {
-      setLoading(false);
+      if (epoch === listEpoch.current) setLoading(false);
     }
-  }, []);
+  }, [session.scopeKey]);
 
-  useEffect(() => { void refreshList(); }, [refreshList]);
+  useEffect(() => { if (session.active) void refreshList(); }, [refreshList, session.active]);
   useEffect(() => {
     if (selectedId && window.matchMedia('(max-width: 1023px)').matches) {
       detailRef.current?.focus({ preventScroll: true });
@@ -81,10 +82,11 @@ export function PersonalGoalsPanel() {
   }, [selectedId]);
 
   async function openGoal(goalId: string) {
+    if (!session.current()) return false;
     const epoch = ++selectionEpoch.current;
     runEpoch.current++;
     briefEpoch.current++;
-    if (selectedId !== goalId) { setStepsText(''); setShowRunCreate(false); }
+    if (selectedId !== goalId) setShowRunCreate(Boolean(session.read().runDrafts[goalId]));
     setSelectedId(goalId);
     setDetail(null);
     setDetailLoading(true);
@@ -93,7 +95,7 @@ export function PersonalGoalsPanel() {
     setActionError('');
     try {
       const result = await personalGoalsApi.detail(goalId);
-      if (epoch !== selectionEpoch.current) return false;
+      if (!session.current() || epoch !== selectionEpoch.current) return false;
       setDetail(result);
       setExecutionAvailable(result.executionAvailable === true);
       return true;
@@ -105,16 +107,19 @@ export function PersonalGoalsPanel() {
     }
   }
 
-  async function refreshGoal(goalId: string) {
-    if (await refreshList() && selectedId === goalId) await openGoal(goalId);
+  async function refreshGoal(goalId: string, preserveRun = false) {
+    if (!await refreshList() || session.read().selectedId !== goalId) return;
+    const runId = preserveRun ? session.read().runDetail?.run.id : undefined;
+    if (await openGoal(goalId) && runId) await openRun(goalId, runId);
   }
 
   async function refreshVisible() {
-    if (await refreshList() && selectedId) await openGoal(selectedId);
+    if (await refreshList() && selectedId && session.read().selectedId === selectedId) await openGoal(selectedId);
   }
 
   async function createGoal() {
-    if (busyRef.current) return;
+    if (!session.current() || busyRef.current) return;
+    const submitted = { outcome, constraintsText, checksText }, selection = selectionEpoch.current;
     setActionError(''); setNotice('');
     let payload;
     try {
@@ -124,11 +129,14 @@ export function PersonalGoalsPanel() {
     busyRef.current = true; setBusy('create');
     try {
       const result = await personalGoalsApi.create(payload, createAttempt.current.key);
+      if (!session.current()) return;
       createAttempt.current = null;
-      setOutcome(''); setConstraintsText(''); setChecksText(''); setShowCreate(false);
+      const latest = session.read();
+      const unchanged = latest.outcome === submitted.outcome && latest.constraintsText === submitted.constraintsText && latest.checksText === submitted.checksText;
+      if (unchanged) { setOutcome(''); setConstraintsText(''); setChecksText(''); setShowCreate(false); }
       setNotice(result.replayed ? '已找到此前提交的同一目标；未重复创建。' : '目标已保存。可以核对要求并生成简报，当前不会自动执行。');
       await refreshList();
-      await openGoal(result.goalId);
+      if (unchanged && selectionEpoch.current === selection) await openGoal(result.goalId);
     } catch (error) {
       if ((error as { status?: number })?.status === 400) createAttempt.current = null;
       setActionError(displayError(error));
@@ -136,7 +144,8 @@ export function PersonalGoalsPanel() {
   }
 
   async function createRun() {
-    if (busyRef.current || listError || !detail || detail.goal.state !== 'active') return;
+    if (!session.current() || busyRef.current || listError || !detail || detail.goal.state !== 'active') return;
+    const submittedSteps = stepsText, goalId = detail.goal.id;
     setActionError(''); setNotice('');
     let payload;
     try {
@@ -147,7 +156,11 @@ export function PersonalGoalsPanel() {
     try {
       const result = await personalGoalsApi.createRun(detail.goal.id, payload, runAttempts.current.get(detail.goal.id)!.key);
       runAttempts.current.delete(detail.goal.id);
-      setStepsText(''); setShowRunCreate(false);
+      setRunDrafts(drafts => {
+        if (drafts[goalId] !== submittedSteps) return drafts;
+        const next = { ...drafts }; delete next[goalId]; return next;
+      });
+      if (session.read().selectedId === goalId && !session.read().runDrafts[goalId]) setShowRunCreate(false);
       setNotice(result.replayed ? '已找到此前提交的同一运行；未重复创建。' : '步骤已保存，当前不会自动执行。');
       await refreshGoal(detail.goal.id);
     } catch (error) {
@@ -157,6 +170,7 @@ export function PersonalGoalsPanel() {
   }
 
   async function openRun(goalId: string, runId: string) {
+    if (!session.current()) return;
     const epoch = ++runEpoch.current;
     briefEpoch.current++;
     setBrief(null);
@@ -170,6 +184,7 @@ export function PersonalGoalsPanel() {
   }
 
   async function openBrief(goalId: string, runId: string) {
+    if (!session.current()) return;
     const epoch = ++briefEpoch.current;
     setBrief(null);
     setBriefLoading(true);
@@ -184,7 +199,7 @@ export function PersonalGoalsPanel() {
   }
 
   async function createBrief() {
-    if (!detail || detail.goal.state !== 'active' || listError || busyRef.current) return;
+    if (!session.current() || !detail || detail.goal.state !== 'active' || listError || busyRef.current) return;
     const goalId = detail.goal.id;
     const epoch = selectionEpoch.current;
     const key = briefAttempts.current.get(goalId) || crypto.randomUUID();
@@ -207,6 +222,7 @@ export function PersonalGoalsPanel() {
   }
 
   async function resetUncertainAttempt(kind: 'goal' | 'run' | 'brief') {
+    if (!session.current() || busyRef.current) return;
     const goalId = detail?.goal.id;
     const refreshed = await refreshList();
     if (!refreshed) return;
@@ -219,18 +235,20 @@ export function PersonalGoalsPanel() {
           ? '运行记录已刷新。请先核对是否已有刚提交的运行；再次提交可能创建另一份记录。'
           : '目标列表已刷新。请先核对是否已有刚提交的目标；再次提交可能创建另一份记录。',
     })) return;
+    if (!session.current() || busyRef.current) return;
     if (kind === 'goal') createAttempt.current = null;
     else if (kind === 'brief' && goalId) briefAttempts.current.delete(goalId);
     else if (goalId) runAttempts.current.delete(goalId);
     setActionError('');
-    setNotice('已放弃原提交键。请确认列表里没有重复内容后再提交。');
+    setNotice('已允许重新提交。请确认列表里没有重复内容后再保存。');
   }
 
   async function transition(run: PersonalGoalRun, action: 'pause' | 'resume' | 'cancel') {
-    if (!detail || listError || busyRef.current) return;
+    if (!session.current() || !detail || listError || busyRef.current) return;
     if (action === 'cancel' && !await confirm({
       title: '取消这次运行', description: '取消会阻止后续步骤。已经发出的外部效果仍可能发生，需单独核验。', danger: true,
     })) return;
+    if (!session.current() || busyRef.current) return;
     busyRef.current = true; setBusy(`${run.id}:${action}`); setActionError(''); setNotice('');
     const operation = `${detail.goal.id}:${run.id}:${action}`;
     const key = transitionKeys.current.get(operation) || crypto.randomUUID();
@@ -239,16 +257,16 @@ export function PersonalGoalsPanel() {
       await personalGoalsApi.transitionRun(detail.goal.id, run.id, action, key);
       transitionKeys.current.delete(operation);
       setNotice(action === 'pause' ? '运行已暂停；若外部效果未确认，状态会继续显示待核验。' : action === 'resume' ? '运行已恢复为待领取，当前没有自动执行者。' : '运行已取消；外部已发动作不会因此自动撤销。');
-      await refreshGoal(detail.goal.id);
-      if (runDetail?.run.id === run.id) await openRun(detail.goal.id, run.id);
+      await refreshGoal(detail.goal.id, true);
     } catch (error) {
       setActionError(displayError(error));
     } finally { busyRef.current = false; setBusy(''); }
   }
 
   async function completeWith(run: PersonalGoalRun) {
-    if (!detail || listError || busyRef.current || run.state !== 'completed' || String(run.goal_revision) !== String(detail.goal.revision)) return;
+    if (!session.current() || !detail || listError || busyRef.current || run.state !== 'completed' || String(run.goal_revision) !== String(detail.goal.revision)) return;
     if (!await confirm({ title: '确认目标完成', description: '该运行已通过服务端步骤、效果与产物验收。请核对目标结果与验收条件后确认完成。' })) return;
+    if (!session.current() || busyRef.current) return;
     busyRef.current = true; setBusy('complete'); setActionError('');
     const operation = `${detail.goal.id}:${run.id}:complete`;
     const key = transitionKeys.current.get(operation) || crypto.randomUUID();
@@ -276,7 +294,7 @@ export function PersonalGoalsPanel() {
       <label className="block text-xs text-text-secondary space-y-2">希望得到的可检查结果<textarea className={field} required maxLength={10000} rows={3} value={outcome} onChange={event => setOutcome(event.target.value)} placeholder="例如：完成项目交付文档并由我检查版本" /></label>
       <label className="block text-xs text-text-secondary space-y-2">硬约束（每行一条，可留空）<textarea className={field} rows={2} value={constraintsText} onChange={event => setConstraintsText(event.target.value)} placeholder="例如：不能覆盖现有用户文件" /></label>
       <label className="block text-xs text-text-secondary space-y-2">验收条件（每行一条，至少一条）<textarea className={field} required rows={3} value={checksText} onChange={event => setChecksText(event.target.value)} placeholder="例如：文档可打开且包含所有已确认章节" /></label>
-      <p className="text-xs text-text-muted">保存目标不会启动 AI 或产生模型调用费用。</p>
+      <p className="text-xs text-text-muted">保存目标不会启动 AI 或产生模型调用费用。草稿在本标签页保留，切换页面可继续；刷新或退出账号会清除。</p>
       {createAttempt.current && <div className="text-xs text-amber-600">上次保存结果未确认；请保留原内容重试。<button type="button" className="underline ml-2" onClick={() => void resetUncertainAttempt('goal')}>核对记录后重新提交</button></div>}
       <button className={primary} disabled={busy !== '' || Boolean(listError)}>{busy === 'create' ? '保存中…' : '保存目标'}</button>
     </form>}
